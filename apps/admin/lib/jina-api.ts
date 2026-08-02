@@ -68,6 +68,14 @@ export interface AdminContextBuild {
   readonly consumedModelTokens?: number;
   readonly activeModelReservedTokens?: number;
   readonly remainingModelTokens?: number;
+  readonly queuedFollowup?: {
+    readonly repository: string;
+    readonly ref: string;
+    readonly commitSha?: string;
+    readonly trigger: string;
+    readonly requestedAt: string;
+    readonly reason: string;
+  };
   readonly status: "active" | "completed" | "failed";
   readonly failureCode?: string;
   readonly failureReason?: string;
@@ -87,6 +95,7 @@ export interface AdminContextBuildProgress {
   readonly consumedModelTokens?: number;
   readonly activeModelReservedTokens?: number;
   readonly remainingModelTokens?: number;
+  readonly queuedFollowup?: AdminContextBuild["queuedFollowup"];
   readonly failureCode?: string;
   readonly failureReason?: string;
   readonly stages: readonly AdminContextBuildStage[];

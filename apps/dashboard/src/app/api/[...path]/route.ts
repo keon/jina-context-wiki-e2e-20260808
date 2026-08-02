@@ -1,5 +1,9 @@
 import type { NextRequest } from "next/server";
-import { isAllowedDashboardApiRequest, resolveDashboardPrincipal } from "../../../server/proxy-policy.ts";
+import {
+  dashboardWebAuthorization,
+  isAllowedDashboardApiRequest,
+  resolveDashboardPrincipal
+} from "../../../server/proxy-policy.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +20,7 @@ const STRIPPED_REQUEST_HEADERS = new Set([
   "host",
   "connection",
   "authorization",
+  "x-jina-web-authorization",
   "content-length",
   "accept-encoding",
   "x-jina-tenant-id",
@@ -40,7 +45,10 @@ async function proxy(request: NextRequest): Promise<Response> {
   }
   const principal = resolveDashboardPrincipal({
     iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),
-    authorizationHeader: request.headers.get("authorization"),
+    authorizationHeader: dashboardWebAuthorization(
+      request.headers.get("authorization"),
+      request.headers.get("x-jina-web-authorization")
+    ),
     webAuthUsername: process.env.JINA_WEB_AUTH_USERNAME,
     webAuthPassword: process.env.JINA_WEB_AUTH_PASSWORD,
     webPrincipal: process.env.JINA_WEB_PRINCIPAL_ID

@@ -133,7 +133,8 @@ A production context dashboard should show:
   failures, repair passes, and fail-closed count;
 - Board graph phase and checkpoint age, planned/completed subjects and pages, gate
   outcomes, blocking gaps, attempt counts, and terminal failures;
-- lease loss and API polling failures;
+- lease loss and API polling failures, attributed to a process-unique worker ID
+  (the release revision alone is not an instance identity);
 - repository/ref ingestion freshness and latest published release age;
 - valid/pending/invalid private-checkpoint rate plus Git history count/root status, GitHub pagination
   completion/reason, and omitted-body count from the observation frontier;

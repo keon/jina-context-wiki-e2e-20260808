@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { isValidBasicAuthorization } from "./server/proxy-policy";
+import { dashboardWebAuthorization, isValidBasicAuthorization } from "./server/proxy-policy";
 
 export function proxy(request: NextRequest): NextResponse {
   if (!process.env.INTERNAL_API_TOKEN?.trim()) return NextResponse.next();
@@ -10,7 +10,7 @@ export function proxy(request: NextRequest): NextResponse {
   if (request.headers.get("x-goog-authenticated-user-email")) return NextResponse.next();
   if (
     isValidBasicAuthorization(
-      request.headers.get("authorization"),
+      dashboardWebAuthorization(request.headers.get("authorization"), request.headers.get("x-jina-web-authorization")),
       process.env.JINA_WEB_AUTH_USERNAME,
       process.env.JINA_WEB_AUTH_PASSWORD
     )

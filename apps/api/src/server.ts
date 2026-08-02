@@ -86,7 +86,7 @@ import {
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
 import { entityId, nowIso, type IsoTimestamp } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
-import { admitContextBoardBuild } from "./context-board-admission.js";
+import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
 import { compactTerminalContextBuildHistory } from "./context-board-compaction.js";
 import {
   applyContextBoardTaskResult,
@@ -1107,12 +1107,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         throw new ApiError(409, "conflict", "context build admission raced another update");
       }
       if (admitted.outcome === "ignored") throw new Error("manual context build admission was unexpectedly ignored");
-      json(response, admitted.outcome === "created" ? 202 : 200, {
-        build:
-          admitted.outcome === "created"
-            ? publicContextBoardBuild(admitted.state, admitted.build.buildTaskId)
-            : publicContextBoardBuild(admitted.state, admitted.existingBuildTaskId),
-        duplicate: admitted.outcome === "duplicate"
+      const visibleBuildId =
+        admitted.outcome === "created"
+          ? admitted.build.buildTaskId
+          : admitted.outcome === "duplicate"
+            ? admitted.existingBuildTaskId
+            : admitted.activeBuildTaskId;
+      json(response, admitted.outcome === "duplicate" ? 200 : 202, {
+        build: publicContextBoardBuild(admitted.state, visibleBuildId),
+        duplicate: admitted.outcome === "duplicate",
+        deferred: admitted.outcome === "deferred"
       });
       return;
     }
@@ -2361,6 +2365,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
     if (admission.outcome !== "created") {
       intakeState = { ...intakeState, board: admission.state };
+      if (admission.outcome === "deferred") {
+        logger.info("deferred Context build behind the active repository ref build", {
+          event: "context.build_followup_deferred",
+          tenantId,
+          repository,
+          ref,
+          activeBuildTaskId: admission.activeBuildTaskId,
+          requestKey: admission.requestKey
+        });
+        return { outcome: "created", createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
+      }
       return { outcome: admission.outcome, createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
     }
     const reservedBuildIds: string[] = [];
@@ -2388,6 +2403,81 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       supersededBuildTaskIds: admission.supersededBuildTaskIds,
       reservedBuildIds
     };
+  }
+
+  async function promoteContextBoardFollowup(tenantId: string, completedBuildTaskId: TaskId): Promise<boolean> {
+    const pending = latestContextBoardFollowup(intakeState.board, completedBuildTaskId);
+    if (!pending || pending.tenantId !== tenantId) return false;
+    let newlyReservedBuildId: string | undefined;
+    const promoted = await mutate(async () => {
+      const current = latestContextBoardFollowup(intakeState.board, completedBuildTaskId);
+      if (!current || current.tenantId !== tenantId) return undefined;
+      const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
+        tenantId,
+        repository: current.repository,
+        ref: current.ref
+      });
+      const admission = admitContextBoardBuild(intakeState.board, {
+        source: "followup",
+        ...current,
+        ...(priorRelease ? { priorRelease } : {}),
+        now: nowIso()
+      });
+      if (admission.outcome === "created" && config.contextQuotaService) {
+        await config.contextQuotaService.admitBuild({ tenantId, buildId: admission.build.buildTaskId });
+        newlyReservedBuildId = admission.build.buildTaskId;
+      }
+      intakeState = { ...intakeState, board: admission.state };
+      return admission;
+    });
+    if (!promoted) {
+      if (newlyReservedBuildId && config.contextQuotaService) {
+        await config.contextQuotaService
+          .completeBuild({ tenantId, buildId: newlyReservedBuildId })
+          .catch(() => undefined);
+      }
+      return false;
+    }
+    logger.info("promoted deferred Context build after its predecessor reached a terminal checkpoint", {
+      event: "context.build_followup_promoted",
+      tenantId,
+      repository: pending.repository,
+      ref: pending.ref,
+      completedBuildTaskId,
+      outcome: promoted.outcome,
+      ...(promoted.outcome === "created" ? { buildTaskId: promoted.build.buildTaskId } : {})
+    });
+    return promoted.outcome === "created";
+  }
+
+  async function tryPromoteContextBoardFollowup(tenantId: string, completedBuildTaskId: TaskId): Promise<boolean> {
+    try {
+      return await promoteContextBoardFollowup(tenantId, completedBuildTaskId);
+    } catch (error) {
+      logger.warn("deferred Context build promotion will retry on a later worker claim", {
+        event: "context.build_followup_promotion_failed",
+        tenantId,
+        completedBuildTaskId,
+        ...errorLogFields(error)
+      });
+      return false;
+    }
+  }
+
+  async function promotePendingContextBoardFollowups(tenantIds: readonly string[]): Promise<void> {
+    const permitted = new Set(tenantIds);
+    const candidates = intakeState.board.tasks
+      .filter(
+        (task) =>
+          task.type === contextBoardTaskTypes.build &&
+          isTerminalTaskStatus(task.status) &&
+          permitted.has(String(task.metadata.tenantId)) &&
+          latestContextBoardFollowup(intakeState.board, task.id) !== undefined
+      )
+      .slice(0, 8);
+    for (const build of candidates) {
+      await tryPromoteContextBoardFollowup(requiredString(build.metadata.tenantId, "tenantId"), build.id);
+    }
   }
 
   async function resolveWebhookIdentity(webhook: ParsedGitHubWebhook): Promise<ResolvedRepositoryIdentity | undefined> {
@@ -2801,6 +2891,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const workerRelease = workerReleaseGuard(body);
     requireWorkerServiceForTopics(workerRelease, topics);
     const claimTenantIds = tenantId === "*" ? [...(await config.sharedIdentityResolver!.listTenantIds())] : [tenantId];
+    await reload();
+    await promotePendingContextBoardFollowups(claimTenantIds);
     await reload();
     const claimNow = nowIso();
     const hasCandidate = intakeState.board.outbox.some((message) => {
@@ -3505,6 +3597,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         tenantId,
         buildId: completedBuild.id
       });
+      await tryPromoteContextBoardFollowup(tenantId, completedBuild.id);
     }
     json(response, 200, { accepted: true });
   }
@@ -3872,9 +3965,45 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
           )
         }
       : {}),
+    ...publicContextBuildQueuedFollowup(state, task.id),
     ...publicContextBuildFailure(state, task),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt
+  };
+}
+
+function publicContextBuildQueuedFollowup(state: BoardState, buildTaskId: TaskId) {
+  const event = [...state.events]
+    .reverse()
+    .find((candidate) => candidate.taskId === buildTaskId && candidate.type === "context.build_followup_requested");
+  const followup = isRecord(event?.payload?.followup) ? event.payload.followup : undefined;
+  if (!event || !followup) return {};
+  const tenantId = optionalString(followup.tenantId);
+  const requestKey = optionalString(followup.requestKey);
+  const repository = optionalString(followup.repository);
+  const ref = optionalString(followup.ref);
+  const commitSha = optionalString(followup.commitSha);
+  const trigger = optionalString(followup.trigger);
+  if (!tenantId || !requestKey || !repository || !ref || !trigger) return {};
+  if (
+    state.tasks.some(
+      (task) =>
+        task.type === contextBoardTaskTypes.build &&
+        task.metadata.tenantId === tenantId &&
+        task.metadata.requestKey === requestKey
+    )
+  ) {
+    return {};
+  }
+  return {
+    queuedFollowup: {
+      repository,
+      ref,
+      ...(commitSha ? { commitSha } : {}),
+      trigger,
+      requestedAt: event.at,
+      reason: "Waiting for the active build to finish so its verified checkpoints become the incremental seed."
+    }
   };
 }
 
@@ -4913,7 +5042,17 @@ function publicBoardEvent(state: BoardState, event: BoardState["events"][number]
   const task = event.taskId ? findTask(state, event.taskId) : undefined;
   if (!task || !isBoardWorkTaskType(task.type) || !event.payload) return event;
   const payload = Object.fromEntries(
-    ["verdict", "unsupportedCitationCount", "blockingGapCount", "releaseId", "reason"].flatMap((key) => {
+    [
+      "verdict",
+      "unsupportedCitationCount",
+      "blockingGapCount",
+      "releaseId",
+      "reason",
+      "repository",
+      "ref",
+      "commitSha",
+      "trigger"
+    ].flatMap((key) => {
       const value = event.payload?.[key];
       if (value === undefined) return [];
       return [[key, key === "reason" && typeof value === "string" ? value.slice(0, 500) : value]];

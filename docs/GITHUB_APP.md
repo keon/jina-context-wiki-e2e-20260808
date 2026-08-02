@@ -24,12 +24,15 @@ services.
 The integrated `POST /context/webhooks/github` route produces only the Context result in
 this table. V1 owns all review tasks.
 
-An unchanged latest head deduplicates redelivery. A real ref transition supersedes active
-older context work, including a force-push back to a previously seen SHA. At ingestion,
-the event head is also compared with a freshly fetched authoritative remote branch head;
-a moved ref rejects the stale delivery instead of indexing its historical commit as
-current. Issue triage has no automatic runner and remains in `triage` until a user acts;
-the separate context build is automatic.
+An unchanged latest head deduplicates redelivery. Pull-request heads supersede their
+older previews immediately. A branch push replaces an unstarted build, but once the
+default-ref build has invested work, later pushes and issues are coalesced as a durable
+Board follow-up; only the newest commit is admitted after the active build finishes. This
+lets a long first publication finish and makes the queued commit incremental instead of
+discarding hours of verified checkpoints. At ingestion, the selected head is compared
+with a freshly fetched authoritative remote branch head; a moved ref rejects stale work
+instead of indexing a historical commit as current. Issue triage has no automatic runner
+and remains in `triage` until a user acts; the separate context build is automatic.
 
 ## Configure the server
 

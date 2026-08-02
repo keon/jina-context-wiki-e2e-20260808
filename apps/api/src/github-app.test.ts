@@ -285,7 +285,7 @@ test("MCP exposes exactly the four context-pack tools and never synthesizes an a
   }
 });
 
-test("incremental manual admission advances the ref frontier and remains idempotent", async () => {
+test("an incremental manual admission is durably deferred behind invested work and remains idempotent", async () => {
   const incrementalCommitSha = "2".repeat(40);
   const request = {
     repository,
@@ -301,9 +301,12 @@ test("incremental manual admission advances the ref frontier and remains idempot
   });
   assert.equal(created.response.status, 202);
   const build = record(created.body.build);
-  assert.equal(build.refSequence, 2);
-  assert.equal(build.commitSha, incrementalCommitSha);
+  assert.equal(created.body.deferred, true);
+  assert.equal(build.refSequence, 1);
+  assert.equal(build.commitSha, commitSha);
   assert.equal(build.trigger, "manual");
+  assert.equal(record(build.queuedFollowup).commitSha, incrementalCommitSha);
+  assert.match(string(record(build.queuedFollowup).reason), /incremental seed/i);
   assert.equal("stages" in build, false);
 
   const replay = await api("/context/build", {
@@ -311,18 +314,22 @@ test("incremental manual admission advances the ref frontier and remains idempot
     headers: contextHeaders(),
     body: JSON.stringify(request)
   });
-  assert.equal(replay.response.status, 200);
-  assert.equal(replay.body.duplicate, true);
+  assert.equal(replay.response.status, 202);
+  assert.equal(replay.body.duplicate, false);
+  assert.equal(replay.body.deferred, true);
   assert.equal(record(replay.body.build).id, build.id);
-  assert.equal(record(replay.body.build).refSequence, 2);
+  assert.equal(record(replay.body.build).refSequence, 1);
 
   const builds = await api("/context/builds", { headers: contextHeaders() });
   assert.equal(builds.response.status, 200);
   const mainBuilds = array(builds.body.builds)
     .map(record)
     .filter((candidate) => candidate.repository === repository && candidate.ref === "main");
-  assert.ok(mainBuilds.some((candidate) => candidate.id === build.id && candidate.commitSha === incrementalCommitSha));
-  assert.ok(mainBuilds.some((candidate) => candidate.commitSha === commitSha));
+  assert.equal(mainBuilds.filter((candidate) => candidate.id === build.id).length, 1);
+  assert.equal(
+    mainBuilds.some((candidate) => candidate.commitSha === incrementalCommitSha),
+    false
+  );
 
   const progress = await api("/context/builds/" + encodeURIComponent(string(build.id)) + "/progress", {
     headers: contextHeaders()
@@ -331,9 +338,36 @@ test("incremental manual admission advances the ref frontier and remains idempot
   assert.equal(progress.body.status, "active");
   assert.deepEqual(
     array(progress.body.stages).map((stage) => record(stage).type),
-    ["snapshot-context-input"]
+    ["snapshot-context-input", "plan-context-research"]
   );
   assert.deepEqual(progress.body.pages, []);
+
+  const canceled = await fetch(`${baseUrl}/internal/context/builds/${encodeURIComponent(string(build.id))}/cancel`, {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({ reason: "exercise deferred follow-up promotion" })
+  });
+  assert.equal(canceled.status, 200, await canceled.text());
+  const promotedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({ workerId: "followup-promotion-test", topics: ["run-context-input-snapshot"] })
+  });
+  const promotedClaimText = await promotedClaim.text();
+  assert.equal(promotedClaim.status, 200, promotedClaimText);
+  const claim = record(JSON.parse(promotedClaimText));
+  const promotedTask = record(claim.task);
+  const promotedMetadata = record(promotedTask.metadata);
+  assert.equal(promotedMetadata.commitSha, incrementalCommitSha);
+  assert.equal(promotedMetadata.refSequence, 2);
+  const promotedBuildId = string(promotedMetadata.contextBuildId);
+
+  const cleanup = await fetch(`${baseUrl}/internal/context/builds/${encodeURIComponent(promotedBuildId)}/cancel`, {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({ reason: "finish deferred follow-up promotion test" })
+  });
+  assert.equal(cleanup.status, 200, await cleanup.text());
 });
 
 test("public context search bounds query, result count, and request body", async () => {

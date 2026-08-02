@@ -120,6 +120,7 @@ import { parseResearchPlanWithRepair } from "./board-research-plan.js";
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
+import { runtimeWorkerId } from "./worker-identity.js";
 import {
   CONTEXT_BOARD_TOPICS,
   CAUSAL_GRAPH_TOPICS,
@@ -310,9 +311,10 @@ const token = requiredEnv("INTERNAL_API_TOKEN");
 const topics = configuredWorkerTopics(process.env.WORKER_TOPICS);
 const claimMode = configuredWorkerClaimMode(process.env.JINA_WORKER_CLAIM_MODE);
 const workerRelease = configuredWorkerReleaseIdentity();
-const workerId =
-  process.env.WORKER_ID?.trim() ||
-  (workerRelease ? `${workerRelease.revision}:${process.pid}` : `worker-${process.pid}`);
+const workerId = runtimeWorkerId({
+  ...(process.env.WORKER_ID !== undefined ? { configured: process.env.WORKER_ID } : {}),
+  ...(workerRelease ? { revision: workerRelease.revision } : {})
+});
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
 const workerApiTimeoutMs = positiveInt(process.env.WORKER_API_TIMEOUT_MS, 30_000);
 const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 62 * 60_000);
@@ -560,6 +562,12 @@ async function execute(work: ClaimedWork): Promise<void> {
     try {
       await complete(work, result);
     } catch (error) {
+      if (error instanceof LeaseLostError) {
+        loseLease(lease, error, false);
+        logStageOutcome(work, startedAt, undefined, lease.lostReason);
+        lastWork = { topic: work.message.topic, outcome: "lease_lost", finishedAt: new Date().toISOString() };
+        return;
+      }
       if (!(error instanceof LeaseLostError) && isBoardTopic(work.topic)) {
         await releaseBoardLeaseOnce(work, lease, `completion failed: ${errorMessage(error)}`).catch((releaseError) => {
           logger.error("worker lease release failed after completion failure", {
@@ -1838,13 +1846,13 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
     )
     .digest("hex");
   let audit: CitationAuditStageResult | undefined;
-  if (structuralProblems.length === 0) {
+  if (inventory.references.length > 0 && inventory.references.length <= 500) {
     const workerId = `citation-audit-${safeStageId(work.task.metadata.pageKey).slice(0, 60)}`;
     let priorReferences: readonly CitationAuditReference[] | undefined;
     let priorAudit: CitationAuditStageResult | undefined;
     if (page.findingsArtifact) {
       const prior = parseContextPageAuditArtifact(await readContextBoardArtifact(work, page.findingsArtifact));
-      if (prior.audit && prior.structuralProblems.length === 0) {
+      if (prior.audit) {
         priorReferences = prior.references;
         priorAudit = parseCitationAuditStageResult(prior.audit, {
           workerId: prior.audit.worker.id,
@@ -4702,10 +4710,11 @@ function requestSignal(timeoutMs: number): AbortSignal {
   return activeLease ? AbortSignal.any([activeLease.controller.signal, timeout]) : timeout;
 }
 
-function loseLease(lease: LeaseExecutionState, error: unknown): void {
+function loseLease(lease: LeaseExecutionState, error: unknown, recordFailure = true): void {
   if (lease.lostReason) return;
   lease.lostReason = errorMessage(error);
-  recordApiFailure(new LeaseLostError(lease.lostReason));
+  if (recordFailure) recordApiFailure(new LeaseLostError(lease.lostReason));
+  else recordApiSuccess();
   lease.controller.abort(new LeaseLostError(lease.lostReason));
 }
 

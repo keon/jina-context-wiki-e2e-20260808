@@ -29,6 +29,7 @@ export function BuildCheckpoints({
   const activeReservedTokens = currentProgress?.activeModelReservedTokens ?? build.activeModelReservedTokens;
   const remainingTokens = currentProgress?.remainingModelTokens ?? build.remainingModelTokens;
   const deadline = currentProgress?.derivationDeadlineAt ?? build.derivationDeadlineAt;
+  const queuedFollowup = currentProgress?.queuedFollowup ?? build.queuedFollowup;
   return (
     <section className="context-operations-panel" aria-label="Context build checkpoints">
       <header className="context-panel-heading">
@@ -55,6 +56,19 @@ export function BuildCheckpoints({
         {remainingTokens !== undefined ? ` · ${compactNumber(remainingTokens)} remaining` : ""}
         {deadline ? ` · deadline ${formatTime(deadline)}` : ""}
       </p>
+      {queuedFollowup ? (
+        <p className="context-alert">
+          Newest queued update: <code>{queuedFollowup.ref}</code>
+          {queuedFollowup.commitSha ? (
+            <>
+              {" "}
+              at <code>{queuedFollowup.commitSha.slice(0, 12)}</code>
+            </>
+          ) : null}
+          {" — "}
+          {queuedFollowup.reason}
+        </p>
+      ) : null}
       <p className={`context-alert ${status === "failed" || invalidPages > 0 ? "danger" : ""}`}>
         {status === "failed" && buildFailure
           ? `Build failed — ${buildFailure}`

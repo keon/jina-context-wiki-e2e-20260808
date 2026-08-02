@@ -2,6 +2,7 @@ import { applyCommand, isTerminalTaskStatus, reduceBoard, type BoardState, type 
 import {
   contextBoardTaskTypes,
   createContextBoardBuild,
+  isDerivationDetail,
   nextContextBoardRefSequence,
   normalizeRepository,
   type ContextBoardBuild,
@@ -48,7 +49,13 @@ interface GitHubContextBoardAdmission extends ResolvedContextBuildScope {
   readonly now: string;
 }
 
-export type ContextBoardAdmissionInput = ManualContextBoardAdmission | GitHubContextBoardAdmission;
+type FollowupContextBoardAdmission = Omit<ContextBuildScope, "refSequence"> & {
+  readonly source: "followup";
+  readonly now: string;
+};
+
+export type ContextBoardAdmissionInput =
+  ManualContextBoardAdmission | GitHubContextBoardAdmission | FollowupContextBoardAdmission;
 
 interface CreatedContextBoardAdmission {
   readonly state: BoardState;
@@ -74,8 +81,22 @@ interface IgnoredContextBoardAdmission {
   readonly build?: never;
 }
 
+interface DeferredContextBoardAdmission {
+  readonly state: BoardState;
+  readonly outcome: "deferred";
+  readonly activeBuildTaskId: TaskId;
+  readonly requestKey: string;
+  readonly scope: Omit<ContextBuildScope, "refSequence" | "priorRelease">;
+  readonly build?: never;
+}
+
 export type ContextBoardAdmissionResult =
-  CreatedContextBoardAdmission | DuplicateContextBoardAdmission | IgnoredContextBoardAdmission;
+  | CreatedContextBoardAdmission
+  | DuplicateContextBoardAdmission
+  | IgnoredContextBoardAdmission
+  | DeferredContextBoardAdmission;
+
+export type ContextBoardFollowup = Omit<ContextBuildScope, "refSequence" | "priorRelease">;
 
 /**
  * Admits one board-native Context build as a pure state transition.
@@ -127,6 +148,53 @@ export function admitContextBoardBuild(
     };
   }
 
+  const deferredReplay = input.source === "followup" ? undefined : existingDeferredRequest(state, tenantId, requestKey);
+  if (deferredReplay) {
+    const requestedScope = withoutPriorRelease(scopeWithoutSequence);
+    if (JSON.stringify(deferredReplay.scope) !== JSON.stringify(requestedScope)) {
+      throw new Error("context build request key collides with a different deferred scope");
+    }
+    return {
+      state,
+      outcome: "deferred",
+      activeBuildTaskId: deferredReplay.buildTaskId,
+      requestKey,
+      scope: requestedScope
+    };
+  }
+
+  if (scopeWithoutSequence.trigger !== "pull_request") {
+    const active = newestActiveRefBuild(state, scopeWithoutSequence);
+    if (active) {
+      const scope = withoutPriorRelease(scopeWithoutSequence);
+      const deferred = applyCommand(
+        state,
+        {
+          command: "CommentTask",
+          taskId: active.id,
+          eventType: "context.build_followup_requested",
+          payload: {
+            followup: scope,
+            repository: scope.repository,
+            ref: scope.ref,
+            ...(scope.commitSha ? { commitSha: scope.commitSha } : {}),
+            trigger: scope.trigger,
+            reason: "Queued behind the active build so verified checkpoints are not discarded."
+          }
+        },
+        { actor: { type: "system", id: "context-build-admission" }, now: input.now }
+      );
+      if (!deferred.accepted) throw new Error("failed to defer the next Context build");
+      return {
+        state: deferred.state,
+        outcome: "deferred",
+        activeBuildTaskId: active.id,
+        requestKey,
+        scope
+      };
+    }
+  }
+
   const refSequence = nextContextBoardRefSequence(state, {
     tenantId,
     repository: scopeWithoutSequence.repository,
@@ -145,6 +213,24 @@ export function admitContextBoardBuild(
     scope,
     supersededBuildTaskIds: superseded.buildTaskIds
   };
+}
+
+/**
+ * Returns the newest unadmitted follow-up retained on a completed build. Push,
+ * issue, and manual admissions are serialized behind the active build so a
+ * moving default branch cannot discard hours of verified private checkpoints.
+ * Pull-request heads remain freshness-first and are superseded immediately.
+ */
+export function latestContextBoardFollowup(state: BoardState, buildTaskId: TaskId): ContextBoardFollowup | undefined {
+  const build = state.tasks.find((task) => task.id === buildTaskId && task.type === contextBoardTaskTypes.build);
+  if (!build || !isTerminalTaskStatus(build.status)) return undefined;
+  const events = state.events
+    .filter((event) => event.taskId === buildTaskId && event.type === "context.build_followup_requested")
+    .sort((left, right) => right.at.localeCompare(left.at) || right.seq - left.seq);
+  const newest = events[0];
+  if (!newest) return undefined;
+  const followup = parseFollowup(newest.payload?.followup);
+  return existingRequestBuilds(state, followup.tenantId, followup.requestKey).length ? undefined : followup;
 }
 
 const SUPERSEDED_REF_REASON = "superseded by a newer build for the same repository ref";
@@ -199,6 +285,10 @@ function supersedeOlderRefBuilds(
 }
 
 function resolveAdmissionScope(input: ContextBoardAdmissionInput): Omit<ContextBuildScope, "refSequence"> | undefined {
+  if (input.source === "followup") {
+    const { source: _source, now: _now, ...scope } = input;
+    return scope;
+  }
   if (input.source === "manual") {
     return {
       tenantId: input.tenantId,
@@ -261,6 +351,89 @@ function resolveAdmissionScope(input: ContextBoardAdmissionInput): Omit<ContextB
   };
 }
 
+function newestActiveRefBuild(state: BoardState, scope: Pick<ContextBuildScope, "tenantId" | "repository" | "ref">) {
+  return state.tasks
+    .filter(
+      (task) =>
+        task.type === contextBoardTaskTypes.build &&
+        task.metadata.tenantId === scope.tenantId &&
+        task.metadata.repository === scope.repository &&
+        task.metadata.ref === scope.ref &&
+        hasInvestedBuildWork(state, task.id, task.status) &&
+        !isTerminalTaskStatus(task.status)
+    )
+    .sort(
+      (left, right) =>
+        requiredRefSequence(right.metadata.refSequence) - requiredRefSequence(left.metadata.refSequence) ||
+        right.createdAt.localeCompare(left.createdAt)
+    )[0];
+}
+
+function hasInvestedBuildWork(state: BoardState, buildTaskId: TaskId, status: string): boolean {
+  if (status === "in_progress" || status === "in_review") return true;
+  return state.tasks.some(
+    (task) =>
+      task.parentTaskId === buildTaskId &&
+      (task.status === "in_progress" || task.status === "in_review" || task.status === "done")
+  );
+}
+
+function withoutPriorRelease(
+  scope: Omit<ContextBuildScope, "refSequence">
+): Omit<ContextBuildScope, "refSequence" | "priorRelease"> {
+  const { priorRelease: _priorRelease, ...followup } = scope;
+  return followup;
+}
+
+function parseFollowup(value: unknown): ContextBoardFollowup {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("deferred Context build scope is invalid");
+  }
+  const input = value as Record<string, unknown>;
+  const trigger = input.trigger;
+  if (trigger !== "push" && trigger !== "issue" && trigger !== "manual") {
+    throw new Error("deferred Context build trigger is invalid");
+  }
+  const tenantId = requiredText(input.tenantId, "tenantId");
+  const ref = requiredText(input.ref, "ref");
+  const requestKey = requiredText(input.requestKey, "requestKey");
+  const commitSha =
+    input.commitSha === undefined ? undefined : requiredText(input.commitSha, "commitSha").toLowerCase();
+  if (commitSha && !/^[0-9a-f]{40}$/.test(commitSha)) throw new Error("deferred Context build commitSha is invalid");
+  const githubInstallationId = optionalPositiveInteger(input.githubInstallationId, "githubInstallationId");
+  const derivationBudgetSeconds = optionalPositiveInteger(input.derivationBudgetSeconds, "derivationBudgetSeconds");
+  const derivationTokenBudget = optionalPositiveInteger(input.derivationTokenBudget, "derivationTokenBudget");
+  const derivationDetail = input.derivationDetail;
+  if (derivationDetail !== undefined && !isDerivationDetail(derivationDetail)) {
+    throw new Error("deferred Context build derivationDetail is invalid");
+  }
+  return {
+    tenantId,
+    repository: normalizeRepository(requiredText(input.repository, "repository")),
+    ref,
+    requestKey,
+    ...(commitSha ? { commitSha } : {}),
+    ...(githubInstallationId ? { githubInstallationId } : {}),
+    ...(derivationDetail ? { derivationDetail } : {}),
+    ...(derivationBudgetSeconds ? { derivationBudgetSeconds } : {}),
+    ...(derivationTokenBudget ? { derivationTokenBudget } : {}),
+    trigger
+  };
+}
+
+function requiredText(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`deferred Context build ${label} is invalid`);
+  return value.trim();
+}
+
+function optionalPositiveInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new Error(`deferred Context build ${label} is invalid`);
+  }
+  return Number(value);
+}
+
 function existingRequestBuilds(state: BoardState, tenantId: string, requestKey: string) {
   return state.tasks.filter(
     (task) =>
@@ -268,6 +441,21 @@ function existingRequestBuilds(state: BoardState, tenantId: string, requestKey: 
       task.metadata.tenantId === tenantId &&
       task.metadata.requestKey === requestKey
   );
+}
+
+function existingDeferredRequest(
+  state: BoardState,
+  tenantId: string,
+  requestKey: string
+): { readonly buildTaskId: TaskId; readonly scope: ContextBoardFollowup } | undefined {
+  for (const event of [...state.events].reverse()) {
+    if (!event.taskId || event.type !== "context.build_followup_requested") continue;
+    const scope = parseFollowup(event.payload?.followup);
+    if (scope.tenantId === tenantId && scope.requestKey === requestKey) {
+      return { buildTaskId: event.taskId, scope };
+    }
+  }
+  return undefined;
 }
 
 function requiredRefSequence(value: unknown): number {

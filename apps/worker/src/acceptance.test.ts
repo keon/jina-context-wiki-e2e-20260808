@@ -998,8 +998,8 @@ test("production web acceptance exercises the dashboard proxy and admin server r
     requests.push(`${url.hostname}${url.pathname}`);
     const headers = new Headers(init?.headers);
     if (url.hostname === "dashboard.example.test") {
-      assert.equal(headers.get("x-serverless-authorization"), "Bearer dashboard-cloud-run");
-      assert.equal(headers.get("authorization"), "Basic dashboard");
+      assert.equal(headers.get("authorization"), "Bearer dashboard-cloud-run");
+      assert.equal(headers.get("x-jina-web-authorization"), "Basic dashboard");
       if (url.pathname === "/context") {
         return new Response(
           '<!doctype html><html><body><section id="context-page"><h1>Evidence-backed workspace</h1></section></body></html>',

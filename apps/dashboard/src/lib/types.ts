@@ -185,6 +185,15 @@ interface ContextBuildStage {
   readonly updatedAt: string;
 }
 
+interface ContextQueuedFollowup {
+  readonly repository: string;
+  readonly ref: string;
+  readonly commitSha?: string;
+  readonly trigger: string;
+  readonly requestedAt: string;
+  readonly reason: string;
+}
+
 export interface ContextBuildSummary {
   readonly id: string;
   readonly buildKind?: "documentation" | "causal_graph";
@@ -199,6 +208,7 @@ export interface ContextBuildSummary {
   readonly consumedModelTokens?: number;
   readonly activeModelReservedTokens?: number;
   readonly remainingModelTokens?: number;
+  readonly queuedFollowup?: ContextQueuedFollowup;
   readonly status: "active" | "completed" | "failed";
   readonly failureCode?: string;
   readonly failureReason?: string;
@@ -272,6 +282,7 @@ export interface ContextBuildProgressResponse {
   readonly consumedModelTokens?: number;
   readonly activeModelReservedTokens?: number;
   readonly remainingModelTokens?: number;
+  readonly queuedFollowup?: ContextQueuedFollowup;
   readonly failureCode?: string;
   readonly failureReason?: string;
   readonly stages: readonly ContextBuildStage[];

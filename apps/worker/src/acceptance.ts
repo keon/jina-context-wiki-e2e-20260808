@@ -1309,8 +1309,8 @@ export async function verifyProductionWebSurfaces(
     {
       headers: {
         accept: "application/json",
-        "x-serverless-authorization": checks.dashboardInvocationAuthorization,
-        authorization: checks.dashboardAuthorization
+        authorization: checks.dashboardInvocationAuthorization,
+        "x-jina-web-authorization": checks.dashboardAuthorization
       },
       signal: AbortSignal.timeout(expected.timeoutMs)
     }
@@ -1339,8 +1339,8 @@ export async function verifyProductionWebSurfaces(
     {
       headers: {
         accept: "text/html",
-        "x-serverless-authorization": checks.dashboardInvocationAuthorization,
-        authorization: checks.dashboardAuthorization
+        authorization: checks.dashboardInvocationAuthorization,
+        "x-jina-web-authorization": checks.dashboardAuthorization
       },
       signal: AbortSignal.timeout(expected.timeoutMs)
     }

@@ -154,6 +154,13 @@ next unfinished phase instead of paying for the completed call again. A checkpoi
 never reused when its exact source artifacts, public snapshot, contract version, or
 repair diagnostic changes.
 
+Page audit does not serialize deterministic cleanup ahead of semantic citation review.
+When a page has source-bound references within the host limit, the worker audits those
+valid references in the same pass even if other links, navigation, or section coverage
+have deterministic defects. The resulting repair receives both finding sets together;
+later passes reuse exact digest-bound verdicts. Empty and over-limit inventories remain
+model-free and fail closed.
+
 ## Inputs
 
 The immutable input snapshot contains:

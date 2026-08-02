@@ -511,10 +511,16 @@ writes, and records it on the build and ingest stage. The checkpoint retains tha
 sequence. If an earlier accepted push finishes after a later accepted push, the earlier
 checkpoint remains stored for audit but cannot advance the projection-input frontier,
 commit derived context, become current, or publish a release over the higher
-admitted sequence. Admission therefore cancels every older nonterminal build for the
-same tenant/repository/ref immediately, retires its leases, and releases its build quota;
-only the newest sequence spends worker and model capacity. Request-key redelivery reuses
-the existing build and sequence.
+admitted sequence. Pull-request heads are freshness-first: a new head cancels the older
+preview immediately, retires its leases, and releases its quota. Unstarted default-ref
+builds are also cheap to replace. Once a push-, issue-, or manually-triggered build has
+invested work, however, the Board records later admissions as immutable
+`context.build_followup_requested` events instead of canceling it. The history remains
+immutable, but only the newest follow-up is eligible for promotion. When the active build reaches a terminal state, its release (when
+successful) becomes the incremental seed and the API automatically admits that newest
+follow-up at the next ref sequence. Worker claims also reconcile pending follow-ups, so
+process loss between completion and promotion cannot strand them. Request-key redelivery
+reuses either the existing build or the same deferred follow-up.
 
 The Board is the only production scheduler. It materializes snapshot, research
 plan, parallel subject research, publication plan, parallel page write/audit,
@@ -724,6 +730,11 @@ so causal writes and agent runs cannot consume Context worker capacity. The API/
 database transaction remains the shared consistency boundary; graph publication writes
 one immutable artifact metadata row and one current-pointer row regardless of graph
 cardinality.
+
+Context derivation runs with three warm workers and may scale to eight workers by
+default so independent research, page-writing, and audit stages can execute in
+parallel. Override the ceiling with `JINA_CONTEXT_WORKER_MAX_INSTANCES`; model
+provider limits and tenant token budgets remain the authoritative cost bounds.
 
 The production transition program is copied into both immutable backend images at
 `/opt/jina/context-production-preflight.mjs` and executed from that path by the Daytona,

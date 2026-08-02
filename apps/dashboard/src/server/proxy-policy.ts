@@ -33,6 +33,18 @@ export interface DashboardPrincipalInput {
   readonly webPrincipal: string | null | undefined;
 }
 
+/**
+ * Cloud Run consumes the bearer token in Authorization before the request
+ * reaches Next.js. Candidate checks therefore carry the app's Basic credential
+ * in a separate header. Browser/Vercel requests keep using Authorization.
+ */
+export function dashboardWebAuthorization(
+  authorizationHeader: string | null | undefined,
+  webAuthorizationHeader: string | null | undefined
+): string | null | undefined {
+  return webAuthorizationHeader ?? authorizationHeader;
+}
+
 function constantTimeEqual(left: string, right: string): boolean {
   const length = Math.max(left.length, right.length);
   let difference = left.length ^ right.length;

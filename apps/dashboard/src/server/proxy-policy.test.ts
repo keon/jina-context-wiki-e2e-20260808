@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isAllowedDashboardApiRequest, resolveDashboardPrincipal } from "./proxy-policy.ts";
+import { dashboardWebAuthorization, isAllowedDashboardApiRequest, resolveDashboardPrincipal } from "./proxy-policy.ts";
+
+test("candidate Cloud Run requests keep invocation and web authorization separate", () => {
+  assert.equal(dashboardWebAuthorization("Bearer cloud-run", "Basic dashboard"), "Basic dashboard");
+  assert.equal(dashboardWebAuthorization("Basic browser", null), "Basic browser");
+});
 
 test("allows dashboard reads, blocks internal and unknown routes", () => {
   for (const pathname of [

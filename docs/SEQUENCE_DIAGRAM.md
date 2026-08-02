@@ -103,6 +103,13 @@ therefore resumes at the first unfinished model boundary. File-producing phases 
 the exact private Markdown snapshot from GCS. No unaudited partial release becomes
 queryable.
 
+If `main` moves after the build has invested work, admission records only the newest
+follow-up on the same Board root and lets the current sequence finish. Completion
+atomically publishes the old sequence, then the API promotes the queued head with that
+release as its prior-context seed. Worker claim reconciliation repeats the promotion
+idempotently after an API crash. PR synchronize events remain freshness-first and cancel
+the stale preview immediately.
+
 ## Incremental commit, PR, and issue
 
 ```mermaid

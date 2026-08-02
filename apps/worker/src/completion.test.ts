@@ -210,6 +210,76 @@ test("a failed Context completion releases exactly its own lease", async (contex
   assert.match(String(releases[0]?.reason), /completion failed with 500/);
 });
 
+test("a stale completion fence is an expected lease loss and does not poison worker health", async (context) => {
+  let claimed = false;
+  let completionCount = 0;
+  const releases: Record<string, unknown>[] = [];
+  const mock = createServer(async (request, response) => {
+    const body = await readJson(request);
+    if (request.url === "/internal/worker/claim") {
+      if (claimed) {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      claimed = true;
+      json(response, 200, publicationWork("cs_stale_completion"));
+      return;
+    }
+    if (request.url === "/internal/context/board/publish") {
+      json(response, 200, {
+        version: 1,
+        outputArtifact: artifact("context-release"),
+        releaseId: "cr_0123456789abcdef0123456789abcdef"
+      });
+      return;
+    }
+    if (request.url === "/internal/worker/complete") {
+      completionCount += 1;
+      json(response, 409, { accepted: false, code: "stale_lease" });
+      return;
+    }
+    if (request.url === "/internal/worker/release") {
+      releases.push(body);
+      json(response, 409, { accepted: false, code: "stale_lease" });
+      return;
+    }
+    json(response, 404, { error: "not found" });
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+
+  const workerPort = await availablePort();
+  const mockPort = (mock.address() as AddressInfo).port;
+  const worker = spawn(process.execPath, [new URL("./server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: String(workerPort),
+      JINA_API_URL: `http://127.0.0.1:${mockPort}`,
+      INTERNAL_API_TOKEN: "test-token",
+      WORKER_TOPICS: "run-context-publication",
+      WORKER_POLL_INTERVAL_MS: "20",
+      WORKER_HEARTBEAT_INTERVAL_MS: "1000",
+      CONTEXT_API_TIMEOUT_MS: "2000",
+      CONTEXT_COMPLETION_TIMEOUT_MS: "2000"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  context.after(async () => {
+    await terminate(worker);
+    await new Promise<void>((resolve) => mock.close(() => resolve()));
+  });
+
+  const health = await waitForHealth(
+    workerPort,
+    (value) => recordOrUndefined(value.lastWork)?.outcome === "lease_lost"
+  );
+  assert.equal(health.ok, true);
+  assert.equal(health.consecutiveApiFailures, 0);
+  assert.equal(metricCounter(health, "worker.poll_failures"), 0);
+  assert.equal(completionCount, 1);
+  assert.deepEqual(releases, []);
+});
+
 test("Board context API timeout requests a bounded retry with diagnostics", async (context) => {
   let completion: Record<string, unknown> | undefined;
   const mock = createServer(async (request, response) => {

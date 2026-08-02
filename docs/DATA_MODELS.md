@@ -125,6 +125,14 @@ reference before completing a Board task or expanding the graph. Independent art
 storage is intentional: plans, research, valid sibling pages, and audits survive worker
 or sandbox loss even when the build never publishes.
 
+Phase checkpoints resume retries of the same Board task. Ref-level durability is a
+separate scheduler concern: after a default-ref build has started, a newer push, issue,
+or manual request is stored as a `context.build_followup_requested` event on that build.
+The latest request is promoted only after the predecessor becomes terminal, using its
+published release as the next build's incremental seed. PR heads remain freshness-first
+and cancel stale previews. This division keeps checkpoint identity immutable while
+preventing ordinary default-branch movement from repeatedly restarting a cold build.
+
 ## Immutable releases and disposable projections
 
 `index_generations` stores immutable release metadata: tenant, repository, ref, commit,

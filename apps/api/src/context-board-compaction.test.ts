@@ -20,6 +20,28 @@ test("compaction retains active builds and only the newest terminal history per 
     });
     state = created.state;
     roots.push(created.buildTaskId);
+    if (index === 0) {
+      const deferred = applyCommand(
+        state,
+        {
+          command: "CommentTask",
+          taskId: created.buildTaskId,
+          eventType: "context.build_followup_requested",
+          payload: {
+            followup: {
+              tenantId: "tenant-a",
+              repository: "acme/repo",
+              ref: "refs/heads/build-0",
+              requestKey: "followup-after-compaction",
+              trigger: "manual"
+            }
+          }
+        },
+        { actor: { type: "system", id: "test" }, now: at }
+      );
+      assert.equal(deferred.accepted, true);
+      state = deferred.state;
+    }
     if (index < 3) state = terminal(state, created.buildTaskId, at);
   }
   const otherTenant = createContextBoardBuild(state, {
@@ -81,9 +103,12 @@ test("compaction retains active builds and only the newest terminal history per 
     true
   );
   assert.equal(
-    compacted.state.events.some((event) => event.taskId === roots[0]),
-    false,
-    "old task events must not remain attached to the tombstone"
+    compacted.state.events
+      .filter((event) => event.taskId === roots[0])
+      .map((event) => event.type)
+      .join(","),
+    "context.build_followup_requested",
+    "only the durable follow-up survives on a compacted root tombstone"
   );
 });
 

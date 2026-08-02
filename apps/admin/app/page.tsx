@@ -180,6 +180,7 @@ export default async function ContextAdminPage({
                 const activeStages = stages.filter(
                   (stage) => stage.status === "in_progress" || stage.status === "queued" || stage.status === "triage"
                 );
+                const queuedFollowup = progress?.queuedFollowup ?? build.queuedFollowup;
                 return (
                   <tr key={build.id}>
                     <td>{build.repository}</td>
@@ -194,6 +195,12 @@ export default async function ContextAdminPage({
                     <td>
                       {build.status}
                       {buildFailure ? <span className="failure-detail">{buildFailure}</span> : null}
+                      {queuedFollowup ? (
+                        <span className="muted">
+                          Next: {queuedFollowup.ref}
+                          {queuedFollowup.commitSha ? `@${queuedFollowup.commitSha.slice(0, 10)}` : ""} after this build
+                        </span>
+                      ) : null}
                     </td>
                     <td>
                       {build.derivationTokenBudget !== undefined ? (

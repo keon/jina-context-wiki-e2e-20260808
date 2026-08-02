@@ -3,7 +3,7 @@ import test from "node:test";
 import { createEmptyBoardState, findTask, leaseNextOutboxMessage, transitionBoardTask } from "@jina/board";
 import { contextBoardTaskTypes } from "@jina/context-engine";
 import { parseGitHubWebhook, type GitHubWebhookEvent } from "@jina/github";
-import { admitContextBoardBuild } from "./context-board-admission.js";
+import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
 
 const NOW = "2026-07-29T21:00:00.000Z";
 const LATER = "2026-07-29T21:01:00.000Z";
@@ -434,7 +434,7 @@ test("a newer PR commit retires an active lease and preserves unrelated or termi
   assert.equal(findTask(newest.state, newest.build.buildTaskId)?.status, "triage");
 });
 
-test("same-commit and non-PR same-ref admissions supersede older active builds", () => {
+test("same-commit and non-PR same-ref admissions supersede older queued builds", () => {
   const head = "7".repeat(40);
   const opened = github(createEmptyBoardState(), prEvent("pull_request.opened", 71, head), "delivery-pr-71-open");
   assert.equal(opened.outcome, "created");
@@ -454,6 +454,30 @@ test("same-commit and non-PR same-ref admissions supersede older active builds",
   assert.deepEqual(newerPush.supersededBuildTaskIds, [pushed.build.buildTaskId]);
   assert.equal(findTask(newerPush.state, pushed.build.buildTaskId)?.status, "canceled");
   assert.equal(findTask(newerPush.state, newerPush.build.buildTaskId)?.status, "triage");
+});
+
+test("an invested default-ref build retains only the newest follow-up until it becomes terminal", () => {
+  const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-push-first");
+  assert.equal(first.outcome, "created");
+  const active = transitionBoardTask(first.state, first.build.buildTaskId, "in_progress", NOW);
+
+  const second = github(active, pushEvent("8".repeat(40)), "delivery-push-second");
+  assert.equal(second.outcome, "deferred");
+  assert.equal(second.activeBuildTaskId, first.build.buildTaskId);
+  assert.equal(findTask(second.state, first.build.buildTaskId)?.status, "in_progress");
+  assert.equal(second.state.tasks.filter((task) => task.type === contextBoardTaskTypes.build).length, 1);
+
+  const newest = github(second.state, pushEvent("9".repeat(40)), "delivery-push-newest");
+  assert.equal(newest.outcome, "deferred");
+  const completed = transitionBoardTask(newest.state, first.build.buildTaskId, "done", LATER);
+  const followup = latestContextBoardFollowup(completed, first.build.buildTaskId);
+  assert.equal(followup?.commitSha, "9".repeat(40));
+
+  const promoted = admitContextBoardBuild(completed, { source: "followup", ...followup, now: LATER });
+  assert.equal(promoted.outcome, "created");
+  assert.equal(promoted.scope.refSequence, 2);
+  assert.equal(promoted.scope.commitSha, "9".repeat(40));
+  assert.equal(latestContextBoardFollowup(promoted.state, first.build.buildTaskId), undefined);
 });
 
 test("comments, reviews, labels, edits, closes, deleted pushes, and tag pushes create no Context build", () => {

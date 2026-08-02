@@ -69,7 +69,9 @@ export function compactTerminalContextBuildHistory(
   const outbox = state.outbox.filter((message) => retainedTaskIds.has(message.taskId));
   const events = state.events.filter(
     (event) =>
-      event.taskId === undefined || (!prunedGraphTaskIds.has(event.taskId) && retainedTaskIds.has(event.taskId))
+      event.taskId === undefined ||
+      (retainedTaskIds.has(event.taskId) &&
+        (event.type === "context.build_followup_requested" || !prunedGraphTaskIds.has(event.taskId)))
   );
 
   return {
