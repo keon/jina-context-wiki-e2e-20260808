@@ -229,3 +229,29 @@ scope before opening a PR.
 - A test PR creates a Jina comment/check under the staging app identity.
 - Trigger.dev staging run logs and API dashboard records share the same review id.
 - Daytona sandboxes created by staging use the expected staging resource profile.
+
+### Accepted end-to-end review (2026-08-02)
+
+The production GitHub App cannot see repositories owned by the personal `keon`
+account. Acceptance therefore used the private
+`keon/jina-staging-e2e-20260802` repository while the staging App was installed
+on that repository only. The temporary installation was removed after the test
+and the staging App was returned to private visibility.
+
+- Pull request: `keon/jina-staging-e2e-20260802#1` (closed after acceptance)
+- Head commit: `7d4a411d8818b7a93a9cec3337b95f1fd29daf87`
+- API review id: `b587d680-8451-4752-befc-c44248edfa6b`
+- Trigger parent run: `run_06fs7q43lhrbdjcm0ruvfc3n01`
+- Trigger runtime run: `run_06fs7q4dttja4oruu2hqt81r01`
+- Trigger deployment: `20260802.2` in the isolated staging project
+- Result: parent and runtime runs completed successfully, the runtime review was
+  published by `jina-staging-gcloud-omxyz`, nine findings were persisted, and
+  the completed investigation rendered at
+  `https://staging.usejina.com/reviews/b587d680-8451-4752-befc-c44248edfa6b`.
+- Isolation proof: the pull request's only App comment/review author was
+  `jina-staging-gcloud-omxyz`; staging logs contained none of the production GCP
+  project, Trigger project, dashboard domain, or GitHub App identifiers.
+
+The acceptance test finished with the staging App private and only installation
+`150654218` remaining. Do not leave the App public after an external-account
+acceptance run.

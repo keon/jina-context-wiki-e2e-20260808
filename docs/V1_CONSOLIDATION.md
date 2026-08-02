@@ -110,7 +110,12 @@ Provisioned platform resources:
   tenant.
 - Staging GitHub App `jina-staging-gcloud-omxyz` (App ID `4461130`) uses only
   the new V1 webhook/OAuth callback and `staging.usejina.com` setup/homepage
-  URLs. GitHub OAuth sign-in and the installation callback are verified.
+  URLs. GitHub OAuth sign-in and the installation callback are verified. A
+  staging-only PR under the personal `keon` account completed the real webhook,
+  Trigger, Daytona, GitHub publication, API persistence, and dashboard-detail
+  flow under review id `b587d680-8451-4752-befc-c44248edfa6b`. Its temporary
+  App installation was then removed and the staging App returned to private
+  visibility.
 
 Repository automation:
 
@@ -133,7 +138,7 @@ signed-webhook fixture, and verify App installation scope before opening a PR.
 
 ## Verification gates
 
-1. The imported baseline must pass 409 API tests, 215 Trigger tests, 112 v1 dashboard
+1. The imported baseline must pass 409 API tests, 216 Trigger tests, 112 v1 dashboard
    tests, API/Trigger typechecks, and all production builds.
 2. The merged dashboard must pass its route/synchronization tests and a Next.js
    production build containing every route in the inventory above.
