@@ -129,7 +129,10 @@ test("mechanical deployment is an explicit opt-in and full acceptance remains th
 
 test("background workers are quiesced and Board leases are proven empty before schema mutation", () => {
   const daytona = deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight");
-  const quiescence = deployment.indexOf('worker_quiescence_started="true"', daytona);
+  const drainAdmission = deployment.indexOf('run_release_control "worker-drain"', daytona);
+  const awaitDrain = deployment.indexOf('run_release_control "board-await-drain"', drainAdmission);
+  const quiescence = deployment.indexOf('worker_quiescence_started="true"', awaitDrain);
+  const preFenceVerify = deployment.indexOf('run_release_control "board-verify"', quiescence);
   const contextDrain = deployment.indexOf(
     'route_paused_worker_and_delete_prior_revisions "jina-context-worker"',
     quiescence
@@ -138,22 +141,42 @@ test("background workers are quiesced and Board leases are proven empty before s
     'route_paused_worker_and_delete_prior_revisions "jina-task-worker"',
     contextDrain
   );
-  const boardDrain = deployment.indexOf('run_release_control "board-drain"', taskDrain);
-  const boardVerify = deployment.indexOf('run_release_control "board-verify"', boardDrain);
+  const boardVerify = deployment.indexOf('run_release_control "board-verify"', taskDrain);
   const migration = deployment.indexOf("gcloud run jobs execute jina-context-migrate", boardVerify);
 
   assert.ok(daytona > 0);
-  assert.ok(quiescence > daytona);
+  assert.ok(drainAdmission > daytona);
+  assert.ok(awaitDrain > drainAdmission);
+  assert.ok(quiescence > awaitDrain);
+  assert.ok(preFenceVerify > quiescence);
   assert.ok(contextDrain > quiescence);
   assert.ok(taskDrain > contextDrain);
-  assert.ok(boardDrain > taskDrain);
-  assert.ok(boardVerify > boardDrain);
+  assert.ok(boardVerify > taskDrain);
   assert.ok(migration > boardVerify);
   assert.match(deployment, /JINA_WORKER_CLAIM_MODE=\$\{claim_mode\}/);
   assert.equal(deployment.match(/--scaling=auto/g)?.length, 4);
   assert.match(deployment, /--clear-tags[\s\S]+?--to-revisions="\$\{drain_revision\}=100"/);
   assert.match(deployment, /gcloud run revisions delete "\$\{revision\}"[\s\S]+?--no-async/);
   assert.match(deployment, /wait_for_exact_worker_revisions "\$\{service\}" "\$\{drain_revision\}"/);
+});
+
+test("a failed graceful drain reopens claim admission without replacing the serving workers", () => {
+  const trap = deployment.indexOf("rollback_failed_release()");
+  const drainFailure = deployment.indexOf('worker_drain_started}" == "true"', trap);
+  const resume = deployment.indexOf('run_release_control "worker-resume"', drainFailure);
+  const forcedDrain = deployment.indexOf('route_paused_worker \\\n      "jina-context-worker"', resume);
+  assert.ok(drainFailure > trap);
+  assert.ok(resume > drainFailure);
+  assert.ok(forcedDrain > resume);
+  assert.match(productionPreflight, /action === "worker-drain"/);
+  assert.match(productionPreflight, /action === "worker-resume"/);
+  assert.match(productionPreflight, /command === "board-await-drain"/);
+  assert.match(productionPreflight, /release_control\.board_drain_wait/);
+  assert.match(productionPreflight, /release_control\.board_drained_and_worker_paused/);
+  assert.match(productionPreflight, /cannot pause worker generation with \$\{leases\.length\} active Board leases/);
+  assert.match(deployment, /JINA_WORKER_DRAIN_TIMEOUT_SECONDS:-1800/);
+  assert.match(deployment, /release_control_task_timeout_seconds=\$\(\(worker_drain_timeout_seconds \+ 600\)\)/);
+  assert.match(deployment, /--task-timeout="\$\{release_control_task_timeout_seconds\}s"/);
 });
 
 test("candidate traffic tags are short and validated against each live Cloud Run service identifier", () => {

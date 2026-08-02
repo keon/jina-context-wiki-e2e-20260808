@@ -18,6 +18,8 @@ export interface WorkerReleaseGuard {
   readonly credentialSha256: string;
   readonly service: "jina-context-worker" | "jina-causal-graph-worker" | "jina-task-worker";
   readonly revision: string;
+  /** Claim mutations additionally require the release claim-admission gate. */
+  readonly requireClaimAdmission?: true;
 }
 
 export interface StateUpdateResult<R> {
@@ -107,20 +109,43 @@ export class PostgresJsonStateStore<T> {
              from jina_runtime.causal_graph_release_control
              where id=1
                and worker_claims_enabled
+               and (
+                 not $4::boolean
+                 or coalesce(
+                   (select worker_accepts_claims or lease_expires_at <= clock_timestamp()
+                    from jina_runtime.release_control
+                    where id=1),
+                   true
+                 )
+               )
                and worker_release_id=$1
                and worker_credential_sha256=$2
                and worker_revision=$3`,
-            [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+            [
+              workerRelease.releaseId,
+              workerRelease.credentialSha256,
+              workerRelease.revision,
+              workerRelease.requireClaimAdmission === true
+            ]
           )
         : await this.pool.query(
             `select 1
              from jina_runtime.release_control
              where id=1
                and worker_claims_enabled
+               and (
+                 not $4::boolean
+                 or coalesce(worker_accepts_claims or lease_expires_at <= clock_timestamp(), true)
+               )
                and worker_release_id=$1
                and worker_credential_sha256=$2
                and ${workerRevisionColumn(workerRelease.service)}=$3`,
-            [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+            [
+              workerRelease.releaseId,
+              workerRelease.credentialSha256,
+              workerRelease.revision,
+              workerRelease.requireClaimAdmission === true
+            ]
           );
     if (accepted.rowCount !== 1) throw new WorkerReleaseRejectedError();
   }
@@ -150,20 +175,43 @@ export class PostgresJsonStateStore<T> {
                  from jina_runtime.causal_graph_release_control
                  where id=1
                    and worker_claims_enabled
+                   and (
+                     not $4::boolean
+                     or coalesce(
+                       (select worker_accepts_claims or lease_expires_at <= clock_timestamp()
+                        from jina_runtime.release_control
+                        where id=1),
+                       true
+                     )
+                   )
                    and worker_release_id=$1
                    and worker_credential_sha256=$2
                    and worker_revision=$3`,
-                [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+                [
+                  workerRelease.releaseId,
+                  workerRelease.credentialSha256,
+                  workerRelease.revision,
+                  workerRelease.requireClaimAdmission === true
+                ]
               )
             : await client.query(
                 `select 1
                  from jina_runtime.release_control
                  where id=1
                    and worker_claims_enabled
+                   and (
+                     not $4::boolean
+                     or coalesce(worker_accepts_claims or lease_expires_at <= clock_timestamp(), true)
+                   )
                    and worker_release_id=$1
                    and worker_credential_sha256=$2
                    and ${workerRevisionColumn(workerRelease.service)}=$3`,
-                [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+                [
+                  workerRelease.releaseId,
+                  workerRelease.credentialSha256,
+                  workerRelease.revision,
+                  workerRelease.requireClaimAdmission === true
+                ]
               );
         if (accepted.rowCount !== 1) {
           throw new WorkerReleaseRejectedError();
@@ -283,6 +331,7 @@ export class PostgresJsonStateStore<T> {
         lease_credential_sha256 text,
         lease_expires_at timestamptz,
         worker_claims_enabled boolean not null default false,
+        worker_accepts_claims boolean not null default true,
         worker_release_id text,
         worker_credential_sha256 text,
         context_worker_revision text,
@@ -301,6 +350,9 @@ export class PostgresJsonStateStore<T> {
              and context_worker_revision is not null and task_worker_revision is not null)
         )
       );
+
+      alter table jina_runtime.release_control
+        add column if not exists worker_accepts_claims boolean not null default true;
       create table if not exists jina_runtime.causal_graph_release_control (
         id smallint primary key check (id=1),
         worker_claims_enabled boolean not null default false,

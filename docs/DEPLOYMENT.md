@@ -782,12 +782,13 @@ The coordinated `cloudbuild.yaml` invocation above calls
 4. under that lease, runs the exact schema-layout preflight and creates and verifies an
    on-demand Cloud SQL backup while the serving workers remain untouched;
 5. deploys claim-disabled Context and task-worker drain revisions from the exact pinned
-   worker image, atomically closes the database worker-generation gate, routes each
-   worker service to its drain, removes every traffic tag, synchronously deletes every
-   prior worker revision, and proves that only its drain revision remains;
-6. takes the Board advisory lock, returns any residual leased delivery to `pending`
-   without consuming an attempt, removes its lease/write fence, and independently proves
-   that the durable Board contains zero active leases;
+   worker image, closes only new-claim admission for the serving generation, and waits
+   up to 30 minutes for its existing lease holders to renew and complete normally;
+6. in the same locked transaction that proves the durable Board contains zero active
+   leases, fences the old generation, then routes each worker service to its drain, removes every
+   traffic tag, synchronously deletes every prior worker revision, and proves that only
+   its drain revision remains. If the bounded wait fails, claim admission is restored
+   without changing production worker traffic;
 7. rechecks the exact schema under the still-live deployment lease immediately before
    owner DDL;
 8. executes `jina-context-migrate` as the dedicated `jina-migration` identity with
@@ -823,8 +824,9 @@ The coordinated `cloudbuild.yaml` invocation above calls
     reported separately and does not invalidate an already accepted, serving release.
 
 Foreground API, dashboard, and admin traffic stays on the prior release until cutover.
-Background worker traffic intentionally changes before schema mutation: it is placed on
-the paused drains and prior worker revisions are deleted. An unaccepted failure first
+Background worker traffic changes only after the serving generation has drained to zero
+leases: it is then placed on the paused drains and prior worker revisions are deleted.
+An unaccepted failure after generation fencing first
 closes the database claim gate, removes enabled candidates, returns both services to the
 paused drains, fences residual leases, independently verifies zero, destroys the
 unaccepted worker-generation credential and verifies its Secret Manager state is
@@ -889,32 +891,34 @@ leases, migrate, or cut over while it is live. The release then deploys
 `jina-context-worker-drain-<Cloud Build ID>` and
 `jina-task-worker-drain-<Cloud Build ID>` with
 `JINA_WORKER_CLAIM_MODE=paused`. Paused mode serves a healthy status endpoint but never
-calls `/internal/worker/claim` and does not initialize a model-backed executor. The
-deployment routes each worker service 100% to that exact drain, clears all revision
-tags, synchronously deletes every other revision, and checks the resulting revision
-inventory. Every drain and candidate explicitly restores automatic scaling, preventing
-a stale manual instance count from multiplying Board pollers across later releases.
-Deletion is deliberate: routing an old polling revision to zero percent does
-not by itself prove its minimum instances have terminated.
+calls `/internal/worker/claim` and does not initialize a model-backed executor.
 
-Before deleting any revision, the control job sets
-`jina_runtime.release_control.worker_claims_enabled=false` while holding the same
-Board advisory lock used by normal mutations. It also temporarily revokes runtime writes
-to `jina_runtime.api_state`, which makes the first gated rollout fail closed even if an
-older serving API revision does not yet understand the release-control row. Those writes
-are restored only when the exact candidate generation is enabled. A live Board mutation
-can delay this gate; lock timeouts emit `release_control.lock_retry` and are retried
-boundedly, so transient contention delays the release instead of aborting it before
-cutover. Shutdown then lets
-current Context work release cooperatively. The migration identity fences leases in that
-same control job, which holds the same
-`hashtext('jina_runtime.api_state')` advisory lock as normal Board mutations, locks the
-snapshot row, fences every residual leased outbox message, and increments the snapshot
-version. The old lease and write-fence token can no longer renew, complete, or publish;
-the same attempt becomes pending for the candidate. A separate control-job execution must
-observe zero active leases. Schema inspection and the verified backup already completed
-before quiescence; the schema is checked again under the deployment lease before
-migration or reset.
+The release-control row has two distinct gates. `worker_claims_enabled` authorizes the
+ordinary Context/task generation to mutate existing leases; its generation identity is
+independent from the causal worker's release-control row. `worker_accepts_claims` is the
+shared admission gate for new Context, task, and causal claims. The control job first
+sets it to false under the Board advisory lock. New claims fail closed, while each exact
+serving generation remains authorized to renew, complete, or release leases. A bounded
+control job observes the durable lease inventory until it reaches zero. If it times out
+or the release otherwise fails in this phase, `worker-resume` reopens claim admission
+and production traffic is left untouched. Claim admission also reopens when the
+renewable deployment lease expires, so a terminated release controller cannot strand
+otherwise valid worker generations in drain mode.
+
+The drain waiter clears the generation identity and temporarily revokes runtime writes
+to `jina_runtime.api_state` in the same locked transaction that observes zero leases.
+The deployment then routes
+each worker service 100% to its exact paused drain, clears all revision tags,
+synchronously deletes every other revision, and checks the resulting inventory. Every
+drain and candidate explicitly restores automatic scaling, preventing a stale manual
+instance count from multiplying Board pollers across later releases. Deletion is
+deliberate: routing an old polling revision to zero percent does not by itself prove its
+minimum instances have terminated. A final zero-lease check precedes schema mutation.
+The standalone `worker-pause` recovery action applies the same locked zero-lease guard.
+The atomic waiter closes the race between observation and fencing even during the first
+rollout from an API revision that does not yet understand the shared claim-admission gate.
+Schema inspection and the verified backup already completed before quiescence; the
+schema is checked again under the deployment lease before migration or reset.
 Lease renewal intentionally does not take the Board advisory lock: migration and reset
 hold that lock across their full critical sections, while renewal continues to serialize
 on the release-control row and release-control advisory lock. All gate-changing actions

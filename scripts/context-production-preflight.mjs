@@ -92,12 +92,16 @@ if (command === "daytona") {
   await withDatabase((pool, reset) => resetLegacySchema(pool, reset));
 } else if (command === "board-drain") {
   await withDatabase((pool) => drainBoardLeases(pool));
+} else if (command === "board-await-drain") {
+  await withDatabase((pool) => awaitBoardLeases(pool));
 } else if (command === "board-verify") {
   await withDatabase((pool) => verifyBoardLeases(pool));
 } else if (
   [
     "release-acquire",
     "release-renew",
+    "worker-drain",
+    "worker-resume",
     "worker-pause",
     "worker-enable",
     "runtime-write-enable",
@@ -107,8 +111,9 @@ if (command === "daytona") {
   await withDatabase((pool) => updateReleaseControlWithRetry(pool, command));
 } else {
   throw new Error(
-    "Expected daytona, release-acquire, release-renew, worker-pause, worker-enable, runtime-write-enable, release-release, " +
-      "board-drain, board-verify, schema-preflight, schema-inspect, or schema-reset"
+    "Expected daytona, release-acquire, release-renew, worker-drain, worker-resume, worker-pause, worker-enable, " +
+      "runtime-write-enable, release-release, board-drain, board-await-drain, board-verify, schema-preflight, " +
+      "schema-inspect, or schema-reset"
   );
 }
 
@@ -314,7 +319,7 @@ async function updateReleaseControl(pool, action) {
     }
     await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.release_control'))");
     const current = await client.query(
-      `select lease_release_id,lease_credential_sha256,lease_expires_at,worker_claims_enabled
+      `select lease_release_id,lease_credential_sha256,lease_expires_at,worker_claims_enabled,worker_accepts_claims
        from jina_runtime.release_control
        where id=1
        for update`
@@ -350,20 +355,28 @@ async function updateReleaseControl(pool, action) {
            where id=1`,
           [release.leaseSeconds]
         );
-      } else if (action === "worker-pause") {
+      } else if (action === "worker-drain") {
+        if (!row?.worker_claims_enabled) {
+          throw new Error("cannot drain an inactive worker generation");
+        }
         await client.query(
           `update jina_runtime.release_control
-           set worker_claims_enabled=false,
-               worker_release_id=null,
-               worker_credential_sha256=null,
-               context_worker_revision=null,
-               task_worker_revision=null,
+           set worker_accepts_claims=false,
                updated_at=clock_timestamp()
            where id=1`
         );
+      } else if (action === "worker-resume") {
+        if (!row?.worker_claims_enabled) {
+          throw new Error("cannot resume an inactive worker generation");
+        }
         await client.query(
-          `revoke insert,update on jina_runtime.api_state from "${requiredRuntimeUser().replaceAll('"', '""')}"`
+          `update jina_runtime.release_control
+           set worker_accepts_claims=true,
+               updated_at=clock_timestamp()
+           where id=1`
         );
+      } else if (action === "worker-pause") {
+        await pauseWorkerGeneration(client);
       } else if (action === "worker-enable") {
         const contextRevision = requiredWorkerRevision("JINA_CONTEXT_WORKER_REVISION", "jina-context-worker");
         const taskRevision = requiredWorkerRevision("JINA_TASK_WORKER_REVISION", "jina-task-worker");
@@ -371,6 +384,7 @@ async function updateReleaseControl(pool, action) {
         await client.query(
           `update jina_runtime.release_control
            set worker_claims_enabled=true,
+               worker_accepts_claims=true,
                worker_release_id=$1,
                worker_credential_sha256=$2,
                context_worker_revision=$3,
@@ -405,7 +419,13 @@ async function updateReleaseControl(pool, action) {
         action,
         releaseId: release.releaseId,
         leaseSeconds: release.leaseSeconds,
-        workerClaimsEnabled: action === "worker-enable" ? true : action === "worker-pause" ? false : undefined
+        workerClaimsEnabled: action === "worker-enable" ? true : action === "worker-pause" ? false : undefined,
+        workerAcceptsClaims:
+          action === "worker-enable" || action === "worker-resume"
+            ? true
+            : action === "worker-drain" || action === "worker-pause"
+              ? false
+              : undefined
       })
     );
   } catch (error) {
@@ -449,6 +469,7 @@ async function ensureReleaseControlTable(pool) {
       lease_credential_sha256 text,
       lease_expires_at timestamptz,
       worker_claims_enabled boolean not null default false,
+      worker_accepts_claims boolean not null default true,
       worker_release_id text,
       worker_credential_sha256 text,
       context_worker_revision text,
@@ -467,6 +488,10 @@ async function ensureReleaseControlTable(pool) {
            and context_worker_revision is not null and task_worker_revision is not null)
       )
     )
+  `);
+  await pool.query(`
+    alter table jina_runtime.release_control
+      add column if not exists worker_accepts_claims boolean not null default true
   `);
   const runtimeUser = requiredRuntimeUser();
   await pool.query(`grant select on jina_runtime.release_control to "${runtimeUser.replaceAll('"', '""')}"`);
@@ -597,6 +622,101 @@ async function drainBoardLeases(pool) {
   } finally {
     client.release();
   }
+}
+
+async function awaitBoardLeases(pool) {
+  const timeoutSeconds = Number(process.env.JINA_WORKER_DRAIN_TIMEOUT_SECONDS ?? "1800");
+  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 60 || timeoutSeconds > 14_400) {
+    throw new Error("JINA_WORKER_DRAIN_TIMEOUT_SECONDS must be an integer between 60 and 14400");
+  }
+  const deadline = Date.now() + timeoutSeconds * 1_000;
+  const startedAt = Date.now();
+  let priorCount;
+  let nextHeartbeatAt = startedAt;
+  while (true) {
+    const client = await pool.connect();
+    let leases;
+    try {
+      await client.query("begin");
+      await client.query("set local lock_timeout='60s'");
+      await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+      await assertDeploymentLease(client, true);
+      await requireBoardStateTable(client);
+      const result = await client.query("select snapshot from jina_runtime.api_state where id=1 for update");
+      leases = result.rows[0]?.snapshot === undefined ? [] : activeBoardLeaseInventory(result.rows[0].snapshot);
+      if (leases.length === 0) {
+        await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.release_control'))");
+        const current = await client.query(
+          `select lease_release_id,lease_credential_sha256,lease_expires_at,worker_claims_enabled
+           from jina_runtime.release_control
+           where id=1
+           for update`
+        );
+        assertCurrentDeploymentLease(current.rows[0], requiredReleaseInput());
+        await pauseWorkerGeneration(client);
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (leases.length === 0) {
+      console.log(
+        JSON.stringify({
+          event: "release_control.board_drained_and_worker_paused",
+          boardLeases: 0,
+          workerClaimsEnabled: false,
+          verified: true
+        })
+      );
+      return;
+    }
+    const now = Date.now();
+    if (leases.length !== priorCount || now >= nextHeartbeatAt) {
+      console.log(
+        JSON.stringify({
+          event: "release_control.board_drain_wait",
+          boardLeases: leases.length,
+          messageIds: leases.map((lease) => lease.id),
+          topics: [...new Set(leases.map((lease) => lease.topic))],
+          elapsedSeconds: Math.floor((now - startedAt) / 1_000),
+          deadlineAt: new Date(deadline).toISOString()
+        })
+      );
+      priorCount = leases.length;
+      nextHeartbeatAt = now + 60_000;
+    }
+    if (now >= deadline) {
+      throw new Error(`Board still has ${leases.length} active leases after ${timeoutSeconds} seconds`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+}
+
+async function pauseWorkerGeneration(client) {
+  await requireBoardStateTable(client);
+  const boardResult = await client.query("select snapshot from jina_runtime.api_state where id=1 for update");
+  const snapshot = boardResult.rows[0]?.snapshot;
+  const leases = snapshot === undefined ? [] : activeBoardLeaseInventory(snapshot);
+  if (leases.length > 0) {
+    throw new Error(`cannot pause worker generation with ${leases.length} active Board leases`);
+  }
+  await client.query(
+    `update jina_runtime.release_control
+     set worker_claims_enabled=false,
+         worker_accepts_claims=false,
+         worker_release_id=null,
+         worker_credential_sha256=null,
+         context_worker_revision=null,
+         task_worker_revision=null,
+         updated_at=clock_timestamp()
+     where id=1`
+  );
+  await client.query(
+    `revoke insert,update on jina_runtime.api_state from "${requiredRuntimeUser().replaceAll('"', '""')}"`
+  );
 }
 
 async function verifyBoardLeases(pool) {

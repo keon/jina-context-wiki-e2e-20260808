@@ -172,6 +172,102 @@ test(
   }
 );
 
+test(
+  "draining rejects new claims while the active generation can renew and complete",
+  { skip: !databaseUrl },
+  async () => {
+    const controlPool = new Pool({ connectionString: databaseUrl, application_name: "jina-worker-drain-control-test" });
+    const store = new PostgresJsonStateStore<{ value: number }>({
+      connectionString: databaseUrl,
+      applicationName: "jina-worker-drain-store-test"
+    });
+    const claimGuard: WorkerReleaseGuard = { ...ACTIVE_RELEASE, requireClaimAdmission: true };
+    try {
+      await controlPool.query("drop schema if exists jina_runtime cascade");
+      await store.load();
+      await enableRelease(controlPool, ACTIVE_RELEASE);
+      await controlPool.query(
+        `update jina_runtime.release_control
+         set worker_accepts_claims=false,
+             lease_release_id='deployment-drain',
+             lease_credential_sha256='deployment-drain-credential',
+             lease_expires_at=now()+interval '10 minutes',
+             updated_at=now()
+         where id=1`
+      );
+
+      await store.verifyWorkerRelease(ACTIVE_RELEASE);
+      const completion = await store.update(
+        async () => ({ state: { value: 1 }, result: "completed-during-drain" }),
+        undefined,
+        ACTIVE_RELEASE
+      );
+      assert.deepEqual(completion, { committed: true, result: "completed-during-drain" });
+      await assert.rejects(store.verifyWorkerRelease(claimGuard), WorkerReleaseRejectedError);
+      await assert.rejects(
+        store.update(async () => ({ state: { value: 2 }, result: "claim" }), undefined, claimGuard),
+        WorkerReleaseRejectedError
+      );
+
+      await controlPool.query(
+        "update jina_runtime.release_control set lease_expires_at=now()-interval '1 second',updated_at=now() where id=1"
+      );
+      await store.verifyWorkerRelease(claimGuard);
+      await controlPool.query(
+        `update jina_runtime.release_control
+         set lease_release_id=null,lease_credential_sha256=null,lease_expires_at=null,updated_at=now()
+         where id=1`
+      );
+      await store.verifyWorkerRelease(claimGuard);
+    } finally {
+      await store.close().catch(() => undefined);
+      await controlPool.query("drop schema if exists jina_runtime cascade").catch(() => undefined);
+      await controlPool.end();
+    }
+  }
+);
+
+test(
+  "the shared drain stops causal claims without revoking its active generation",
+  { skip: !databaseUrl },
+  async () => {
+    const controlPool = new Pool({ connectionString: databaseUrl, application_name: "jina-causal-drain-control-test" });
+    const store = new PostgresJsonStateStore<{ value: number }>({
+      connectionString: databaseUrl,
+      applicationName: "jina-causal-drain-store-test"
+    });
+    const causalRelease = {
+      releaseId: "causal-release-active",
+      credentialSha256: "c".repeat(64),
+      service: "jina-causal-graph-worker",
+      revision: "jina-causal-graph-worker-active"
+    } as const;
+    const claimGuard: WorkerReleaseGuard = { ...causalRelease, requireClaimAdmission: true };
+    try {
+      await controlPool.query("drop schema if exists jina_runtime cascade");
+      await store.load();
+      await enableCausalRelease(controlPool, causalRelease);
+      await store.verifyWorkerRelease(claimGuard);
+      await controlPool.query(
+        `insert into jina_runtime.release_control (
+         id,lease_release_id,lease_credential_sha256,lease_expires_at,worker_accepts_claims
+       ) values (1,'deployment-drain','deployment-drain-credential',now()+interval '10 minutes',false)`
+      );
+
+      await store.verifyWorkerRelease(causalRelease);
+      await assert.rejects(store.verifyWorkerRelease(claimGuard), WorkerReleaseRejectedError);
+      await controlPool.query(
+        "update jina_runtime.release_control set lease_expires_at=now()-interval '1 second',updated_at=now() where id=1"
+      );
+      await store.verifyWorkerRelease(claimGuard);
+    } finally {
+      await store.close().catch(() => undefined);
+      await controlPool.query("drop schema if exists jina_runtime cascade").catch(() => undefined);
+      await controlPool.end();
+    }
+  }
+);
+
 async function enableRelease(pool: Pool, release: WorkerReleaseGuard): Promise<void> {
   await pool.query(
     `insert into jina_runtime.release_control (

@@ -49,6 +49,7 @@ context_api_timeout_ms="${JINA_CONTEXT_API_TIMEOUT_MS:-7800000}"
 context_completion_timeout_ms="${JINA_CONTEXT_COMPLETION_TIMEOUT_MS:-600000}"
 context_worker_heartbeat_interval_ms="${JINA_CONTEXT_WORKER_HEARTBEAT_INTERVAL_MS:-60000}"
 context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-300000}"
+worker_drain_timeout_seconds="${JINA_WORKER_DRAIN_TIMEOUT_SECONDS:-1800}"
 context_codex_context_tokens="${JINA_CONTEXT_CODEX_CONTEXT_TOKENS:-128000}"
 context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-96000}"
 acceptance_derivation_budget_seconds="${JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS:-10800}"
@@ -159,6 +160,7 @@ validate_positive_integer "JINA_CONTEXT_API_TIMEOUT_MS" "${context_api_timeout_m
 validate_positive_integer "JINA_CONTEXT_COMPLETION_TIMEOUT_MS" "${context_completion_timeout_ms}"
 validate_positive_integer "JINA_CONTEXT_WORKER_HEARTBEAT_INTERVAL_MS" "${context_worker_heartbeat_interval_ms}"
 validate_positive_integer "JINA_CONTEXT_WORKER_LEASE_MS" "${context_worker_lease_ms}"
+validate_positive_integer "JINA_WORKER_DRAIN_TIMEOUT_SECONDS" "${worker_drain_timeout_seconds}"
 validate_positive_integer "JINA_CONTEXT_WORKER_MAX_INSTANCES" "${context_worker_max_instances}"
 validate_positive_integer "JINA_CONTEXT_CODEX_CONTEXT_TOKENS" "${context_codex_context_tokens}"
 validate_positive_integer "JINA_CONTEXT_CODEX_COMPACT_TOKENS" "${context_codex_compact_tokens}"
@@ -211,6 +213,11 @@ if (( context_worker_lease_ms < context_worker_heartbeat_interval_ms * 3 )); the
   echo "JINA_CONTEXT_WORKER_LEASE_MS must cover at least three worker heartbeat intervals" >&2
   exit 2
 fi
+if (( worker_drain_timeout_seconds > 14400 )); then
+  echo "JINA_WORKER_DRAIN_TIMEOUT_SECONDS must not exceed 14400" >&2
+  exit 2
+fi
+release_control_task_timeout_seconds=$((worker_drain_timeout_seconds + 600))
 validate_positive_integer "JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS" "${acceptance_derivation_budget_seconds}"
 validate_positive_integer "JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET" "${acceptance_derivation_token_budget}"
 if (( acceptance_timeout_ms < acceptance_derivation_budget_seconds * 1000 )); then
@@ -844,6 +851,7 @@ post_cutover_cleanup_complete="false"
 post_cutover_phase="candidate"
 trigger_acceptance_job_status="not-attempted"
 worker_quiescence_started="false"
+worker_drain_started="false"
 board_leases_verified="false"
 release_lease_acquired="false"
 release_renewal_pid=""
@@ -1016,6 +1024,16 @@ The durable deployment lease was extended for twelve hours to block a second
 release while this accepted cutover is repaired.
 ROLLFORWARD
     exit "${status}"
+  fi
+  if [[ "${status}" -ne 0 && "${worker_drain_started}" == "true" && "${worker_quiescence_started}" != "true" ]]; then
+    if run_release_control "worker-resume" >/dev/null 2>&1; then
+      worker_drain_started="false"
+    else
+      extend_release_lease_for_repair || true
+      stop_release_renewal
+      echo "Candidate release failed while draining; claim admission could not be restored and the deployment lease remains held" >&2
+      exit "${status}"
+    fi
   fi
   if [[ "${status}" -ne 0 && "${worker_quiescence_started}" == "true" ]]; then
     local cleanup_ok="true"
@@ -1223,7 +1241,7 @@ fi
 # The unique control job owns the durable renewable lease, generation gate,
 # schema checks, and Board fencing for this build. A second build can create its
 # own job, but release-acquire fails before that build can touch worker services.
-release_control_env="^~^CONTEXT_RESET_MODULE_PATH=/app/node_modules/@jina/db/dist/reset-context-data.js~CONTEXT_BOARD_MODULE_PATH=/app/node_modules/@jina/board/dist/index.js~CLOUD_BUILD_ID=${CLOUD_BUILD_ID}~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~JINA_WORKER_GENERATION_CREDENTIAL_SHA256=${worker_release_credential_sha256}~JINA_DEPLOYMENT_LEASE_SECONDS=1800~JINA_CONTEXT_WORKER_REVISION=${context_candidate_revision}~JINA_TASK_WORKER_REVISION=${task_candidate_revision}~JINA_CONTEXT_RESET_MODE=${context_reset_mode}~CONTEXT_RUNTIME_DB_USER=${db_user}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}"
+release_control_env="^~^CONTEXT_RESET_MODULE_PATH=/app/node_modules/@jina/db/dist/reset-context-data.js~CONTEXT_BOARD_MODULE_PATH=/app/node_modules/@jina/board/dist/index.js~CLOUD_BUILD_ID=${CLOUD_BUILD_ID}~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~JINA_WORKER_GENERATION_CREDENTIAL_SHA256=${worker_release_credential_sha256}~JINA_DEPLOYMENT_LEASE_SECONDS=1800~JINA_WORKER_DRAIN_TIMEOUT_SECONDS=${worker_drain_timeout_seconds}~JINA_CONTEXT_WORKER_REVISION=${context_candidate_revision}~JINA_TASK_WORKER_REVISION=${task_candidate_revision}~JINA_CONTEXT_RESET_MODE=${context_reset_mode}~CONTEXT_RUNTIME_DB_USER=${db_user}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}"
 gcloud run jobs deploy "${release_control_job}" \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -1236,7 +1254,7 @@ gcloud run jobs deploy "${release_control_job}" \
   --args="${production_preflight_path},release-acquire" \
   --tasks=1 \
   --max-retries=0 \
-  --task-timeout=15m \
+  --task-timeout="${release_control_task_timeout_seconds}s" \
   --quiet
 run_release_control "release-acquire"
 release_lease_acquired="true"
@@ -1285,9 +1303,10 @@ if [[ "${context_backup_status}" != "SUCCESSFUL" ]]; then
 fi
 echo "Verified Cloud SQL backup ${context_backup_id} for ${cloud_sql_instance}"
 
-# Create both paused drains before closing the database generation gate. Once
-# both revisions are ready, worker-pause serializes behind any in-flight Board
-# mutation, so no claim/renew/complete can commit after it returns.
+# Create both paused drains before closing claim admission. The serving worker
+# generation remains authorized to renew and complete work while no new leases
+# can be claimed. Only after the Board reaches zero leases is that generation
+# fenced and replaced by the paused drain revisions.
 serving_api_url="$(stable_service_url "jina-api")"
 gcloud run deploy jina-context-worker \
   --project="${GCP_PROJECT_ID}" \
@@ -1328,11 +1347,14 @@ gcloud run deploy jina-task-worker \
   --quiet
 wait_for_candidate_revision "jina-task-worker" "${drain_suffix}"
 
+run_release_control "worker-drain"
+worker_drain_started="true"
+run_release_control "board-await-drain"
 worker_quiescence_started="true"
-run_release_control "worker-pause"
+worker_drain_started="false"
+run_release_control "board-verify"
 route_paused_worker_and_delete_prior_revisions "jina-context-worker" "${context_drain_revision}"
 route_paused_worker_and_delete_prior_revisions "jina-task-worker" "${task_drain_revision}"
-run_release_control "board-drain"
 run_release_control "board-verify"
 board_leases_verified="true"
 

@@ -250,6 +250,7 @@ export interface WorkerReleaseGuard {
   readonly credentialSha256: string;
   readonly service: "jina-context-worker" | "jina-causal-graph-worker" | "jina-task-worker";
   readonly revision: string;
+  readonly requireClaimAdmission?: true;
 }
 
 interface Principal {
@@ -2889,6 +2890,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const unsupported = topics.filter((topic) => !WORKER_TOPICS.includes(topic as (typeof WORKER_TOPICS)[number]));
     if (unsupported.length) throw invalidRequest(`unsupported worker topics: ${unsupported.join(", ")}`);
     const workerRelease = workerReleaseGuard(body);
+    const claimRelease = workerRelease ? { ...workerRelease, requireClaimAdmission: true as const } : undefined;
     requireWorkerServiceForTopics(workerRelease, topics);
     const claimTenantIds = tenantId === "*" ? [...(await config.sharedIdentityResolver!.listTenantIds())] : [tenantId];
     await reload();
@@ -2908,9 +2910,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (workerRelease) {
         try {
           if (config.stateStore?.verifyWorkerRelease) {
-            await config.stateStore.verifyWorkerRelease(workerRelease);
+            await config.stateStore.verifyWorkerRelease(claimRelease!);
           } else {
-            await mutate(async () => undefined, undefined, workerRelease);
+            await mutate(async () => undefined, undefined, claimRelease);
           }
         } catch (error) {
           if (error instanceof Error && error.name === "WorkerReleaseRejectedError") {
@@ -3062,7 +3064,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           return undefined;
         },
         undefined,
-        workerRelease
+        claimRelease
       );
     } catch (error) {
       if (quotaModelTask && config.contextQuotaService) {

@@ -74,6 +74,7 @@ test("exact active release reaches the Board transaction and topic/service ident
     assert.equal(accepted.status, 204);
     assert.equal(store.mutationCount(), 0);
     assert.equal(store.verificationCount(), 1);
+    assert.equal(store.lastVerification()?.requireClaimAdmission, true);
 
     const wrongService = await workerPost(baseUrl, "/internal/worker/claim", {
       workerId: "candidate",
@@ -148,17 +149,21 @@ function requestIdentity(credential: string): Record<string, string> {
   };
 }
 
-function guardedStateStore(
-  active: WorkerReleaseGuard | undefined
-): ApiStateStore & { mutationCount(): number; verificationCount(): number } {
+function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStore & {
+  mutationCount(): number;
+  verificationCount(): number;
+  lastVerification(): WorkerReleaseGuard | undefined;
+} {
   let snapshot: ApiSnapshot = {
     intakeState: createGitHubIntakeState(),
     devDeliverySequence: 0
   };
   let mutations = 0;
   let verifications = 0;
+  let lastVerification: WorkerReleaseGuard | undefined;
   const assertWorkerRelease = (guard: WorkerReleaseGuard): void => {
     verifications += 1;
+    lastVerification = guard;
     if (
       !active ||
       guard.releaseId !== active.releaseId ||
@@ -203,6 +208,9 @@ function guardedStateStore(
     },
     verificationCount() {
       return verifications;
+    },
+    lastVerification() {
+      return lastVerification;
     }
   };
 }
