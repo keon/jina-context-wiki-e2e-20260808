@@ -882,7 +882,10 @@ Before deleting any revision, the control job sets
 Board advisory lock used by normal mutations. It also temporarily revokes runtime writes
 to `jina_runtime.api_state`, which makes the first gated rollout fail closed even if an
 older serving API revision does not yet understand the release-control row. Those writes
-are restored only when the exact candidate generation is enabled. Shutdown then lets
+are restored only when the exact candidate generation is enabled. A live Board mutation
+can delay this gate; lock timeouts emit `release_control.lock_retry` and are retried
+boundedly, so transient contention delays the release instead of aborting it before
+cutover. Shutdown then lets
 current Context work release cooperatively. The migration identity fences leases in that
 same control job, which holds the same
 `hashtext('jina_runtime.api_state')` advisory lock as normal Board mutations, locks the

@@ -104,7 +104,7 @@ if (command === "daytona") {
     "release-release"
   ].includes(command)
 ) {
-  await withDatabase((pool) => updateReleaseControl(pool, command));
+  await withDatabase((pool) => updateReleaseControlWithRetry(pool, command));
 } else {
   throw new Error(
     "Expected daytona, release-acquire, release-renew, worker-pause, worker-enable, runtime-write-enable, release-release, " +
@@ -413,6 +413,30 @@ async function updateReleaseControl(pool, action) {
     throw error;
   } finally {
     client.release();
+  }
+}
+
+async function updateReleaseControlWithRetry(pool, action) {
+  const maximumAttempts = action === "release-renew" ? 3 : 12;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    try {
+      await updateReleaseControl(pool, action);
+      return;
+    } catch (error) {
+      if (error?.code !== "55P03" || attempt === maximumAttempts) {
+        throw error;
+      }
+      console.warn(
+        JSON.stringify({
+          event: "release_control.lock_retry",
+          action,
+          attempt,
+          maximumAttempts,
+          retryDelaySeconds: 5
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
   }
 }
 

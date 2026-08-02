@@ -186,6 +186,9 @@ test("coordinated releases hold one renewable durable lease and reject overlap b
   );
   assert.match(productionPreflight, /lease_expires_at=clock_timestamp\(\)\+\(\$1::text \|\| ' seconds'\)::interval/);
   assert.match(productionPreflight, /pg_advisory_xact_lock\(hashtext\('jina_runtime\.release_control'\)\)/);
+  assert.match(productionPreflight, /event: "release_control\.lock_retry"/);
+  assert.match(productionPreflight, /error\?\.code !== "55P03"/);
+  assert.match(productionPreflight, /action === "release-renew" \? 3 : 12/);
   assert.match(productionPreflight, /revoke insert,update on jina_runtime\.api_state/);
   assert.match(productionPreflight, /grant select,insert,update on jina_runtime\.api_state/);
 });
