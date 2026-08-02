@@ -64,19 +64,15 @@ Staging must be isolated before any webhook or customer traffic is admitted:
 | Resource           | Required staging target                                                                                                                   |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | GitHub environment | `omxyz/jina` environment `Staging`, branch-restricted to `staging`                                                                        |
-| Product API        | Cloud Run `jina-code-review-api-staging` in `jina-463721/us-east1`                                                                        |
-| Product database   | PostgreSQL 16 `jina-db-staging`, database `jina_staging`, staging-only login and encryption key                                           |
-| Context stack      | Staging-suffixed API/workers/jobs and artifact bucket; never the production services or production Context bucket                         |
-| Trigger workers    | Separate Trigger.dev staging project and deploy/access keys                                                                               |
-| Dashboard          | Separate Vercel staging project rooted at `apps/dashboard`, with `staging.usejina.com` only after smoke verification                      |
+| Product API        | Cloud Run `jina-code-review-api-staging` in `jina-staging-20260802/us-east1`                                                              |
+| Product database   | PostgreSQL 16 `jina-db-staging` in `jina-staging-20260802`, database `jina_staging`, staging-only logins and encryption key               |
+| Context stack      | `jina-api-staging`, `jina-context-worker-staging`, `jina-task-worker-staging`, migration job, registry, and bucket in the staging project |
+| Trigger workers    | Trigger.dev project `jina-staging-isolated` (`proj_rqckjugodcaghbpgggbz`) and staging-only keys                                           |
+| Dashboard          | Vercel project `omlabs/jina-staging-dashboard`, rooted at `apps/dashboard`, serving `https://staging.usejina.com`                         |
 | GitHub identity    | Separate staging GitHub App/OAuth identity installed only on test repositories                                                            |
 | Secrets            | Names and values containing/owned by staging; no production database URL, webhook secret, internal token, OAuth secret, or encryption key |
 
-The existing `jina-simulation` `Staging` environment is only a partial scaffold: as of
-2026-08-01 it has no secrets, no staging Cloud SQL instance, no staging Cloud Run
-service, and no Trigger credentials. Copying that environment by name is not a deploy.
-
-## Staging provisioning state (2026-08-01)
+## Staging provisioning state (2026-08-02)
 
 The consolidation created `omxyz/jina`'s real `Staging` GitHub Environment and restricts
 it to the `staging` branch. Resource variables use staging-scoped Cloud Run, Cloud SQL,
@@ -86,28 +82,35 @@ provider keys.
 
 Provisioned platform resources:
 
-- `jina-463721`: PostgreSQL 16 instance `jina-db-staging` (Enterprise shared-core,
-  zonal), v1 runtime service account, and independent webhook/internal/encryption/
-  Context credentials. The `jina_staging` database has isolated v1 owner and hardened
-  v2 runtime logins; all 29 v1 migrations and the 51-table Context schema are applied.
-- `jina-v2`: v2 API, Context-worker, task-worker, and migration service accounts;
-  staging-only internal/Context/checkpoint secrets; and the private
-  `gs://jina-v2-jina-context-artifacts-staging-us-east1` bucket.
+- `jina-staging-20260802`: PostgreSQL 16 instance `jina-db-staging` (Enterprise
+  shared-core, zonal), both registries, all V1/V2 Cloud Run services/jobs and
+  service accounts, staging-only secrets, and the private
+  `gs://jina-staging-20260802-context-artifacts-us-east1` bucket. The Om Labs
+  billing account is shared; resource identities and data planes are not.
+- The `jina_staging` database has an isolated V1 login, a hardened V2 runtime
+  login with no role-administration flags, all V1 migrations, and the Context
+  schema/roles. The V2 runtime can read only the four shared identity tables
+  outside its own schema.
+- A staging-only Workload Identity provider accepts only
+  `omxyz/jina@refs/heads/staging`; the deploy workflows additionally reject the
+  production GCP and Trigger project identifiers.
 - Explicit staging aliases of the existing Daytona, OpenRouter, OpenAI, and clone
   credentials. These share vendor accounts and billing, but are stored under staging
   names and cannot be selected through a production-secret fallback. Replace them with
   dedicated vendor-account keys if hard provider-account isolation is required.
 - Vercel project `omlabs/jina-staging-dashboard`, served at
-  `https://jina-staging-dashboard.vercel.app`. All product routes return `200`; the four
-  operational routes return `401` without staging Basic Auth and `200` with it.
+  `https://staging.usejina.com`. HTTP Basic Auth is removed; GitHub OAuth is the
+  dashboard identity boundary. All product and operational routes return `200`.
 - Dedicated operations tenant `ba699695-dc9f-431e-a89c-4dc98220f53e`, shared by the
   staging dashboard and v2 API configuration. The deployment script rejects labels and
   malformed identifiers in this database identity boundary.
-- Healthy Cloud Run `jina-api-staging` plus ready `jina-context-worker-staging` and
-  `jina-task-worker-staging` services. The dashboard proxy reaches the empty staging
-  Board through the bound tenant. Until the staging GitHub App exists, the Context
-  worker is limited to its configured clone-token fallback and is not accepted as proof
-  of installation-token behavior.
+- Healthy Cloud Run `jina-code-review-api-staging`, `jina-api-staging`,
+  `jina-context-worker-staging`, and `jina-task-worker-staging` services. The
+  dashboard proxy reaches the empty staging Board through the bound operations
+  tenant.
+- Staging GitHub App `jina-staging-gcloud-omxyz` (App ID `4461130`) uses only
+  the new V1 webhook/OAuth callback and `staging.usejina.com` setup/homepage
+  URLs. GitHub OAuth sign-in and the installation callback are verified.
 
 Repository automation:
 
@@ -118,25 +121,15 @@ Repository automation:
 - `.github/workflows/deploy-v1-api.yml` supports the first isolated staging service
   bootstrap and retains the canary/rollback path for every subsequent revision.
 
-Account-owner prerequisites still required before any public staging traffic is
-accepted:
+Billing enforcement remains `off`; no Autumn production credential is mounted.
+Billing read/empty-state routes are accepted, while checkout/top-up writes remain
+outside staging acceptance until a dedicated test-mode Autumn key is provided.
 
-1. Create a staging GitHub App and OAuth client, installed only on a test repository.
-   Configure webhook
-   `https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app/webhooks/github`, OAuth
-   callback
-   `https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app/auth/github/callback`,
-   and setup URL `https://jina-staging-dashboard.vercel.app/integrations`.
-2. Create a separate Trigger.dev staging project and provide its project ref, deploy
-   access token, and production-style project secret key.
-3. Provide an Autumn test-mode key before the billing write paths can be accepted.
-
-Do not substitute the existing production GitHub App, OAuth client, Trigger project,
-or live Autumn key for these three gates. Until they exist, local and database
-acceptance is authoritative, but an end-to-end staging PR and billing checkout cannot be
-claimed as verified. The merged dashboard, database schemas, v2 API, and fallback-capable
-v2 workers are live. The v1 product API, Trigger workers, App-backed repository access,
-and billing write paths remain intentionally gated until those credentials exist.
+The production GitHub App currently has organization-wide access to `omxyz`.
+Consequently, an `omxyz` repository cannot be used as an isolated staging PR
+target even when it is newly created: GitHub will deliver the PR to both Apps.
+Use a repository/account without the production installation or a synthetic
+signed-webhook fixture, and verify App installation scope before opening a PR.
 
 ## Verification gates
 

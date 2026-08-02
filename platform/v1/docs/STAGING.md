@@ -1,8 +1,11 @@
 # Staging Environment
 
-Staging is isolated from production by GitHub Environment, Cloud Run service,
-database, Secret Manager secret names, Trigger.dev project, dashboard origin,
-GitHub App, and webhook secret.
+Staging is isolated from production by GCP project, GitHub Environment, Cloud
+Run services, Cloud SQL instance, service accounts, Workload Identity pool,
+Artifact Registry repositories, Secret Manager values, Trigger.dev project,
+dashboard project/origin, GitHub App, OAuth credentials, and webhook secret.
+The isolated GCP project shares the Om Labs billing account only; it does not
+share runtime resources or identities with production.
 
 ## GitHub Environment
 
@@ -23,21 +26,21 @@ Save these as GitHub Environment variables on `Staging`:
 
 | Name | Example |
 | --- | --- |
-| `GCP_PROJECT_ID` | `jina-463721` |
+| `GCP_PROJECT_ID` | `jina-staging-20260802` |
 | `GCP_REGION` | `us-east1` |
 | `CLOUD_RUN_SERVICE` | `jina-code-review-api-staging` |
-| `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT` | `jina-api-staging-runtime@jina-463721.iam.gserviceaccount.com` |
+| `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT` | `jina-api-staging-runtime@jina-staging-20260802.iam.gserviceaccount.com` |
 | `CLOUD_SQL_INSTANCE` | `jina-db-staging` |
-| `ARTIFACT_REGISTRY_REPOSITORY` | `jina-code-review` |
-| `JINA_API_BASE_URL` | `https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app` |
-| `JINA_DASHBOARD_ORIGIN` | `https://jina-staging-dashboard.vercel.app` |
-| `JINA_DASHBOARD_URL` | `https://jina-staging-dashboard.vercel.app` |
+| `ARTIFACT_REGISTRY_REPOSITORY` | `jina-code-review-staging` |
+| `JINA_API_BASE_URL` | `https://jina-code-review-api-staging-679811160186.us-east1.run.app` |
+| `JINA_DASHBOARD_ORIGIN` | `https://staging.usejina.com` |
+| `JINA_DASHBOARD_URL` | `https://staging.usejina.com` |
 | `JINA_GITHUB_APP_ID` | staging GitHub App id |
 | `JINA_GITHUB_APP_SLUG` or `JINA_GITHUB_APP_INSTALL_URL` | staging GitHub App slug/install URL |
 | `JINA_GITHUB_OAUTH_CLIENT_ID` | staging OAuth App client id |
 | `JINA_GITHUB_OAUTH_SCOPES` | `read:user read:org repo` |
 | `JINA_TRIGGER_API_URL` | `https://api.trigger.dev` |
-| `JINA_TRIGGER_PROJECT_REF` | staging Trigger.dev project ref |
+| `JINA_TRIGGER_PROJECT_REF` | `proj_rqckjugodcaghbpgggbz` |
 | `WEBHOOK_SECRET_NAME` | `jina-staging-github-webhook-secret` |
 | `JINA_GITHUB_APP_PRIVATE_KEY_SECRET_NAME` | `jina-staging-github-app-private-key` |
 | `INTERNAL_API_TOKEN_SECRET_NAME` | `jina-staging-internal-api-token` |
@@ -51,8 +54,8 @@ Optional staging variables:
 | Name | Example / notes |
 | --- | --- |
 | `JINA_DASHBOARD_ORIGIN` | Extra comma-separated dashboard origins; if set, must contain `staging`. |
-| `JINA_BILLING_ENFORCE` | `off`, `shadow`, or `on`. When set, the API deploy mounts the Autumn secret. |
-| `AUTUMN_SECRET_KEY_SECRET_NAME` | `jina-staging-autumn-secret-key`. Required only when `JINA_BILLING_ENFORCE` is set. |
+| `JINA_BILLING_ENFORCE` | `off`, `shadow`, or `on`. `off` never mounts an Autumn secret. |
+| `AUTUMN_SECRET_KEY_SECRET_NAME` | `jina-staging-autumn-secret-key`. Required only for `shadow` or `on`. |
 | `JINA_GRAPH_API_URL` | Optional staging V2 Context API HTTPS origin; if set, it must contain `staging` and be paired with `GRAPH_API_TOKEN_SECRET_NAME`. |
 | `JINA_GRAPH_REQUEST_TIMEOUT_MS` | Optional timeout for staging V2 Context requests and webhook relay; defaults to 20,000 ms. |
 | `GRAPH_API_TOKEN_SECRET_NAME` | Staging-scoped Secret Manager name for the static `JINA_GRAPH_API_TOKEN` fallback; required when `JINA_GRAPH_API_URL` is set. |
@@ -82,8 +85,8 @@ Save these as GitHub Environment secrets on `Staging`:
 
 | Name | Notes |
 | --- | --- |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Can reuse production deploy identity only if IAM allows staging resources. |
-| `GCP_SERVICE_ACCOUNT` | Deployer service account. |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Staging-only provider in `github-staging-pool`, restricted to `omxyz/jina`'s `staging` branch. |
+| `GCP_SERVICE_ACCOUNT` | `jina-api-staging-deployer@jina-staging-20260802.iam.gserviceaccount.com`. |
 | `STAGING_JINA_TRIGGER_ACCESS_TOKEN` | Token for the staging Trigger.dev project. |
 | `STAGING_JINA_GITHUB_APP_PRIVATE_KEY` | Private key for the staging GitHub App. |
 | `STAGING_JINA_INTERNAL_API_TOKEN` | Must match the staging Secret Manager internal token. |
@@ -106,7 +109,7 @@ generic production fallback names are unreachable from staging deploys.
 Create staging resources with distinct names:
 
 ```bash
-export GCP_PROJECT_ID=jina-463721
+export GCP_PROJECT_ID=jina-staging-20260802
 export GCP_REGION=us-east1
 
 gcloud sql instances create jina-db-staging \
@@ -173,6 +176,10 @@ Create a separate Trigger.dev project for staging. Use that project's:
 - `JINA_TRIGGER_PROJECT_REF` in the `Staging` GitHub Environment variable
 - production-style Trigger secret key in `jina-staging-trigger-secret-key`
 
+The isolated project is `jina-staging-isolated` with ref
+`proj_rqckjugodcaghbpgggbz`. The staging workflow rejects the production ref
+`proj_gmesnthgwwqledarlfip`.
+
 Do not use a `tr_dev_*` key for deployed staging unless intentionally testing a
 locally connected Trigger dev worker. The API deploy rejects a `tr_dev_*` value
 in `TRIGGER_SECRET_KEY_SECRET_NAME` unless `ALLOW_DEV_TRIGGER_SECRET_IN_DEPLOY`
@@ -186,11 +193,18 @@ variables) so managed reviews can run.
 
 Create a separate staging GitHub App:
 
-- Webhook URL: `https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app/webhooks/github`
+- Webhook URL: `https://jina-code-review-api-staging-679811160186.us-east1.run.app/webhooks/github`
 - Webhook secret: value stored in `jina-staging-github-webhook-secret`
-- OAuth callback: `https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app/auth/github/callback`
-- Setup URL: `https://jina-staging-dashboard.vercel.app/integrations`
+- OAuth callback: `https://jina-code-review-api-staging-679811160186.us-east1.run.app/auth/github/callback`
+- Setup URL: `https://staging.usejina.com/integrations`
 - Install it only on staging/test repositories.
+
+The production GitHub App is installed organization-wide on `omxyz`. Creating
+an `omxyz` test repository therefore does **not** create an isolated staging
+acceptance target: GitHub will also deliver its pull requests to production.
+Use an account/repository on which the production App is not installed, or use
+a synthetic signed webhook plus a non-customer fixture. Verify installation
+scope before opening a PR.
 
 ## Deploy Order
 
@@ -204,12 +218,12 @@ Create a separate staging GitHub App:
 7. Run `Deploy API` from the `staging` branch with `target_environment=Staging`.
 8. Run `Deploy Trigger` from the `staging` branch with `target_environment=Staging`.
 9. Deploy the dashboard with
-   `NEXT_PUBLIC_API_BASE_URL=https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app`.
+   `NEXT_PUBLIC_API_BASE_URL=https://jina-code-review-api-staging-679811160186.us-east1.run.app`.
 10. Install the staging GitHub App on a test repository and open a PR.
 
 ## Validation
 
-- `GET https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app/healthz`
+- `GET https://jina-code-review-api-staging-679811160186.us-east1.run.app/v1/healthz`
   returns `status: ok`.
 - Staging GitHub App webhook delivery gets HTTP 200.
 - A test PR creates a Jina comment/check under the staging app identity.
