@@ -662,7 +662,9 @@ jobs:
               fi
             fi
           fi
-          candidate_tag="candidate-${GITHUB_RUN_ID}"
+          # Cloud Run caps service-name + tag at 46 characters. Keep the tag
+          # compact so long staging service names can still use tagged canaries.
+          candidate_tag="c-${GITHUB_RUN_ID}"
           deploy_traffic_args=()
           if [ "$service_exists" = true ]; then
             deploy_traffic_args+=(--no-traffic)
