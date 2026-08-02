@@ -942,7 +942,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             trigger: "manual",
             now: nowIso()
           });
-          return { outcome: "duplicate" as const, buildTaskId: replay.buildTaskId };
+          return {
+            outcome: "duplicate" as const,
+            build: publicContextBoardBuild(replay.state, replay.buildTaskId)
+          };
         }
         const refSequence = nextCausalGraphBoardRefSequence(intakeState.board, {
           tenantId: principal.tenantId,
@@ -963,13 +966,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           now: nowIso()
         });
         intakeState = { ...intakeState, board: build.state };
-        return { outcome: "created" as const, buildTaskId: build.buildTaskId };
+        return {
+          outcome: "created" as const,
+          build: publicContextBoardBuild(build.state, build.buildTaskId)
+        };
       });
       if (!admitted) {
         throw new ApiError(409, "conflict", "causal graph build admission raced another update");
       }
       json(response, admitted.outcome === "created" ? 202 : 200, {
-        build: publicContextBoardBuild(intakeState.board, admitted.buildTaskId),
+        // A concurrent request can reload this API process from the pre-commit
+        // snapshot after the transaction callback has run. Return the immutable
+        // transaction result instead of consulting that mutable process cache.
+        build: admitted.build,
         duplicate: admitted.outcome === "duplicate"
       });
       return;

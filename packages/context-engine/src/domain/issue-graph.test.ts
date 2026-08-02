@@ -119,6 +119,16 @@ test("rejects evidence outside the observed commit message", () => {
   assert.throws(() => materialize(invalid), /outside commit/);
 });
 
+test("canonicalizes case-only differences in model-authored issue references", () => {
+  const value = candidate();
+  value.causalities[2]!.subjectKey = "CLAIM-TIMEOUT";
+  value.causalities[2]!.objectRef = "POOL-CONTENTION";
+  const graph = materialize(value);
+  const edge = graph.causalities.find((causality) => causality.object.kind === "issue");
+  assert.ok(edge);
+  assert.notEqual(edge.subjectIssueId, edge.object.id);
+});
+
 test("rejects predicate endpoint mismatches and causal cycles", () => {
   const wrongKind = candidate();
   wrongKind.causalities[0]!.objectKind = "issue";

@@ -12,8 +12,9 @@ import {
   type ContextArtifactStore,
   type ContextArtifactWrite
 } from "@jina/context-engine";
-import { createApiServer } from "./server.js";
 import type { ContextQuotaService } from "./context-quotas.js";
+import { createGitHubIntakeState } from "./github-intake.js";
+import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const TENANT = "tenant-issue-graph";
 const PRINCIPAL = "user:reader@example.com";
@@ -35,6 +36,59 @@ class CountingArtifactStore implements ContextArtifactStore {
     this.reads += 1;
     return this.delegate.get(ref);
   }
+}
+
+class AdmissionRaceStateStore implements ApiStateStore {
+  readonly operationFinished: Promise<void>;
+  private snapshot: ApiSnapshot;
+  private signalOperationFinished!: () => void;
+  private releaseCommit!: () => void;
+  private readonly commitReleased: Promise<void>;
+  private holdUpdate = true;
+
+  constructor(initial: ApiSnapshot) {
+    this.snapshot = structuredClone(initial);
+    this.operationFinished = new Promise((resolve) => {
+      this.signalOperationFinished = resolve;
+    });
+    this.commitReleased = new Promise((resolve) => {
+      this.releaseCommit = resolve;
+    });
+  }
+
+  commit(): void {
+    this.releaseCommit();
+  }
+
+  async load(): Promise<ApiSnapshot> {
+    return structuredClone(this.snapshot);
+  }
+
+  async ping(): Promise<void> {}
+
+  async hasDelivery(): Promise<boolean> {
+    return false;
+  }
+
+  async save(snapshot: ApiSnapshot): Promise<boolean> {
+    this.snapshot = structuredClone(snapshot);
+    return true;
+  }
+
+  async update<T>(
+    operation: (snapshot: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>
+  ): Promise<{ readonly committed: boolean; readonly result?: T }> {
+    const updated = await operation(structuredClone(this.snapshot));
+    if (this.holdUpdate) {
+      this.holdUpdate = false;
+      this.signalOperationFinished();
+      await this.commitReleased;
+    }
+    this.snapshot = structuredClone(updated.state);
+    return { committed: true, result: updated.result };
+  }
+
+  async close(): Promise<void> {}
 }
 
 test("causal graph API authorizes through the current pointer and serves cached artifact reads", async () => {
@@ -203,6 +257,54 @@ test("causal graph API authorizes through the current pointer and serves cached 
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("causal graph admission returns the committed build when a concurrent reload replaces the local snapshot", async () => {
+  const store = new AdmissionRaceStateStore({
+    intakeState: createGitHubIntakeState(),
+    devDeliverySequence: 0
+  });
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    stateStore: store,
+    contextStore: new MemoryContextEngineStore()
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const headers = {
+    "x-jina-tenant-id": TENANT,
+    "x-jina-principal-id": "svc:dev",
+    "content-type": "application/json"
+  };
+  try {
+    const admission = fetch(`${baseUrl}/causal-graph/build`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ repository: REPOSITORY, ref: "main", requestKey: "admission-reload-race" })
+    });
+    await store.operationFinished;
+
+    // This request reloads the still-uncommitted snapshot into the same API
+    // process while admission is paused after constructing its transaction result.
+    const reloader = await fetch(`${baseUrl}/force-reload`, {
+      method: "POST",
+      headers,
+      body: "{}"
+    });
+    assert.equal(reloader.status, 404);
+    store.commit();
+
+    const response = await admission;
+    const text = await response.text();
+    assert.equal(response.status, 202, text);
+    const body = JSON.parse(text) as { build: { id: string; buildKind: string }; duplicate: boolean };
+    assert.match(body.build.id, /^task_/);
+    assert.equal(body.build.buildKind, "causal_graph");
+    assert.equal(body.duplicate, false);
+  } finally {
+    store.commit();
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 });
 

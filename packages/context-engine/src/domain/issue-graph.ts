@@ -334,17 +334,31 @@ function parseIssueGraphCandidate(value: unknown): IssueGraphCandidate {
       `causality ${index}`
     );
     const predicate = enumValue(edge.predicate, issueCausalityPredicates, `causality ${index} predicate`);
+    const objectKind = enumValue(edge.objectKind, ["issue", "commit"] as const, `causality ${index} objectKind`);
+    const objectRef = boundedString(edge.objectRef, `causality ${index} objectRef`, 120);
     return {
-      subjectKey: boundedString(edge.subjectKey, `causality ${index} subjectKey`, 120),
+      // Issue keys are canonical lowercase identifiers. Structured model output
+      // can still vary the casing of a reference, so resolve an unambiguous
+      // case-only difference before enforcing graph integrity.
+      subjectKey: canonicalIssueKeyReference(
+        keys,
+        boundedString(edge.subjectKey, `causality ${index} subjectKey`, 120)
+      ),
       predicate,
-      objectKind: enumValue(edge.objectKind, ["issue", "commit"] as const, `causality ${index} objectKind`),
-      objectRef: boundedString(edge.objectRef, `causality ${index} objectRef`, 120),
+      objectKind,
+      objectRef: objectKind === "issue" ? canonicalIssueKeyReference(keys, objectRef) : objectRef,
       why: boundedString(edge.why, `causality ${index} why`, 2_000, 12),
       confidence: enumValue(edge.confidence, ["explicit", "inferred"] as const, `causality ${index} confidence`),
       evidence: parseEvidenceArray(edge.evidence, `causality ${index}`)
     };
   });
   return { version: 1, summary, issues, causalities };
+}
+
+function canonicalIssueKeyReference(keys: ReadonlySet<string>, reference: string): string {
+  if (keys.has(reference)) return reference;
+  const lowercase = reference.toLowerCase();
+  return keys.has(lowercase) ? lowercase : reference;
 }
 
 function parseEvidenceArray(value: unknown, name: string): Omit<IssueCommitEvidence, "excerpt">[] {

@@ -347,13 +347,13 @@ const ISSUE_GRAPH_STAGE_SCHEMA = {
         additionalProperties: false,
         required: ["subjectKey", "predicate", "objectKind", "objectRef", "why", "confidence", "evidence"],
         properties: {
-          subjectKey: { type: "string", minLength: 1, maxLength: 120 },
+          subjectKey: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
           predicate: {
             type: "string",
             enum: ["INTRODUCED_BY", "RESOLVED_BY", "CAUSED_BY", "CONTRIBUTES_TO"]
           },
           objectKind: { type: "string", enum: ["issue", "commit"] },
-          objectRef: { type: "string", minLength: 1, maxLength: 120 },
+          objectRef: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
           why: { type: "string", minLength: 12, maxLength: 2_000 },
           confidence: { type: "string", const: "explicit" },
           evidence: { type: "array", minItems: 1, maxItems: 100, items: issueEvidenceSchema() }
@@ -4708,6 +4708,7 @@ function issueGraphPrompt(repository: string, ref: string, historyPath: string):
     "An issue is a concrete defect, failure mode, operational constraint, or harmful design tradeoff visible in commit messages. Do not turn ordinary features, refactors, or chores into issues.",
     "Every issue needs exact 1-based commit-message line ranges. Use introduced, observed, and resolved roles only when the cited text supports that role.",
     "Use INTRODUCED_BY and RESOLVED_BY only with commit SHA objects. Use CAUSED_BY and CONTRIBUTES_TO only between issue keys.",
+    "Every subjectKey and issue objectRef must exactly copy one lowercase key from the issues array. Never invent or recase an issue reference.",
     "Emit a causality only when the commit history states the relationship explicitly enough to defend. confidence must be explicit. Omit guesses and ambiguous relationships.",
     "Keep distinct symptoms separate only when the history supports separate identities. Prefer fewer well-evidenced issues over speculative coverage.",
     "Return only the schema-conforming JSON result."
