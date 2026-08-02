@@ -73,6 +73,7 @@ required_variables=(
   JINA_TRIGGER_PROJECT_REF
   JINA_GRAPH_API_URL
   JINA_CONTEXT_TENANT_ID
+  JINA_BILLING_ENFORCE
   WEBHOOK_SECRET_NAME
   JINA_GITHUB_APP_PRIVATE_KEY_SECRET_NAME
   INTERNAL_API_TOKEN_SECRET_NAME
@@ -82,6 +83,7 @@ required_variables=(
   ENCRYPTION_KEY_SECRET_NAME
   GRAPH_API_TOKEN_SECRET_NAME
   GRAPH_INTERNAL_TOKEN_SECRET_NAME
+  AUTUMN_SECRET_KEY_SECRET_NAME
 )
 
 for variable_name in "${required_variables[@]}"; do
@@ -115,6 +117,8 @@ required_environment_secrets=(
   STAGING_JINA_INTERNAL_API_TOKEN
   STAGING_JINA_DAYTONA_API_KEY
   STAGING_JINA_OPENROUTER_API_KEY
+  STAGING_JINA_OPENAI_API_KEY
+  STAGING_JINA_GITHUB_CLONE_TOKEN
 )
 
 for secret_name in "${required_environment_secrets[@]}"; do
@@ -152,6 +156,7 @@ v1_secrets=(
   jina-staging-secrets-encryption-key
   jina-staging-graph-api-token
   jina-staging-graph-internal-token
+  jina-staging-autumn-secret-key
 )
 for secret_name in "${v1_secrets[@]}"; do
   if gcloud secrets versions describe latest --secret="${secret_name}" \

@@ -103,6 +103,11 @@ Provisioned platform resources:
 - Dedicated operations tenant `ba699695-dc9f-431e-a89c-4dc98220f53e`, shared by the
   staging dashboard and v2 API configuration. The deployment script rejects labels and
   malformed identifiers in this database identity boundary.
+- Healthy Cloud Run `jina-api-staging` plus ready `jina-context-worker-staging` and
+  `jina-task-worker-staging` services. The dashboard proxy reaches the empty staging
+  Board through the bound tenant. Until the staging GitHub App exists, the Context
+  worker is limited to its configured clone-token fallback and is not accepted as proof
+  of installation-token behavior.
 
 Repository automation:
 
@@ -129,8 +134,9 @@ accepted:
 Do not substitute the existing production GitHub App, OAuth client, Trigger project,
 or live Autumn key for these three gates. Until they exist, local and database
 acceptance is authoritative, but an end-to-end staging PR and billing checkout cannot be
-claimed as verified. The merged dashboard deployment and database schemas are live, but
-the API and workers remain intentionally undeployed until those credentials exist.
+claimed as verified. The merged dashboard, database schemas, v2 API, and fallback-capable
+v2 workers are live. The v1 product API, Trigger workers, App-backed repository access,
+and billing write paths remain intentionally gated until those credentials exist.
 
 ## Verification gates
 
