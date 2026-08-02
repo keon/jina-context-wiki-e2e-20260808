@@ -85,7 +85,7 @@ function materialize(value: unknown = candidate()) {
       {
         sha: resolved,
         parentShas: [introduced],
-        message: "perf(db): remove context query fan-out\nExpose pool checkout pressure.",
+        message: "perf(db): remove context query fan-out\n\nExpose pool checkout pressure.",
         committedAt: "2026-08-01T13:00:00.000Z"
       },
       {
@@ -133,6 +133,17 @@ test("rejects evidence outside the observed commit message", () => {
   const invalid = candidate();
   invalid.issues[0]!.evidence[0]!.messageEndLine = 20;
   assert.throws(() => materialize(invalid), /outside commit/);
+});
+
+test("normalizes a whitespace-only evidence range to the nearest following message line", () => {
+  const value = candidate();
+  value.issues[0]!.evidence[1]!.messageStartLine = 2;
+  value.issues[0]!.evidence[1]!.messageEndLine = 2;
+  const graph = materialize(value);
+  const evidence = graph.issues.find((issue) => issue.title.includes("fan-out"))!.evidence[1]!;
+  assert.equal(evidence.messageStartLine, 3);
+  assert.equal(evidence.messageEndLine, 3);
+  assert.equal(evidence.excerpt, "Expose pool checkout pressure.");
 });
 
 test("canonicalizes case-only differences in model-authored issue references", () => {

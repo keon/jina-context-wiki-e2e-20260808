@@ -662,12 +662,32 @@ function materializeEvidence(
   if (evidence.messageEndLine < evidence.messageStartLine || evidence.messageEndLine > lines.length) {
     throw new Error(`issue evidence range is outside commit ${evidence.commitSha}`);
   }
-  const excerpt = lines
+  let normalizedEvidence = evidence;
+  let excerpt = lines
     .slice(evidence.messageStartLine - 1, evidence.messageEndLine)
     .join("\n")
     .trim();
-  if (!excerpt) throw new Error(`issue evidence excerpt is empty for commit ${evidence.commitSha}`);
-  return { ...evidence, excerpt };
+  if (!excerpt) {
+    const nearestLine = nearestNonEmptyMessageLine(lines, evidence.messageStartLine, evidence.messageEndLine);
+    if (nearestLine === undefined) throw new Error(`issue evidence excerpt is empty for commit ${evidence.commitSha}`);
+    normalizedEvidence = { ...evidence, messageStartLine: nearestLine + 1, messageEndLine: nearestLine + 1 };
+    excerpt = lines[nearestLine]!.trim();
+  }
+  return { ...normalizedEvidence, excerpt };
+}
+
+function nearestNonEmptyMessageLine(
+  lines: readonly string[],
+  messageStartLine: number,
+  messageEndLine: number
+): number | undefined {
+  for (let distance = 0; distance < lines.length; distance += 1) {
+    const following = messageEndLine + distance;
+    if (following < lines.length && lines[following]!.trim()) return following;
+    const preceding = messageStartLine - 2 - distance;
+    if (preceding >= 0 && lines[preceding]!.trim()) return preceding;
+  }
+  return undefined;
 }
 
 function issueState(
