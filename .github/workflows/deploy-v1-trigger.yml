@@ -229,6 +229,9 @@ jobs:
           # deploy fails in CI, not per-review.
           if [ -z "${OPENROUTER_API_KEY:-}" ]; then missing+=("OPENROUTER_API_KEY"); fi
           if [ "$DEPLOY_ENVIRONMENT" = "Staging" ]; then
+            if [ "$TRIGGER_PROJECT_REF" = "proj_gmesnthgwwqledarlfip" ]; then
+              missing+=("TRIGGER_PROJECT_REF uses the production Trigger.dev project")
+            fi
             staging_values=(
               API_BASE_URL
               DASHBOARD_URL

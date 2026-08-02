@@ -3,8 +3,7 @@ set -uo pipefail
 
 repository="${JINA_STAGING_REPOSITORY:-omxyz/jina}"
 github_environment="${JINA_STAGING_GITHUB_ENVIRONMENT:-Staging}"
-v1_project="${JINA_STAGING_V1_PROJECT:-jina-463721}"
-v2_project="${JINA_STAGING_V2_PROJECT:-jina-v2}"
+staging_project="${JINA_STAGING_GCP_PROJECT:-jina-staging-20260802}"
 region="${JINA_STAGING_REGION:-us-east1}"
 failures=0
 
@@ -61,6 +60,22 @@ variables_json="$(
     jq '{variables: [.[].variables[]]}' || true
 )"
 secrets_json="$(gh api "repos/${repository}/environments/${github_environment}/secrets?per_page=100" 2>/dev/null || true)"
+
+configured_project="$(jq -r '.variables[]? | select(.name == "GCP_PROJECT_ID") | .value' \
+  <<<"${variables_json}")"
+if [[ "${configured_project}" == "${staging_project}" ]]; then
+  pass "GitHub Staging targets the isolated GCP project ${staging_project}"
+else
+  fail "GitHub Staging GCP_PROJECT_ID must equal ${staging_project}"
+fi
+
+trigger_project="$(jq -r '.variables[]? | select(.name == "JINA_TRIGGER_PROJECT_REF") | .value' \
+  <<<"${variables_json}")"
+if [[ -n "${trigger_project}" && "${trigger_project}" != "proj_gmesnthgwwqledarlfip" ]]; then
+  pass "GitHub Staging uses a non-production Trigger.dev project"
+else
+  fail "GitHub Staging must not use the production Trigger.dev project"
+fi
 
 required_variables=(
   GCP_PROJECT_ID
@@ -134,17 +149,17 @@ for secret_name in "${required_environment_secrets[@]}"; do
   fi
 done
 
-sql_state="$(gcloud sql instances describe jina-db-staging --project="${v1_project}" \
+sql_state="$(gcloud sql instances describe jina-db-staging --project="${staging_project}" \
   --format='value(state)' 2>/dev/null || true)"
 if [[ "${sql_state}" == "RUNNABLE" ]]; then
-  pass "Cloud SQL ${v1_project}/${region}/jina-db-staging is runnable"
+  pass "Cloud SQL ${staging_project}/${region}/jina-db-staging is runnable"
 else
-  fail "Cloud SQL ${v1_project}/${region}/jina-db-staging is not runnable"
+  fail "Cloud SQL ${staging_project}/${region}/jina-db-staging is not runnable"
 fi
 
 if gcloud iam service-accounts describe \
-    "jina-api-staging-runtime@${v1_project}.iam.gserviceaccount.com" \
-    --project="${v1_project}" >/dev/null 2>&1; then
+    "jina-api-staging-runtime@${staging_project}.iam.gserviceaccount.com" \
+    --project="${staging_project}" >/dev/null 2>&1; then
   pass "V1 staging runtime service account exists"
 else
   fail "V1 staging runtime service account is missing"
@@ -160,11 +175,14 @@ v1_secrets=(
   jina-staging-secrets-encryption-key
   jina-staging-graph-api-token
   jina-staging-graph-internal-token
-  jina-staging-autumn-secret-key
 )
+if [[ "$(jq -r '.variables[]? | select(.name == "JINA_BILLING_ENFORCE") | .value' \
+    <<<"${variables_json}")" != "off" ]]; then
+  v1_secrets+=(jina-staging-autumn-secret-key)
+fi
 for secret_name in "${v1_secrets[@]}"; do
   if gcloud secrets versions describe latest --secret="${secret_name}" \
-      --project="${v1_project}" >/dev/null 2>&1; then
+      --project="${staging_project}" >/dev/null 2>&1; then
     pass "V1 Secret Manager secret ${secret_name} has a latest version"
   else
     fail "V1 Secret Manager secret ${secret_name} is missing a latest version"
@@ -173,7 +191,7 @@ done
 
 v2_services=(jina-api-staging jina-context-worker-staging jina-task-worker-staging)
 for service_name in "${v2_services[@]}"; do
-  if gcloud run services describe "${service_name}" --project="${v2_project}" \
+  if gcloud run services describe "${service_name}" --project="${staging_project}" \
       --region="${region}" >/dev/null 2>&1; then
     pass "V2 Cloud Run service ${service_name} exists"
   else

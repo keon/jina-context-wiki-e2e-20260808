@@ -128,12 +128,19 @@ jobs:
                 exit 1
               fi
               unsafe=()
+              if [ "$PROJECT_ID" = "jina-463721" ]; then
+                unsafe+=("PROJECT_ID uses the production GCP project")
+              fi
+              case "${BILLING_ENFORCE_VALUE:-off}" in
+                off|shadow|on) ;;
+                *) unsafe+=("JINA_BILLING_ENFORCE must be off, shadow, or on") ;;
+              esac
               for pair in "${production_defaults[@]}"; do
                 name="${pair%%:*}"
                 production_value="${pair#*:}"
                 # The Autumn billing secret is only mounted when billing is
                 # enabled, so only require a staging name for it then.
-                if [ "$name" = "AUTUMN_SECRET_KEY_SECRET_NAME" ] && [ -z "${BILLING_ENFORCE_VALUE:-}" ]; then
+                if [ "$name" = "AUTUMN_SECRET_KEY_SECRET_NAME" ] && [ "${BILLING_ENFORCE_VALUE:-off}" = "off" ]; then
                   continue
                 fi
                 if [ -z "${!name:-}" ]; then
@@ -143,8 +150,10 @@ jobs:
                 fi
               done
               staging_values=(
+                PROJECT_ID
                 SERVICE_NAME
                 CLOUD_SQL_INSTANCE
+                ARTIFACT_REPOSITORY
                 RUNTIME_SERVICE_ACCOUNT
                 DASHBOARD_URL
                 API_BASE_URL
@@ -156,7 +165,7 @@ jobs:
                 DATABASE_URL_SECRET_NAME
                 ENCRYPTION_KEY_SECRET_NAME
               )
-              if [ -n "${BILLING_ENFORCE_VALUE:-}" ]; then
+              if [ "${BILLING_ENFORCE_VALUE:-off}" != "off" ]; then
                 staging_values+=(AUTUMN_SECRET_KEY_SECRET_NAME)
               fi
               if [ -n "${GRAPH_API_URL_VALUE:-}" ]; then
@@ -650,9 +659,11 @@ jobs:
           # to enable it, which also mounts the Autumn Secret Manager secret. All
           # secret names resolve to staging-scoped values on staging deploys.
           secrets="GITHUB_WEBHOOK_SECRET=${WEBHOOK_SECRET_NAME}:latest,GITHUB_APP_PRIVATE_KEY=${APP_PRIVATE_KEY_SECRET_NAME}:latest,INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN_SECRET_NAME}:latest,TRIGGER_SECRET_KEY=${TRIGGER_SECRET_KEY_SECRET_NAME}:latest,GITHUB_OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET_NAME}:latest,DATABASE_URL=${DATABASE_URL_SECRET_NAME}:latest,SECRETS_ENCRYPTION_KEY=${ENCRYPTION_KEY_SECRET_NAME}:latest"
-          if [ -n "${BILLING_ENFORCE_VALUE:-}" ]; then
+          if [ "${BILLING_ENFORCE_VALUE:-off}" != "off" ]; then
             env_vars="${env_vars}|JINA_BILLING_ENFORCE=${BILLING_ENFORCE_VALUE}"
             secrets="${secrets},AUTUMN_SECRET_KEY=${AUTUMN_SECRET_KEY_SECRET_NAME}:latest"
+          else
+            env_vars="${env_vars}|JINA_BILLING_ENFORCE=off"
           fi
           if [ -n "${GRAPH_API_URL_VALUE:-}" ]; then
             env_vars="${env_vars}|JINA_GRAPH_API_URL=${GRAPH_API_URL_VALUE}"

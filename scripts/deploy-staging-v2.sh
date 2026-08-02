@@ -3,16 +3,17 @@ set -euo pipefail
 
 : "${IMAGE_TAG:?IMAGE_TAG is required and must identify images already pushed by cloudbuild.images.yaml}"
 
-project="${GCP_PROJECT_ID:-jina-v2}"
+project="${GCP_PROJECT_ID:-jina-staging-20260802}"
 region="${GCP_REGION:-us-east1}"
-sql_instance="${CLOUD_SQL_INSTANCE:-jina-463721:us-east1:jina-db-staging}"
+sql_instance="${CLOUD_SQL_INSTANCE:-jina-staging-20260802:us-east1:jina-db-staging}"
 database_name="${JINA_DB_NAME:-jina_staging}"
 runtime_user="${JINA_DB_USER:-jina_v2_staging_app}"
 owner_user="${JINA_MIGRATION_DB_USER:-postgres}"
 context_tenant_id="${JINA_CONTEXT_TENANT_ID:?JINA_CONTEXT_TENANT_ID is required}"
-artifact_bucket="${JINA_CONTEXT_GCS_BUCKET:-jina-v2-jina-context-artifacts-staging-us-east1}"
-v1_api_url="${JINA_V1_API_URL:-https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app}"
-gar="${region}-docker.pkg.dev/${project}/jina"
+artifact_bucket="${JINA_CONTEXT_GCS_BUCKET:-jina-staging-20260802-context-artifacts-us-east1}"
+v1_api_url="${JINA_V1_API_URL:-https://jina-code-review-api-staging-679811160186.us-east1.run.app}"
+artifact_repository="${JINA_ARTIFACT_REGISTRY_REPOSITORY:-jina-staging}"
+gar="${region}-docker.pkg.dev/${project}/${artifact_repository}"
 api_image="${gar}/api:${IMAGE_TAG}"
 worker_image="${gar}/worker:${IMAGE_TAG}"
 
@@ -28,7 +29,7 @@ migration_service_account="jina-migration-staging@${project}.iam.gserviceaccount
 owner_password_secret="jina-staging-owner-db-password"
 runtime_password_secret="jina-staging-db-password"
 webhook_secret="jina-staging-github-webhook-secret"
-internal_token_secret="jina-staging-internal-api-token"
+internal_token_secret="${JINA_V2_INTERNAL_TOKEN_SECRET:-jina-v2-staging-internal-api-token}"
 context_token_secret="jina-staging-context-api-token"
 checkpoint_secret="jina-staging-context-private-checkpoint-key"
 v1_internal_token_secret="jina-staging-v1-internal-api-token"
@@ -39,10 +40,12 @@ github_clone_token_secret="jina-staging-github-clone-token"
 openai_secret="jina-staging-openai-api-key"
 
 required_staging_values=(
+  "${project}"
   "${sql_instance}"
   "${database_name}"
   "${runtime_user}"
   "${artifact_bucket}"
+  "${artifact_repository}"
   "${v1_api_url}"
   "${api_service}"
   "${context_worker_service}"
@@ -61,6 +64,10 @@ required_staging_values=(
   "${github_clone_token_secret}"
   "${openai_secret}"
 )
+if [[ "${project}" == "jina-463721" || "${project}" == "jina-v2" ]]; then
+  printf 'Refusing to deploy staging services into production project: %s\n' "${project}" >&2
+  exit 2
+fi
 for value in "${required_staging_values[@]}"; do
   if [[ "${value}" != *staging* ]]; then
     printf 'Refusing non-staging deployment value: %s\n' "${value}" >&2
