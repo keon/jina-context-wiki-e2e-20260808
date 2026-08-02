@@ -1,0 +1,751 @@
+name: Deploy API
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - api/**
+      - migrations/**
+      - .dockerignore
+      - .github/workflows/deploy-api.yml
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "GitHub deployment environment to use"
+        required: true
+        type: choice
+        default: Staging
+        options:
+          - Staging
+          - Production
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
+    concurrency:
+      group: deploy-api-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
+      # Never cancel a deployment while it may be serving canary traffic. A
+      # queued deploy is safer than leaving a partially promoted revision.
+      cancel-in-progress: false
+    env:
+      DEPLOY_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE }}
+      CLOUD_SQL_INSTANCE: ${{ vars.CLOUD_SQL_INSTANCE }}
+      ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
+      IMAGE_NAME: jina-code-review-api
+      RUNTIME_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
+      DASHBOARD_ORIGIN: ${{ vars.JINA_DASHBOARD_ORIGIN }}
+      DASHBOARD_URL: ${{ vars.JINA_DASHBOARD_URL }}
+      API_BASE_URL: ${{ vars.JINA_API_BASE_URL || vars.API_BASE_URL }}
+      GITHUB_APP_ID_VALUE: ${{ vars.JINA_GITHUB_APP_ID }}
+      GITHUB_APP_INSTALL_URL_VALUE: ${{ vars.JINA_GITHUB_APP_INSTALL_URL }}
+      GITHUB_APP_SLUG_VALUE: ${{ vars.JINA_GITHUB_APP_SLUG }}
+      GITHUB_OAUTH_CLIENT_ID_VALUE: ${{ vars.JINA_GITHUB_OAUTH_CLIENT_ID }}
+      GITHUB_OAUTH_SCOPES_VALUE: ${{ vars.JINA_GITHUB_OAUTH_SCOPES }}
+      TRIGGER_API_URL_VALUE: ${{ vars.JINA_TRIGGER_API_URL }}
+      BILLING_ENFORCE_VALUE: ${{ vars.JINA_BILLING_ENFORCE }}
+      GRAPH_API_URL_VALUE: ${{ vars.JINA_GRAPH_API_URL }}
+      GRAPH_REQUEST_TIMEOUT_MS_VALUE: ${{ vars.JINA_GRAPH_REQUEST_TIMEOUT_MS }}
+      # Platform default model slugs — the TRUE defaults the API surfaces to the dashboard model picker
+      # and passes through to runs when a stage is unset. Sourced from the SAME repo variables the trigger
+      # deploy uses (deploy-trigger.yml), so the API and worker agree on defaults. Optional (passed through
+      # only when set below).
+      # JINA_* wins, GENERIC (unprefixed) is the fallback — the SAME resolution deploy-trigger.yml uses,
+      # so the API's platform defaults (which drive routing-coverage classification) can never diverge
+      # from the model the worker actually runs for an unset stage.
+      RUNTIME_PLANNER_MODEL_VALUE: ${{ vars.JINA_RUNTIME_PLANNER_MODEL || vars.RUNTIME_PLANNER_MODEL }}
+      RUNTIME_AGENT_MODEL_VALUE: ${{ vars.JINA_RUNTIME_AGENT_MODEL || vars.RUNTIME_AGENT_MODEL }}
+      RUNTIME_MENTAL_TRACE_MODEL_VALUE: ${{ vars.JINA_RUNTIME_MENTAL_TRACE_MODEL || vars.RUNTIME_MENTAL_TRACE_MODEL }}
+      REVIEW_CODEX_MODEL_VALUE: ${{ vars.JINA_REVIEW_CODEX_MODEL || vars.REVIEW_CODEX_MODEL }}
+      WEBHOOK_SECRET_NAME: ${{ vars.WEBHOOK_SECRET_NAME }}
+      APP_PRIVATE_KEY_SECRET_NAME: ${{ vars.GITHUB_APP_PRIVATE_KEY_SECRET_NAME }}
+      INTERNAL_API_TOKEN_SECRET_NAME: ${{ vars.INTERNAL_API_TOKEN_SECRET_NAME }}
+      TRIGGER_SECRET_KEY_SECRET_NAME: ${{ vars.TRIGGER_SECRET_KEY_SECRET_NAME }}
+      OAUTH_CLIENT_SECRET_NAME: ${{ vars.OAUTH_CLIENT_SECRET_NAME }}
+      DATABASE_URL_SECRET_NAME: ${{ vars.DATABASE_URL_SECRET_NAME }}
+      ENCRYPTION_KEY_SECRET_NAME: ${{ vars.ENCRYPTION_KEY_SECRET_NAME }}
+      AUTUMN_SECRET_KEY_SECRET_NAME: ${{ vars.AUTUMN_SECRET_KEY_SECRET_NAME }}
+      GRAPH_API_TOKEN_SECRET_NAME: ${{ vars.GRAPH_API_TOKEN_SECRET_NAME }}
+      GRAPH_INTERNAL_TOKEN_SECRET_NAME: ${{ vars.GRAPH_INTERNAL_TOKEN_SECRET_NAME }}
+      GRAPH_DELEGATED_TOKEN_TTL_MINUTES_VALUE: ${{ vars.JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES }}
+      ALLOW_DEV_TRIGGER_SECRET_IN_DEPLOY: ${{ vars.ALLOW_DEV_TRIGGER_SECRET_IN_DEPLOY || 'false' }}
+
+    steps:
+      - name: Validate configuration
+        env:
+          WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOYER_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          # Production Secret Manager / Cloud SQL defaults. Non-production
+          # environments must override every one of these with a distinct
+          # (staging-scoped) name so a staging deploy can never touch a
+          # production database or secret.
+          production_defaults=(
+            CLOUD_SQL_INSTANCE:jina-db
+            WEBHOOK_SECRET_NAME:jina-github-webhook-secret
+            APP_PRIVATE_KEY_SECRET_NAME:jina-github-app-private-key
+            INTERNAL_API_TOKEN_SECRET_NAME:jina-internal-api-token
+            TRIGGER_SECRET_KEY_SECRET_NAME:jina-trigger-secret-key
+            OAUTH_CLIENT_SECRET_NAME:jina-github-oauth-client-secret
+            DATABASE_URL_SECRET_NAME:jina-database-url
+            ENCRYPTION_KEY_SECRET_NAME:jina-secrets-encryption-key
+            AUTUMN_SECRET_KEY_SECRET_NAME:jina-autumn-secret-key
+          )
+          case "$DEPLOY_ENVIRONMENT" in
+            Production)
+              if [ "$GITHUB_REF_NAME" != "main" ]; then
+                echo "Production deploys must run from main" >&2
+                exit 1
+              fi
+              for pair in "${production_defaults[@]}"; do
+                name="${pair%%:*}"
+                default_value="${pair#*:}"
+                if [ -z "${!name:-}" ]; then
+                  printf -v "$name" '%s' "$default_value"
+                fi
+              done
+              if [ -n "${GRAPH_API_URL_VALUE:-}" ] && [ -z "${GRAPH_API_TOKEN_SECRET_NAME:-}" ]; then
+                GRAPH_API_TOKEN_SECRET_NAME=jina-graph-api-token
+              fi
+              ;;
+            Staging)
+              if [ "$GITHUB_REF_NAME" != "staging" ]; then
+                echo "Staging deploys must run from the staging branch" >&2
+                exit 1
+              fi
+              unsafe=()
+              for pair in "${production_defaults[@]}"; do
+                name="${pair%%:*}"
+                production_value="${pair#*:}"
+                # The Autumn billing secret is only mounted when billing is
+                # enabled, so only require a staging name for it then.
+                if [ "$name" = "AUTUMN_SECRET_KEY_SECRET_NAME" ] && [ -z "${BILLING_ENFORCE_VALUE:-}" ]; then
+                  continue
+                fi
+                if [ -z "${!name:-}" ]; then
+                  unsafe+=("$name is unset")
+                elif [ "${!name}" = "$production_value" ]; then
+                  unsafe+=("$name uses production value $production_value")
+                fi
+              done
+              staging_values=(
+                SERVICE_NAME
+                CLOUD_SQL_INSTANCE
+                RUNTIME_SERVICE_ACCOUNT
+                DASHBOARD_URL
+                API_BASE_URL
+                WEBHOOK_SECRET_NAME
+                APP_PRIVATE_KEY_SECRET_NAME
+                INTERNAL_API_TOKEN_SECRET_NAME
+                TRIGGER_SECRET_KEY_SECRET_NAME
+                OAUTH_CLIENT_SECRET_NAME
+                DATABASE_URL_SECRET_NAME
+                ENCRYPTION_KEY_SECRET_NAME
+              )
+              if [ -n "${BILLING_ENFORCE_VALUE:-}" ]; then
+                staging_values+=(AUTUMN_SECRET_KEY_SECRET_NAME)
+              fi
+              if [ -n "${GRAPH_API_URL_VALUE:-}" ]; then
+                if [ -z "${GRAPH_API_TOKEN_SECRET_NAME:-}" ]; then
+                  unsafe+=("GRAPH_API_TOKEN_SECRET_NAME is unset")
+                elif [ "$GRAPH_API_TOKEN_SECRET_NAME" = "jina-graph-api-token" ]; then
+                  unsafe+=("GRAPH_API_TOKEN_SECRET_NAME uses the production value")
+                fi
+                staging_values+=(GRAPH_API_TOKEN_SECRET_NAME)
+                if [[ "$GRAPH_API_URL_VALUE" != *staging* ]]; then
+                  unsafe+=("JINA_GRAPH_API_URL must contain staging")
+                fi
+              elif [ -n "${GRAPH_API_TOKEN_SECRET_NAME:-}" ]; then
+                unsafe+=("GRAPH_API_TOKEN_SECRET_NAME is set while JINA_GRAPH_API_URL is unset")
+              fi
+              for name in "${staging_values[@]}"; do
+                if [[ "${!name:-}" != *staging* ]]; then
+                  unsafe+=("$name must contain staging")
+                fi
+              done
+              # DASHBOARD_ORIGIN is optional extra origins; only require a
+              # staging-scoped value when one is configured.
+              if [ -n "${DASHBOARD_ORIGIN:-}" ] && [[ "$DASHBOARD_ORIGIN" != *staging* ]]; then
+                unsafe+=("DASHBOARD_ORIGIN must contain staging")
+              fi
+              if [ "${#unsafe[@]}" -gt 0 ]; then
+                echo "Staging deploys require explicit non-production resource names:" >&2
+                printf '  - %s\n' "${unsafe[@]}" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Unsupported deployment environment: $DEPLOY_ENVIRONMENT" >&2
+              exit 1
+              ;;
+          esac
+          # Persist resolved names for later steps.
+          {
+            echo "CLOUD_SQL_INSTANCE=$CLOUD_SQL_INSTANCE"
+            echo "WEBHOOK_SECRET_NAME=$WEBHOOK_SECRET_NAME"
+            echo "APP_PRIVATE_KEY_SECRET_NAME=$APP_PRIVATE_KEY_SECRET_NAME"
+            echo "INTERNAL_API_TOKEN_SECRET_NAME=$INTERNAL_API_TOKEN_SECRET_NAME"
+            echo "TRIGGER_SECRET_KEY_SECRET_NAME=$TRIGGER_SECRET_KEY_SECRET_NAME"
+            echo "OAUTH_CLIENT_SECRET_NAME=$OAUTH_CLIENT_SECRET_NAME"
+            echo "DATABASE_URL_SECRET_NAME=$DATABASE_URL_SECRET_NAME"
+            echo "ENCRYPTION_KEY_SECRET_NAME=$ENCRYPTION_KEY_SECRET_NAME"
+            echo "AUTUMN_SECRET_KEY_SECRET_NAME=$AUTUMN_SECRET_KEY_SECRET_NAME"
+            echo "GRAPH_API_TOKEN_SECRET_NAME=${GRAPH_API_TOKEN_SECRET_NAME:-}"
+          } >> "$GITHUB_ENV"
+          required=(
+            PROJECT_ID
+            REGION
+            SERVICE_NAME
+            CLOUD_SQL_INSTANCE
+            ARTIFACT_REPOSITORY
+            RUNTIME_SERVICE_ACCOUNT
+            DASHBOARD_URL
+            API_BASE_URL
+            GITHUB_APP_ID_VALUE
+            GITHUB_OAUTH_CLIENT_ID_VALUE
+            GITHUB_OAUTH_SCOPES_VALUE
+            TRIGGER_API_URL_VALUE
+            WEBHOOK_SECRET_NAME
+            APP_PRIVATE_KEY_SECRET_NAME
+            INTERNAL_API_TOKEN_SECRET_NAME
+            TRIGGER_SECRET_KEY_SECRET_NAME
+            OAUTH_CLIENT_SECRET_NAME
+            DATABASE_URL_SECRET_NAME
+            ENCRYPTION_KEY_SECRET_NAME
+            WIF_PROVIDER
+            DEPLOYER_SERVICE_ACCOUNT
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required deployment configuration: $name" >&2
+              exit 1
+            fi
+          done
+          case "$API_BASE_URL" in
+            https://*) ;;
+            *)
+              echo "API_BASE_URL must be the public HTTPS API origin for production OAuth callbacks" >&2
+              exit 1
+              ;;
+          esac
+          case "$DASHBOARD_URL" in
+            https://*) ;;
+            *)
+              echo "DASHBOARD_URL must be the public HTTPS dashboard origin for production cookies" >&2
+              exit 1
+              ;;
+          esac
+          if [ -n "${GRAPH_API_URL_VALUE:-}" ]; then
+            case "$GRAPH_API_URL_VALUE" in
+              https://*) ;;
+              *)
+                echo "JINA_GRAPH_API_URL must be an HTTPS origin" >&2
+                exit 1
+                ;;
+            esac
+            if [ -z "${GRAPH_API_TOKEN_SECRET_NAME:-}" ]; then
+              echo "GRAPH_API_TOKEN_SECRET_NAME is required when JINA_GRAPH_API_URL is configured" >&2
+              exit 1
+            fi
+          fi
+          if [ -n "${DASHBOARD_ORIGIN:-}" ]; then
+            DASHBOARD_ORIGIN="$DASHBOARD_ORIGIN" python3 - <<'PY'
+          import os
+          import sys
+          from urllib.parse import urlparse
+
+          for raw in os.environ["DASHBOARD_ORIGIN"].split(","):
+              origin = raw.strip()
+              if not origin:
+                  continue
+              if origin == "*":
+                  print("DASHBOARD_ORIGIN cannot include *; configure explicit dashboard origins", file=sys.stderr)
+                  sys.exit(1)
+              parsed = urlparse(origin)
+              if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                  print("DASHBOARD_ORIGIN values must be full http(s) origins", file=sys.stderr)
+                  sys.exit(1)
+          PY
+          fi
+          if [ -z "${GITHUB_APP_INSTALL_URL_VALUE:-}" ] && [ -z "${GITHUB_APP_SLUG_VALUE:-}" ]; then
+            echo "Missing required deployment configuration: JINA_GITHUB_APP_SLUG or JINA_GITHUB_APP_INSTALL_URL" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Validate runtime secrets
+        run: |
+          set -euo pipefail
+          trigger_secret="$(gcloud secrets versions access latest --secret="${TRIGGER_SECRET_KEY_SECRET_NAME}" --project="${PROJECT_ID}")"
+          if [ -z "$trigger_secret" ]; then
+            echo "Secret Manager value ${TRIGGER_SECRET_KEY_SECRET_NAME} is empty" >&2
+            exit 1
+          fi
+          case "$trigger_secret" in
+            tr_dev_*)
+              if [ "$ALLOW_DEV_TRIGGER_SECRET_IN_DEPLOY" != "true" ]; then
+                echo "Secret Manager value ${TRIGGER_SECRET_KEY_SECRET_NAME} is a Trigger.dev development key; deployed API environments should use a production key" >&2
+                exit 1
+              fi
+              ;;
+          esac
+          # SECRETS_ENCRYPTION_KEY is REQUIRED at startup (the API refuses to
+          # boot without it since the OpenRouter/billing work): verify the Secret
+          # Manager value exists and is base64-encoded 32 bytes before deploying,
+          # so a missing or malformed key fails this workflow instead of
+          # boot-looping Cloud Run. Staging validates its own staging-scoped key.
+          encryption_key="$(gcloud secrets versions access latest --secret="${ENCRYPTION_KEY_SECRET_NAME}" --project="${PROJECT_ID}")"
+          if [ -z "$encryption_key" ]; then
+            echo "Secret Manager value ${ENCRYPTION_KEY_SECRET_NAME} is empty; create it with 32 random bytes, base64-encoded (openssl rand -base64 32)" >&2
+            exit 1
+          fi
+          decoded_len="$(printf '%s' "$encryption_key" | base64 -d 2>/dev/null | wc -c | tr -d ' ')"
+          if [ "$decoded_len" != "32" ]; then
+            echo "Secret Manager value ${ENCRYPTION_KEY_SECRET_NAME} must be base64-encoded 32 bytes (got ${decoded_len} decoded bytes)" >&2
+            exit 1
+          fi
+          if [ -n "${GRAPH_API_URL_VALUE:-}" ]; then
+            graph_token="$(gcloud secrets versions access latest --secret="${GRAPH_API_TOKEN_SECRET_NAME}" --project="${PROJECT_ID}")"
+            if [ -z "$graph_token" ]; then
+              echo "Secret Manager value ${GRAPH_API_TOKEN_SECRET_NAME} is empty" >&2
+              exit 1
+            fi
+            unset graph_token
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Validate migrations on PostgreSQL
+        run: |
+          set -euo pipefail
+          container=jina-migration-preflight
+          docker run --rm --detach \
+            --name "$container" \
+            --publish 127.0.0.1:55450:5432 \
+            --env POSTGRES_DB=jina_test \
+            --env POSTGRES_USER=postgres \
+            --env POSTGRES_PASSWORD=postgres \
+            --health-cmd "pg_isready -U postgres -d jina_test" \
+            --health-interval 1s \
+            --health-timeout 5s \
+            --health-retries 30 \
+            --health-start-period 5s \
+            postgres:16-alpine
+          trap 'docker stop "$container" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 40); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = "healthy" ]; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = "healthy"
+          npm --prefix api ci
+          (
+            cd api
+            export DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55450/jina_test
+            npm run migrate
+            TEST_DATABASE_URL="$DATABASE_URL" node --test --import tsx src/dashboard-projection-postgres.test.ts
+            TEST_DATABASE_URL="$DATABASE_URL" node --test --import tsx src/identity-transition-postgres.test.ts
+            TEST_DATABASE_URL="$DATABASE_URL" node --test --import tsx src/internal-user-postgres.test.ts
+            TEST_DATABASE_URL="$DATABASE_URL" node --test --import tsx src/jina-organization-postgres.test.ts
+            TEST_DATABASE_URL="$DATABASE_URL" node --test --import tsx src/tenant-github-connections-postgres.test.ts
+            TEST_DATABASE_URL="$DATABASE_URL" node --test --import tsx src/tenant-review-feed-postgres.test.ts
+          )
+
+      - name: Run database migrations
+        run: |
+          set -euo pipefail
+          # Migrations MUST be applied before the new image serves traffic: the API queries columns a
+          # prior schema lacks (e.g. tenant_model_settings.model_provider) and would otherwise error on
+          # every run. Fail-closed — if migrations can't run, the deploy stops here rather than shipping
+          # code that boot-loops on a missing column. migrate.ts holds a pg advisory lock, so this is
+          # safe against a concurrent manual run. Additive migrations keep the running (old) image happy.
+          curl -fsSL -o /tmp/cloud-sql-proxy \
+            https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.1/cloud-sql-proxy.linux.amd64
+          chmod +x /tmp/cloud-sql-proxy
+          instance="${PROJECT_ID}:${REGION}:${CLOUD_SQL_INSTANCE}"
+          # Expose the Cloud SQL socket at the SAME /cloudsql path the runtime DATABASE_URL secret uses
+          # (the deploy attaches it via --add-cloudsql-instances), so the connection string works here
+          # unchanged — no rewrite, no separate CI credentials.
+          sudo mkdir -p /cloudsql && sudo chown "$(id -u)" /cloudsql
+          /tmp/cloud-sql-proxy --unix-socket /cloudsql "$instance" &
+          proxy_pid=$!
+          trap 'kill "$proxy_pid" 2>/dev/null || true' EXIT
+          socket="/cloudsql/${instance}/.s.PGSQL.5432"
+          for _ in $(seq 1 30); do
+            [ -S "$socket" ] && break
+            sleep 1
+          done
+          if [ ! -S "$socket" ]; then
+            echo "Cloud SQL Auth Proxy socket did not appear for ${instance}" >&2
+            exit 1
+          fi
+          DATABASE_URL="$(gcloud secrets versions access latest --secret="${DATABASE_URL_SECRET_NAME}" --project="${PROJECT_ID}")"
+          export DATABASE_URL
+          GITHUB_APP_ID="$GITHUB_APP_ID_VALUE"
+          GITHUB_APP_PRIVATE_KEY="$(gcloud secrets versions access latest \
+            --secret="${APP_PRIVATE_KEY_SECRET_NAME}" \
+            --project="${PROJECT_ID}")"
+          export GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY
+          npm --prefix api run migrate
+          # The old revision is still serving traffic. Backfill all additive
+          # identity/connection columns now. Prove convergence in a rollback-only
+          # transaction before applying, then fail before building/deploying if
+          # any identity or enabled repository cannot be mapped without guessing.
+          for attempt in 1 2 3 4 5; do
+            if npm --prefix api run identity:backfill -- \
+                --dry-run --require-converged --resolve-repositories \
+              && npm --prefix api run identity:backfill -- \
+                --apply --require-converged --resolve-repositories; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 2))
+          done
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push image
+        run: |
+          set -euo pipefail
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}"
+          docker build --platform linux/amd64 -f api/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy Cloud Run service
+        run: |
+          set -eEuo pipefail
+          previous_service="$(gcloud run services describe "$SERVICE_NAME" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --format=json)"
+          previous_revision="$(jq -r '
+            [.status.traffic[]? | select((.percent // 0) > 0 and .revisionName != null)] as $receiving
+            | if ($receiving | length) == 1 and $receiving[0].percent == 100
+              then $receiving[0].revisionName
+              else empty
+              end
+          ' <<<"$previous_service")"
+          if [ -z "$previous_revision" ]; then
+            echo "Expected exactly one existing Cloud Run revision at 100% traffic; refusing an ambiguous rollout" >&2
+            exit 1
+          fi
+          previous_revision_json="$(gcloud run revisions describe "$previous_revision" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --format=json)"
+          previous_ready="$(jq -r '.status.conditions[]? | select(.type == "Ready") | .status' \
+            <<<"$previous_revision_json")"
+          if [ "$previous_ready" != "True" ]; then
+            echo "Previous Cloud Run revision ${previous_revision} is not ready; refusing rollout" >&2
+            exit 1
+          fi
+          # Monitoring is a rollout requirement. Verify access before creating
+          # a candidate so a missing Logs Viewer grant cannot strand a canary.
+          gcloud logging read \
+            "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE_NAME}\"" \
+            --project "$PROJECT_ID" \
+            --limit 1 \
+            --format=json >/dev/null
+          rollback_required=false
+          rollback() {
+            status=$?
+            if [ -n "${proxy_pid:-}" ]; then
+              kill "$proxy_pid" 2>/dev/null || true
+            fi
+            if [ "$rollback_required" = true ]; then
+              set +e
+              echo "Rollout failed; restoring 100% traffic to ${previous_revision}" >&2
+              gcloud run services update-traffic "$SERVICE_NAME" \
+                --region "$REGION" \
+                --project "$PROJECT_ID" \
+                --platform managed \
+                --to-revisions "${previous_revision}=100" \
+                --quiet
+            fi
+            exit "$status"
+          }
+          trap rollback ERR
+          healthcheck() {
+            url="${1%/}/v1/healthz"
+            curl --fail --silent --show-error \
+              --retry 5 \
+              --retry-delay 2 \
+              --retry-all-errors \
+              --max-time 10 \
+              "$url" >/dev/null
+          }
+          run_identity_backfill() {
+            for attempt in 1 2 3 4 5; do
+              if npm --prefix api run identity:backfill -- \
+                  --dry-run --require-converged --resolve-repositories \
+                && npm --prefix api run identity:backfill -- \
+                  --apply --require-converged --resolve-repositories; then
+                return 0
+              fi
+              if [ "$attempt" = 5 ]; then
+                return 1
+              fi
+              sleep $((attempt * 2))
+            done
+          }
+          monitor_candidate_errors() {
+            observation_start="$1"
+            observation_seconds="$2"
+            sleep "$observation_seconds"
+            log_file="$(mktemp)"
+            gcloud logging read \
+              "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE_NAME}\" AND resource.labels.revision_name=\"${candidate_revision}\" AND timestamp>=\"${observation_start}\"" \
+              --project "$PROJECT_ID" \
+              --limit 1000 \
+              --order=asc \
+              --format=json >"$log_file"
+            node - "$log_file" <<'NODE'
+          const fs = require("node:fs");
+          const entries = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          const url = (entry) => entry.httpRequest?.requestUrl ?? "";
+          const status = (entry) => Number(entry.httpRequest?.status ?? 0);
+          const serialized = (entry) => JSON.stringify(entry).toLowerCase();
+          // Context dashboard routes are authenticated V1 proxies to V2. Their
+          // explicit 502 means that dependency is unavailable; it is not
+          // evidence that this V1 candidate regressed. V2 availability remains
+          // independently visible in the UI and its own deployment monitors.
+          const downstreamContextFailure = (entry) => status(entry) === 502
+            && /\/v1\/dashboard\/tenants\/[^/]+\/context(?:\/|$)/.test(url(entry));
+          const serverError = (entry) => !downstreamContextFailure(entry) && (
+            status(entry) >= 500
+              || ["ERROR", "CRITICAL", "ALERT", "EMERGENCY"].includes(entry.severity)
+          );
+          const signals = {
+            oauth: /tenant_membership_sync_failed|dashboard_session_refresh_failed|oauth_.*failed/,
+            webhook: /github_event_persist_failed/,
+            manualReview: /issue_comment|pull_request_review_comment|manual-pr|manual-command/,
+            graph: /review_graph_.*failed|review_graph_completion_context_missing|graph_work_overview_unavailable/,
+          };
+          const groups = {
+            oauth: (entry) => /\/auth\/github|\/oauth\//.test(url(entry)) || signals.oauth.test(serialized(entry)),
+            webhook: (entry) => /\/webhooks\/github/.test(url(entry)) || signals.webhook.test(serialized(entry)),
+            manualReview: (entry) => /\/webhooks\/github/.test(url(entry))
+              && signals.manualReview.test(serialized(entry)),
+            graph: (entry) => /\/graph/.test(url(entry)) || /graph/.test(serialized(entry)),
+          };
+          const operationalFailure = {
+            oauth: (entry) => serverError(entry) || signals.oauth.test(serialized(entry)),
+            webhook: (entry) => serverError(entry) || signals.webhook.test(serialized(entry)),
+            manualReview: (entry) => serverError(entry),
+            graph: (entry) => serverError(entry) || signals.graph.test(serialized(entry)),
+          };
+          const failures = Object.fromEntries(
+            Object.entries(groups).map(([name, matches]) => [
+              name,
+              entries.filter((entry) => matches(entry) && operationalFailure[name](entry)).length,
+            ]),
+          );
+          const serverErrors = entries.filter(serverError);
+          const diagnostics = serverErrors.map((entry) => ({
+            method: entry.httpRequest?.requestMethod,
+            path: (() => {
+              try { return new URL(url(entry)).pathname; } catch { return ""; }
+            })(),
+            status: status(entry),
+            severity: entry.severity,
+          }));
+          process.stdout.write(`${JSON.stringify({
+            entries: entries.length,
+            allServerErrors: serverErrors.length,
+            failures,
+            diagnostics,
+          })}\n`);
+          // One uncategorized transient in a short, low-traffic sample is not
+          // enough evidence of a candidate regression. Named control-plane
+          // failures remain fail-fast, and two server errors still roll back.
+          if (serverErrors.length > 1 || Object.values(failures).some((count) => count > 0)) process.exit(1);
+          NODE
+            rm -f "$log_file"
+          }
+          env_vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT_ID}|DASHBOARD_AUTH_MODE=github|DASHBOARD_URL=${DASHBOARD_URL}|API_BASE_URL=${API_BASE_URL}|DASHBOARD_COOKIE_SAMESITE=None|DASHBOARD_COOKIE_SECURE=true|GITHUB_APP_ID=${GITHUB_APP_ID_VALUE}|GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID_VALUE}|GITHUB_OAUTH_SCOPES=${GITHUB_OAUTH_SCOPES_VALUE}|TRIGGER_API_URL=${TRIGGER_API_URL_VALUE}"
+          if [ -n "${DASHBOARD_ORIGIN:-}" ]; then
+            env_vars="${env_vars}|DASHBOARD_ORIGIN=${DASHBOARD_ORIGIN}"
+          fi
+          if [ -n "${GITHUB_APP_INSTALL_URL_VALUE:-}" ]; then
+            env_vars="${env_vars}|GITHUB_APP_INSTALL_URL=${GITHUB_APP_INSTALL_URL_VALUE}"
+          fi
+          if [ -n "${GITHUB_APP_SLUG_VALUE:-}" ]; then
+            env_vars="${env_vars}|GITHUB_APP_SLUG=${GITHUB_APP_SLUG_VALUE}"
+          fi
+          # Platform default model slugs — passed through only when the corresponding repo variable is set;
+          # otherwise the API falls back to its code defaults (model-settings.ts platformModelDefaults).
+          if [ -n "${RUNTIME_PLANNER_MODEL_VALUE:-}" ]; then
+            env_vars="${env_vars}|RUNTIME_PLANNER_MODEL=${RUNTIME_PLANNER_MODEL_VALUE}"
+          fi
+          if [ -n "${RUNTIME_AGENT_MODEL_VALUE:-}" ]; then
+            env_vars="${env_vars}|RUNTIME_AGENT_MODEL=${RUNTIME_AGENT_MODEL_VALUE}"
+          fi
+          if [ -n "${RUNTIME_MENTAL_TRACE_MODEL_VALUE:-}" ]; then
+            env_vars="${env_vars}|RUNTIME_MENTAL_TRACE_MODEL=${RUNTIME_MENTAL_TRACE_MODEL_VALUE}"
+          fi
+          if [ -n "${REVIEW_CODEX_MODEL_VALUE:-}" ]; then
+            env_vars="${env_vars}|REVIEW_CODEX_MODEL=${REVIEW_CODEX_MODEL_VALUE}"
+          fi
+          # SECRETS_ENCRYPTION_KEY is mandatory (validated above). Autumn billing
+          # wiring is opt-in: set the JINA_BILLING_ENFORCE variable (off|shadow|on)
+          # to enable it, which also mounts the Autumn Secret Manager secret. All
+          # secret names resolve to staging-scoped values on staging deploys.
+          secrets="GITHUB_WEBHOOK_SECRET=${WEBHOOK_SECRET_NAME}:latest,GITHUB_APP_PRIVATE_KEY=${APP_PRIVATE_KEY_SECRET_NAME}:latest,INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN_SECRET_NAME}:latest,TRIGGER_SECRET_KEY=${TRIGGER_SECRET_KEY_SECRET_NAME}:latest,GITHUB_OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET_NAME}:latest,DATABASE_URL=${DATABASE_URL_SECRET_NAME}:latest,SECRETS_ENCRYPTION_KEY=${ENCRYPTION_KEY_SECRET_NAME}:latest"
+          if [ -n "${BILLING_ENFORCE_VALUE:-}" ]; then
+            env_vars="${env_vars}|JINA_BILLING_ENFORCE=${BILLING_ENFORCE_VALUE}"
+            secrets="${secrets},AUTUMN_SECRET_KEY=${AUTUMN_SECRET_KEY_SECRET_NAME}:latest"
+          fi
+          if [ -n "${GRAPH_API_URL_VALUE:-}" ]; then
+            env_vars="${env_vars}|JINA_GRAPH_API_URL=${GRAPH_API_URL_VALUE}"
+            if [ -n "${GRAPH_REQUEST_TIMEOUT_MS_VALUE:-}" ]; then
+              env_vars="${env_vars}|JINA_GRAPH_REQUEST_TIMEOUT_MS=${GRAPH_REQUEST_TIMEOUT_MS_VALUE}"
+            fi
+            secrets="${secrets},JINA_GRAPH_API_TOKEN=${GRAPH_API_TOKEN_SECRET_NAME}:latest"
+            # Without this the client runs in static-token mode, which is the
+            # behaviour the delegated-token work exists to replace: a credential
+            # bound to one tenant and principal cannot read for any other.
+            if [ -n "${GRAPH_INTERNAL_TOKEN_SECRET_NAME:-}" ]; then
+              secrets="${secrets},JINA_GRAPH_INTERNAL_TOKEN=${GRAPH_INTERNAL_TOKEN_SECRET_NAME}:latest"
+              if [ -n "${GRAPH_DELEGATED_TOKEN_TTL_MINUTES_VALUE:-}" ]; then
+                env_vars="${env_vars}|JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=${GRAPH_DELEGATED_TOKEN_TTL_MINUTES_VALUE}"
+              fi
+            fi
+          fi
+          candidate_tag="candidate-${GITHUB_RUN_ID}"
+          gcloud run deploy "$SERVICE_NAME" \
+            --image "$IMAGE" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+            --allow-unauthenticated \
+            --add-cloudsql-instances "${PROJECT_ID}:${REGION}:${CLOUD_SQL_INSTANCE}" \
+            --set-env-vars "$env_vars" \
+            --set-secrets "$secrets" \
+            --no-traffic \
+            --tag "$candidate_tag" \
+            --quiet
+
+          candidate_service="$(gcloud run services describe "$SERVICE_NAME" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --format=json)"
+          candidate_revision="$(jq -r '.status.latestReadyRevisionName // empty' <<<"$candidate_service")"
+          candidate_url="$(jq -r --arg tag "$candidate_tag" \
+            '.status.traffic[]? | select(.tag == $tag) | .url' <<<"$candidate_service")"
+          if [ -z "$candidate_revision" ] || [ -z "$candidate_url" ] || [ "$candidate_revision" = "$previous_revision" ]; then
+            echo "Cloud Run did not expose a distinct ready candidate revision" >&2
+            exit 1
+          fi
+          rollback_required=true
+          healthcheck "$candidate_url"
+
+          # Catch writes made by the old revision while the image was built.
+          # Keep the proxy alive through promotion, then run one final catch-up
+          # after the candidate owns all traffic.
+          curl -fsSL -o /tmp/cloud-sql-proxy \
+            https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.1/cloud-sql-proxy.linux.amd64
+          chmod +x /tmp/cloud-sql-proxy
+          instance="${PROJECT_ID}:${REGION}:${CLOUD_SQL_INSTANCE}"
+          sudo mkdir -p /cloudsql && sudo chown "$(id -u)" /cloudsql
+          /tmp/cloud-sql-proxy --unix-socket /cloudsql "$instance" &
+          proxy_pid=$!
+          socket="/cloudsql/${instance}/.s.PGSQL.5432"
+          for _ in $(seq 1 30); do
+            [ -S "$socket" ] && break
+            sleep 1
+          done
+          if [ ! -S "$socket" ]; then
+            echo "Cloud SQL Auth Proxy socket did not appear for ${instance}" >&2
+            false
+          fi
+          DATABASE_URL="$(gcloud secrets versions access latest \
+            --secret="${DATABASE_URL_SECRET_NAME}" \
+            --project="${PROJECT_ID}")"
+          GITHUB_APP_ID="$GITHUB_APP_ID_VALUE"
+          GITHUB_APP_PRIVATE_KEY="$(gcloud secrets versions access latest \
+            --secret="${APP_PRIVATE_KEY_SECRET_NAME}" \
+            --project="${PROJECT_ID}")"
+          export DATABASE_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY
+          run_identity_backfill
+
+          observation_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gcloud run services update-traffic "$SERVICE_NAME" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --to-revisions "${candidate_revision}=5,${previous_revision}=95" \
+            --quiet
+          healthcheck "$candidate_url"
+          healthcheck "$API_BASE_URL"
+          monitor_candidate_errors "$observation_start" 60
+          run_identity_backfill
+
+          observation_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gcloud run services update-traffic "$SERVICE_NAME" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --to-revisions "${candidate_revision}=25,${previous_revision}=75" \
+            --quiet
+          healthcheck "$candidate_url"
+          healthcheck "$API_BASE_URL"
+          monitor_candidate_errors "$observation_start" 60
+          run_identity_backfill
+
+          observation_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gcloud run services update-traffic "$SERVICE_NAME" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --to-revisions "${candidate_revision}=100" \
+            --quiet
+          healthcheck "$API_BASE_URL"
+          monitor_candidate_errors "$observation_start" 60
+          run_identity_backfill
+          previous_revision_json="$(gcloud run revisions describe "$previous_revision" \
+            --region "$REGION" \
+            --project "$PROJECT_ID" \
+            --platform managed \
+            --format=json)"
+          previous_ready="$(jq -r '.status.conditions[]? | select(.type == "Ready") | .status' \
+            <<<"$previous_revision_json")"
+          if [ "$previous_ready" != "True" ]; then
+            echo "Previous Cloud Run revision ${previous_revision} is no longer ready" >&2
+            false
+          fi
+          echo "Rollback revision kept ready: ${previous_revision}"
+
+          rollback_required=false
+          kill "$proxy_pid" 2>/dev/null || true
+          trap - ERR

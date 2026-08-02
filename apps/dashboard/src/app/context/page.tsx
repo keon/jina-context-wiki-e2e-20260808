@@ -1,5 +1,1 @@
-import { ContextPage } from "../../components/context/context-page.tsx";
-
-export default function Page() {
-  return <ContextPage />;
-}
+export { default } from "@jina-v1-dashboard/app/context/page";

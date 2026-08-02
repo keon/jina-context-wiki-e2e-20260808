@@ -8,9 +8,13 @@
     "module": "esnext",
     "esModuleInterop": true,
     "isolatedModules": true,
+    "exactOptionalPropertyTypes": false,
     "resolveJsonModule": true,
     "jsx": "preserve",
     "allowImportingTsExtensions": true,
+    "paths": {
+      "@jina-v1-dashboard/app/*": ["./src/v1/*"]
+    },
     "types": ["node"],
     "plugins": [{ "name": "next" }]
   },

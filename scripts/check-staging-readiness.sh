@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+repository="${JINA_STAGING_REPOSITORY:-omxyz/jina}"
+github_environment="${JINA_STAGING_GITHUB_ENVIRONMENT:-Staging}"
+v1_project="${JINA_STAGING_V1_PROJECT:-jina-463721}"
+v2_project="${JINA_STAGING_V2_PROJECT:-jina-v2}"
+region="${JINA_STAGING_REGION:-us-east1}"
+failures=0
+
+pass() {
+  printf 'PASS  %s\n' "$1"
+}
+
+fail() {
+  printf 'FAIL  %s\n' "$1" >&2
+  failures=$((failures + 1))
+}
+
+require_command() {
+  if command -v "$1" >/dev/null 2>&1; then
+    pass "$1 is installed"
+  else
+    fail "$1 is required"
+  fi
+}
+
+for command_name in gh gcloud jq; do
+  require_command "$command_name"
+done
+
+if ((failures > 0)); then
+  exit 1
+fi
+
+environment_json="$(gh api "repos/${repository}/environments/${github_environment}" 2>/dev/null || true)"
+if [[ -z "${environment_json}" ]]; then
+  fail "GitHub environment ${repository}/${github_environment} exists"
+else
+  pass "GitHub environment ${repository}/${github_environment} exists"
+  branch_policy="$(jq -r '
+    .deployment_branch_policy.custom_branch_policies == true and
+    .deployment_branch_policy.protected_branches == false
+  ' <<<"${environment_json}")"
+  if [[ "${branch_policy}" == "true" ]]; then
+    policies="$(gh api "repos/${repository}/environments/${github_environment}/deployment-branch-policies?per_page=100" 2>/dev/null || true)"
+    if jq -e '.branch_policies[]? | select(.name == "staging" and .type == "branch")' \
+        <<<"${policies}" >/dev/null; then
+      pass "Staging deployments are restricted to the staging branch"
+    else
+      fail "Staging branch deployment policy is missing"
+    fi
+  else
+    fail "Staging does not use custom branch deployment policies"
+  fi
+fi
+
+variables_json="$(gh api "repos/${repository}/environments/${github_environment}/variables?per_page=100" 2>/dev/null || true)"
+secrets_json="$(gh api "repos/${repository}/environments/${github_environment}/secrets?per_page=100" 2>/dev/null || true)"
+
+required_variables=(
+  GCP_PROJECT_ID
+  GCP_REGION
+  CLOUD_RUN_SERVICE
+  CLOUD_SQL_INSTANCE
+  CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT
+  ARTIFACT_REGISTRY_REPOSITORY
+  JINA_API_BASE_URL
+  JINA_DASHBOARD_URL
+  JINA_GITHUB_APP_ID
+  JINA_GITHUB_APP_SLUG
+  JINA_GITHUB_OAUTH_CLIENT_ID
+  JINA_TRIGGER_PROJECT_REF
+  JINA_GRAPH_API_URL
+  WEBHOOK_SECRET_NAME
+  JINA_GITHUB_APP_PRIVATE_KEY_SECRET_NAME
+  INTERNAL_API_TOKEN_SECRET_NAME
+  TRIGGER_SECRET_KEY_SECRET_NAME
+  OAUTH_CLIENT_SECRET_NAME
+  DATABASE_URL_SECRET_NAME
+  ENCRYPTION_KEY_SECRET_NAME
+  GRAPH_API_TOKEN_SECRET_NAME
+  GRAPH_INTERNAL_TOKEN_SECRET_NAME
+)
+
+for variable_name in "${required_variables[@]}"; do
+  variable_value="$(jq -r --arg name "${variable_name}" \
+    '.variables[]? | select(.name == $name) | .value' <<<"${variables_json}")"
+  if [[ -z "${variable_value}" ]]; then
+    fail "GitHub Staging variable ${variable_name} is configured"
+  elif [[ "${variable_value}" == *usejina.com* || "${variable_name}" == *_SERVICE ||
+          "${variable_name}" == *_INSTANCE || "${variable_name}" == *_SECRET_NAME ||
+          "${variable_name}" == JINA_GITHUB_APP_SLUG ||
+          "${variable_name}" == CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT ]]; then
+    if [[ "${variable_value}" == *staging* ]]; then
+      pass "GitHub Staging variable ${variable_name} is staging-scoped"
+    else
+      fail "GitHub Staging variable ${variable_name} must contain staging"
+    fi
+  else
+    pass "GitHub Staging variable ${variable_name} is configured"
+  fi
+done
+
+required_environment_secrets=(
+  STAGING_JINA_TRIGGER_ACCESS_TOKEN
+  STAGING_JINA_GITHUB_APP_PRIVATE_KEY
+  STAGING_JINA_INTERNAL_API_TOKEN
+  STAGING_JINA_DAYTONA_API_KEY
+  STAGING_JINA_OPENROUTER_API_KEY
+)
+
+for secret_name in "${required_environment_secrets[@]}"; do
+  if jq -e --arg name "${secret_name}" '.secrets[]? | select(.name == $name)' \
+      <<<"${secrets_json}" >/dev/null; then
+    pass "GitHub Staging secret ${secret_name} exists"
+  else
+    fail "GitHub Staging secret ${secret_name} is missing"
+  fi
+done
+
+sql_state="$(gcloud sql instances describe jina-db-staging --project="${v1_project}" \
+  --format='value(state)' 2>/dev/null || true)"
+if [[ "${sql_state}" == "RUNNABLE" ]]; then
+  pass "Cloud SQL ${v1_project}/${region}/jina-db-staging is runnable"
+else
+  fail "Cloud SQL ${v1_project}/${region}/jina-db-staging is not runnable"
+fi
+
+if gcloud iam service-accounts describe \
+    "jina-api-staging-runtime@${v1_project}.iam.gserviceaccount.com" \
+    --project="${v1_project}" >/dev/null 2>&1; then
+  pass "V1 staging runtime service account exists"
+else
+  fail "V1 staging runtime service account is missing"
+fi
+
+v1_secrets=(
+  jina-staging-github-webhook-secret
+  jina-staging-github-app-private-key
+  jina-staging-internal-api-token
+  jina-staging-trigger-secret-key
+  jina-staging-github-oauth-client-secret
+  jina-staging-database-url
+  jina-staging-secrets-encryption-key
+  jina-staging-graph-api-token
+  jina-staging-graph-internal-token
+)
+for secret_name in "${v1_secrets[@]}"; do
+  if gcloud secrets versions describe latest --secret="${secret_name}" \
+      --project="${v1_project}" >/dev/null 2>&1; then
+    pass "V1 Secret Manager secret ${secret_name} has a latest version"
+  else
+    fail "V1 Secret Manager secret ${secret_name} is missing a latest version"
+  fi
+done
+
+v2_services=(jina-api-staging jina-context-worker-staging jina-task-worker-staging)
+for service_name in "${v2_services[@]}"; do
+  if gcloud run services describe "${service_name}" --project="${v2_project}" \
+      --region="${region}" >/dev/null 2>&1; then
+    pass "V2 Cloud Run service ${service_name} exists"
+  else
+    fail "V2 Cloud Run service ${service_name} is missing"
+  fi
+done
+
+if command -v vercel >/dev/null 2>&1 && vercel project inspect jina-staging-dashboard \
+    --scope omlabs >/dev/null 2>&1; then
+  pass "Vercel staging dashboard project exists"
+else
+  fail "Vercel staging dashboard project is missing"
+fi
+
+if ((failures > 0)); then
+  printf '%d staging readiness check(s) failed\n' "${failures}" >&2
+  exit 1
+fi
+
+printf 'Staging is ready for deployment\n'

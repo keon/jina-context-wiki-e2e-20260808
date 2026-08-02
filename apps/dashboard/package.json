@@ -5,11 +5,12 @@
   "scripts": {
     "build": "next build",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --max-warnings 0",
-    "test": "node --test src/lib/*.test.ts src/server/*.test.ts",
+    "lint": "eslint . --ignore-pattern src/v1 --max-warnings 0",
+    "test": "node scripts/check-v1-sync.mjs && node --test --import tsx src/lib/*.test.ts src/server/*.test.ts src/v1/**/*.test.ts",
     "dev": "next dev -p 3000"
   },
   "dependencies": {
+    "geist": "^1.7.2",
     "mermaid": "^11.16.0",
     "next": "^16.2.11",
     "react": "^19.2.8",
@@ -20,6 +21,7 @@
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3"
+    "@types/react-dom": "^19.2.3",
+    "tsx": "^4.22.4"
   }
 }

@@ -1,0 +1,232 @@
+/*
+ * Design tokens — the single source of truth for the dashboard.
+ * Components never hardcode colors, spacing, or radii; they reference these
+ * semantic tokens so the whole surface can be re-themed from one place.
+ *
+ * Visual language: Geist typeface (Vercel) + crisp neutral surfaces +
+ * Linear's indigo accent. Borders do the structural work; shadows stay
+ * whisper-light.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Neutral ramp — crisp, true-neutral grays (Vercel/Geist feel) */
+  --gray-0: #ffffff;
+  --gray-50: #fafafa;
+  --gray-100: #f5f5f5;
+  --gray-200: #ebebeb;
+  --gray-300: #e3e3e3;
+  --gray-400: #b4b4b4;
+  --gray-500: #8f8f8f;
+  --gray-600: #646464;
+  --gray-700: #454545;
+  --gray-800: #2e2e2e;
+  --gray-900: #171717;
+  --gray-950: #0a0a0a;
+
+  /* Accent (Linear indigo) + status hues */
+  --accent: #5e6ad2;
+  --accent-hover: #4f5ac4;
+  --accent-soft: #eef0fb;
+  --accent-contrast: #ffffff;
+
+  --green: #197f3a;
+  --amber: #946400;
+  --red: #d11e34;
+  --blue: #0068d6;
+
+  /* Semantic surfaces */
+  --bg: var(--gray-50);
+  --bg-canvas: #fcfcfc;
+  --surface: var(--gray-0);
+  --surface-2: var(--gray-50);
+  --surface-hover: var(--gray-100);
+  --sidebar: #fafafa;
+
+  /* Borders */
+  --border: #e6e6e6;
+  --border-strong: #d9d9d9;
+  --border-subtle: #efefef;
+
+  /* Text */
+  --text: var(--gray-900);
+  --text-muted: var(--gray-600);
+  --text-subtle: var(--gray-500);
+  --text-on-accent: var(--accent-contrast);
+
+  /* Status tokens: fg + soft bg + border for pills/badges/callouts */
+  --ok-fg: var(--green);
+  --ok-bg: #e9f6ed;
+  --ok-border: #c2e6cd;
+
+  --warn-fg: var(--amber);
+  --warn-bg: #fcf3e0;
+  --warn-border: #ecd9a8;
+
+  --bad-fg: var(--red);
+  --bad-bg: #fdecee;
+  --bad-border: #f5c2c8;
+
+  --info-fg: var(--blue);
+  --info-bg: #e9f1fd;
+  --info-border: #bcd7f7;
+
+  --neutral-fg: var(--gray-600);
+  --neutral-bg: var(--gray-100);
+  --neutral-border: var(--gray-200);
+
+  /* Tooltip (inverted in light mode, elevated in dark) */
+  --tooltip-bg: var(--gray-900);
+  --tooltip-fg: var(--gray-0);
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Typography — Geist is injected by next/font as --font-geist-sans/mono;
+     fall back to a refined system stack when it is unavailable. */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 19px;
+  --text-2xl: 24px;
+
+  /* Elevation — borders carry structure; shadows are barely-there */
+  --shadow-sm: 0 1px 2px rgba(17, 17, 17, 0.04);
+  --shadow: 0 2px 4px rgba(17, 17, 17, 0.04), 0 4px 16px rgba(17, 17, 17, 0.06);
+  --shadow-lg: 0 12px 32px rgba(17, 17, 17, 0.1);
+
+  /* Layout */
+  --sidebar-width: 224px;
+  --header-height: 52px;
+  --content-max: 1000px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #7c85e6;
+    --accent-hover: #8d95ec;
+    --accent-soft: #1a1c2e;
+
+    --green: #46c463;
+    --amber: #d8a02a;
+    --red: #f76d77;
+    --blue: #5ba3ff;
+
+    --bg: #000000;
+    --bg-canvas: #000000;
+    --surface: #0c0c0c;
+    --surface-2: #131313;
+    --surface-hover: #1a1a1a;
+    --sidebar: #050505;
+
+    --border: #232323;
+    --border-strong: #2e2e2e;
+    --border-subtle: #1a1a1a;
+
+    --text: #ededed;
+    --text-muted: #a0a0a0;
+    --text-subtle: #6e6e6e;
+
+    --ok-fg: #46c463;
+    --ok-bg: #0e2417;
+    --ok-border: #1f4a2e;
+
+    --warn-fg: #d8a02a;
+    --warn-bg: #261f0e;
+    --warn-border: #4d3f1c;
+
+    --bad-fg: #f76d77;
+    --bad-bg: #2a1316;
+    --bad-border: #532026;
+
+    --info-fg: #5ba3ff;
+    --info-bg: #0c1d32;
+    --info-border: #1d3c63;
+
+    --neutral-fg: #a0a0a0;
+    --neutral-bg: #1a1a1a;
+    --neutral-border: #262626;
+
+    --tooltip-bg: #2a2a2a;
+    --tooltip-fg: #ededed;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.6);
+    --shadow: 0 2px 4px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.7);
+  }
+}
+
+/* Reset + base */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-canvas);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}

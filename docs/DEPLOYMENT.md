@@ -1,5 +1,22 @@
 # Deployment
 
+This repository now also contains the original Jina review product under
+`platform/v1`. Its Cloud Run API and Trigger.dev workers deploy through
+`.github/workflows/deploy-v1-api.yml` and `.github/workflows/deploy-v1-trigger.yml`;
+the merged customer/operations dashboard deploys from `apps/dashboard`. The existing
+Cloud Build release described below remains the v2 Board/Context release.
+
+The two release trains share a commit but retain separate rollout controls until the
+staging consolidation is accepted. See [V1 consolidation and staging release
+plan](V1_CONSOLIDATION.md) for the complete feature gate, staging isolation requirements,
+and production promotion order.
+
+Run `scripts/check-staging-readiness.sh` before a staging release. Build immutable v2
+API/worker images with `cloudbuild.images.yaml` and a tag containing `staging`, then pass
+that tag to `scripts/deploy-staging-v2.sh`. The script is fail-closed on any resource,
+service account, secret, database, bucket, URL, or image tag that is not explicitly
+staging-scoped. Production continues to use the coordinated `cloudbuild.yaml` path below.
+
 Cloud Build validates, builds, and deploys one coordinated release to
 `jina-v2/us-east1`. API, worker, dashboard, and admin images are built from the same
 exact source revision, receive the same unique Cloud Build release identity, and are

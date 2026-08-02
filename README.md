@@ -1,10 +1,9 @@
 # Jina
 
-Jina is a tenant-scoped task board and repository context engine for software-work agents.
-Signed GitHub events create durable board workflows. Cloud Run workers perform pull-request
-review and build repository context at an exact commit. PostgreSQL stores board state,
-canonical evidence, immutable derived-context revisions, disposable indexes, ACLs, and
-retrieval telemetry.
+Jina is a multi-tenant code-review and repository-context platform. It combines the
+original Jina review product (GitHub App intake, Trigger.dev orchestration, Daytona review
+workers, billing, integrations, model routing, and customer dashboard) with the v2
+tenant-scoped Board and Context engine in one repository and one merged dashboard.
 
 ## Quick start
 
@@ -16,6 +15,9 @@ pnpm dev
 
 `pnpm dev` starts the API on port 4000 and dashboard on port 3000.
 `pnpm --filter @jina/admin dev` starts the tenant-wide administration app on port 3100.
+Start the review API on port 8080 in a second terminal with
+`npm --prefix platform/v1/api run dev`; the merged dashboard uses it for the product
+routes and the port-4000 API for the operational routes.
 Development uses in-memory stores unless PostgreSQL configuration is supplied. Production
 requires PostgreSQL, `INTERNAL_API_TOKEN`, `CONTEXT_API_TOKEN`, and either fixed or
 shared-database tenancy configuration.
@@ -55,8 +57,9 @@ deduplicate unchanged heads, and supersede stale ref work. Ingestion fetches the
 authoritative remote branch head and rejects the build if the ref has moved since the
 event, rather than indexing a historical commit as current.
 
-External review publication, automated fixes, repository dependency installation, and
-repository test execution are not shipped.
+The imported v1 review runtime publishes validated GitHub review feedback and runs
+execution-first investigations in isolated Daytona sandboxes. The v2 Board review task
+remains a separate operational workflow; automated fixes are not shipped.
 
 ## Repository context
 
@@ -131,6 +134,11 @@ apps/admin/           tenant-wide context health UI
 apps/dashboard/       operator board and context workspace
 apps/worker/          review and context-stage workers
 apps/workflows/       local review CLI and deterministic simulation
+platform/v1/api/      product API, GitHub auth/webhooks, billing, review state
+platform/v1/trigger/  Trigger.dev review orchestration and Daytona runtime
+platform/v1/migrations/ original Jina product schema
+platform/v1/evals/    review evaluation datasets and tools
+platform/v1/dashboard/ pinned upstream dashboard source and provenance
 packages/board/       generic tasks, dependencies, commands, reducer
 packages/context-engine/ evidence, derived context, releases, retrieval
 packages/db/          PostgreSQL stores, context adapters, migrations
@@ -143,6 +151,7 @@ packages/observability/ structured logging, traces, live metrics
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [V1 consolidation and feature inventory](docs/V1_CONSOLIDATION.md)
 - [Agentic context derivation](docs/AGENTIC_DERIVATION.md)
 - [Context quality benchmark](docs/CONTEXT_QUALITY_BENCHMARK.md)
 - [Daytona Board-stage acceptance](docs/CONTEXT_DAYTONA_BOARD_STAGE_ACCEPTANCE.md)

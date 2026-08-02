@@ -6,16 +6,18 @@ import { useEffect } from "react";
 import { useConnection } from "../lib/connection.ts";
 
 const PAGES = [
-  { href: "/", page: "board", label: "Board" },
+  { href: "/board", page: "board", label: "Board" },
   { href: "/history", page: "history", label: "History" },
   { href: "/tasks", page: "task-types", label: "Task types" },
-  { href: "/context", page: "context", label: "Context" }
+  { href: "/operations/context", page: "context-operations", label: "Context ops" },
+  { href: "/reviews", page: "reviews", label: "Product" }
 ] as const;
 
 function activePage(pathname: string): string {
   if (pathname === "/history") return "history";
   if (pathname === "/tasks") return "task-types";
-  if (pathname === "/context" || pathname.startsWith("/context/")) return "context";
+  if (pathname === "/operations/context" || pathname.startsWith("/operations/context/")) return "context-operations";
+  if (pathname === "/reviews" || pathname.startsWith("/reviews/")) return "reviews";
   return "board";
 }
 

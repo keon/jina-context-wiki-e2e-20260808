@@ -25,5 +25,9 @@ export function proxy(request: NextRequest): NextResponse {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"]
+  // Product routes authenticate with the v1 API's GitHub OAuth session and
+  // must remain reachable before that session exists. The operational views
+  // and their privileged same-origin API proxy retain the existing deployment
+  // boundary until v2 has a customer-session token exchange of its own.
+  matcher: ["/board/:path*", "/history/:path*", "/tasks/:path*", "/operations/:path*", "/api/:path*"]
 };
