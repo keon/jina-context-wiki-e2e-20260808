@@ -10,7 +10,6 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   blockedContextTaskIds,
   cloudRunCandidateIdentityTarget,
-  iapServiceAccountJwt,
   productionAcceptanceExitCode,
   requestProductionRemediation,
   runProductionContextAcceptance,
@@ -46,39 +45,6 @@ test("Cloud Run candidate requests keep tagged URLs distinct from stable token a
         "https://jina-context-worker-abc-uc.a.run.app"
       ),
     /must not contain a path/
-  );
-});
-
-test("IAP service-account JWTs use a bounded candidate URL wildcard", async () => {
-  const requests: { url: string; init: RequestInit | undefined }[] = [];
-  const fetchImpl: typeof fetch = async (input, init) => {
-    const url = String(input);
-    requests.push({ url, init });
-    if (url.endsWith("/email")) return new Response("jina-acceptance@example.iam.gserviceaccount.com");
-    if (url.endsWith("/token")) return json({ access_token: "metadata-access-token" });
-    return json({ signedJwt: "header.payload.signature" });
-  };
-
-  assert.equal(
-    await iapServiceAccountJwt("https://candidate---dashboard.example.run.app/*", fetchImpl, 1_700_000_000),
-    "header.payload.signature"
-  );
-  assert.equal(requests.length, 3);
-  assert.match(requests[2]!.url, /jina-acceptance%40example\.iam\.gserviceaccount\.com:signJwt$/);
-  const headers = new Headers(requests[2]!.init?.headers);
-  assert.equal(headers.get("authorization"), "Bearer metadata-access-token");
-  assert.deepEqual(JSON.parse(String(requests[2]!.init?.body)), {
-    payload: JSON.stringify({
-      iss: "jina-acceptance@example.iam.gserviceaccount.com",
-      sub: "jina-acceptance@example.iam.gserviceaccount.com",
-      aud: "https://candidate---dashboard.example.run.app/*",
-      iat: 1_700_000_000,
-      exp: 1_700_003_600
-    })
-  });
-  await assert.rejects(
-    iapServiceAccountJwt("https://candidate---dashboard.example.run.app", fetchImpl),
-    /ending in \/\*/
   );
 });
 
@@ -1032,7 +998,8 @@ test("production web acceptance exercises the dashboard proxy and admin server r
     requests.push(`${url.hostname}${url.pathname}`);
     const headers = new Headers(init?.headers);
     if (url.hostname === "dashboard.example.test") {
-      assert.equal(headers.get("authorization"), "Bearer dashboard-iap");
+      assert.equal(headers.get("x-serverless-authorization"), "Bearer dashboard-cloud-run");
+      assert.equal(headers.get("authorization"), "Basic dashboard");
       if (url.pathname === "/context") {
         return new Response(
           '<!doctype html><html><body><section id="context-page"><h1>Evidence-backed workspace</h1></section></body></html>',
@@ -1054,7 +1021,8 @@ test("production web acceptance exercises the dashboard proxy and admin server r
       {
         dashboardUrl: "https://dashboard.example.test",
         adminUrl: "https://admin.example.test",
-        dashboardAuthorization: "Bearer dashboard-iap",
+        dashboardInvocationAuthorization: "Bearer dashboard-cloud-run",
+        dashboardAuthorization: "Basic dashboard",
         adminAuthorization: "Basic acceptance"
       },
       { repository: "omlabs/repo", releaseId: "ig_current", timeoutMs: 1_000 }
