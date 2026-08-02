@@ -80,6 +80,7 @@ import {
   type PortableContextBoardAgentStageRunner
 } from "./board-agent-stage-adapter.js";
 import { parseBoardSourceChallengeStageResultWithRepair } from "./board-source-challenge.js";
+import { canonicalCausalGraphCommitTimestamp } from "./causal-graph-history.js";
 import {
   citationAuditDelta,
   retainAssignedCitationAuditResults,
@@ -775,7 +776,14 @@ async function runCausalGraphHistory(work: ClaimedWork<"run-causal-graph-history
         sha: commit.sha,
         parentShas: commit.parentShas,
         message: commit.message,
-        ...(commit.committedAt ? { committedAt: commit.committedAt } : {})
+        ...(commit.committedAt
+          ? {
+              committedAt: canonicalCausalGraphCommitTimestamp(
+                commit.committedAt,
+                "causal graph history commit committedAt"
+              )
+            }
+          : {})
       }))
     };
     const outputArtifact = await uploadContextBoardArtifact(work, {
@@ -4559,7 +4567,12 @@ function parseIssueHistoryPacket(content: Uint8Array, metadata: RepositoryContex
       message: requiredString(candidate.message, `issue history commit ${index} message`),
       ...(candidate.committedAt === undefined
         ? {}
-        : { committedAt: requiredIsoTimestamp(candidate.committedAt, `issue history commit ${index} committedAt`) })
+        : {
+            committedAt: canonicalCausalGraphCommitTimestamp(
+              candidate.committedAt,
+              `issue history commit ${index} committedAt`
+            )
+          })
     };
   });
   if (commits[0]?.sha !== commitSha) throw new Error("issue history does not begin at the leased commit");

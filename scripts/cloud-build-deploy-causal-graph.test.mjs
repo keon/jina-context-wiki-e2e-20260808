@@ -31,6 +31,8 @@ test("causal graph deployment uses isolated capacity and an exact topic check", 
   assert.match(deployment, /--min-instances=1/);
   assert.match(deployment, /--max-instances=1/);
   assert.match(deployment, /--concurrency=1/);
+  assert.match(deployment, /--format=json \| python3 -c/);
+  assert.match(deployment, /item\.get\("name"\) == "WORKER_TOPICS"/);
   assert.match(deployment, /if \[\[ "\$\{observed_topics\}" != "\$\{causal_topics\}" \]\]/);
 });
 

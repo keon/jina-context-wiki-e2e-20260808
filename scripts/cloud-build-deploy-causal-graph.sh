@@ -206,7 +206,17 @@ gcloud run services update-traffic "${worker_service}" \
   --clear-tags \
   --quiet
 
-observed_topics="$(gcloud run revisions describe "${worker_revision}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format='value(spec.containers[0].env[?name=WORKER_TOPICS].value)')"
+observed_topics="$(
+  gcloud run revisions describe "${worker_revision}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --format=json | python3 -c '
+import json, sys
+revision = json.load(sys.stdin)
+environment = revision["spec"]["containers"][0].get("env", [])
+print(next((item.get("value", "") for item in environment if item.get("name") == "WORKER_TOPICS"), ""))
+'
+)"
 if [[ "${observed_topics}" != "${causal_topics}" ]]; then
   echo "Causal graph worker topic isolation failed: ${observed_topics}" >&2
   exit 2
