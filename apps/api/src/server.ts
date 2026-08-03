@@ -1254,9 +1254,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               lastError = error;
             }
           }
-          throw (
-            lastError ?? new OperatorRetryRejectedError("unsafe_graph_state", "no token-interrupted task can resume")
-          );
+          if (lastError instanceof Error) throw lastError;
+          throw new OperatorRetryRejectedError("unsafe_graph_state", "no token-interrupted task can resume");
         });
       } catch (error) {
         if (quotaResumed && config.contextQuotaService) {
