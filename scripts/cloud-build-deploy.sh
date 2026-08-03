@@ -1058,10 +1058,23 @@ ROLLFORWARD
   if [[ "${status}" -ne 0 && "${worker_quiescence_started}" == "true" ]]; then
     local cleanup_ok="true"
     local worker_generation_invalidated="false"
+    local worker_generation_paused="false"
     local context_worker_returned_to_drain="false"
     local task_worker_returned_to_drain="false"
     run_failed_release_cleanup_step \
-      "pause worker generation" run_release_control "worker-pause" || cleanup_ok="false"
+      "stop new worker claims" run_release_control "worker-drain" || cleanup_ok="false"
+    if [[ "${cleanup_ok}" == "true" ]] && run_failed_release_cleanup_step \
+      "await Board drain and pause worker generation" run_release_control "board-await-drain"; then
+      worker_generation_paused="true"
+    else
+      cleanup_ok="false"
+    fi
+    if [[ "${cleanup_ok}" == "true" ]] && run_failed_release_cleanup_step \
+      "verify zero Board leases" run_release_control "board-verify"; then
+      board_leases_verified="true"
+    else
+      cleanup_ok="false"
+    fi
     # A failed candidate is the latest-created Cloud Run revision and cannot be
     # deleted directly. Route only to the paused drain here; the generation
     # credential is destroyed below, and the next drain revision makes the
@@ -1077,14 +1090,6 @@ ROLLFORWARD
       "route task worker to drain" route_paused_worker \
       "jina-task-worker" "${task_drain_revision}"; then
       task_worker_returned_to_drain="true"
-    else
-      cleanup_ok="false"
-    fi
-    run_failed_release_cleanup_step \
-      "drain Board leases" run_release_control "board-drain" || cleanup_ok="false"
-    if run_failed_release_cleanup_step \
-      "verify zero Board leases" run_release_control "board-verify"; then
-      board_leases_verified="true"
     else
       cleanup_ok="false"
     fi
@@ -1132,6 +1137,8 @@ Candidate release failed after background-worker quiescence began.
 Fail-closed cleanup completed: ${cleanup_ok}
 Worker claims disabled and unaccepted generation credential invalidated:
   ${worker_generation_invalidated}
+Worker generation paused after graceful Board drain:
+  ${worker_generation_paused}
 Context worker returned to its exact paused drain revision:
   ${context_worker_returned_to_drain}
   ${context_drain_revision}

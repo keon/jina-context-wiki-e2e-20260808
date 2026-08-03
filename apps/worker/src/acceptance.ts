@@ -130,6 +130,7 @@ export async function runProductionContextAcceptance(
   const pollIntervalMs = config.pollIntervalMs ?? 10_000;
   const fetchImpl = config.fetchImpl ?? fetch;
   const log = config.log ?? console.log;
+  const acceptanceRequestKey = config.requestKey ?? `acceptance-${Date.now()}`;
   const queryPrincipalId = nonAdminAcceptancePrincipal(config.principalId, config.adminPrincipalId);
   const queryIdentityHeaders = {
     "x-jina-principal-id": queryPrincipalId,
@@ -169,7 +170,7 @@ export async function runProductionContextAcceptance(
       ...(config.githubInstallationId ? { githubInstallationId: config.githubInstallationId } : {}),
       ...(config.derivationBudgetSeconds ? { derivationBudgetSeconds: config.derivationBudgetSeconds } : {}),
       ...(config.derivationTokenBudget ? { derivationTokenBudget: config.derivationTokenBudget } : {}),
-      requestKey: config.requestKey ?? `acceptance-${Date.now()}`
+      requestKey: acceptanceRequestKey
     })
   });
   const buildId = requiredString(record(created.build).id, "build.id");
@@ -202,6 +203,7 @@ export async function runProductionContextAcceptance(
               apiUrl,
               internalHeaders,
               buildId,
+              requestScope: acceptanceRequestKey,
               attempt: remediationAttempts + 1
             })
           : undefined;
@@ -1117,6 +1119,7 @@ export async function requestProductionRemediation(input: {
   readonly apiUrl: string;
   readonly internalHeaders: Record<string, string>;
   readonly buildId: string;
+  readonly requestScope: string;
   readonly attempt: number;
 }): Promise<ProductionRemediationMode | undefined> {
   const progress = await apiJson(
@@ -1146,7 +1149,9 @@ export async function requestProductionRemediation(input: {
     headers: input.internalHeaders,
     body: JSON.stringify({
       taskIds,
-      requestKey: `production-acceptance:${input.buildId}:${requestMode}:${input.attempt}:${taskIds[0]}`,
+      requestKey:
+        `production-acceptance:${input.requestScope}:${input.buildId}:` +
+        `${requestMode}:${input.attempt}:${taskIds[0]}`,
       reason:
         remediationMode === "page_remediation"
           ? "Production acceptance resumed one bounded citation-quality page from its retained checkpoint; preserve supported bindings and repair only current findings."

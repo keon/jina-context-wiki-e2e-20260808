@@ -131,6 +131,7 @@ test("blocked task detection is dynamic and scoped to repository and ref", () =>
 });
 
 test("production acceptance resumes one explicitly eligible checkpoint branch", async () => {
+  const requestScope = "deploy-release-a";
   const requests: { readonly path: string; readonly body?: Record<string, unknown> }[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -156,6 +157,7 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
       apiUrl: "https://api.example.test",
       internalHeaders: { authorization: "Bearer internal" },
       buildId: "task_build",
+      requestScope,
       attempt: 2
     }),
     "page_remediation"
@@ -165,7 +167,10 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
     ["/context/builds/task_build/progress", "/context/builds/task_build/retry"]
   );
   assert.deepEqual(requests[1]?.body?.taskIds, ["task_page_failed"]);
-  assert.equal(requests[1]?.body?.requestKey, "production-acceptance:task_build:page-remediation:2:task_page_failed");
+  assert.equal(
+    requests[1]?.body?.requestKey,
+    "production-acceptance:deploy-release-a:task_build:page-remediation:2:task_page_failed"
+  );
 
   const ineligibleFetch: typeof fetch = async () =>
     json({ retryEligibility: { eligible: false, mode: "ordinary", recoverableTaskIds: [] } });
@@ -175,6 +180,7 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
       apiUrl: "https://api.example.test",
       internalHeaders: { authorization: "Bearer internal" },
       buildId: "task_build",
+      requestScope,
       attempt: 1
     }),
     undefined
@@ -204,13 +210,14 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
       apiUrl: "https://api.example.test",
       internalHeaders: { authorization: "Bearer internal" },
       buildId: "task_build",
+      requestScope,
       attempt: 3
     }),
     "gate_remediation"
   );
   assert.equal(
     gateRequests[1]?.body?.requestKey,
-    "production-acceptance:task_build:gate-remediation:3:task_certification"
+    "production-acceptance:deploy-release-a:task_build:gate-remediation:3:task_certification"
   );
 
   const checkpointRequests: { readonly path: string; readonly body?: Record<string, unknown> }[] = [];
@@ -236,13 +243,14 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
       apiUrl: "https://api.example.test",
       internalHeaders: { authorization: "Bearer internal" },
       buildId: "task_build",
+      requestScope,
       attempt: 1
     }),
     "checkpoint_retry"
   );
   assert.equal(
     checkpointRequests[1]?.body?.requestKey,
-    "production-acceptance:task_build:checkpoint-retry:1:task_publication_plan"
+    "production-acceptance:deploy-release-a:task_build:checkpoint-retry:1:task_publication_plan"
   );
 });
 

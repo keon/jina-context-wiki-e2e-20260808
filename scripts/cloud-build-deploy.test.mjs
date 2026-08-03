@@ -275,21 +275,21 @@ test("owner migration and destructive reset are bound to the live coordinated de
 
 test("failed unaccepted candidates are paused, fenced, and independently verified before lease release", () => {
   const trap = deployment.indexOf("rollback_failed_release()");
-  const pause = deployment.indexOf('run_release_control "worker-pause"', trap);
-  const contextDrain = deployment.indexOf('route_paused_worker \\\n      "jina-context-worker"', pause);
+  const stopClaims = deployment.indexOf('run_release_control "worker-drain"', trap);
+  const awaitDrain = deployment.indexOf('run_release_control "board-await-drain"', stopClaims);
+  const verify = deployment.indexOf('run_release_control "board-verify"', awaitDrain);
+  const contextDrain = deployment.indexOf('route_paused_worker \\\n      "jina-context-worker"', verify);
   const taskDrain = deployment.indexOf('route_paused_worker \\\n      "jina-task-worker"', contextDrain);
-  const drain = deployment.indexOf('run_release_control "board-drain"', taskDrain);
-  const verify = deployment.indexOf('run_release_control "board-verify"', drain);
   const destroyGeneration = deployment.indexOf("destroy_worker_release_credential_verified", verify);
   const restoreApiWrites = deployment.indexOf('run_release_control "runtime-write-enable"', destroyGeneration);
   const stopRenewal = deployment.indexOf("stop_release_renewal", restoreApiWrites);
   const release = deployment.indexOf('run_release_control "release-release"', stopRenewal);
-  assert.ok(pause > trap);
-  assert.ok(contextDrain > pause);
+  assert.ok(stopClaims > trap);
+  assert.ok(awaitDrain > stopClaims);
+  assert.ok(verify > awaitDrain);
+  assert.ok(contextDrain > verify);
   assert.ok(taskDrain > contextDrain);
-  assert.ok(drain > taskDrain);
-  assert.ok(verify > drain);
-  assert.ok(destroyGeneration > verify);
+  assert.ok(destroyGeneration > taskDrain);
   assert.ok(restoreApiWrites > destroyGeneration);
   assert.ok(stopRenewal > restoreApiWrites);
   assert.ok(release > stopRenewal);
