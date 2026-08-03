@@ -552,7 +552,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
       CONTEXT_API_TIMEOUT_MS: "5000",
       CONTEXT_COMPLETION_TIMEOUT_MS: "5000",
       WORKER_HEARTBEAT_INTERVAL_MS: "1000",
-      CONTEXT_GAP_REPAIR_SECONDS: "30",
+      CONTEXT_GAP_PAGE_REPAIR_SECONDS: "30",
       CODEX_BINARY: fakeCodex,
       GIT_ALLOW_PROTOCOL: "file",
       GIT_CONFIG_COUNT: "1",
@@ -594,6 +594,11 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.deepEqual(uploadedDraft?.taskEvaluationArtifact, evaluationArtifact);
   assert.equal(completion?.outcome, "done", output);
   assert.equal(completionAttempts.length, 2);
+  const pageCandidateCheckpoint = [...phaseCheckpoints.values()].find(
+    (checkpoint) => checkpoint.phase === "gap-repair.candidate.architecture-md"
+  );
+  assert.equal(pageCandidateCheckpoint?.attempt, 1);
+  assert.match(output, /resumed gap-repair\.candidate\.architecture-md from a durable checkpoint/);
   assert.deepEqual(completionAttempts[0]?.modelUsage, {
     inputTokens: 420,
     cachedInputTokens: 210,

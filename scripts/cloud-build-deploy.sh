@@ -58,7 +58,8 @@ acceptance_timeout_ms="${JINA_ACCEPTANCE_TIMEOUT_MS:-10800000}"
 acceptance_job_timeout_seconds="${JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS:-11700}"
 deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-full}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
-context_worker_max_instances="${JINA_CONTEXT_WORKER_MAX_INSTANCES:-8}"
+context_worker_max_instances="${JINA_CONTEXT_WORKER_MAX_INSTANCES:-20}"
+task_worker_max_instances="${JINA_TASK_WORKER_MAX_INSTANCES:-5}"
 context_artifact_bucket="${JINA_CONTEXT_GCS_BUCKET:-${GCP_PROJECT_ID}-jina-context-artifacts}"
 worker_release_secret="${JINA_WORKER_RELEASE_SECRET:-jina-worker-release-credential}"
 context_daytona_snapshot="${JINA_CONTEXT_DAYTONA_SNAPSHOT:-}"
@@ -162,6 +163,7 @@ validate_positive_integer "JINA_CONTEXT_WORKER_HEARTBEAT_INTERVAL_MS" "${context
 validate_positive_integer "JINA_CONTEXT_WORKER_LEASE_MS" "${context_worker_lease_ms}"
 validate_positive_integer "JINA_WORKER_DRAIN_TIMEOUT_SECONDS" "${worker_drain_timeout_seconds}"
 validate_positive_integer "JINA_CONTEXT_WORKER_MAX_INSTANCES" "${context_worker_max_instances}"
+validate_positive_integer "JINA_TASK_WORKER_MAX_INSTANCES" "${task_worker_max_instances}"
 validate_positive_integer "JINA_CONTEXT_CODEX_CONTEXT_TOKENS" "${context_codex_context_tokens}"
 validate_positive_integer "JINA_CONTEXT_CODEX_COMPACT_TOKENS" "${context_codex_compact_tokens}"
 validate_positive_integer "JINA_ACCEPTANCE_TIMEOUT_MS" "${acceptance_timeout_ms}"
@@ -1338,7 +1340,7 @@ gcloud run deploy jina-task-worker \
   --timeout=300 \
   --scaling=auto \
   --min-instances=1 \
-  --max-instances=1 \
+  --max-instances="${task_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(task_worker_environment "${serving_api_url}" "paused")" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
@@ -1477,7 +1479,7 @@ gcloud run deploy jina-task-worker \
   --timeout=300 \
   --scaling=auto \
   --min-instances=1 \
-  --max-instances=1 \
+  --max-instances="${task_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(task_worker_environment "${api_url}" "enabled" "${task_candidate_revision}")" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
@@ -1695,6 +1697,7 @@ API PostgreSQL pool maximum (per pool): ${api_db_pool_max}
 API size: ${api_cpu} CPU / ${api_memory}
 Context worker memory: ${context_worker_memory}
 Context worker instances: 3-${context_worker_max_instances}
+Task worker instances: 1-${task_worker_max_instances}
 Candidate tag: ${release_tag}
 Pre-deployment backup: ${context_backup_id}
 Context reset mode: ${context_reset_mode}

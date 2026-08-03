@@ -139,7 +139,9 @@ export function ContextBrowser({
             />
           </label>
           <div className="context-query-actions">
-            <span>{search ? `${search.results.length} documents selected` : "Model-guided tree search"}</span>
+            <span>
+              {search ? `${search.results.length} documents selected` : "Deterministic tree and lexical search"}
+            </span>
             <button type="submit" className="primary-button" disabled={loading || !query.trim()}>
               {loading ? "Selecting context…" : "Search context"}
             </button>

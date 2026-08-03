@@ -1,11 +1,4 @@
-import {
-  applyCommand,
-  boardOperatorRetryEligibility,
-  isTerminalTaskStatus,
-  reduceBoard,
-  type BoardState,
-  type TaskId
-} from "@jina/board";
+import { applyCommand, isTerminalTaskStatus, reduceBoard, type BoardState, type TaskId } from "@jina/board";
 import {
   contextBoardTaskTypes,
   createContextBoardBuild,
@@ -18,6 +11,7 @@ import {
   type DerivationDetail
 } from "@jina/context-engine";
 import { isContextTrigger, type GitHubWebhookEvent } from "@jina/github";
+import { contextBuildHasOperatorRecovery } from "./context-board-recovery.js";
 
 interface ResolvedContextBuildScope {
   readonly tenantId: string;
@@ -171,11 +165,23 @@ export function admitContextBoardBuild(
   }
 
   if (scopeWithoutSequence.trigger !== "pull_request") {
-    const active = newestActiveRefBuild(state, scopeWithoutSequence);
+    const active =
+      newestActiveRefBuild(state, scopeWithoutSequence) ??
+      newestRecoverableRefBuild(state, scopeWithoutSequence, input.now);
     if (active) {
       const scope = withoutPriorRelease(scopeWithoutSequence);
+      // A follow-up is a coalescing slot, not an append-only queue. Only the
+      // newest revision for this repository ref can be useful after the active
+      // build finishes; retaining every intermediate push makes the durable
+      // Board snapshot grow without bound.
+      const coalescedState: BoardState = {
+        ...state,
+        events: state.events.filter(
+          (event) => event.taskId !== active.id || event.type !== "context.build_followup_requested"
+        )
+      };
       const deferred = applyCommand(
-        state,
+        coalescedState,
         {
           command: "CommentTask",
           taskId: active.id,
@@ -237,13 +243,7 @@ export function latestContextBoardFollowup(state: BoardState, buildTaskId: TaskI
   const newest = events[0];
   if (!newest) return undefined;
   const followup = parseFollowup(newest.payload?.followup);
-  if (
-    build.status === "failed" &&
-    boardOperatorRetryEligibility(contextBuildState(state, build.id), {
-      buildTaskId: build.id,
-      now: newest.at
-    }).eligible
-  ) {
+  if (build.status === "failed" && contextBuildHasOperatorRecovery(state, build, newest.at)) {
     return undefined;
   }
   const predecessorSequence = requiredRefSequence(build.metadata.refSequence);
@@ -258,19 +258,6 @@ export function latestContextBoardFollowup(state: BoardState, buildTaskId: TaskI
   );
   if (newerRefBuildExists) return undefined;
   return existingRequestBuilds(state, followup.tenantId, followup.requestKey).length ? undefined : followup;
-}
-
-function contextBuildState(state: BoardState, buildTaskId: TaskId): BoardState {
-  const tasks = state.tasks.filter((task) => task.id === buildTaskId || task.metadata.contextBuildId === buildTaskId);
-  const taskIds = new Set(tasks.map((task) => task.id));
-  return {
-    tasks,
-    dependencies: state.dependencies.filter(
-      (dependency) => taskIds.has(dependency.taskId) && taskIds.has(dependency.dependsOnTaskId)
-    ),
-    outbox: state.outbox.filter((message) => taskIds.has(message.taskId)),
-    events: state.events.filter((event) => event.taskId === undefined || taskIds.has(event.taskId))
-  };
 }
 
 const SUPERSEDED_REF_REASON = "superseded by a newer build for the same repository ref";
@@ -361,6 +348,8 @@ function resolveAdmissionScope(input: ContextBoardAdmissionInput): Omit<ContextB
   if (event.type === "push") {
     const headSha = event.headSha.toLowerCase();
     const ref = event.ref.slice("refs/heads/".length);
+    const defaultBranch = input.defaultBranch?.trim();
+    if (defaultBranch && ref !== defaultBranch) return undefined;
     return {
       ...common,
       ref,
@@ -401,6 +390,28 @@ function newestActiveRefBuild(state: BoardState, scope: Pick<ContextBuildScope, 
         task.metadata.ref === scope.ref &&
         hasInvestedBuildWork(state, task.id, task.status) &&
         !isTerminalTaskStatus(task.status)
+    )
+    .sort(
+      (left, right) =>
+        requiredRefSequence(right.metadata.refSequence) - requiredRefSequence(left.metadata.refSequence) ||
+        right.createdAt.localeCompare(left.createdAt)
+    )[0];
+}
+
+function newestRecoverableRefBuild(
+  state: BoardState,
+  scope: Pick<ContextBuildScope, "tenantId" | "repository" | "ref">,
+  now: string
+) {
+  return state.tasks
+    .filter(
+      (task) =>
+        task.type === contextBoardTaskTypes.build &&
+        task.status === "failed" &&
+        task.metadata.tenantId === scope.tenantId &&
+        task.metadata.repository === scope.repository &&
+        task.metadata.ref === scope.ref &&
+        contextBuildHasOperatorRecovery(state, task, now)
     )
     .sort(
       (left, right) =>

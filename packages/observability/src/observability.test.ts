@@ -135,6 +135,9 @@ test("stream sink installs error listeners so a closed log pipe cannot crash the
   // The listener must swallow the error, not rethrow it.
   stdout.errorListeners[0]!(new Error("EPIPE"));
   stderr.errorListeners[0]!(new Error("EPIPE"));
+  createStreamLogSink(stdout, stderr);
+  assert.equal(stdout.errorListeners.length, 1, "reused process streams must not accumulate listeners");
+  assert.equal(stderr.errorListeners.length, 1, "reused process streams must not accumulate listeners");
 });
 
 test("errorLogFields keeps the message and stack of real errors", () => {

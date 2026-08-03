@@ -29,6 +29,8 @@ export function BuildCheckpoints({
   const activeReservedTokens = currentProgress?.activeModelReservedTokens ?? build.activeModelReservedTokens;
   const remainingTokens = currentProgress?.remainingModelTokens ?? build.remainingModelTokens;
   const deadline = currentProgress?.derivationDeadlineAt ?? build.derivationDeadlineAt;
+  const consumedExecutionSeconds = currentProgress?.consumedExecutionSeconds ?? build.consumedExecutionSeconds;
+  const remainingExecutionSeconds = currentProgress?.remainingExecutionSeconds ?? build.remainingExecutionSeconds;
   const queuedFollowup = currentProgress?.queuedFollowup ?? build.queuedFollowup;
   return (
     <section className="context-operations-panel" aria-label="Context build checkpoints">
@@ -54,6 +56,9 @@ export function BuildCheckpoints({
           : ""}
         {activeReservedTokens ? ` · ${compactNumber(activeReservedTokens)} actively reserved` : ""}
         {remainingTokens !== undefined ? ` · ${compactNumber(remainingTokens)} remaining` : ""}
+        {consumedExecutionSeconds !== undefined && remainingExecutionSeconds !== undefined
+          ? ` · ${compactDuration(consumedExecutionSeconds)} execution used / ${compactDuration(remainingExecutionSeconds)} remaining`
+          : ""}
         {deadline ? ` · deadline ${formatTime(deadline)}` : ""}
       </p>
       {queuedFollowup ? (
@@ -132,4 +137,13 @@ export function BuildCheckpoints({
 
 function compactNumber(value: number): string {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function compactDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }

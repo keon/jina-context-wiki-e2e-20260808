@@ -133,10 +133,10 @@ export function configuredPortableContextBoardAgentStageRunner(
           : managedRunner!;
         return runPortableBoardAgentStage(defaultRunner, input, attempt, environment);
       }
-      const profileManagedRunner = () =>
-        configuredManagedProfileRunner(environment, protectedValues, profile.effort, runnerFactory);
+      const profileManagedRunner = (selectedModel?: string) =>
+        configuredManagedProfileRunner(environment, protectedValues, profile.effort, runnerFactory, selectedModel);
       if (profile.credential.kind === "managed") {
-        return runPortableBoardAgentStage(profileManagedRunner(), input, attempt, environment);
+        return runPortableBoardAgentStage(profileManagedRunner(profile.model), input, attempt, environment);
       }
       if (profile.credential.kind === "unavailable") {
         if (profile.fallback_policy === "managed") {
@@ -184,13 +184,21 @@ function configuredManagedProfileRunner(
   environment: WorkerEnvironment,
   protectedValues: readonly string[],
   effort: ContextExecutionProfile["effort"],
-  runnerFactory: BoardAgentRunnerFactory
+  runnerFactory: BoardAgentRunnerFactory,
+  selectedModel?: string
 ): BoardAgentStageRunner {
   const environmentVariable = environment.CONTEXT_DAYTONA_MODEL_SECRET_ENV?.trim() || "OPENAI_API_KEY";
   if (environmentVariable !== "OPENAI_API_KEY" && environmentVariable !== "OPENROUTER_API_KEY") {
     throw new Error("CONTEXT_DAYTONA_MODEL_SECRET_ENV must be OPENAI_API_KEY or OPENROUTER_API_KEY");
   }
-  const configuredModel = environment.CONTEXT_CODEX_MODEL?.trim() || "gpt-5.6-terra";
+  const configuredModel = selectedModel ?? environment.CONTEXT_CODEX_MODEL?.trim() ?? "gpt-5.6-terra";
+  if (
+    environmentVariable === "OPENAI_API_KEY" &&
+    configuredModel.includes("/") &&
+    !configuredModel.startsWith("openai/")
+  ) {
+    throw new Error("the managed OpenAI credential cannot serve the selected Context model");
+  }
   const managedModel =
     environmentVariable === "OPENROUTER_API_KEY"
       ? configuredModel.includes("/")
@@ -410,8 +418,18 @@ function boundedString(value: unknown, name: string, maximumBytes: number): stri
 
 function providerExecutionFailure(error: unknown): boolean {
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  return /quota|rate.?limit|credit|unauthorized|authentication|api.?key|token_expired|invalid_grant|model|openai|openrouter|codex|provider|upstream|service unavailable|bad gateway|gateway timeout/i.test(
-    message.slice(0, 12_000)
+  const diagnostic = message.slice(0, 12_000);
+  return (
+    /\b(?:quota|rate.?limit|too many requests|insufficient[_ -]quota|out of credits|credits? (?:balance|exhausted)|usage limit)\b/i.test(
+      diagnostic
+    ) ||
+    /\b(?:unauthorized|invalid[_ -](?:api[_ -]?)?key|authentication|invalid_grant|token_expired|refresh token|logged out)\b/i.test(
+      diagnostic
+    ) ||
+    /\b(?:unknown model|invalid model|model .{0,120}(?:not found|unavailable|unsupported))\b/i.test(diagnostic) ||
+    /\b(?:upstream|service unavailable|bad gateway|gateway timeout|connection (?:reset|refused)|network unreachable|dns lookup|http (?:502|503|504))\b/i.test(
+      diagnostic
+    )
   );
 }
 

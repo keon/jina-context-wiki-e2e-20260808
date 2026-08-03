@@ -69,6 +69,8 @@ export interface AdminContextBuild {
   readonly trigger?: string;
   readonly derivationBudgetSeconds?: number;
   readonly derivationDeadlineAt?: string;
+  readonly consumedExecutionSeconds?: number;
+  readonly remainingExecutionSeconds?: number;
   readonly derivationTokenBudget?: number;
   readonly consumedModelTokens?: number;
   readonly activeModelReservedTokens?: number;
@@ -96,6 +98,8 @@ export interface AdminContextBuildProgress {
   readonly status: AdminContextBuild["status"];
   readonly derivationBudgetSeconds?: number;
   readonly derivationDeadlineAt?: string;
+  readonly consumedExecutionSeconds?: number;
+  readonly remainingExecutionSeconds?: number;
   readonly derivationTokenBudget?: number;
   readonly consumedModelTokens?: number;
   readonly activeModelReservedTokens?: number;

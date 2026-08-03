@@ -1156,10 +1156,12 @@ async function checkpointedContextCandidate(
     readonly phase: string;
     readonly checkpointKey: string;
     readonly generate: () => Promise<unknown>;
+    readonly validate?: (candidate: unknown) => void | Promise<void>;
   }
 ): Promise<unknown> {
   const existing = await loadContextBoardPhaseCheckpoint(work, input.phase, input.checkpointKey);
   if (existing) {
+    await input.validate?.(existing.value);
     logger.info(`resumed ${input.phase} from a durable checkpoint`, {
       event: "context.phase_checkpoint.reused",
       taskId: work.task.id,
@@ -1172,6 +1174,7 @@ async function checkpointedContextCandidate(
     return existing.value;
   }
   const candidate = await input.generate();
+  await input.validate?.(candidate);
   const artifact = await uploadContextBoardArtifact(work, {
     kind: boardWorkArtifactKindForTopic(work.topic),
     name: `${input.phase}.json`,
@@ -1401,6 +1404,12 @@ async function runContextResearch(work: ClaimedWork<"run-context-research">): Pr
     const candidate = await checkpointedContextCandidate(work, {
       phase: "research-report.candidate",
       checkpointKey,
+      validate: (value) => {
+        if (!isRecord(value) || typeof value.report !== "string") {
+          throw new Error(`research worker ${assignment.id} checkpoint is invalid`);
+        }
+        if (value.report.length < 200) throw new Error(`research worker ${assignment.id} returned a shallow report`);
+      },
       generate: async () => {
         const output = await requireBoardAgentStageRunner().run({
           id: `research-${assignment.id}`,
@@ -1419,10 +1428,7 @@ async function runContextResearch(work: ClaimedWork<"run-context-research">): Pr
         return { report: output.text };
       }
     });
-    if (!isRecord(candidate) || typeof candidate.report !== "string") {
-      throw new Error(`research worker ${assignment.id} checkpoint is invalid`);
-    }
-    if (candidate.report.length < 200) throw new Error(`research worker ${assignment.id} returned a shallow report`);
+    if (!isRecord(candidate) || typeof candidate.report !== "string") throw new Error("validated report disappeared");
     const outputArtifact = await uploadContextBoardArtifact(work, {
       kind: "research-report",
       name: `${assignment.id}.json`,
@@ -1736,6 +1742,14 @@ async function runContextPageWrite(work: ClaimedWork<"run-context-page-write">):
     const candidate = await checkpointedContextCandidate(work, {
       phase: "context-page-write.candidate",
       checkpointKey,
+      validate: (value) => {
+        if (!isRecord(value) || typeof value.bodyMarkdown !== "string") {
+          throw new Error(`page writer checkpoint is invalid for ${page.path}`);
+        }
+        if (canonicalPublicPageMarkdown(value.bodyMarkdown).trim().length < 400) {
+          throw new Error(`page writer returned a shallow page for ${page.path}`);
+        }
+      },
       generate: async () => {
         await requireBoardAgentStageRunner().run({
           id: `write-${safeStageId(page.id)}`,
@@ -1760,11 +1774,9 @@ async function runContextPageWrite(work: ClaimedWork<"run-context-page-write">):
         };
       }
     });
-    if (!isRecord(candidate) || typeof candidate.bodyMarkdown !== "string") {
-      throw new Error(`page writer checkpoint is invalid for ${page.path}`);
-    }
+    if (!isRecord(candidate) || typeof candidate.bodyMarkdown !== "string")
+      throw new Error("validated page disappeared");
     const bodyMarkdown = canonicalPublicPageMarkdown(candidate.bodyMarkdown);
-    if (bodyMarkdown.trim().length < 400) throw new Error(`page writer returned a shallow page for ${page.path}`);
     const draftInventory = boardPageAuditInventory({
       documentPath: page.path,
       bodyMarkdown,
@@ -2138,6 +2150,11 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
     const candidate = await checkpointedContextCandidate(work, {
       phase: "context-page-repair.candidate",
       checkpointKey,
+      validate: (value) => {
+        if (!isRecord(value) || typeof value.bodyMarkdown !== "string") {
+          throw new Error(`page repair checkpoint is invalid for ${page.documentPath}`);
+        }
+      },
       generate: async () => {
         await requireBoardAgentStageRunner().run({
           id: `repair-${safeStageId(page.documentPath)}-${work.task.metadata.pass}`,
@@ -2153,7 +2170,7 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
       }
     });
     if (!isRecord(candidate) || typeof candidate.bodyMarkdown !== "string") {
-      throw new Error(`page repair checkpoint is invalid for ${page.documentPath}`);
+      throw new Error("validated page repair disappeared");
     }
     const bodyMarkdown = canonicalPublicPageMarkdown(candidate.bodyMarkdown);
     const priorPlanStructuralProblems = pagePlanStructuralProblems(
@@ -2644,31 +2661,73 @@ async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">):
         pass: work.task.metadata.pass,
         input
       });
-    const gapCandidate = await checkpointedContextCandidate(work, {
-      phase: "gap-repair.candidate",
-      checkpointKey: phaseCheckpointKey("gap-repair.candidate", priorSnapshotDigest),
-      generate: async () => {
-        await requireBoardAgentStageRunner().run({
-          id: `gap-repair-${work.task.metadata.pass}`,
-          prompt: contextGapRepairPrompt({
-            repository: snapshot.repository,
-            repositoryDirectory: checkout.directory,
-            outputDirectory,
-            publicationPlan: publication.plan,
-            sourceChallenge: challenge.result,
-            taskEvaluation: evaluation.result,
-            pass: work.task.metadata.pass
+    for (const { page } of currentPages) {
+      const plannedPage = publication.plan.pages.find((candidate) => candidate.path === page.documentPath);
+      if (!plannedPage) throw new Error(`context gap repair cannot find ${page.documentPath} in its plan`);
+      const phase = `gap-repair.candidate.${safeStageId(page.documentPath)}`;
+      const pageRoot = join(stageRoot, "candidate", safeStageId(page.documentPath));
+      const pageOutputDirectory = join(pageRoot, "context");
+      const pageTarget = join(pageOutputDirectory, page.documentPath);
+      await mkdir(dirname(pageTarget), { recursive: true });
+      await writeFile(pageTarget, page.bodyMarkdown, "utf8");
+      try {
+        const candidate = await checkpointedContextCandidate(work, {
+          phase,
+          checkpointKey: phaseCheckpointKey(phase, {
+            priorSnapshotDigest,
+            documentPath: page.documentPath,
+            bodyDigest: createHash("sha256").update(page.bodyMarkdown).digest("hex")
           }),
-          workingDirectory: stageRoot,
-          additionalDirectories: [checkout.directory],
-          writableDirectories: [outputDirectory],
-          outputFiles: currentPages.map(({ page }) => join(outputDirectory, page.documentPath)),
-          budgetSeconds: stageBudgetSeconds("CONTEXT_GAP_REPAIR_SECONDS", 1_200)
+          validate: (value) => {
+            if (
+              !isRecord(value) ||
+              value.version !== 1 ||
+              value.documentPath !== page.documentPath ||
+              typeof value.bodyMarkdown !== "string"
+            ) {
+              throw new Error(`context gap repair candidate checkpoint is invalid for ${page.documentPath}`);
+            }
+          },
+          generate: async () => {
+            await requireBoardAgentStageRunner().run({
+              id: `gap-repair-${work.task.metadata.pass}-${safeStageId(page.documentPath)}`,
+              prompt: contextGapRepairPrompt({
+                repository: snapshot.repository,
+                repositoryDirectory: checkout.directory,
+                outputDirectory: pageOutputDirectory,
+                contextDirectory: outputDirectory,
+                targetPage: plannedPage,
+                publicationPlan: publication.plan,
+                sourceChallenge: challenge.result,
+                taskEvaluation: evaluation.result,
+                pass: work.task.metadata.pass
+              }),
+              workingDirectory: pageRoot,
+              additionalDirectories: [checkout.directory, outputDirectory],
+              writableDirectories: [pageOutputDirectory],
+              outputFiles: [pageTarget],
+              budgetSeconds: stageBudgetSeconds("CONTEXT_GAP_PAGE_REPAIR_SECONDS", 600)
+            });
+            await assertOnlyContextPage(pageOutputDirectory, page.documentPath);
+            return {
+              version: 1,
+              documentPath: page.documentPath,
+              bodyMarkdown: canonicalPublicPageMarkdown(await readFile(pageTarget, "utf8"))
+            };
+          }
         });
-        return captureContextDirectory(outputDirectory);
+        if (!isRecord(candidate) || typeof candidate.bodyMarkdown !== "string") {
+          throw new Error("validated gap repair page disappeared");
+        }
+        await writeFile(
+          join(outputDirectory, page.documentPath),
+          canonicalPublicPageMarkdown(candidate.bodyMarkdown),
+          "utf8"
+        );
+      } finally {
+        await rm(pageRoot, { recursive: true, force: true });
       }
-    });
-    await restoreContextDirectory(outputDirectory, gapCandidate);
+    }
     let pages = await structurallyRepairContextDraft({
       work,
       snapshot,
@@ -2872,6 +2931,11 @@ async function structurallyRepairContextDraft(input: {
       const correction = await checkpointedContextCandidate(input.work, {
         phase,
         checkpointKey: input.phaseCheckpointKey(phase, { bodyDigest, problems }),
+        validate: (value) => {
+          if (!isRecord(value) || typeof value.bodyMarkdown !== "string") {
+            throw new Error(`context gap structural checkpoint is invalid for ${currentPage.documentPath}`);
+          }
+        },
         generate: async () => {
           await requireBoardAgentStageRunner().run({
             id: `gap-structural-${safeStageId(currentPage.documentPath)}-${structuralPass}`,
@@ -2894,7 +2958,7 @@ async function structurallyRepairContextDraft(input: {
         }
       });
       if (!isRecord(correction) || typeof correction.bodyMarkdown !== "string") {
-        throw new Error(`context gap structural checkpoint is invalid for ${currentPage.documentPath}`);
+        throw new Error("validated gap structural page disappeared");
       }
       bodyMarkdown = canonicalPublicPageMarkdown(correction.bodyMarkdown);
       await writeFile(targetPath, bodyMarkdown, "utf8");

@@ -217,8 +217,10 @@ test("coordinated releases hold one renewable durable lease and reject overlap b
   assert.match(productionPreflight, /grant select,insert,update on jina_runtime\.api_state/);
   assert.match(apiServer, /DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 \* 60 \* 1000/);
   assert.match(deployment, /JINA_CONTEXT_WORKER_LEASE_MS:-300000/);
-  assert.match(deployment, /JINA_CONTEXT_WORKER_MAX_INSTANCES:-8/);
+  assert.match(deployment, /JINA_CONTEXT_WORKER_MAX_INSTANCES:-20/);
   assert.equal(deployment.match(/--max-instances="\$\{context_worker_max_instances\}"/g)?.length, 2);
+  assert.match(deployment, /JINA_TASK_WORKER_MAX_INSTANCES:-5/);
+  assert.equal(deployment.match(/--max-instances="\$\{task_worker_max_instances\}"/g)?.length, 2);
   assert.match(deployment, /WORKER_HEARTBEAT_INTERVAL_MS=\$\{context_worker_heartbeat_interval_ms\}/);
   assert.match(deployment, /must cover at least three worker heartbeat intervals/);
 });
@@ -822,6 +824,8 @@ test("production storage, quota database, and PageIndex dependencies are explici
 
 test("API burst capacity preserves the aggregate PostgreSQL connection budget", () => {
   assert.match(cloudBuild, /_JINA_API_MAX_INSTANCES: "4"/);
+  assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MAX_INSTANCES: "20"/);
+  assert.match(cloudBuild, /_JINA_TASK_WORKER_MAX_INSTANCES: "5"/);
   assert.match(cloudBuild, /_JINA_API_DB_POOL_MAX: "3"/);
   assert.match(cloudBuild, /JINA_API_DB_POOL_MAX=\$\{_JINA_API_DB_POOL_MAX\}/);
   assert.match(deployment.match(/^api_env_vars=.*$/m)?.[0] ?? "", /JINA_DB_POOL_MAX=\$\{api_db_pool_max\}/);

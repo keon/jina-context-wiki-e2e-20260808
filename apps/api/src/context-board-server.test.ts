@@ -695,7 +695,23 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
     derivationTokenBudget: 12_000_000,
     now: "2020-01-01T00:00:00.000Z"
   });
-  const tokenLimited = createContextBoardBuild(expired.state, {
+  const expiredMessage = expired.state.outbox.find((message) => message.taskId === expired.snapshotTaskId);
+  assert.ok(expiredMessage);
+  const expiredLeaseId = "expired-execution-lease";
+  const expiredExecution = appendEvent(
+    expired.state,
+    "context.build_execution_lease_started",
+    new Date(Date.now() - 301_000).toISOString(),
+    expired.buildTaskId,
+    {
+      messageId: expiredMessage.id,
+      taskId: expired.snapshotTaskId,
+      attempt: expiredMessage.payload.attempt,
+      leaseId: expiredLeaseId,
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+    }
+  );
+  const tokenLimited = createContextBoardBuild(expiredExecution, {
     tenantId,
     repository,
     ref: "main",
@@ -856,6 +872,91 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
   }
 });
 
+test("Context execution budgets ignore queue time and merge parallel lease windows", async () => {
+  const tenantId = "tenant-active-time-budget";
+  const repository = "omxyz/active-time-budget";
+  const principalId = "user:active-time@example.com";
+  const internalApiToken = "context-active-time-test-token";
+  const createdAtMs = Date.now() - 600_000;
+  const createdAt = new Date(createdAtMs).toISOString();
+  const created = createContextBoardBuild(createEmptyBoardState(), {
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "budget:active-time",
+    derivationBudgetSeconds: 300,
+    derivationTokenBudget: 12_000_000,
+    now: createdAt
+  });
+  const base = Date.now();
+  const firstMessage = created.state.outbox.find((message) => message.taskId === created.snapshotTaskId);
+  assert.ok(firstMessage);
+  const executionEvent = (
+    state: BoardState,
+    phase: "started" | "ended",
+    messageId: string,
+    leaseId: string,
+    at: number,
+    expiresAt: number
+  ) =>
+    appendEvent(state, `context.build_execution_lease_${phase}`, new Date(at).toISOString(), created.buildTaskId, {
+      messageId,
+      taskId: created.snapshotTaskId,
+      attempt: 1,
+      leaseId,
+      leaseExpiresAt: new Date(expiresAt).toISOString()
+    });
+  let board = executionEvent(
+    created.state,
+    "started",
+    firstMessage.id,
+    "execution-one",
+    base - 240_000,
+    base - 210_000
+  );
+  board = executionEvent(board, "ended", firstMessage.id, "execution-one", base - 180_000, base - 150_000);
+  board = executionEvent(
+    board,
+    "started",
+    `${firstMessage.id}-parallel`,
+    "execution-two",
+    base - 190_000,
+    base - 90_000
+  );
+  board = executionEvent(board, "ended", `${firstMessage.id}-parallel`, "execution-two", base - 120_000, base - 90_000);
+  const stateStore = mutableStateStore({
+    intakeState: { board, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const contextStore = new MemoryContextEngineStore();
+  await contextStore.replaceRepositoryAccess(tenantId, principalId, [repository]);
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore,
+    contextStore,
+    internalApiToken
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const response = await fetch(`${baseUrl}/context/builds/${created.buildTaskId}/progress`, {
+      headers: devHeaders(tenantId, principalId)
+    });
+    assert.equal(response.status, 200);
+    const progress = (await response.json()) as Record<string, unknown>;
+    assert.equal(progress.status, "active");
+    assert.equal(progress.consumedExecutionSeconds, 120);
+    assert.equal(progress.remainingExecutionSeconds, 180);
+    const deadlineMs = Date.parse(String(progress.derivationDeadlineAt));
+    assert.ok(deadlineMs >= Date.now() + 179_000 && deadlineMs <= Date.now() + 181_000);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("tenant administrators can extend and resume only the task canceled by a build deadline", async () => {
   const tenantId = "tenant-deadline-recovery";
   const repository = "omxyz/deadline-recovery";
@@ -871,8 +972,23 @@ test("tenant administrators can extend and resume only the task canceled by a bu
     derivationTokenBudget: 12_000_000,
     now: new Date(Date.now() - 301_000).toISOString()
   });
+  const snapshotMessage = created.state.outbox.find((message) => message.taskId === created.snapshotTaskId);
+  assert.ok(snapshotMessage);
+  const board = appendEvent(
+    created.state,
+    "context.build_execution_lease_started",
+    new Date(Date.now() - 301_000).toISOString(),
+    created.buildTaskId,
+    {
+      messageId: snapshotMessage.id,
+      taskId: created.snapshotTaskId,
+      attempt: snapshotMessage.payload.attempt,
+      leaseId: "deadline-expired-lease",
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+    }
+  );
   const stateStore = mutableStateStore({
-    intakeState: { board: created.state, pullRequests: [] },
+    intakeState: { board, pullRequests: [] },
     devDeliverySequence: 0
   });
   const contextStore = new MemoryContextEngineStore();

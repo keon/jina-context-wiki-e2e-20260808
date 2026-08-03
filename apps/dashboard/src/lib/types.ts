@@ -209,6 +209,8 @@ export interface ContextBuildSummary {
   readonly trigger?: string;
   readonly derivationBudgetSeconds?: number;
   readonly derivationDeadlineAt?: string;
+  readonly consumedExecutionSeconds?: number;
+  readonly remainingExecutionSeconds?: number;
   readonly derivationTokenBudget?: number;
   readonly consumedModelTokens?: number;
   readonly activeModelReservedTokens?: number;
@@ -283,6 +285,8 @@ export interface ContextBuildProgressResponse {
   readonly status: ContextBuildSummary["status"];
   readonly derivationBudgetSeconds?: number;
   readonly derivationDeadlineAt?: string;
+  readonly consumedExecutionSeconds?: number;
+  readonly remainingExecutionSeconds?: number;
   readonly derivationTokenBudget?: number;
   readonly consumedModelTokens?: number;
   readonly activeModelReservedTokens?: number;

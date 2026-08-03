@@ -4,6 +4,7 @@ import {
   BOARD_TASK_HARD_MAX_ATTEMPTS,
   OperatorRetryRejectedError,
   applyCommand,
+  appendEvent,
   boardOperatorRetryEligibility,
   findOutboxMessage,
   findTask,
@@ -54,7 +55,6 @@ import {
   parseBoardPageIndexTreeArtifact,
   isContextBoardTaskType,
   isBoardWorkTaskType,
-  MAX_CONTEXT_OPERATOR_REMEDIATION_PASS,
   resumeContextGateExhaustion,
   resumeContextPageExhaustion,
   newId,
@@ -88,6 +88,12 @@ import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/re
 import { entityId, nowIso, type IsoTimestamp } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
+import {
+  contextBuildBoardState,
+  contextDeadlineInterruptedTaskIds,
+  contextGateRemediationTaskId,
+  contextPageRemediationTaskIds
+} from "./context-board-recovery.js";
 import { compactTerminalContextBuildHistory } from "./context-board-compaction.js";
 import {
   applyContextBoardTaskResult,
@@ -1368,17 +1374,31 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           const priorRetry = intakeState.board.events.some(
             (event) => event.type === "task.operator_retry_scheduled" && event.payload?.requestKey === requestKey
           );
+          const currentTarget = findTask(intakeState.board, boardTaskId);
+          if (!currentTarget) throw notFound("build task not found");
+          const deadlineRecovery =
+            extendDeadlineBySeconds !== undefined ||
+            contextDeadlineInterruptedTaskIds(intakeState.board, currentBuild).includes(currentTarget.id);
+          const priorDeadlineRecovery =
+            priorRetry &&
+            intakeState.board.events.some(
+              (event) =>
+                event.taskId === currentBuild.id &&
+                (event.type === "context.build_time_budget_extended" ||
+                  event.type === "context.build_active_time_budget_recovered") &&
+                event.payload?.requestKey === requestKey
+            );
           const prepared =
-            extendDeadlineBySeconds === undefined || priorRetry
+            !deadlineRecovery || priorRetry
               ? {
                   state: intakeState.board,
-                  extendedDeadlineAt:
-                    extendDeadlineBySeconds !== undefined ? contextBuildDeadlineAt(currentBuild) : undefined
+                  deadlineRecovered: deadlineRecovery || priorDeadlineRecovery
                 }
               : prepareContextDeadlineRetry(intakeState.board, {
                   buildTaskId,
                   taskId: boardTaskId,
-                  extensionSeconds: extendDeadlineBySeconds,
+                  extensionSeconds: extendDeadlineBySeconds ?? 0,
+                  requestKey,
                   actorId: principal.principalId,
                   reason,
                   now: nowIso()
@@ -1410,7 +1430,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             quotaResumed = quota.outcome === "admitted";
           }
           intakeState = { ...intakeState, board: result.state };
-          return { ...result, extendedDeadlineAt: prepared.extendedDeadlineAt };
+          const recoveredBuild = findTask(result.state, build.id);
+          return {
+            ...result,
+            ...(prepared.deadlineRecovered && recoveredBuild
+              ? { extendedDeadlineAt: contextBuildDeadlineAt(result.state, recoveredBuild, nowIso()) }
+              : {})
+          };
         });
       } catch (error) {
         if (quotaResumed && config.contextQuotaService) {
@@ -1708,15 +1734,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         tenantId: principal.tenantId,
         buildIds: [buildId]
       });
+      const progressAt = nowIso();
+      const executionBudget =
+        typeof build.metadata.derivationBudgetSeconds === "number"
+          ? contextBuildExecutionBudget(intakeState.board, build, progressAt)
+          : undefined;
       json(response, 200, {
         buildId,
         repository,
         ref: requiredString(build.metadata.ref, "build ref"),
         status: publicContextBuildStatus(build.status),
-        ...(typeof build.metadata.derivationBudgetSeconds === "number"
+        ...(executionBudget
           ? {
               derivationBudgetSeconds: build.metadata.derivationBudgetSeconds,
-              derivationDeadlineAt: contextBuildDeadlineAt(build)
+              derivationDeadlineAt: executionBudget.deadlineAt,
+              consumedExecutionSeconds: executionBudget.consumedSeconds,
+              remainingExecutionSeconds: executionBudget.remainingSeconds
             }
           : {}),
         ...(typeof build.metadata.derivationTokenBudget === "number"
@@ -2342,9 +2375,21 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!isContextTrigger(webhook.event)) {
       return { outcome: "ignored", createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
     }
+    // GitHub's delivery describes the repository at event time and is fresher
+    // than a provisioned identity row after a default-branch rename. Reject an
+    // ignorable feature push before quota reconciliation or release lookup so
+    // an unrelated dependency outage cannot turn it into a retrying webhook.
+    const defaultBranch = webhook.repositoryDefaultBranch?.trim() || identity?.defaultBranch?.trim();
+    if (
+      webhook.event.type === "push" &&
+      defaultBranch &&
+      webhook.event.ref.slice("refs/heads/".length) !== defaultBranch
+    ) {
+      return { outcome: "ignored", createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
+    }
     await reconcileContextQuotas(config.contextQuotaService, intakeState.board, tenantId);
     const repository = identity?.repository ?? webhook.repository;
-    const ref = contextTriggerRef(webhook.event, identity?.defaultBranch ?? webhook.repositoryDefaultBranch);
+    const ref = contextTriggerRef(webhook.event, defaultBranch);
     const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
       tenantId,
       repository,
@@ -2360,9 +2405,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       derivationTokenBudget: DEFAULT_DERIVATION_TOKEN_BUDGET,
       deliveryId,
       event: webhook.event,
-      ...((identity?.defaultBranch ?? webhook.repositoryDefaultBranch)
-        ? { defaultBranch: identity?.defaultBranch ?? webhook.repositoryDefaultBranch }
-        : {}),
+      ...(defaultBranch ? { defaultBranch } : {}),
       now: nowIso()
     });
     if (admission.outcome !== "created") {
@@ -2468,17 +2511,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function promotePendingContextBoardFollowups(tenantIds: readonly string[]): Promise<void> {
     const permitted = new Set(tenantIds);
-    const candidates = intakeState.board.tasks
-      .filter(
-        (task) =>
-          task.type === contextBoardTaskTypes.build &&
-          isTerminalTaskStatus(task.status) &&
-          permitted.has(String(task.metadata.tenantId)) &&
-          latestContextBoardFollowup(intakeState.board, task.id) !== undefined
-      )
-      .slice(0, 8);
+    const candidates = intakeState.board.tasks.filter(
+      (task) =>
+        task.type === contextBoardTaskTypes.build &&
+        isTerminalTaskStatus(task.status) &&
+        permitted.has(String(task.metadata.tenantId)) &&
+        latestContextBoardFollowup(intakeState.board, task.id) !== undefined
+    );
+    let promoted = 0;
     for (const build of candidates) {
-      await tryPromoteContextBoardFollowup(requiredString(build.metadata.tenantId, "tenantId"), build.id);
+      if (await tryPromoteContextBoardFollowup(requiredString(build.metadata.tenantId, "tenantId"), build.id)) {
+        promoted += 1;
+        if (promoted >= 8) break;
+      }
     }
   }
 
@@ -2983,7 +3028,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             }
             const leaseId = randomUUID();
             const writeFenceToken = randomUUID();
-            const initiallyLeased = leaseNextOutboxMessage(intakeState.board, {
+            let claimBoard = intakeState.board;
+            if (
+              candidateBuild?.type === contextBoardTaskTypes.build &&
+              candidate.status === "leased" &&
+              candidate.leaseExpiresAt &&
+              candidate.leaseExpiresAt <= now
+            ) {
+              claimBoard = recordContextBuildExecutionLease(
+                claimBoard,
+                candidateBuild,
+                candidate,
+                "ended",
+                candidate.leaseExpiresAt
+              );
+            }
+            const initiallyLeased = leaseNextOutboxMessage(claimBoard, {
               topics,
               messageIds: [messageId],
               leaseId,
@@ -3043,6 +3103,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 ? claimedTask.metadata.contextBuildId
                 : undefined;
             const claimedBuild = claimedBuildId ? findTask(board, entityId<"task">(claimedBuildId)) : undefined;
+            if (claimedBuild?.type === contextBoardTaskTypes.build) {
+              board = recordContextBuildExecutionLease(board, claimedBuild, leasedMessage, "started", now);
+            }
             intakeState = { ...intakeState, board };
             return {
               message: { ...leasedMessage, attempt: leasedMessage.payload.attempt },
@@ -3053,7 +3116,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                       ...claimedTask.metadata,
                       ...(claimedBuild?.type === contextBoardTaskTypes.build &&
                       typeof claimedBuild.metadata.derivationBudgetSeconds === "number"
-                        ? { derivationDeadlineAt: contextBuildDeadlineAt(claimedBuild) }
+                        ? { derivationDeadlineAt: contextBuildDeadlineAt(board, claimedBuild, now) }
                         : {}),
                       dependencyResults: contextBoardDependencyResults(board, claimedTask.id)
                     }
@@ -3133,7 +3196,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             return { accepted: false, terminatedBuildId: build.id };
           }
         }
-        const board = renewOutboxLease(
+        let board = renewOutboxLease(
           intakeState.board,
           id,
           leaseId,
@@ -3145,6 +3208,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           ).toISOString()
         );
         if (!board) return { accepted: false };
+        const renewedMessage = findOutboxMessage(board, id);
+        if (
+          build?.type === contextBoardTaskTypes.build &&
+          renewedMessage &&
+          !hasContextBuildExecutionLeaseStart(board, build.id, renewedMessage)
+        ) {
+          board = recordContextBuildExecutionLease(board, build, renewedMessage, "started", now);
+        }
         intakeState = { ...intakeState, board };
         return { accepted: true };
       },
@@ -3211,6 +3282,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         }
         let board = releaseOutboxLease(intakeState.board, messageId, leaseId, writeFenceToken, now);
         if (!board) return false;
+        const buildId = typeof task.metadata.contextBuildId === "string" ? task.metadata.contextBuildId : undefined;
+        const build = buildId ? findTask(board, entityId<"task">(buildId)) : undefined;
+        if (build?.type === contextBoardTaskTypes.build) {
+          board = recordContextBuildExecutionLease(board, build, message, "ended", now);
+        }
         board = applyCommand(
           board,
           {
@@ -3372,6 +3448,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             isBoardWorkTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
               ? task.metadata.contextBuildId
               : undefined;
+          if (!retried.replay && buildId) {
+            const executionBuild = findTask(retryState, entityId<"task">(buildId));
+            if (executionBuild?.type === contextBoardTaskTypes.build) {
+              retryState = recordContextBuildExecutionLease(retryState, executionBuild, message, "ended", now);
+            }
+          }
           let build = buildId ? findTask(retryState, entityId<"task">(buildId)) : undefined;
           if (!retried.replay && build?.type === contextBoardTaskTypes.build && !isTerminalTaskStatus(build.status)) {
             const limitFailure = contextBuildLimitFailure(retryState, build, now);
@@ -3521,6 +3603,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           },
           { actor: RUN_ACTOR, now }
         ).state;
+        const completionBuildId =
+          isBoardWorkTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+            ? task.metadata.contextBuildId
+            : undefined;
+        const executionBuild = completionBuildId ? findTask(board, entityId<"task">(completionBuildId)) : undefined;
+        if (executionBuild?.type === contextBoardTaskTypes.build) {
+          board = recordContextBuildExecutionLease(board, executionBuild, message, "ended", now);
+        }
         const transitioned = applyCommand(
           board,
           {
@@ -3660,7 +3750,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       isTerminalTaskStatus(build.status) ||
       build.metadata.tenantId !== tenantId ||
       build.metadata.repository !== task.metadata.repository ||
-      (typeof build.metadata.derivationBudgetSeconds === "number" && at >= contextBuildDeadlineAt(build))
+      (typeof build.metadata.derivationBudgetSeconds === "number" &&
+        contextBuildRemainingExecutionSeconds(board, build, at) <= 0)
     ) {
       throw staleLease();
     }
@@ -3941,6 +4032,11 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
   if (!task || !isContextBuildTaskType(task.type)) {
     throw new Error("admitted context board build disappeared");
   }
+  const at = nowIso();
+  const executionBudget =
+    typeof task.metadata.derivationBudgetSeconds === "number"
+      ? contextBuildExecutionBudget(state, task, at)
+      : undefined;
   return {
     id: task.id,
     buildKind: task.type === causalGraphBoardTaskTypes.build ? "causal_graph" : "documentation",
@@ -3951,10 +4047,12 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
     refSequence: requiredPositiveInteger(task.metadata.refSequence, "context build refSequence"),
     ...(typeof task.metadata.commitSha === "string" ? { commitSha: task.metadata.commitSha } : {}),
     ...(typeof task.metadata.trigger === "string" ? { trigger: task.metadata.trigger } : {}),
-    ...(typeof task.metadata.derivationBudgetSeconds === "number"
+    ...(executionBudget
       ? {
           derivationBudgetSeconds: task.metadata.derivationBudgetSeconds,
-          derivationDeadlineAt: contextBuildDeadlineAt(task)
+          derivationDeadlineAt: executionBudget.deadlineAt,
+          consumedExecutionSeconds: executionBudget.consumedSeconds,
+          remainingExecutionSeconds: executionBudget.remainingSeconds
         }
       : {}),
     ...(typeof task.metadata.derivationTokenBudget === "number"
@@ -4261,11 +4359,189 @@ function publicContextFailure(code: PublicContextFailureCode): {
 
 type ContextBuildLimitFailure = "build_time_budget_exceeded" | "build_token_budget_exceeded";
 
-function contextBuildDeadlineAt(build: BoardTask): string {
+function contextBuildDeadlineAt(state: BoardState, build: BoardTask, at: IsoTimestamp): string {
+  return contextBuildExecutionBudget(state, build, at).deadlineAt;
+}
+
+function contextBuildExecutionBudget(state: BoardState, build: BoardTask, at: IsoTimestamp) {
   const budgetSeconds = requiredPositiveInteger(build.metadata.derivationBudgetSeconds, "derivationBudgetSeconds");
-  const createdAt = Date.parse(build.createdAt);
-  if (!Number.isFinite(createdAt)) throw new Error("context build createdAt is invalid");
-  return new Date(createdAt + budgetSeconds * 1_000).toISOString();
+  const atMs = Date.parse(at);
+  if (!Number.isFinite(atMs)) throw new Error("context build deadline reference time is invalid");
+  const consumedMs = contextBuildConsumedExecutionMilliseconds(state, build.id, at);
+  const remainingMs = Math.max(0, budgetSeconds * 1_000 - consumedMs);
+  return {
+    consumedMilliseconds: consumedMs,
+    consumedSeconds: Math.floor(consumedMs / 1_000),
+    remainingMilliseconds: remainingMs,
+    remainingSeconds: Math.ceil(remainingMs / 1_000),
+    deadlineAt: new Date(atMs + remainingMs).toISOString()
+  };
+}
+
+function contextBuildRemainingExecutionSeconds(state: BoardState, build: BoardTask, at: IsoTimestamp): number {
+  return contextBuildExecutionBudget(state, build, at).remainingSeconds;
+}
+
+function recordContextBuildExecutionLease(
+  state: BoardState,
+  build: BoardTask,
+  message: BoardState["outbox"][number],
+  phase: "started" | "ended",
+  at: IsoTimestamp
+): BoardState {
+  if (build.type !== contextBoardTaskTypes.build || message.status === "pending") return state;
+  const leaseId = message.status === "leased" ? message.leaseId : message.dispatchedLeaseId;
+  if (!leaseId) throw new Error("context execution lease identity is missing");
+  return appendEvent(state, `context.build_execution_lease_${phase}`, at, build.id, {
+    messageId: message.id,
+    taskId: message.taskId,
+    attempt: message.payload.attempt,
+    leaseId,
+    ...(message.leaseExpiresAt ? { leaseExpiresAt: message.leaseExpiresAt } : {})
+  });
+}
+
+function hasContextBuildExecutionLeaseStart(
+  state: BoardState,
+  buildTaskId: TaskId,
+  message: BoardState["outbox"][number]
+): boolean {
+  if (message.status !== "leased" || !message.leaseId) return false;
+  return state.events.some(
+    (event) =>
+      event.taskId === buildTaskId &&
+      event.type === "context.build_execution_lease_started" &&
+      event.payload?.messageId === message.id &&
+      event.payload.leaseId === message.leaseId
+  );
+}
+
+/**
+ * Meters the union of durable worker lease windows. Queue delay, provider
+ * backoff, deployment drains, and operator downtime consume no execution
+ * budget, while parallel workers consume wall time only once. Every open
+ * window is capped by its last acknowledged expiry, so an API or worker crash
+ * cannot burn the rest of a build's budget indefinitely.
+ */
+function contextBuildConsumedExecutionMilliseconds(state: BoardState, buildTaskId: TaskId, at: IsoTimestamp): number {
+  const atMs = Date.parse(at);
+  if (!Number.isFinite(atMs)) throw new Error("context execution reference time is invalid");
+  const windows = new Map<
+    string,
+    {
+      readonly startedAt: number;
+      expiresAt: number;
+      endedAt?: number;
+      readonly messageId: string;
+      readonly leaseId: string;
+    }
+  >();
+  const latestLeaseByMessage = new Map<string, string>();
+  const buildTaskIds = new Set(
+    state.tasks
+      .filter((task) => task.id === buildTaskId || task.metadata.contextBuildId === buildTaskId)
+      .map((task) => task.id)
+  );
+  const orderedEvents = [...state.events].sort((left, right) => left.seq - right.seq);
+  for (const event of orderedEvents) {
+    if (
+      event.taskId === buildTaskId &&
+      (event.type === "context.build_execution_lease_started" || event.type === "context.build_execution_lease_ended")
+    ) {
+      const messageId = requiredString(event.payload?.messageId, "execution lease messageId");
+      const leaseId = requiredString(event.payload?.leaseId, "execution lease leaseId");
+      const key = `${messageId}\u0000${leaseId}`;
+      const eventAt = Date.parse(event.at);
+      if (!Number.isFinite(eventAt)) throw new Error("context execution lease timestamp is invalid");
+      if (event.type === "context.build_execution_lease_started") {
+        const expiresAt = Date.parse(requiredString(event.payload?.leaseExpiresAt, "execution lease expiresAt"));
+        if (!Number.isFinite(expiresAt) || expiresAt < eventAt) {
+          throw new Error("context execution lease expiry is invalid");
+        }
+        const existing = windows.get(key);
+        if (existing && (existing.startedAt !== eventAt || existing.expiresAt !== expiresAt)) {
+          throw new Error("context execution lease start receipt conflicts with prior state");
+        }
+        windows.set(key, existing ?? { startedAt: eventAt, expiresAt, messageId, leaseId });
+        latestLeaseByMessage.set(messageId, key);
+        continue;
+      }
+      const existing = windows.get(key);
+      if (existing) {
+        const endedLeaseExpiresAt = Date.parse(
+          requiredString(event.payload?.leaseExpiresAt, "execution lease expiresAt")
+        );
+        if (!Number.isFinite(endedLeaseExpiresAt) || endedLeaseExpiresAt < existing.startedAt) {
+          throw new Error("context execution lease expiry is invalid");
+        }
+        // Renewals intentionally do not append an event on every heartbeat.
+        // The terminal receipt carries the last durable lease expiry so the
+        // completed window does not collapse back to its initial claim TTL.
+        existing.expiresAt = Math.max(existing.expiresAt, endedLeaseExpiresAt);
+        existing.endedAt = existing.endedAt === undefined ? eventAt : Math.min(existing.endedAt, eventAt);
+      }
+      continue;
+    }
+
+    if (
+      event.taskId &&
+      buildTaskIds.has(event.taskId) &&
+      (event.type === "task.worker_lease_fenced" || event.type === "task.aggregate_terminal_outbox_retired") &&
+      typeof event.payload?.messageId === "string"
+    ) {
+      const key = latestLeaseByMessage.get(event.payload.messageId);
+      const window = key ? windows.get(key) : undefined;
+      const endedAt = Date.parse(event.at);
+      if (window && Number.isFinite(endedAt)) {
+        window.endedAt = window.endedAt === undefined ? endedAt : Math.min(window.endedAt, endedAt);
+      }
+    }
+  }
+
+  for (const window of windows.values()) {
+    const liveMessage = state.outbox.find(
+      (message) =>
+        message.id === window.messageId &&
+        message.status === "leased" &&
+        message.leaseId === window.leaseId &&
+        message.leaseExpiresAt
+    );
+    if (liveMessage?.leaseExpiresAt) {
+      const liveExpiry = Date.parse(liveMessage.leaseExpiresAt);
+      if (!Number.isFinite(liveExpiry) || liveExpiry < window.startedAt) {
+        throw new Error("context execution live lease expiry is invalid");
+      }
+      window.expiresAt = liveExpiry;
+    }
+  }
+
+  const intervals = [...windows.values()]
+    .map((window) => ({
+      start: window.startedAt,
+      end: Math.min(atMs, window.expiresAt, window.endedAt ?? Number.POSITIVE_INFINITY)
+    }))
+    .filter((interval) => interval.end > interval.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  let total = 0;
+  let currentStart: number | undefined;
+  let currentEnd: number | undefined;
+  for (const interval of intervals) {
+    if (currentStart === undefined || currentEnd === undefined) {
+      currentStart = interval.start;
+      currentEnd = interval.end;
+      continue;
+    }
+    if (interval.start <= currentEnd) {
+      currentEnd = Math.max(currentEnd, interval.end);
+      continue;
+    }
+    total += currentEnd - currentStart;
+    currentStart = interval.start;
+    currentEnd = interval.end;
+  }
+  if (currentStart !== undefined && currentEnd !== undefined) total += currentEnd - currentStart;
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error("context execution duration is invalid");
+  return total;
 }
 
 function contextBuildConsumedModelTokens(state: BoardState, buildId: string): number {
@@ -4323,7 +4599,10 @@ function contextBuildLimitFailure(
   build: BoardTask,
   at: IsoTimestamp
 ): ContextBuildLimitFailure | undefined {
-  if (typeof build.metadata.derivationBudgetSeconds === "number" && at >= contextBuildDeadlineAt(build)) {
+  if (
+    typeof build.metadata.derivationBudgetSeconds === "number" &&
+    contextBuildRemainingExecutionSeconds(state, build, at) <= 0
+  ) {
     return "build_time_budget_exceeded";
   }
   if (typeof build.metadata.derivationTokenBudget !== "number") return undefined;
@@ -4350,24 +4629,14 @@ function prepareContextDeadlineRetry(
     readonly buildTaskId: TaskId;
     readonly taskId: TaskId;
     readonly extensionSeconds: number;
+    readonly requestKey: string;
     readonly actorId: string;
     readonly reason: string;
     readonly now: IsoTimestamp;
   }
-): { readonly state: BoardState; readonly extendedDeadlineAt: string } {
+): { readonly state: BoardState; readonly deadlineRecovered: true } {
   const build = findTask(state, input.buildTaskId);
   const target = findTask(state, input.taskId);
-  const terminalReconciliation = [...state.events]
-    .reverse()
-    .find(
-      (event) =>
-        event.taskId === build?.id &&
-        event.type === "aggregate.terminal_reconciled" &&
-        Array.isArray(event.payload?.canceledTaskIds)
-    );
-  const deadlineFailure = [...state.events]
-    .reverse()
-    .find((event) => event.taskId === build?.id && event.type === "context.build_time_budget_exceeded.failed");
   if (
     !build ||
     build.type !== contextBoardTaskTypes.build ||
@@ -4376,8 +4645,7 @@ function prepareContextDeadlineRetry(
     target.kind !== "dispatchable" ||
     target.status !== "canceled" ||
     target.metadata.contextBuildId !== build.id ||
-    !deadlineFailure ||
-    !(terminalReconciliation?.payload?.canceledTaskIds as unknown[]).includes(target.id)
+    !contextDeadlineInterruptedTaskIds(state, build).includes(target.id)
   ) {
     throw new OperatorRetryRejectedError(
       "unsafe_graph_state",
@@ -4388,6 +4656,12 @@ function prepareContextDeadlineRetry(
     build.metadata.derivationBudgetSeconds,
     "derivationBudgetSeconds"
   );
+  if (input.extensionSeconds === 0 && contextBuildRemainingExecutionSeconds(state, build, input.now) <= 0) {
+    throw new OperatorRetryRejectedError(
+      "unsafe_graph_state",
+      "the build consumed its execution budget and requires an explicit deadline extension"
+    );
+  }
   const nextBudgetSeconds = previousBudgetSeconds + input.extensionSeconds;
   if (!Number.isSafeInteger(nextBudgetSeconds) || nextBudgetSeconds > MAX_CONTEXT_RECOVERED_DERIVATION_BUDGET_SECONDS) {
     throw new OperatorRetryRejectedError(
@@ -4400,10 +4674,15 @@ function prepareContextDeadlineRetry(
     {
       command: "CommentTask",
       taskId: build.id,
-      eventType: "context.build_time_budget_extended",
+      eventType:
+        input.extensionSeconds > 0
+          ? "context.build_time_budget_extended"
+          : "context.build_active_time_budget_recovered",
       payload: {
         previousDerivationBudgetSeconds: previousBudgetSeconds,
         nextDerivationBudgetSeconds: nextBudgetSeconds,
+        excludedOperatorPause: input.extensionSeconds === 0,
+        requestKey: input.requestKey,
         reason: input.reason
       }
     },
@@ -4415,7 +4694,7 @@ function prepareContextDeadlineRetry(
       command: "CommentTask",
       taskId: target.id,
       eventType: "context.deadline_interrupted_task_reclassified",
-      payload: { fromStatus: "canceled", toStatus: "failed", reason: input.reason }
+      payload: { fromStatus: "canceled", toStatus: "failed", requestKey: input.requestKey, reason: input.reason }
     },
     { actor: { type: "user", id: input.actorId }, now: input.now }
   ).state;
@@ -4434,7 +4713,7 @@ function prepareContextDeadlineRetry(
   };
   return {
     state: next,
-    extendedDeadlineAt: new Date(Date.parse(build.createdAt) + nextBudgetSeconds * 1_000).toISOString()
+    deadlineRecovered: true
   };
 }
 
@@ -4526,77 +4805,75 @@ function contextBoardOperatorRetryEligibility(state: BoardState, build: BoardTas
     };
   }
   const buildState = contextBuildBoardState(state, build.id);
+  const deadlineInterruptedTaskIds = contextDeadlineInterruptedTaskIds(buildState, build);
+  for (const taskId of deadlineInterruptedTaskIds) {
+    try {
+      const prepared = prepareContextDeadlineRetry(buildState, {
+        buildTaskId: build.id,
+        taskId,
+        extensionSeconds: 0,
+        requestKey: `\u0000eligibility:deadline:${build.id}`,
+        actorId: "system:eligibility",
+        reason: "dry-run",
+        now
+      });
+      retryFailedBoardTask(prepared.state, {
+        buildTaskId: build.id,
+        taskId,
+        requestKey: `\u0000eligibility:deadline:${build.id}`,
+        actorId: "system:eligibility",
+        reason: "dry-run",
+        now
+      });
+      return {
+        eligible: true,
+        recoverableTaskIds: [taskId],
+        blockers: [],
+        mode: "deadline_recovery" as const
+      };
+    } catch {
+      // Try the next canceled dispatchable task. Downstream tasks remain
+      // ineligible until their required dependency is resumed.
+    }
+  }
+  if (deadlineInterruptedTaskIds.length > 0) {
+    return {
+      eligible: false,
+      recoverableTaskIds: [deadlineInterruptedTaskIds[0]!],
+      blockers: [
+        {
+          code: "execution_budget_exhausted",
+          detail: "the interrupted build requires an explicit execution-budget extension"
+        }
+      ],
+      mode: "deadline_recovery" as const
+    };
+  }
   const dispatchable = boardOperatorRetryEligibility(buildState, {
     buildTaskId: build.id,
     now
   });
   if (dispatchable.eligible) return dispatchable;
 
-  const recoverablePages = buildState.tasks
-    .filter(
-      (task) =>
-        task.parentTaskId === build.id &&
-        task.type === contextBoardTaskTypes.page &&
-        task.status === "failed" &&
-        buildState.events.some((event) => event.taskId === task.id && event.type === "context.page_repair_exhausted")
-    )
-    .filter((page) => {
-      const latestPass = buildState.tasks
-        .filter(
-          (task) =>
-            task.parentTaskId === page.id &&
-            task.type === contextBoardTaskTypes.pageAudit &&
-            task.status === "done" &&
-            Number.isSafeInteger(task.metadata.pass)
-        )
-        .reduce((maximum, task) => Math.max(maximum, Number(task.metadata.pass)), 0);
-      return latestPass >= 1 && latestPass < MAX_CONTEXT_OPERATOR_REMEDIATION_PASS;
-    })
-    .sort((left, right) => left.id.localeCompare(right.id));
-  if (recoverablePages.length > 0) {
+  const recoverablePageIds = contextPageRemediationTaskIds(buildState, build);
+  if (recoverablePageIds.length > 0) {
     return {
       eligible: true,
-      recoverableTaskIds: recoverablePages.map((page) => page.id),
+      recoverableTaskIds: recoverablePageIds,
       blockers: [],
       mode: "page_remediation" as const
     };
   }
-  const certification = buildState.tasks.find(
-    (task) =>
-      task.parentTaskId === build.id && task.type === contextBoardTaskTypes.certification && task.status === "canceled"
-  );
-  const exhaustion = certification
-    ? [...buildState.events]
-        .reverse()
-        .find((event) => event.taskId === certification.id && event.type === "context.gate_repair_exhausted")
-    : undefined;
-  const exhaustedPass = exhaustion?.payload?.pass;
-  if (
-    certification &&
-    Number.isSafeInteger(exhaustedPass) &&
-    Number(exhaustedPass) < MAX_CONTEXT_OPERATOR_REMEDIATION_PASS
-  ) {
+  const certificationTaskId = contextGateRemediationTaskId(buildState, build);
+  if (certificationTaskId) {
     return {
       eligible: true,
-      recoverableTaskIds: [certification.id],
+      recoverableTaskIds: [certificationTaskId],
       blockers: [],
       mode: "gate_remediation" as const
     };
   }
   return dispatchable;
-}
-
-function contextBuildBoardState(state: BoardState, buildId: TaskId): BoardState {
-  const tasks = state.tasks.filter((task) => task.id === buildId || task.metadata.contextBuildId === buildId);
-  const taskIds = new Set(tasks.map((task) => task.id));
-  return {
-    tasks,
-    dependencies: state.dependencies.filter(
-      (dependency) => taskIds.has(dependency.taskId) && taskIds.has(dependency.dependsOnTaskId)
-    ),
-    outbox: state.outbox.filter((message) => taskIds.has(message.taskId)),
-    events: state.events.filter((event) => event.taskId === undefined || taskIds.has(event.taskId))
-  };
 }
 
 function assertContextOperatorRetrySafety(state: BoardState, build: BoardTask, target: BoardTask): void {

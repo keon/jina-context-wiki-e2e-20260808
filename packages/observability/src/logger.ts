@@ -49,6 +49,8 @@ interface LogStreamState {
   dropped: number;
 }
 
+const errorHandledStreams = new WeakSet<object>();
+
 /**
  * Builds the default line sink over a pair of process streams. Logging must
  * never take the service down or grow its memory without bound, so the sink
@@ -67,7 +69,11 @@ export function createStreamLogSink(
     [stdout, { blocked: false, dropped: 0 }],
     [stderr, { blocked: false, dropped: 0 }]
   ]);
-  for (const stream of states.keys()) stream.on("error", () => undefined);
+  for (const stream of states.keys()) {
+    if (errorHandledStreams.has(stream)) continue;
+    stream.on("error", () => undefined);
+    errorHandledStreams.add(stream);
+  }
   const writeLine = (stream: LogStream, state: LogStreamState, line: string): void => {
     if (state.blocked) {
       state.dropped += 1;

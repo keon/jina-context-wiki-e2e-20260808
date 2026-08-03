@@ -15,9 +15,12 @@ import {
   failContextGateRepairExhausted,
   failContextPageRepairExhausted,
   MemoryContextEngineStore,
+  resumeContextGateExhaustion,
+  resumeContextPageExhaustion,
   type ContextArtifactRef
 } from "@jina/context-engine";
 import { appendEvent, createEmptyBoardState, reduceBoard, type BoardState, type TaskId } from "@jina/board";
+import { contextGateRemediationTaskId, contextPageRemediationTaskIds } from "./context-board-recovery.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
@@ -440,6 +443,59 @@ test("a production-bound read credential can watch builds but cannot remediate t
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
+});
+
+test("historical page exhaustion cannot authorize recovery after the page was reopened", () => {
+  const fixture = exhaustedPagesFixture({
+    tenantId: "tenant-stale-page-remediation",
+    repository: "omxyz/jina",
+    suffix: "stale",
+    pageCount: 1
+  });
+  const page = fixture.pages[0]!;
+  const stale = appendEvent(fixture.state, "task.operator_reopened", "2026-07-30T12:01:00.000Z", page.pageTaskId, {
+    requestKey: "operator:prior-page-reopen"
+  });
+  const build = stale.tasks.find((task) => task.id === fixture.buildId)!;
+
+  assert.deepEqual(contextPageRemediationTaskIds(stale, build), []);
+  assert.throws(
+    () =>
+      resumeContextPageExhaustion(stale, {
+        buildTaskId: fixture.buildId,
+        pageTaskId: page.pageTaskId,
+        requestKey: "operator:stale-page-recovery",
+        actorId: "svc:operator",
+        reason: "must not reuse historical exhaustion",
+        now: "2026-07-30T12:02:00.000Z"
+      }),
+    /latest failure was not bounded repair exhaustion/
+  );
+});
+
+test("historical gate exhaustion cannot authorize recovery after certification was reopened", () => {
+  const fixture = exhaustedGateFixture({ tenantId: "tenant-stale-gate-remediation", repository: "omxyz/jina" });
+  const stale = appendEvent(
+    fixture.state,
+    "task.operator_reopened",
+    "2026-07-30T12:01:00.000Z",
+    fixture.certificationTaskId,
+    { requestKey: "operator:prior-gate-reopen" }
+  );
+  const build = stale.tasks.find((task) => task.id === fixture.buildId)!;
+
+  assert.equal(contextGateRemediationTaskId(stale, build), undefined);
+  assert.throws(
+    () =>
+      resumeContextGateExhaustion(stale, {
+        buildTaskId: fixture.buildId,
+        requestKey: "operator:stale-gate-recovery",
+        actorId: "svc:operator",
+        reason: "must not reuse historical exhaustion",
+        now: "2026-07-30T12:02:00.000Z"
+      }),
+    /latest failure was not bounded gate exhaustion/
+  );
 });
 
 function exhaustedGateFixture(input: { readonly tenantId: string; readonly repository: string }): {

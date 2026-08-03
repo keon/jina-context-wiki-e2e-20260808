@@ -111,11 +111,13 @@ export class PostgresBoardContextPublicationRepository
       const boardSnapshot = runtime.rows[0]?.snapshot;
       if (!boardSnapshot) throw staleLease("durable board state is unavailable");
       await activateTenantPublicationRole(client, input.scope.tenantId);
-      const latestAdmittedSequence = assertLiveBoardPublicationLease(
-        boardSnapshot,
-        input,
-        await databaseClockMillis(client)
-      );
+      // The API-state advisory lock freezes lease ownership for this whole
+      // transaction. Evaluate expiry once when the lock is acquired; using a
+      // later wall clock would make a valid owner lose its fence merely because
+      // bulk projection inserts took longer than the lease TTL while renewal
+      // was blocked by this same lock.
+      const leaseFenceClockMillis = await databaseClockMillis(client);
+      const latestAdmittedSequence = assertLiveBoardPublicationLease(boardSnapshot, input, leaseFenceClockMillis);
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `${REF_LOCK_PREFIX}${input.scope.tenantId}:${input.scope.repository}:${input.scope.ref}`
       ]);
@@ -135,7 +137,7 @@ export class PostgresBoardContextPublicationRepository
             "publication idempotency key is already bound to different certified inputs"
           );
         }
-        assertLiveBoardPublicationLease(boardSnapshot, input, await databaseClockMillis(client));
+        assertLiveBoardPublicationLease(boardSnapshot, input, leaseFenceClockMillis);
         await client.query("commit");
         return recordFromRow(existing);
       }
@@ -215,7 +217,7 @@ export class PostgresBoardContextPublicationRepository
       );
       // The API-state row and advisory lock are still held: repeat the exact
       // lease check immediately before commit, as required by the fence.
-      assertLiveBoardPublicationLease(boardSnapshot, input, await databaseClockMillis(client));
+      assertLiveBoardPublicationLease(boardSnapshot, input, leaseFenceClockMillis);
       await client.query("commit");
       return {
         releaseId: input.releaseId,

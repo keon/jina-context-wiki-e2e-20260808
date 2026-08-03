@@ -82,7 +82,11 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
       const boardSnapshot = runtime.rows[0]?.snapshot;
       if (!boardSnapshot) staleLease("durable board state is unavailable");
       await activateTenantPublicationRole(client, input.scope.tenantId);
-      const liveLease = assertLivePageIndexLease(boardSnapshot, input, await databaseClockMillis(client));
+      // This transaction holds the same API-state lock used by lease renewal
+      // and reclamation. Fence expiry at lock acquisition so a large hierarchy
+      // insert cannot invalidate its own otherwise-exclusive owner.
+      const leaseFenceClockMillis = await databaseClockMillis(client);
+      const liveLease = assertLivePageIndexLease(boardSnapshot, input, leaseFenceClockMillis);
       const artifact = validateBoardPageIndexAttachCommit(input);
 
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
@@ -158,7 +162,7 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
           );
         }
         const record = recordFromPublication(publication);
-        const replayLease = assertLivePageIndexLease(boardSnapshot, input, await databaseClockMillis(client));
+        const replayLease = assertLivePageIndexLease(boardSnapshot, input, leaseFenceClockMillis);
         assertAttachmentFrontier(replayLease.latestAdmittedSequence, input.scope.refSequence, currentSequence);
         if (
           currentRow?.release_id !== input.releaseId ||
@@ -313,7 +317,7 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
         input.scope.repository,
         input.attachedAt
       );
-      const commitLease = assertLivePageIndexLease(boardSnapshot, input, await databaseClockMillis(client));
+      const commitLease = assertLivePageIndexLease(boardSnapshot, input, leaseFenceClockMillis);
       assertAttachmentFrontier(commitLease.latestAdmittedSequence, input.scope.refSequence, currentSequence);
       await client.query("commit");
       return recordFromPublication(attachedRow);

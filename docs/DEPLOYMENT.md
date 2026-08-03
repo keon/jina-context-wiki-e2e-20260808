@@ -313,6 +313,8 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | `_JINA_API_CPU`                                          |                                              `1` | API CPU allocation.                                                                                        |
 | `_JINA_API_MEMORY`                                       |                                            `1Gi` | API memory allocation.                                                                                     |
 | `_JINA_CONTEXT_WORKER_MEMORY`                            |                                            `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.                                  |
+| `_JINA_CONTEXT_WORKER_MAX_INSTANCES`                     |                                             `20` | Maximum concurrency-one Context workers for parallel derivation stages.                                    |
+| `_JINA_TASK_WORKER_MAX_INSTANCES`                        |                                              `5` | Maximum concurrency-one generic task workers.                                                              |
 | `_JINA_CONTEXT_DAYTONA_SNAPSHOT`                         |      `jina-context-board-codex-0-145-0-bwrap-v2` | Audited immutable Codex-and-bubblewrap-ready snapshot.                                                     |
 | `_JINA_CONTEXT_DAYTONA_IMAGE`                            |                                            empty | Required unless the snapshot substitution is set; pin an image by digest.                                  |
 | `_JINA_CONTEXT_DAYTONA_MODEL_SECRET`                     |                            `jina-context-openai` | Daytona organization Secret containing the model credential.                                               |
@@ -737,10 +739,12 @@ one immutable artifact metadata row and one current-pointer row regardless of gr
 cardinality. The API image built by this lane is used only by its migration and
 activation jobs; it is never deployed as the shared API service.
 
-Context derivation runs with three warm workers and may scale to eight workers by
+Context derivation runs with three warm workers and may scale to twenty workers by
 default so independent research, page-writing, and audit stages can execute in
-parallel. Override the ceiling with `JINA_CONTEXT_WORKER_MAX_INSTANCES`; model
-provider limits and tenant token budgets remain the authoritative cost bounds.
+parallel. The generic task service keeps one warm worker and may scale to five.
+Override the ceilings with `JINA_CONTEXT_WORKER_MAX_INSTANCES` and
+`JINA_TASK_WORKER_MAX_INSTANCES`; model provider limits and tenant token budgets
+remain the authoritative cost bounds.
 
 The production transition program is copied into both immutable backend images at
 `/opt/jina/context-production-preflight.mjs` and executed from that path by the Daytona,

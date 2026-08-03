@@ -1385,6 +1385,12 @@ export function resumeContextPageExhaustion(
     .reverse()
     .find((event) => event.taskId === page.id && event.type === "context.page_repair_exhausted");
   if (!exhaustion) throw new Error("context page did not fail from bounded repair exhaustion");
+  const latestPageReopen = [...state.events]
+    .reverse()
+    .find((event) => event.taskId === page.id && event.type === "task.operator_reopened");
+  if (latestPageReopen && exhaustion.seq <= latestPageReopen.seq) {
+    throw new Error("context page's latest failure was not bounded repair exhaustion");
+  }
 
   const priorAudit = state.tasks
     .filter(
@@ -1517,6 +1523,12 @@ export function resumeContextGateExhaustion(
     .reverse()
     .find((event) => event.taskId === certification.id && event.type === "context.gate_repair_exhausted");
   if (!exhaustion) throw new Error("context certification did not fail from bounded gate exhaustion");
+  const latestCertificationReopen = [...state.events]
+    .reverse()
+    .find((event) => event.taskId === certification.id && event.type === "task.operator_reopened");
+  if (latestCertificationReopen && exhaustion.seq <= latestCertificationReopen.seq) {
+    throw new Error("context certification's latest failure was not bounded gate exhaustion");
+  }
   const priorPass = requiredInteger(exhaustion.payload?.pass, "context gate exhaustion pass");
   const pass = priorPass + 1;
   if (pass > MAX_CONTEXT_OPERATOR_REMEDIATION_PASS) {

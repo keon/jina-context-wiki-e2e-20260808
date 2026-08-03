@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEmptyBoardState, findTask, leaseNextOutboxMessage, transitionBoardTask } from "@jina/board";
+import {
+  applyCommand,
+  createEmptyBoardState,
+  findTask,
+  leaseNextOutboxMessage,
+  transitionBoardTask
+} from "@jina/board";
 import { contextBoardTaskTypes } from "@jina/context-engine";
 import { parseGitHubWebhook, type GitHubWebhookEvent } from "@jina/github";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
@@ -68,11 +74,11 @@ test("push, PR opened/synchronize, and issue opened map to provider-idempotent b
   const prHeadTwo = "3".repeat(40);
   let state = createEmptyBoardState();
 
-  const push = github(state, pushEvent(pushSha, "refs/heads/release"), "delivery-push");
+  const push = github(state, pushEvent(pushSha), "delivery-push");
   assert.equal(push.outcome, "created");
   assertScope(push, {
-    ref: "release",
-    requestKey: `github:push:omxyz/jina:release:${pushSha}:delivery-push`,
+    ref: "main",
+    requestKey: `github:push:omxyz/jina:main:${pushSha}:delivery-push`,
     commitSha: pushSha,
     refSequence: 1,
     trigger: "push"
@@ -236,11 +242,11 @@ test("same-delivery replay is idempotent while a distinct-delivery rollback adva
   assert.equal(next.scope.refSequence, 4);
 
   const otherRef = github(next.state, pushEvent("8".repeat(40), "refs/heads/other"), "delivery-other-ref");
-  assert.equal(otherRef.outcome, "created");
-  assert.equal(otherRef.scope.refSequence, 1);
+  assert.equal(otherRef.outcome, "ignored");
+  assert.strictEqual(otherRef.state, next.state);
 });
 
-test("GitHub idempotency keys are independently scoped by repository and push ref", () => {
+test("GitHub idempotency keys are independently scoped by repository and authoritative default ref", () => {
   const headSha = "b".repeat(40);
   const repositoryA = "Example/Repo-A";
   const repositoryB = "example/repo-b";
@@ -252,7 +258,13 @@ test("GitHub idempotency keys are independently scoped by repository and push re
   assert.equal(mainA.scope.refSequence, 1);
   state = mainA.state;
 
-  const releaseA = github(state, pushEvent(headSha, "refs/heads/release"), "delivery-release-a", "main", repositoryA);
+  const releaseA = github(
+    state,
+    pushEvent(headSha, "refs/heads/release"),
+    "delivery-release-a",
+    "release",
+    repositoryA
+  );
   assert.equal(releaseA.outcome, "created");
   assert.equal(releaseA.scope.requestKey, `github:push:example/repo-a:release:${headSha}:delivery-release-a`);
   assert.equal(releaseA.scope.refSequence, 1);
@@ -469,6 +481,12 @@ test("an invested default-ref build retains only the newest follow-up until it b
 
   const newest = github(second.state, pushEvent("9".repeat(40)), "delivery-push-newest");
   assert.equal(newest.outcome, "deferred");
+  assert.equal(
+    newest.state.events.filter(
+      (event) => event.taskId === first.build.buildTaskId && event.type === "context.build_followup_requested"
+    ).length,
+    1
+  );
   const completed = transitionBoardTask(newest.state, first.build.buildTaskId, "done", LATER);
   const followup = latestContextBoardFollowup(completed, first.build.buildTaskId);
   assert.equal(followup?.commitSha, "9".repeat(40));
@@ -478,6 +496,29 @@ test("an invested default-ref build retains only the newest follow-up until it b
   assert.equal(promoted.scope.refSequence, 2);
   assert.equal(promoted.scope.commitSha, "9".repeat(40));
   assert.equal(latestContextBoardFollowup(promoted.state, first.build.buildTaskId), undefined);
+});
+
+test("a burst of deferred pushes occupies one bounded follow-up slot", () => {
+  const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-burst-first");
+  assert.equal(first.outcome, "created");
+  let state = transitionBoardTask(first.state, first.build.buildTaskId, "in_progress", NOW);
+  const baselineBytes = Buffer.byteLength(JSON.stringify(state));
+  let expectedCommit = "";
+  for (let index = 1; index <= 1_000; index += 1) {
+    expectedCommit = index.toString(16).padStart(40, "0");
+    const deferred = github(state, pushEvent(expectedCommit), `delivery-burst-${index}`);
+    assert.equal(deferred.outcome, "deferred");
+    state = deferred.state;
+  }
+  assert.equal(
+    state.events.filter(
+      (event) => event.taskId === first.build.buildTaskId && event.type === "context.build_followup_requested"
+    ).length,
+    1
+  );
+  assert.ok(Buffer.byteLength(JSON.stringify(state)) < baselineBytes + 4_096);
+  const completed = transitionBoardTask(state, first.build.buildTaskId, "done", LATER);
+  assert.equal(latestContextBoardFollowup(completed, first.build.buildTaskId)?.commitSha, expectedCommit);
 });
 
 test("a recoverable failed build retains its follow-up until checkpoint repair publishes", () => {
@@ -502,6 +543,47 @@ test("a recoverable failed build retains its follow-up until checkpoint repair p
     1,
     "the newest follow-up must remain durably attached to the recoverable predecessor"
   );
+
+  const newer = github(failed, pushEvent("9".repeat(40)), "delivery-repair-newer-followup");
+  assert.equal(newer.outcome, "deferred");
+  assert.equal(newer.activeBuildTaskId, first.build.buildTaskId);
+  assert.equal(newer.state.tasks.filter((task) => task.type === contextBoardTaskTypes.build).length, 1);
+  assert.equal(
+    newer.state.events.filter((event) => event.type === "context.build_followup_requested").length,
+    1,
+    "a commit arriving after recoverable failure must replace the retained follow-up instead of growing a queue"
+  );
+  assert.equal(
+    newer.state.events.find((event) => event.type === "context.build_followup_requested")?.payload?.commitSha,
+    "9".repeat(40)
+  );
+});
+
+test("a deadline-interrupted build retains its follow-up even though its resume anchor is canceled", () => {
+  const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-deadline-first");
+  assert.equal(first.outcome, "created");
+  const active = transitionBoardTask(first.state, first.build.buildTaskId, "in_progress", NOW);
+  const deferred = github(active, pushEvent("8".repeat(40)), "delivery-deadline-followup");
+  assert.equal(deferred.outcome, "deferred");
+  const diagnosed = applyCommand(
+    deferred.state,
+    {
+      command: "CommentTask",
+      taskId: first.build.buildTaskId,
+      eventType: "context.build_time_budget_exceeded.failed",
+      payload: { failureCategory: "build_time_budget_exceeded", reason: "execution budget reached" }
+    },
+    { actor: { type: "system", id: "test" }, now: LATER }
+  );
+  assert.equal(diagnosed.accepted, true);
+  const failed = transitionBoardTask(diagnosed.state, first.build.buildTaskId, "failed", LATER);
+  assert.equal(findTask(failed, first.build.snapshotTaskId)?.status, "canceled");
+  assert.equal(latestContextBoardFollowup(failed, first.build.buildTaskId), undefined);
+
+  const newer = github(failed, pushEvent("9".repeat(40)), "delivery-deadline-newer");
+  assert.equal(newer.outcome, "deferred");
+  assert.equal(newer.activeBuildTaskId, first.build.buildTaskId);
+  assert.equal(newer.state.tasks.filter((task) => task.type === contextBoardTaskTypes.build).length, 1);
 });
 
 test("a stale deferred follow-up cannot supersede a newer ref sequence", () => {
@@ -551,6 +633,18 @@ test("comments, reviews, labels, edits, closes, deleted pushes, and tag pushes c
   }
   assert.equal(state.tasks.length, 0);
   assert.equal(state.outbox.length, 0);
+});
+
+test("a push to a non-default branch does not duplicate its pull-request Context build", () => {
+  const ignored = github(
+    createEmptyBoardState(),
+    pushEvent("7".repeat(40), "refs/heads/codex/context-fix"),
+    "delivery-feature-push",
+    "main"
+  );
+  assert.equal(ignored.outcome, "ignored");
+  assert.equal(ignored.state.tasks.length, 0);
+  assert.equal(ignored.state.outbox.length, 0);
 });
 
 test("issue admission requires the authoritative default branch", () => {

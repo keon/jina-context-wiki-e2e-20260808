@@ -592,6 +592,48 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
     assert.equal(fallback?.effort, "high");
 
     executions.length = 0;
+    const semanticFailureRunner = configuredPortableContextBoardAgentStageRunner({
+      environment,
+      attemptContext,
+      runnerFactory: (_environment, _protectedValues, execution) => {
+        executions.push(execution);
+        return {
+          mode: "daytona",
+          async run() {
+            if (execution?.credential.kind === "api-key") {
+              throw new Error("board agent model output is not valid JSON");
+            }
+            return envelope(Buffer.from('{"text":"must not fall back"}'), []);
+          }
+        };
+      },
+      profileFetch: async () =>
+        profileResponse({
+          provider: "byok",
+          model: "anthropic/claude-sonnet-4",
+          effort: "high",
+          fallback_policy: "managed",
+          credential: { kind: "openrouter", value: "sk-or-v1-tenant-key", revision: "key-1" },
+          settings_revision: "settings-1"
+        })
+    });
+    await assert.rejects(
+      () =>
+        semanticFailureRunner.run({
+          id: "semantic-failure-stage",
+          prompt: "Complete the stage.",
+          workingDirectory: root,
+          readOnly: true,
+          budgetSeconds: 30
+        }),
+      /model output is not valid JSON/
+    );
+    assert.equal(
+      executions.some((execution) => execution?.credential.kind === "secret"),
+      false
+    );
+
+    executions.length = 0;
     const managedRunner = configuredPortableContextBoardAgentStageRunner({
       environment,
       attemptContext,
@@ -599,7 +641,7 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
       profileFetch: async () =>
         profileResponse({
           provider: "managed",
-          model: "anthropic/claude-sonnet-4",
+          model: "openai/gpt-5.6-luna",
           effort: "medium",
           fallback_policy: "fail_notify",
           credential: { kind: "managed" },
@@ -614,7 +656,7 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
       budgetSeconds: 30
     });
     const managed = executions.find((execution) => execution?.credential.kind === "secret");
-    assert.equal(managed?.model, "gpt-5.6-terra");
+    assert.equal(managed?.model, "gpt-5.6-luna");
     assert.equal(managed?.effort, "medium");
 
     executions.length = 0;

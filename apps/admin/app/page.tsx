@@ -222,10 +222,25 @@ export default async function ContextAdminPage({
                       ) : (
                         "not recorded"
                       )}
-                      {build.derivationDeadlineAt ? (
+                      {(progress?.derivationDeadlineAt ?? build.derivationDeadlineAt) ? (
                         <>
                           <br />
-                          <span className="muted">deadline {formatTimestamp(build.derivationDeadlineAt)}</span>
+                          <span className="muted">
+                            deadline {formatTimestamp((progress?.derivationDeadlineAt ?? build.derivationDeadlineAt)!)}
+                          </span>
+                        </>
+                      ) : null}
+                      {(progress?.consumedExecutionSeconds ?? build.consumedExecutionSeconds) !== undefined ? (
+                        <>
+                          <br />
+                          <span className="muted">
+                            {compactDuration(progress?.consumedExecutionSeconds ?? build.consumedExecutionSeconds ?? 0)}{" "}
+                            used ·{" "}
+                            {compactDuration(
+                              progress?.remainingExecutionSeconds ?? build.remainingExecutionSeconds ?? 0
+                            )}{" "}
+                            execution remaining
+                          </span>
                         </>
                       ) : null}
                     </td>
@@ -400,6 +415,15 @@ function shortRef(ref: string): string {
 
 function compactNumber(value: number): string {
   return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function compactDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }
 
 function formatTimestamp(iso: string): string {

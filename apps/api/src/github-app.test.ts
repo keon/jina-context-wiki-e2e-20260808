@@ -1026,6 +1026,95 @@ test("the V1 relay admits Context work without creating V2 review work", async (
   );
 });
 
+test("feature pushes bypass Context dependencies and webhook metadata wins after a default-branch rename", async () => {
+  const sharedTenant = "eff0efc9-b103-494a-b7a3-1ae7f95c2d26";
+  const state = deliveryTrackingStateStore({
+    intakeState: { board: { tasks: [], dependencies: [], outbox: [], events: [] }, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const quota = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
+  const reconcile = quota.reconcileActiveBuilds.bind(quota);
+  let quotaCalls = 0;
+  quota.reconcileActiveBuilds = async (input) => {
+    quotaCalls += 1;
+    return reconcile(input);
+  };
+  let releaseSeedCalls = 0;
+  const renamedServer = createApiServer({
+    githubWebhookSecret,
+    stateStore: state,
+    contextQuotaService: quota,
+    contextBoardReleaseSeedStore: {
+      async findCurrentReleaseSeed() {
+        releaseSeedCalls += 1;
+        return undefined;
+      }
+    },
+    sharedIdentityResolver: {
+      async resolveRepository() {
+        return {
+          tenantId: sharedTenant,
+          githubAccountId: "1",
+          githubAccountLogin: "omxyz",
+          githubAccountType: "Organization",
+          githubRepositoryId: "2",
+          githubInstallationId: "140435029",
+          repository,
+          defaultBranch: "main"
+        };
+      },
+      async listTenantIds() {
+        return [sharedTenant];
+      },
+      async ping() {},
+      async close() {}
+    }
+  });
+  await new Promise<void>((resolve) => renamedServer.listen(0, "127.0.0.1", resolve));
+  const renamedUrl = `http://127.0.0.1:${(renamedServer.address() as AddressInfo).port}`;
+  const push = (ref: string) => ({
+    ref,
+    before: "0".repeat(40),
+    after: "1".repeat(40),
+    deleted: false,
+    repository: { id: 2, full_name: repository, default_branch: "trunk" },
+    installation: { id: 140435029 }
+  });
+  try {
+    for (const [deliveryId, ref] of [
+      ["renamed-feature", "refs/heads/feature"],
+      ["renamed-former-default", "refs/heads/main"]
+    ] as const) {
+      const ignored = await signedGitHubWebhookAt(
+        renamedUrl,
+        "push",
+        deliveryId,
+        push(ref),
+        "/context/webhooks/github"
+      );
+      assert.equal(ignored.status, 202, await ignored.text());
+    }
+    assert.equal(quotaCalls, 0);
+    assert.equal(releaseSeedCalls, 0);
+    assert.equal(state.current().intakeState.board.tasks.length, 0);
+
+    const current = await signedGitHubWebhookAt(
+      renamedUrl,
+      "push",
+      "renamed-current-default",
+      push("refs/heads/trunk"),
+      "/context/webhooks/github"
+    );
+    assert.equal(current.status, 202, await current.text());
+    assert.equal(quotaCalls, 1);
+    assert.equal(releaseSeedCalls, 1);
+    const build = state.current().intakeState.board.tasks.find((task) => task.type === "build-context");
+    assert.equal(build?.metadata.ref, "trunk");
+  } finally {
+    await new Promise<void>((resolve, reject) => renamedServer.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("an ignored relay delivery cannot roll back work committed by another API instance", async () => {
   const sharedState = deliveryTrackingStateStore({
     intakeState: {
