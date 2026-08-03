@@ -867,6 +867,24 @@ run_release_control() {
     --wait
 }
 
+run_failed_release_cleanup_step() {
+  local description="$1"
+  shift
+  local attempt
+  for ((attempt = 1; attempt <= release_cleanup_attempts; attempt += 1)); do
+    echo "Failed-release cleanup ${description}: attempt ${attempt}/${release_cleanup_attempts}" >&2
+    if "$@"; then
+      echo "Failed-release cleanup ${description}: complete" >&2
+      return 0
+    fi
+    if (( attempt < release_cleanup_attempts )); then
+      sleep "${release_cleanup_retry_seconds}"
+    fi
+  done
+  echo "Failed-release cleanup ${description}: failed after ${release_cleanup_attempts} attempts" >&2
+  return 1
+}
+
 start_release_renewal() {
   local deployment_pid="$$"
   (
@@ -1039,41 +1057,69 @@ ROLLFORWARD
   fi
   if [[ "${status}" -ne 0 && "${worker_quiescence_started}" == "true" ]]; then
     local cleanup_ok="true"
-    run_release_control "worker-pause" >/dev/null 2>&1 || cleanup_ok="false"
+    local worker_generation_invalidated="false"
+    local context_worker_returned_to_drain="false"
+    local task_worker_returned_to_drain="false"
+    run_failed_release_cleanup_step \
+      "pause worker generation" run_release_control "worker-pause" || cleanup_ok="false"
     # A failed candidate is the latest-created Cloud Run revision and cannot be
     # deleted directly. Route only to the paused drain here; the generation
     # credential is destroyed below, and the next drain revision makes the
     # retained 0%-traffic candidate eligible for normal revision cleanup.
-    route_paused_worker \
-      "jina-context-worker" "${context_drain_revision}" >/dev/null 2>&1 || cleanup_ok="false"
-    route_paused_worker \
-      "jina-task-worker" "${task_drain_revision}" >/dev/null 2>&1 || cleanup_ok="false"
-    run_release_control "board-drain" >/dev/null 2>&1 || cleanup_ok="false"
-    run_release_control "board-verify" >/dev/null 2>&1 || cleanup_ok="false"
-    if [[ "${cleanup_ok}" == "true" ]]; then
+    if run_failed_release_cleanup_step \
+      "route Context worker to drain" route_paused_worker \
+      "jina-context-worker" "${context_drain_revision}"; then
+      context_worker_returned_to_drain="true"
+    else
+      cleanup_ok="false"
+    fi
+    if run_failed_release_cleanup_step \
+      "route task worker to drain" route_paused_worker \
+      "jina-task-worker" "${task_drain_revision}"; then
+      task_worker_returned_to_drain="true"
+    else
+      cleanup_ok="false"
+    fi
+    run_failed_release_cleanup_step \
+      "drain Board leases" run_release_control "board-drain" || cleanup_ok="false"
+    if run_failed_release_cleanup_step \
+      "verify zero Board leases" run_release_control "board-verify"; then
       board_leases_verified="true"
+    else
+      cleanup_ok="false"
+    fi
+    if [[ "${cleanup_ok}" == "true" ]]; then
       # Invalidate the unaccepted generation before relinquishing the database
       # lease. A failed destroy therefore cannot leave usable worker
       # credentials after another deployment starts.
-      destroy_worker_release_credential_verified || cleanup_ok="false"
+      if run_failed_release_cleanup_step \
+        "destroy unaccepted worker credential" destroy_worker_release_credential_verified; then
+        worker_generation_invalidated="true"
+      else
+        cleanup_ok="false"
+      fi
     fi
     if [[ "${cleanup_ok}" == "true" ]]; then
       # Worker claims remain disabled after a rejected candidate, but the
       # serving API must still accept/cancel work and webhooks. Restore only
       # its Board DML grant; do not reactivate an unaccepted worker generation.
-      run_release_control "runtime-write-enable" >/dev/null 2>&1 || cleanup_ok="false"
+      run_failed_release_cleanup_step \
+        "restore API Board writes" run_release_control "runtime-write-enable" || cleanup_ok="false"
     fi
     if [[ "${cleanup_ok}" == "true" ]]; then
       # Keep renewing throughout all fail-closed work. Stop only after the
       # generation is destroyed and zero leases have been independently
       # verified, so release-release cannot race a background renewal.
       stop_release_renewal
-      run_release_control "release-release" >/dev/null 2>&1 || cleanup_ok="false"
+      run_failed_release_cleanup_step \
+        "release deployment lease" run_release_control "release-release" || cleanup_ok="false"
     fi
     if [[ "${cleanup_ok}" == "true" ]]; then
       release_lease_acquired="false"
-      delete_release_control_job_verified || cleanup_ok="false"
-      destroy_deployment_release_credential_verified || cleanup_ok="false"
+      run_failed_release_cleanup_step \
+        "delete release-control job" delete_release_control_job_verified || cleanup_ok="false"
+      run_failed_release_cleanup_step \
+        "destroy release-control credential" destroy_deployment_release_credential_verified || cleanup_ok="false"
     fi
     if [[ "${cleanup_ok}" != "true" && "${release_lease_acquired}" == "true" ]]; then
       # Failure to destroy the generation credential is fail-closed: retain
@@ -1084,9 +1130,13 @@ ROLLFORWARD
     cat >&2 <<ROLLFORWARD
 Candidate release failed after background-worker quiescence began.
 Fail-closed cleanup completed: ${cleanup_ok}
-Worker claims are disabled, the unaccepted generation was invalidated, and the
-worker services were returned to the exact paused drain revisions:
+Worker claims disabled and unaccepted generation credential invalidated:
+  ${worker_generation_invalidated}
+Context worker returned to its exact paused drain revision:
+  ${context_worker_returned_to_drain}
   ${context_drain_revision}
+Task worker returned to its exact paused drain revision:
+  ${task_worker_returned_to_drain}
   ${task_drain_revision}
 Board zero-lease verification completed:
   ${board_leases_verified}

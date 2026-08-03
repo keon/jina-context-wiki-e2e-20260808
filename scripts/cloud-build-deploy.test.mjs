@@ -296,8 +296,10 @@ test("failed unaccepted candidates are paused, fenced, and independently verifie
   assert.match(productionPreflight, /action === "runtime-write-enable"/);
   assert.match(
     deployment,
-    /destroy_worker_release_credential_verified \|\| cleanup_ok="false"[\s\S]+?extend_release_lease_for_repair \|\| true[\s\S]+?stop_release_renewal/
+    /"destroy unaccepted worker credential" destroy_worker_release_credential_verified[\s\S]+?extend_release_lease_for_repair \|\| true[\s\S]+?stop_release_renewal/
   );
+  assert.match(deployment, /Failed-release cleanup \$\{description\}: attempt \$\{attempt\}/);
+  assert.match(deployment, /worker_generation_invalidated="true"/);
   assert.match(
     deployment,
     /A failed candidate is the latest-created Cloud Run revision and cannot be[\s\S]+?generation[\s\S]+?credential is destroyed/
