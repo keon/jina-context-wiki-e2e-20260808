@@ -760,6 +760,18 @@ export class GraphApiClient {
     return this.request("/task-types", context);
   }
 
+  /** Current commit-derived issue release for the Clerk-authenticated dashboard. */
+  async getCausalGraph(
+    context: RequestContext,
+    input: { repository: string; ref: string },
+  ): Promise<unknown> {
+    const query = new URLSearchParams({
+      repository: input.repository,
+      ref: input.ref,
+    });
+    return this.request(`/causal-graph?${query.toString()}`, context);
+  }
+
   /** Raw Context release data used by the merged operational dashboard. */
   async listContextReleases(
     context: RequestContext,

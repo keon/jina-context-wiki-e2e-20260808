@@ -790,6 +790,20 @@ export function createApp(config: AppConfig): Hono {
     return c.json(await graphs.listTaskTypes(await tenantGraphContext(tenantId)));
   });
 
+  app.get("/v1/dashboard/tenants/:tenantId/operations/causal-graph", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    const repository = requiredDashboardQuery(c, "repository");
+    const ref = requiredDashboardQuery(c, "ref");
+    return c.json(
+      await graphs.getCausalGraph(await tenantGraphContext(tenantId, repository), {
+        repository,
+        ref,
+      }),
+    );
+  });
+
   app.get("/v1/dashboard/tenants/:tenantId/operations/context/releases", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);

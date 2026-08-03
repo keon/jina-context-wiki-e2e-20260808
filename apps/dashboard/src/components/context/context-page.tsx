@@ -131,7 +131,12 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
         </>
       ) : null}
       {view === "causal-graph" && repository && ref ? (
-        <IssueGraphBrowser repository={repository} ref={ref} build={causalGraphBuild} />
+        <IssueGraphBrowser
+          repository={repository}
+          ref={ref}
+          build={causalGraphBuild}
+          apiBasePath={operationsApiUrl(selected!.tenantId, "causal-graph")}
+        />
       ) : null}
     </section>
   );

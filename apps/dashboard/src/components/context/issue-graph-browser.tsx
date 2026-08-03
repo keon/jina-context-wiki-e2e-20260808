@@ -7,11 +7,13 @@ import type { ContextBuildSummary, ContextIssue, IssueGraphResponse } from "../.
 export function IssueGraphBrowser({
   repository,
   ref,
-  build
+  build,
+  apiBasePath
 }: {
   readonly repository: string;
   readonly ref: string;
   readonly build?: ContextBuildSummary | undefined;
+  readonly apiBasePath: string;
 }) {
   const [graph, setGraph] = useState<IssueGraphResponse>();
   const [status, setStatus] = useState<"loading" | "ready" | "missing" | "error">("loading");
@@ -22,7 +24,7 @@ export function IssueGraphBrowser({
     const controller = new AbortController();
     setStatus("loading");
     setGraph(undefined);
-    void fetch(`/api/causal-graph?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`, {
+    void fetch(`${apiBasePath}?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`, {
       headers: { accept: "application/json" },
       signal: controller.signal
     })
@@ -43,7 +45,7 @@ export function IssueGraphBrowser({
         if (!(error instanceof DOMException && error.name === "AbortError")) setStatus("error");
       });
     return () => controller.abort();
-  }, [repository, ref, build?.updatedAt]);
+  }, [repository, ref, build?.updatedAt, apiBasePath]);
 
   const issues = useMemo(() => {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
