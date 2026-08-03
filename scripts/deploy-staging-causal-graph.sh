@@ -31,7 +31,7 @@ github_app_private_key_secret="jina-staging-github-app-private-key"
 github_clone_token_secret="jina-staging-github-clone-token"
 
 daytona_snapshot="${JINA_CAUSAL_GRAPH_DAYTONA_SNAPSHOT:-jina-context-board-codex-0-145-0-bwrap-v2}"
-daytona_model_secret="${JINA_CAUSAL_GRAPH_DAYTONA_MODEL_SECRET:-jina-context-openai}"
+daytona_model_secret="${JINA_CAUSAL_GRAPH_DAYTONA_MODEL_SECRET:-jina-staging-context-openai}"
 causal_topics="run-causal-graph-history|run-causal-graph-derive|run-causal-graph-publication"
 
 required_staging_values=(
