@@ -5,12 +5,20 @@
       "dependsOn": ["^build"],
       "env": [
         "INTERNAL_API_TOKEN",
+        "CLERK_AFTER_SIGN_OUT_URL",
+        "CLERK_SECRET_KEY",
+        "CLERK_SIGN_IN_URL",
+        "CLERK_SIGN_UP_URL",
         "JINA_API_URL",
+        "JINA_LEGACY_API_URL",
         "JINA_TENANT_ID",
         "JINA_WEB_AUTH_PASSWORD",
         "JINA_WEB_AUTH_USERNAME",
         "JINA_WEB_PRINCIPAL_ID",
         "NEXT_PUBLIC_API_BASE_URL",
+        "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
+        "NEXT_PUBLIC_CLERK_SIGN_IN_URL",
+        "NEXT_PUBLIC_CLERK_SIGN_UP_URL",
         "NEXT_PUBLIC_DASHBOARD_LOCAL_FIXTURE"
       ],
       "outputs": ["dist/**", ".next/**"]
