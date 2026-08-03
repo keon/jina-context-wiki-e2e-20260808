@@ -189,7 +189,12 @@ for secret_name in "${v1_secrets[@]}"; do
   fi
 done
 
-v2_services=(jina-api-staging jina-context-worker-staging jina-task-worker-staging)
+v2_services=(
+  jina-api-staging
+  jina-context-worker-staging
+  jina-task-worker-staging
+  jina-causal-graph-worker
+)
 for service_name in "${v2_services[@]}"; do
   if gcloud run services describe "${service_name}" --project="${staging_project}" \
       --region="${region}" >/dev/null 2>&1; then
@@ -198,6 +203,22 @@ for service_name in "${v2_services[@]}"; do
     fail "V2 Cloud Run service ${service_name} is missing"
   fi
 done
+
+if gcloud iam service-accounts describe \
+    "jina-causal-worker-staging@${staging_project}.iam.gserviceaccount.com" \
+    --project="${staging_project}" >/dev/null 2>&1; then
+  pass "V2 causal graph staging service account exists"
+else
+  fail "V2 causal graph staging service account is missing"
+fi
+
+if gcloud secrets versions describe latest \
+    --secret=jina-staging-causal-graph-worker-release-credential \
+    --project="${staging_project}" >/dev/null 2>&1; then
+  pass "V2 causal graph staging release credential exists"
+else
+  fail "V2 causal graph staging release credential is missing"
+fi
 
 if command -v vercel >/dev/null 2>&1 && vercel project inspect jina-staging-dashboard \
     --scope omlabs >/dev/null 2>&1; then
