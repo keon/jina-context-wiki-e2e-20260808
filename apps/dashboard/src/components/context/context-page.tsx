@@ -59,10 +59,21 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
   useEffect(() => {
     const stillExists = scopes.some((scope) => `${scope.repository}\0${scope.ref}` === scopeKey);
     if (!stillExists) {
-      const first = scopes[0];
+      const first =
+        view === "causal-graph"
+          ? scopes.find((scope) =>
+              builds.some(
+                (candidate) =>
+                  candidate.repository === scope.repository &&
+                  candidate.ref === scope.ref &&
+                  candidate.buildKind === "causal_graph" &&
+                  candidate.status === "completed"
+              )
+            ) ?? scopes[0]
+          : scopes[0];
       setScopeKey(first ? `${first.repository}\0${first.ref}` : "");
     }
-  }, [scopeKey, scopes]);
+  }, [builds, scopeKey, scopes, view]);
 
   const [repository = "", ref = ""] = scopeKey.split("\0");
   const release = releases.find((candidate) => candidate.repository === repository && candidate.ref === ref);
