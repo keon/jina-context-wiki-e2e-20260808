@@ -600,9 +600,9 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.equal(pageCandidateCheckpoint?.attempt, 1);
   assert.match(output, /resumed gap-repair\.candidate\.architecture-md from a durable checkpoint/);
   assert.deepEqual(completionAttempts[0]?.modelUsage, {
-    inputTokens: 420,
-    cachedInputTokens: 210,
-    outputTokens: 85
+    inputTokens: 450,
+    cachedInputTokens: 225,
+    outputTokens: 90
   });
   assert.deepEqual(completion?.modelUsage, { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
   assert.ok(phaseCheckpoints.size >= 6);
@@ -610,8 +610,8 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.match(String(record(finalAudit.worker).summary), /Reused \d+ exact digest-bound supported citation verdicts/);
   const finalReferences = record(uploadedDraft?.citationAuditInput).references as readonly unknown[];
   const auditBatchSizes = (await readFile(auditBatchSizesPath, "utf8")).trim().split("\n").map(Number);
-  assert.deepEqual(auditBatchSizes, [finalReferences.length - 1, finalReferences.length - 1, 1]);
-  assert.match(output, /context\.gap_audit\.validation_retry/);
+  assert.deepEqual(auditBatchSizes, [finalReferences.length - 1, 2, 1]);
+  assert.doesNotMatch(output, /context\.gap_audit\.validation_retry/);
   const result = record(completion?.result);
   assert.equal(result.version, 1);
   assert.match(String(result.publicSnapshotDigest), /^[a-f0-9]{64}$/);

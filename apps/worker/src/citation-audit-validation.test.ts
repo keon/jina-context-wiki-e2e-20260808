@@ -27,6 +27,42 @@ test("citation audit drops unassigned critic findings but preserves strict assig
   );
 });
 
+test("citation audit treats an omitted assigned citation as unsupported repair work", () => {
+  assert.deepEqual(
+    retainAssignedCitationAuditResults(
+      {
+        version: 1,
+        results: [
+          {
+            citationId: "returned",
+            verdict: "supported",
+            rationale: "Supported.",
+            correction: null
+          }
+        ]
+      },
+      ["returned", "omitted"]
+    ),
+    {
+      version: 1,
+      results: [
+        {
+          citationId: "returned",
+          verdict: "supported",
+          rationale: "Supported.",
+          correction: null
+        },
+        {
+          citationId: "omitted",
+          verdict: "unsupported",
+          rationale: "The citation auditor did not return a verdict for this assigned citation.",
+          correction: null
+        }
+      ]
+    }
+  );
+});
+
 test("citation audit filtering leaves malformed envelopes for the strict parser", () => {
   const malformed = { version: 1, results: "invalid" };
   assert.equal(retainAssignedCitationAuditResults(malformed, ["expected"]), malformed);

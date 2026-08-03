@@ -30,24 +30,39 @@ export async function retryCitationAuditValidation<T>(input: {
 /**
  * Model critics may append a finding for a citation that was not in their
  * assigned batch. Such a finding has no host-bound evidence and must not fail
- * an otherwise complete audit. Keep only assigned IDs; the strict parser still
- * rejects omissions, duplicates, and malformed results for those IDs.
+ * an otherwise complete audit. Keep only assigned IDs. When a critic omits an
+ * assigned ID, retain citation safety by recording a deterministic unsupported
+ * verdict so the existing page-repair workflow can handle it instead of
+ * terminating the entire build on a model formatting error.
  */
 export function retainAssignedCitationAuditResults(value: unknown, citationIds: readonly string[]): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const record = value as Record<string, unknown>;
   if (!Array.isArray(record.results)) return value;
   const assigned = new Set(citationIds);
+  const candidateResults: readonly unknown[] = record.results;
+  const results = candidateResults.filter(
+    (result) =>
+      result !== null &&
+      typeof result === "object" &&
+      !Array.isArray(result) &&
+      typeof (result as Record<string, unknown>).citationId === "string" &&
+      assigned.has((result as Record<string, unknown>).citationId as string)
+  );
+  const returned = new Set(results.map((result) => (result as Record<string, unknown>).citationId as string));
   return {
     ...record,
-    results: record.results.filter(
-      (result) =>
-        result !== null &&
-        typeof result === "object" &&
-        !Array.isArray(result) &&
-        typeof (result as Record<string, unknown>).citationId === "string" &&
-        assigned.has((result as Record<string, unknown>).citationId as string)
-    )
+    results: [
+      ...results,
+      ...citationIds
+        .filter((citationId) => !returned.has(citationId))
+        .map((citationId) => ({
+          citationId,
+          verdict: "unsupported",
+          rationale: "The citation auditor did not return a verdict for this assigned citation.",
+          correction: null
+        }))
+    ]
   };
 }
 
