@@ -120,6 +120,7 @@ steps:
       - JINA_API_CPU=${_JINA_API_CPU}
       - JINA_API_MEMORY=${_JINA_API_MEMORY}
       - JINA_CONTEXT_WORKER_MEMORY=${_JINA_CONTEXT_WORKER_MEMORY}
+      - JINA_CONTEXT_WORKER_MIN_INSTANCES=${_JINA_CONTEXT_WORKER_MIN_INSTANCES}
       - JINA_CONTEXT_WORKER_MAX_INSTANCES=${_JINA_CONTEXT_WORKER_MAX_INSTANCES}
       - JINA_TASK_WORKER_MAX_INSTANCES=${_JINA_TASK_WORKER_MAX_INSTANCES}
       - JINA_CONTEXT_DAYTONA_SNAPSHOT=${_JINA_CONTEXT_DAYTONA_SNAPSHOT}
@@ -167,7 +168,11 @@ substitutions:
   _JINA_API_CPU: "1"
   _JINA_API_MEMORY: 1Gi
   _JINA_CONTEXT_WORKER_MEMORY: 1Gi
-  _JINA_CONTEXT_WORKER_MAX_INSTANCES: "20"
+  # Context workers poll the Board in the background, so Cloud Run request
+  # autoscaling cannot observe queue depth. Keep the requested 20 executors
+  # warm explicitly; max-instances alone would leave only the prior minimum.
+  _JINA_CONTEXT_WORKER_MIN_INSTANCES: "20"
+  _JINA_CONTEXT_WORKER_MAX_INSTANCES: "100"
   _JINA_TASK_WORKER_MAX_INSTANCES: "5"
   # The audited immutable Daytona snapshot contains the Codex CLI. Override it
   # only with another validated immutable snapshot, or clear it and supply one
@@ -188,10 +193,10 @@ substitutions:
   _JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET: "24000000"
   _JINA_ACCEPTANCE_TIMEOUT_MS: "10800000"
   _JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS: "11700"
-  # Full acceptance is the release default. An operator may explicitly select
-  # "mechanical" to gate cutover only on candidate readiness while deferring
-  # the expensive full Context build to a later final verification release.
-  _JINA_DEPLOYMENT_ACCEPTANCE_MODE: full
+  # Do not hold the worker generation paused behind a multi-hour Context build.
+  # Production Context acceptance runs after cutover as an ordinary observable
+  # build; an operator may still select "full" for an exceptional blocking gate.
+  _JINA_DEPLOYMENT_ACCEPTANCE_MODE: mechanical
   # Normal releases accept only the current schema. The first Context v2
   # production transition must override both values explicitly:
   #   _JINA_CONTEXT_RESET_MODE=legacy-once

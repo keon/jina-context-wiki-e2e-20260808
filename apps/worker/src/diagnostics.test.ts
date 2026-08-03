@@ -12,6 +12,7 @@ test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("GitHub request failed with 403: API rate limit exceeded"), "github_rate_limit");
   assert.equal(workerFailureCategory("GitHub request failed with 404: Not Found"), "github_not_found");
   assert.equal(workerFailureCategory("GitHub response is not an object array"), "github_response");
+  assert.equal(workerFailureCategory("GitHub repository checkout timed out after 300000ms"), "github_timeout");
   assert.equal(workerFailureCategory("Unable to fetch prepared commit"), "git_checkout");
   assert.equal(workerFailureCategory("Daytona sandbox creation failed"), "daytona");
   assert.equal(workerFailureCategory("command execution timeout"), "daytona");
@@ -55,6 +56,7 @@ test("only transient failures and bounded source-challenge corrections retry", (
     "board agent stage audit-citation-contract exceeded its 600s budget",
     "GitHub request failed with 429: rate limit",
     "GitHub request timed out",
+    "GitHub repository checkout timed out after 300000ms",
     "GitHub request failed with 503: service unavailable",
     "Context API /internal/context/board/artifacts failed with 502: bad gateway",
     "This operation was aborted",

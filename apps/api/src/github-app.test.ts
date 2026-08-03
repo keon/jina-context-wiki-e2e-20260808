@@ -964,12 +964,13 @@ test("pull-request intake queues review work and a PR-preview context build", as
 });
 
 test("the V1 relay admits Context work without creating V2 review work", async () => {
+  const relayRepository = "omlabs/v1-relay-fixture";
   const pullRequestNumber = 79;
   const headSha = "d".repeat(40);
   const deliveryId = "v1-context-relay-pr";
   const payload = {
     action: "opened",
-    repository: { full_name: repository, default_branch: "main" },
+    repository: { full_name: relayRepository, default_branch: "main" },
     installation: { id: 140435029 },
     pull_request: {
       number: pullRequestNumber,
@@ -996,6 +997,7 @@ test("the V1 relay admits Context work without creating V2 review work", async (
     (task) =>
       task.type === "build-context" &&
       record(task.metadata).ref === `pull/${pullRequestNumber}/head` &&
+      record(task.metadata).repository === relayRepository &&
       record(task.metadata).commitSha === headSha
   );
   assert.ok(contextBuild);
@@ -1010,7 +1012,7 @@ test("the V1 relay admits Context work without creating V2 review work", async (
     "v1-context-relay-comment",
     {
       action: "created",
-      repository: { full_name: repository },
+      repository: { full_name: relayRepository },
       issue: { number: pullRequestNumber },
       comment: { id: 7901, body: "No Context build should be created." }
     },
@@ -1174,14 +1176,15 @@ test("an ignored relay delivery cannot roll back work committed by another API i
   }
 });
 
-test("a newer relayed ref build supersedes stale work and releases its build quota", async () => {
+test("a newer relayed ref build queues behind stale work without consuming another build slot", async () => {
+  const relayRepository = "omlabs/relay-serialization-fixture";
   const pullRequestNumber = 80;
   const firstHead = "1".repeat(40);
   const secondHead = "2".repeat(40);
   const quotaBefore = await serverConfig.contextQuotaService.snapshot(tenantId);
   const payload = (action: "opened" | "synchronize", headSha: string) => ({
     action,
-    repository: { full_name: repository, default_branch: "main" },
+    repository: { full_name: relayRepository, default_branch: "main" },
     installation: { id: 140435029 },
     pull_request: { number: pullRequestNumber, head: { sha: headSha } }
   });
@@ -1201,6 +1204,7 @@ test("a newer relayed ref build supersedes stale work and releases its build quo
     .find(
       (task) =>
         task.type === "build-context" &&
+        record(task.metadata).repository === relayRepository &&
         record(task.metadata).ref === `pull/${pullRequestNumber}/head` &&
         record(task.metadata).commitSha === firstHead
     );
@@ -1221,14 +1225,13 @@ test("a newer relayed ref build supersedes stale work and releases its build quo
     .map(record)
     .filter((task) => task.id === firstBuild.id || record(task.metadata).contextBuildId === firstBuild.id);
   assert.ok(firstBuildTasks.length >= 3);
-  assert.ok(firstBuildTasks.every((task) => task.status === "canceled"));
+  assert.ok(firstBuildTasks.some((task) => task.status !== "canceled"));
   const progress = await api(`/context/builds/${encodeURIComponent(string(firstBuild.id))}/progress`, {
     headers: contextHeaders()
   });
   assert.equal(progress.response.status, 200);
-  assert.equal(progress.body.status, "failed");
-  assert.equal(progress.body.failureCode, "build_superseded");
-  assert.equal(progress.body.failureReason, "A newer build for this repository ref superseded this Context build.");
+  assert.notEqual(progress.body.status, "failed");
+  assert.equal(record(progress.body.queuedFollowup).commitSha, secondHead);
 });
 
 test("generic board work is fenced by attempt, lease id, and token", async () => {
@@ -1314,12 +1317,13 @@ test("generic board work is fenced by attempt, lease id, and token", async () =>
   assert.equal(completed.response.status, 200);
 });
 
-test("push and issue intake create context builds on their event-specific refs", async () => {
+test("push and issue intake serialize their event-specific refs for one repository", async () => {
+  const intakeRepository = "omlabs/push-issue-fixture";
   const pushSha = "6".repeat(40);
   const pushed = await api("/dev/webhooks/github", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ repository, push: true, ref: "release", headSha: pushSha })
+    body: JSON.stringify({ repository: intakeRepository, push: true, ref: "release", headSha: pushSha })
   });
   assert.equal(pushed.response.status, 202);
   const afterPush = await api("/board", { headers: contextHeaders() });
@@ -1328,6 +1332,7 @@ test("push and issue intake create context builds on their event-specific refs",
     .find(
       (candidate) =>
         candidate.type === "build-context" &&
+        record(candidate.metadata).repository === intakeRepository &&
         record(candidate.metadata).ref === "release" &&
         record(candidate.metadata).commitSha === pushSha
     );
@@ -1337,34 +1342,34 @@ test("push and issue intake create context builds on their event-specific refs",
   const issue = await api("/dev/webhooks/github", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ repository, issueNumber: 92, title: "Investigate retries", defaultBranch: "trunk" })
+    body: JSON.stringify({
+      repository: intakeRepository,
+      issueNumber: 92,
+      title: "Investigate retries",
+      defaultBranch: "trunk"
+    })
   });
   assert.equal(issue.response.status, 202);
   const afterIssue = await api("/board", { headers: contextHeaders() });
-  const issueBuild = array(afterIssue.body.tasks)
-    .map(record)
-    .find(
-      (candidate) =>
-        candidate.type === "build-context" &&
-        record(candidate.metadata).ref === "trunk" &&
-        record(candidate.metadata).trigger === "issue"
-    );
-  assert.ok(issueBuild);
-  assert.equal("commitSha" in record(issueBuild.metadata), false);
+  const issueProgress = await api(`/context/builds/${encodeURIComponent(string(pushedBuild.id))}/progress`, {
+    headers: contextHeaders()
+  });
+  assert.equal(record(issueProgress.body.queuedFollowup).ref, "trunk");
+  assert.equal(record(issueProgress.body.queuedFollowup).trigger, "issue");
 
   const contextBuildCount = array(afterIssue.body.tasks)
     .map(record)
     .filter((candidate) => candidate.type === "build-context").length;
   const issueComment = await signedGitHubWebhook("issue_comment", "comment-no-context-build", {
     action: "created",
-    repository: { full_name: repository },
+    repository: { full_name: intakeRepository },
     issue: { number: 92 },
     comment: { id: 9201, body: "This must not start Context generation." }
   });
   assert.equal(issueComment.status, 202);
   const editedIssue = await signedGitHubWebhook("issues", "edited-no-context-build", {
     action: "edited",
-    repository: { full_name: repository }
+    repository: { full_name: intakeRepository }
   });
   assert.equal(editedIssue.status, 202);
 
@@ -1377,7 +1382,8 @@ test("push and issue intake create context builds on their event-specific refs",
   );
 });
 
-test("signed push redelivery is idempotent while a distinct rollback delivery advances the ref", async () => {
+test("signed push redelivery is idempotent while rollback coalesces into the queued ref", async () => {
+  const rollbackRepository = "omlabs/rollback-proof-fixture";
   const ref = "refs/heads/rollback-proof";
   const firstHead = "7".repeat(40);
   const secondHead = "8".repeat(40);
@@ -1386,7 +1392,7 @@ test("signed push redelivery is idempotent while a distinct rollback delivery ad
     before,
     after,
     deleted: false,
-    repository: { full_name: repository },
+    repository: { full_name: rollbackRepository },
     installation: { id: 140435029 }
   });
 
@@ -1408,7 +1414,7 @@ test("signed push redelivery is idempotent while a distinct rollback delivery ad
     .filter(
       (candidate) =>
         candidate.type === "build-context" &&
-        record(candidate.metadata).repository === repository &&
+        record(candidate.metadata).repository === rollbackRepository &&
         record(candidate.metadata).ref === "rollback-proof"
     )
     .sort((left, right) => Number(record(left.metadata).refSequence) - Number(record(right.metadata).refSequence));
@@ -1417,12 +1423,12 @@ test("signed push redelivery is idempotent while a distinct rollback delivery ad
       refSequence: record(build.metadata).refSequence,
       commitSha: record(build.metadata).commitSha
     })),
-    [
-      { refSequence: 1, commitSha: firstHead },
-      { refSequence: 2, commitSha: secondHead },
-      { refSequence: 3, commitSha: firstHead }
-    ]
+    [{ refSequence: 1, commitSha: firstHead }]
   );
+  const progress = await api(`/context/builds/${encodeURIComponent(string(builds[0]?.id))}/progress`, {
+    headers: contextHeaders()
+  });
+  assert.equal(record(progress.body.queuedFollowup).commitSha, firstHead);
 });
 
 test("malformed persisted runtime state is ignored instead of breaking unrelated API reads", async () => {

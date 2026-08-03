@@ -56,9 +56,10 @@ acceptance_derivation_budget_seconds="${JINA_ACCEPTANCE_DERIVATION_BUDGET_SECOND
 acceptance_derivation_token_budget="${JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET:-24000000}"
 acceptance_timeout_ms="${JINA_ACCEPTANCE_TIMEOUT_MS:-10800000}"
 acceptance_job_timeout_seconds="${JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS:-11700}"
-deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-full}"
+deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-mechanical}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
-context_worker_max_instances="${JINA_CONTEXT_WORKER_MAX_INSTANCES:-20}"
+context_worker_min_instances="${JINA_CONTEXT_WORKER_MIN_INSTANCES:-20}"
+context_worker_max_instances="${JINA_CONTEXT_WORKER_MAX_INSTANCES:-100}"
 task_worker_max_instances="${JINA_TASK_WORKER_MAX_INSTANCES:-5}"
 context_artifact_bucket="${JINA_CONTEXT_GCS_BUCKET:-${GCP_PROJECT_ID}-jina-context-artifacts}"
 worker_release_secret="${JINA_WORKER_RELEASE_SECRET:-jina-worker-release-credential}"
@@ -163,6 +164,11 @@ validate_positive_integer "JINA_CONTEXT_WORKER_HEARTBEAT_INTERVAL_MS" "${context
 validate_positive_integer "JINA_CONTEXT_WORKER_LEASE_MS" "${context_worker_lease_ms}"
 validate_positive_integer "JINA_WORKER_DRAIN_TIMEOUT_SECONDS" "${worker_drain_timeout_seconds}"
 validate_positive_integer "JINA_CONTEXT_WORKER_MAX_INSTANCES" "${context_worker_max_instances}"
+validate_positive_integer "JINA_CONTEXT_WORKER_MIN_INSTANCES" "${context_worker_min_instances}"
+if (( context_worker_min_instances > context_worker_max_instances )); then
+  echo "JINA_CONTEXT_WORKER_MIN_INSTANCES cannot exceed JINA_CONTEXT_WORKER_MAX_INSTANCES" >&2
+  exit 2
+fi
 validate_positive_integer "JINA_TASK_WORKER_MAX_INSTANCES" "${task_worker_max_instances}"
 validate_positive_integer "JINA_CONTEXT_CODEX_CONTEXT_TOKENS" "${context_codex_context_tokens}"
 validate_positive_integer "JINA_CONTEXT_CODEX_COMPACT_TOKENS" "${context_codex_compact_tokens}"
@@ -630,7 +636,7 @@ context_worker_environment() {
   local claim_mode="$2"
   local target_revision="${3:-}"
   local environment
-  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_V1_API_URL=${v1_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=${context_board_topics}~WORKER_HEARTBEAT_INTERVAL_MS=${context_worker_heartbeat_interval_ms}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex"
+  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_V1_API_URL=${v1_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=${context_board_topics}~WORKER_PREFERRED_REPOSITORY=${acceptance_repository}~WORKER_HEARTBEAT_INTERVAL_MS=${context_worker_heartbeat_interval_ms}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GIT_COMMAND_TIMEOUT_MS=300000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex"
   if [[ "${claim_mode}" == "enabled" ]]; then
     [[ "${target_revision}" == "${context_candidate_revision}" ]] || {
       echo "Enabled Context worker requires its exact candidate revision" >&2
@@ -1372,7 +1378,7 @@ gcloud run deploy jina-context-worker \
   --memory="${context_worker_memory}" \
   --timeout=300 \
   --scaling=auto \
-  --min-instances=3 \
+  --min-instances="${context_worker_min_instances}" \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(context_worker_environment "${serving_api_url}" "paused")" \
@@ -1509,7 +1515,7 @@ gcloud run deploy jina-context-worker \
   --memory="${context_worker_memory}" \
   --timeout=300 \
   --scaling=auto \
-  --min-instances=3 \
+  --min-instances="${context_worker_min_instances}" \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="${context_worker_env_vars}" \
@@ -1748,7 +1754,7 @@ API concurrency: ${api_concurrency}
 API PostgreSQL pool maximum (per pool): ${api_db_pool_max}
 API size: ${api_cpu} CPU / ${api_memory}
 Context worker memory: ${context_worker_memory}
-Context worker instances: 3-${context_worker_max_instances}
+Context worker instances: ${context_worker_min_instances}-${context_worker_max_instances}
 Task worker instances: 1-${task_worker_max_instances}
 Candidate tag: ${release_tag}
 Pre-deployment backup: ${context_backup_id}

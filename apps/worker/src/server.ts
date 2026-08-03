@@ -132,6 +132,7 @@ import {
   CAUSAL_GRAPH_TOPICS,
   SUPPORTED_WORKER_TOPICS,
   configuredWorkerClaimMode,
+  configuredWorkerPreferredRepository,
   configuredWorkerTopics,
   requiresBoardAgentExecutor,
   workerClaimTimeoutMs,
@@ -316,6 +317,7 @@ const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
 const token = requiredEnv("INTERNAL_API_TOKEN");
 const topics = configuredWorkerTopics(process.env.WORKER_TOPICS);
 const claimMode = configuredWorkerClaimMode(process.env.JINA_WORKER_CLAIM_MODE);
+const preferredRepository = configuredWorkerPreferredRepository(process.env.WORKER_PREFERRED_REPOSITORY);
 const workerRelease = configuredWorkerReleaseIdentity();
 const workerId = runtimeWorkerId({
   ...(process.env.WORKER_ID !== undefined ? { configured: process.env.WORKER_ID } : {}),
@@ -326,6 +328,7 @@ const workerApiTimeoutMs = positiveInt(process.env.WORKER_API_TIMEOUT_MS, 30_000
 const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 62 * 60_000);
 const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TIMEOUT_MS, 10 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
+const gitCommandTimeoutMs = positiveInt(process.env.CONTEXT_GIT_COMMAND_TIMEOUT_MS, 5 * 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
 const MAX_CRITIC_CONTRACT_ATTEMPTS = 4;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
@@ -482,7 +485,7 @@ async function poll(): Promise<void> {
 async function claim(): Promise<ClaimedWork | undefined> {
   const response = await apiRequest(
     "/internal/worker/claim",
-    { workerId, topics },
+    { workerId, topics, ...(preferredRepository ? { preferredRepository } : {}) },
     workerClaimTimeoutMs(topics, workerApiTimeoutMs, contextApiTimeoutMs)
   );
   if (response.status === 204) {
@@ -4100,13 +4103,14 @@ async function checkoutRepository(
         `https://github.com/${repository}.git`,
         directory
       ],
-      { env: environment, maxBuffer: 10 * 1024 * 1024 }
+      { env: environment, maxBuffer: 10 * 1024 * 1024, timeout: gitCommandTimeoutMs }
     );
     const remoteSource = pullRequestRef ? `refs/pull/${pullRequestRef[1]}/head` : `refs/heads/${ref}`;
     await execFileAsync("git", ["fetch", "origin", `+${remoteSource}:refs/remotes/origin/${ref}`], {
       cwd: directory,
       env: environment,
-      maxBuffer: 10 * 1024 * 1024
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: gitCommandTimeoutMs
     });
     const { stdout: remoteHead } = await execFileAsync("git", ["rev-parse", `refs/remotes/origin/${ref}`], {
       cwd: directory,
@@ -4121,13 +4125,15 @@ async function checkoutRepository(
       await execFileAsync("git", ["fetch", "origin", targetCommitSha], {
         cwd: directory,
         env: environment,
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: gitCommandTimeoutMs
       });
     }
     await execFileAsync("git", ["checkout", "--detach", targetCommitSha], {
       cwd: directory,
       env: environment,
-      maxBuffer: 10 * 1024 * 1024
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: gitCommandTimeoutMs
     });
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
       cwd: directory,
@@ -4141,6 +4147,9 @@ async function checkoutRepository(
     return { directory, commitSha };
   } catch (error) {
     await rm(directory, { recursive: true, force: true });
+    if (isRecord(error) && error.killed === true) {
+      throw new Error(`GitHub repository checkout timed out after ${gitCommandTimeoutMs}ms`, { cause: error });
+    }
     throw error;
   }
 }

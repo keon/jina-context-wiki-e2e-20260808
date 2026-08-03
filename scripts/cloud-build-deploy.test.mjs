@@ -112,10 +112,10 @@ test("candidate revisions pass full acceptance before production traffic changes
   assert.doesNotMatch(deployment, /route_latest_revision/);
 });
 
-test("mechanical deployment is an explicit opt-in and full acceptance remains the default", () => {
+test("mechanical deployment is the nonblocking default and full acceptance remains available", () => {
   assert.match(cloudBuild, /JINA_DEPLOYMENT_ACCEPTANCE_MODE=\$\{_JINA_DEPLOYMENT_ACCEPTANCE_MODE\}/);
-  assert.match(cloudBuild, /_JINA_DEPLOYMENT_ACCEPTANCE_MODE: full/);
-  assert.match(deployment, /deployment_acceptance_mode="\$\{JINA_DEPLOYMENT_ACCEPTANCE_MODE:-full\}"/);
+  assert.match(cloudBuild, /_JINA_DEPLOYMENT_ACCEPTANCE_MODE: mechanical/);
+  assert.match(deployment, /deployment_acceptance_mode="\$\{JINA_DEPLOYMENT_ACCEPTANCE_MODE:-mechanical\}"/);
   assert.match(deployment, /JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full or mechanical/);
   assert.match(
     deployment,
@@ -126,6 +126,14 @@ test("mechanical deployment is an explicit opt-in and full acceptance remains th
     deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight") <
       deployment.indexOf('if [[ "${deployment_acceptance_mode}" == "full" ]]')
   );
+});
+
+test("the polling Context pool keeps twenty real executors warm", () => {
+  assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MIN_INSTANCES: "20"/);
+  assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MAX_INSTANCES: "100"/);
+  assert.match(deployment, /context_worker_min_instances="\$\{JINA_CONTEXT_WORKER_MIN_INSTANCES:-20\}"/);
+  assert.match(deployment, /--min-instances="\$\{context_worker_min_instances\}"/);
+  assert.match(deployment, /CONTEXT_GIT_COMMAND_TIMEOUT_MS=300000/);
 });
 
 test("background workers are quiesced and Board leases are proven empty before schema mutation", () => {
@@ -223,7 +231,7 @@ test("coordinated releases hold one renewable durable lease and reject overlap b
   assert.match(productionPreflight, /grant select,insert,update on jina_runtime\.api_state/);
   assert.match(apiServer, /DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 \* 60 \* 1000/);
   assert.match(deployment, /JINA_CONTEXT_WORKER_LEASE_MS:-300000/);
-  assert.match(deployment, /JINA_CONTEXT_WORKER_MAX_INSTANCES:-20/);
+  assert.match(deployment, /JINA_CONTEXT_WORKER_MAX_INSTANCES:-100/);
   assert.equal(deployment.match(/--max-instances="\$\{context_worker_max_instances\}"/g)?.length, 2);
   assert.match(deployment, /JINA_TASK_WORKER_MAX_INSTANCES:-5/);
   assert.equal(deployment.match(/--max-instances="\$\{task_worker_max_instances\}"/g)?.length, 2);
@@ -778,6 +786,7 @@ test("production context worker claims exactly the Board topics", () => {
   assert.deepEqual(configured, BOARD_TOPICS);
   for (const topic of LEGACY_TOPICS) assert.doesNotMatch(deployment, new RegExp(topic));
   assert.match(deployment, /WORKER_TOPICS=\$\{context_board_topics\}/);
+  assert.match(deployment, /WORKER_PREFERRED_REPOSITORY=\$\{acceptance_repository\}/);
 });
 
 test("production Board agents are Daytona-only and do not receive the host model key", () => {
@@ -828,7 +837,7 @@ test("production storage, quota database, and PageIndex dependencies are explici
 
 test("API burst capacity preserves the aggregate PostgreSQL connection budget", () => {
   assert.match(cloudBuild, /_JINA_API_MAX_INSTANCES: "4"/);
-  assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MAX_INSTANCES: "20"/);
+  assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MAX_INSTANCES: "100"/);
   assert.match(cloudBuild, /_JINA_TASK_WORKER_MAX_INSTANCES: "5"/);
   assert.match(cloudBuild, /_JINA_API_DB_POOL_MAX: "3"/);
   assert.match(cloudBuild, /JINA_API_DB_POOL_MAX=\$\{_JINA_API_DB_POOL_MAX\}/);

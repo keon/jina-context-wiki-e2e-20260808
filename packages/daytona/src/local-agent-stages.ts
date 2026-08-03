@@ -43,6 +43,10 @@ export interface ResearchStagePlan {
   readonly assignments: readonly ResearchAssignment[];
 }
 
+export const MAX_RESEARCH_ASSIGNMENTS = 20;
+export const MAX_RESEARCH_FOCUS_PATHS_PER_ASSIGNMENT = 12;
+export const MAX_RESEARCH_QUESTIONS_PER_ASSIGNMENT = 3;
+
 export interface DocumentationPagePlan {
   readonly id: string;
   readonly path: string;
@@ -386,7 +390,7 @@ export const RESEARCH_STAGE_SCHEMA = {
     assignments: {
       type: "array",
       minItems: 1,
-      maxItems: 12,
+      maxItems: MAX_RESEARCH_ASSIGNMENTS,
       items: {
         type: "object",
         additionalProperties: false,
@@ -397,13 +401,13 @@ export const RESEARCH_STAGE_SCHEMA = {
           focusPaths: {
             type: "array",
             minItems: 1,
-            maxItems: 100,
+            maxItems: MAX_RESEARCH_FOCUS_PATHS_PER_ASSIGNMENT,
             items: { type: "string", minLength: 1, maxLength: 500 }
           },
           questions: {
             type: "array",
             minItems: 1,
-            maxItems: 30,
+            maxItems: MAX_RESEARCH_QUESTIONS_PER_ASSIGNMENT,
             items: { type: "string", minLength: 1, maxLength: 1_000 }
           },
           reason: { type: "string", minLength: 1, maxLength: 2_000 },
@@ -1027,8 +1031,12 @@ function retainedHistoryProviderUrl(value: unknown, source: RetainedHistorySigna
 export function parseResearchStagePlan(value: unknown): ResearchStagePlan {
   const input = object(value, "research plan");
   if (input.version !== 1) throw new Error("research plan version must be 1");
-  if (!Array.isArray(input.assignments) || input.assignments.length < 1 || input.assignments.length > 12) {
-    throw new Error("research plan must contain between one and twelve assignments");
+  if (
+    !Array.isArray(input.assignments) ||
+    input.assignments.length < 1 ||
+    input.assignments.length > MAX_RESEARCH_ASSIGNMENTS
+  ) {
+    throw new Error(`research plan must contain between one and ${MAX_RESEARCH_ASSIGNMENTS} assignments`);
   }
   const ids = new Set<string>();
   const historySignalIds = new Set<string>();
@@ -1043,6 +1051,16 @@ export function parseResearchStagePlan(value: unknown): ResearchStagePlan {
     const questions = texts(assignment.questions, `research plan assignments[${index}].questions`);
     if (focusPaths.length === 0 || questions.length === 0) {
       throw new Error(`research assignment ${id} requires focus paths and questions`);
+    }
+    if (focusPaths.length > MAX_RESEARCH_FOCUS_PATHS_PER_ASSIGNMENT) {
+      throw new Error(
+        `research assignment ${id} has ${focusPaths.length} focus paths; split independent concerns into bounded assignments with at most ${MAX_RESEARCH_FOCUS_PATHS_PER_ASSIGNMENT}`
+      );
+    }
+    if (questions.length > MAX_RESEARCH_QUESTIONS_PER_ASSIGNMENT) {
+      throw new Error(
+        `research assignment ${id} has ${questions.length} questions; split independent concerns into bounded assignments with at most ${MAX_RESEARCH_QUESTIONS_PER_ASSIGNMENT}`
+      );
     }
     const retainedHistorySignals = Array.isArray(assignment.retainedHistorySignals)
       ? assignment.retainedHistorySignals.map((entry, signalIndex): RetainedHistorySignal => {
@@ -2154,7 +2172,8 @@ export function researchPlannerPrompt(input: {
       ? `This is an incremental build. Read the complete prior published Context catalog and documents at ${input.priorContextPath}. Use them to target changed source/provider frontiers and to identify pages that may be retained, revised, extended, or retired; do not assume absence means retirement.`
       : "",
     `The host requires coverage of these deterministic repository areas: ${JSON.stringify(input.repositoryAreas)}. Every listed area with readable evidence must intersect at least one assignment focus path.`,
-    "First map those required areas plus every important entrypoint, major state or interface boundary, test concentration, operational surface, configuration boundary, recent change hotspot, and relevant issue/PR/commit signal. Then choose as many bounded, non-overlapping assignments as this repository actually needs—not a fixed documentation template. Use one for a genuinely simple repository and no more than twelve; the host schedules at most three concurrently.",
+    `First map those required areas plus every important entrypoint, major state or interface boundary, test concentration, operational surface, configuration boundary, recent change hotspot, and relevant issue/PR/commit signal. Then choose as many bounded, non-overlapping assignments as this repository actually needs—not a fixed documentation template. Use one for a genuinely simple repository and no more than ${MAX_RESEARCH_ASSIGNMENTS}. Independent assignments run concurrently, so never merge separately changeable concerns merely to reduce task count.`,
+    `Before returning, challenge every proposed assignment: could its concerns be researched, changed, tested, or operated independently? If so, split it. Each leaf must fit one focused agent run of roughly four to six minutes, use at most ${MAX_RESEARCH_FOCUS_PATHS_PER_ASSIGNMENT} concrete path prefixes and at most ${MAX_RESEARCH_QUESTIONS_PER_ASSIGNMENT} major questions. Prefer the narrowest shared directory prefix when all readable files under it belong to the same concern; do not enumerate dozens of sibling files. Assign each path, question, and retained history signal to the one best owner, then verify collectively complete coverage.`,
     "Assignments should collectively cover architecture and the major behaviors a maintainer would need to change, debug, extend, or operate. Every focusPaths value must be an exact repository-relative file/directory prefix present in the supplied manifest; `.` is allowed only when every readable file is at the repository root. Never include the checkout directory, a `repository/work` prefix, absolute paths, glob syntax, or conceptual labels; represent a cross-cutting scope by listing its concrete repository paths. Questions must be distinct, concrete maintenance tasks, not broad requests to describe a subsystem.",
     "For each assignment, return retainedHistorySignals as a typed relevance-scored inventory. Include only a captured commit, pull request, issue, or naturally addressable provider observation whose provider fact materially helps explain current design, a migration, regression, compatibility behavior, or an operational decision. Copy the exact captured natural providerUrl; never construct a URL from a number, SHA, title, branch, or nearby commit. Give the signal a stable repository-local ID, source, one factualPremise stated no more strongly than the captured record, an integer relevanceScore from 1 through 100, and an evidence-based relevanceReason. Use an empty array when no captured provider history is materially relevant.",
     "Use captured issue evidence when it is materially relevant, including issue records that explain a constraint or unresolved behavior. An issue statement proves that the issue said or requested something; it does not by itself prove the current implementation, causation, resolution, or that a later commit fixed it. Keep source-backed inferences explicitly separate from captured provider facts, and never invent an issue link.",

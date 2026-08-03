@@ -4,6 +4,7 @@ import {
   ContextQuotaExceededError,
   ContextQuotaInvariantError,
   ContextQuotaService,
+  DEFAULT_CONTEXT_QUOTA_LIMITS,
   InMemoryContextQuotaStore,
   contextQuotaLimits,
   type ContextQuotaLimits,
@@ -13,6 +14,10 @@ import {
 } from "./context-quotas.js";
 
 const start = Date.parse("2026-07-01T00:00:00.000Z");
+
+test("one tenant can fill the complete twenty-leaf research fan-out", () => {
+  assert.equal(DEFAULT_CONTEXT_QUOTA_LIMITS.maxActiveModelTasks, 20);
+});
 
 test("query and build admission are idempotent, rate limited, concurrent, and reset by time", async () => {
   const service = quotaService({

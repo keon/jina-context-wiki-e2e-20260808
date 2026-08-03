@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  applyCommand,
-  createEmptyBoardState,
-  findTask,
-  leaseNextOutboxMessage,
-  transitionBoardTask
-} from "@jina/board";
+import { applyCommand, createEmptyBoardState, findTask, transitionBoardTask } from "@jina/board";
 import { contextBoardTaskTypes } from "@jina/context-engine";
 import { parseGitHubWebhook, type GitHubWebhookEvent } from "@jina/github";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
@@ -72,9 +66,7 @@ test("push, PR opened/synchronize, and issue opened map to provider-idempotent b
   const pushSha = "1".repeat(40);
   const prHeadOne = "2".repeat(40);
   const prHeadTwo = "3".repeat(40);
-  let state = createEmptyBoardState();
-
-  const push = github(state, pushEvent(pushSha), "delivery-push");
+  const push = github(createEmptyBoardState(), pushEvent(pushSha), "delivery-push");
   assert.equal(push.outcome, "created");
   assertScope(push, {
     ref: "main",
@@ -83,9 +75,7 @@ test("push, PR opened/synchronize, and issue opened map to provider-idempotent b
     refSequence: 1,
     trigger: "push"
   });
-  state = push.state;
-
-  const opened = github(state, prEvent("pull_request.opened", 17, prHeadOne), "delivery-pr-open");
+  const opened = github(createEmptyBoardState(), prEvent("pull_request.opened", 17, prHeadOne), "delivery-pr-open");
   assert.equal(opened.outcome, "created");
   assertScope(opened, {
     ref: "pull/17/head",
@@ -94,21 +84,20 @@ test("push, PR opened/synchronize, and issue opened map to provider-idempotent b
     refSequence: 1,
     trigger: "pull_request"
   });
-  state = opened.state;
-
-  const synchronized = github(state, prEvent("pull_request.synchronize", 17, prHeadTwo), "delivery-pr-sync");
-  assert.equal(synchronized.outcome, "created");
-  assertScope(synchronized, {
+  const synchronized = github(opened.state, prEvent("pull_request.synchronize", 17, prHeadTwo), "delivery-pr-sync");
+  assert.equal(synchronized.outcome, "deferred");
+  assert.deepEqual(synchronized.scope, {
+    tenantId: TENANT,
+    repository: "omxyz/jina",
     ref: "pull/17/head",
     requestKey: `github:pull:omxyz/jina:17:${prHeadTwo}:delivery-pr-sync`,
     commitSha: prHeadTwo,
-    refSequence: 2,
+    githubInstallationId: INSTALLATION,
     trigger: "pull_request"
   });
-  state = synchronized.state;
 
   const issue = github(
-    state,
+    createEmptyBoardState(),
     { type: "issue.opened", issueNumber: 91, title: "Document recovery" },
     "delivery-issue",
     "trunk"
@@ -188,7 +177,8 @@ test("admission binds only a prior published release for the exact tenant, repos
       sha256: "3".repeat(64)
     }
   };
-  const incremental = admitContextBoardBuild(first.state, {
+  const completed = transitionBoardTask(first.state, first.build.buildTaskId, "done", LATER);
+  const incremental = admitContextBoardBuild(completed, {
     source: "manual",
     tenantId: TENANT,
     repository: REPOSITORY,
@@ -204,7 +194,7 @@ test("admission binds only a prior published release for the exact tenant, repos
 
   assert.throws(
     () =>
-      admitContextBoardBuild(first.state, {
+      admitContextBoardBuild(completed, {
         source: "manual",
         tenantId: TENANT,
         repository: REPOSITORY,
@@ -217,15 +207,14 @@ test("admission binds only a prior published release for the exact tenant, repos
   );
 });
 
-test("same-delivery replay is idempotent while a distinct-delivery rollback advances the ref", () => {
+test("same-delivery replay is idempotent while later commits coalesce behind the running build", () => {
   const oldHead = "5".repeat(40);
   const newHead = "6".repeat(40);
   const nextHead = "7".repeat(40);
   const old = github(createEmptyBoardState(), pushEvent(oldHead), "delivery-old");
   assert.equal(old.outcome, "created");
   const newer = github(old.state, pushEvent(newHead), "delivery-new");
-  assert.equal(newer.outcome, "created");
-  assert.equal(newer.scope.refSequence, 2);
+  assert.equal(newer.outcome, "deferred");
 
   const delayedReplay = github(newer.state, pushEvent(oldHead), "delivery-old");
   assert.equal(delayedReplay.outcome, "duplicate");
@@ -233,13 +222,13 @@ test("same-delivery replay is idempotent while a distinct-delivery rollback adva
   assert.strictEqual(delayedReplay.state, newer.state);
 
   const rollback = github(delayedReplay.state, pushEvent(oldHead), "delivery-rollback");
-  assert.equal(rollback.outcome, "created");
-  assert.equal(rollback.scope.refSequence, 3);
-  assert.notEqual(rollback.build.buildTaskId, old.build.buildTaskId);
+  assert.equal(rollback.outcome, "deferred");
 
   const next = github(rollback.state, pushEvent(nextHead), "delivery-next");
-  assert.equal(next.outcome, "created");
-  assert.equal(next.scope.refSequence, 4);
+  assert.equal(next.outcome, "deferred");
+  assert.equal(next.state.events.filter((event) => event.type === "context.build_followup_requested").length, 1);
+  const completed = transitionBoardTask(next.state, old.build.buildTaskId, "done", LATER);
+  assert.equal(latestContextBoardFollowup(completed, old.build.buildTaskId)?.commitSha, nextHead);
 
   const otherRef = github(next.state, pushEvent("8".repeat(40), "refs/heads/other"), "delivery-other-ref");
   assert.equal(otherRef.outcome, "ignored");
@@ -250,16 +239,14 @@ test("GitHub idempotency keys are independently scoped by repository and authori
   const headSha = "b".repeat(40);
   const repositoryA = "Example/Repo-A";
   const repositoryB = "example/repo-b";
-  let state = createEmptyBoardState();
 
-  const mainA = github(state, pushEvent(headSha), "delivery-main-a", "main", repositoryA);
+  const mainA = github(createEmptyBoardState(), pushEvent(headSha), "delivery-main-a", "main", repositoryA);
   assert.equal(mainA.outcome, "created");
   assert.equal(mainA.scope.requestKey, `github:push:example/repo-a:main:${headSha}:delivery-main-a`);
   assert.equal(mainA.scope.refSequence, 1);
-  state = mainA.state;
 
   const releaseA = github(
-    state,
+    createEmptyBoardState(),
     pushEvent(headSha, "refs/heads/release"),
     "delivery-release-a",
     "release",
@@ -268,16 +255,13 @@ test("GitHub idempotency keys are independently scoped by repository and authori
   assert.equal(releaseA.outcome, "created");
   assert.equal(releaseA.scope.requestKey, `github:push:example/repo-a:release:${headSha}:delivery-release-a`);
   assert.equal(releaseA.scope.refSequence, 1);
-  state = releaseA.state;
 
-  const mainB = github(state, pushEvent(headSha), "delivery-main-b", "main", repositoryB);
+  const mainB = github(createEmptyBoardState(), pushEvent(headSha), "delivery-main-b", "main", repositoryB);
   assert.equal(mainB.outcome, "created");
   assert.equal(mainB.scope.requestKey, `github:push:example/repo-b:main:${headSha}:delivery-main-b`);
   assert.equal(mainB.scope.refSequence, 1);
-  state = mainB.state;
-
   const issueA = github(
-    state,
+    createEmptyBoardState(),
     { type: "issue.opened", issueNumber: 12, title: "Repository A issue" },
     "delivery-issue-a",
     "main",
@@ -285,11 +269,10 @@ test("GitHub idempotency keys are independently scoped by repository and authori
   );
   assert.equal(issueA.outcome, "created");
   assert.equal(issueA.scope.requestKey, "github:issue:example/repo-a:12");
-  assert.equal(issueA.scope.refSequence, 2);
-  state = issueA.state;
+  assert.equal(issueA.scope.refSequence, 1);
 
   const issueB = github(
-    state,
+    createEmptyBoardState(),
     { type: "issue.opened", issueNumber: 12, title: "Repository B issue" },
     "delivery-issue-b",
     "main",
@@ -297,23 +280,31 @@ test("GitHub idempotency keys are independently scoped by repository and authori
   );
   assert.equal(issueB.outcome, "created");
   assert.equal(issueB.scope.requestKey, "github:issue:example/repo-b:12");
-  assert.equal(issueB.scope.refSequence, 2);
-  state = issueB.state;
+  assert.equal(issueB.scope.refSequence, 1);
 
-  const pullA = github(state, prEvent("pull_request.opened", 23, headSha), "delivery-pull-a", "main", repositoryA);
+  const pullA = github(
+    createEmptyBoardState(),
+    prEvent("pull_request.opened", 23, headSha),
+    "delivery-pull-a",
+    "main",
+    repositoryA
+  );
   assert.equal(pullA.outcome, "created");
   assert.equal(pullA.scope.requestKey, `github:pull:example/repo-a:23:${headSha}:delivery-pull-a`);
   assert.equal(pullA.scope.refSequence, 1);
-  state = pullA.state;
-
-  const pullB = github(state, prEvent("pull_request.opened", 23, headSha), "delivery-pull-b", "main", repositoryB);
+  const pullB = github(
+    createEmptyBoardState(),
+    prEvent("pull_request.opened", 23, headSha),
+    "delivery-pull-b",
+    "main",
+    repositoryB
+  );
   assert.equal(pullB.outcome, "created");
   assert.equal(pullB.scope.requestKey, `github:pull:example/repo-b:23:${headSha}:delivery-pull-b`);
   assert.equal(pullB.scope.refSequence, 1);
-  assert.equal(pullB.state.tasks.length, 7 * 3);
 });
 
-test("a distinct PR synchronize delivery advances even when the head returns to an earlier SHA", () => {
+test("PR synchronizations queue the newest head without canceling the running predecessor", () => {
   const firstHead = "c".repeat(40);
   const secondHead = "d".repeat(40);
   const opened = github(createEmptyBoardState(), prEvent("pull_request.opened", 41, firstHead), "delivery-pr-open");
@@ -325,147 +316,51 @@ test("a distinct PR synchronize delivery advances even when the head returns to 
     prEvent("pull_request.synchronize", 41, secondHead),
     "delivery-pr-synchronize"
   );
-  assert.equal(synchronized.outcome, "created");
-  assert.equal(synchronized.scope.refSequence, 2);
+  assert.equal(synchronized.outcome, "deferred");
+  assert.equal(findTask(synchronized.state, opened.build.buildTaskId)?.status, "triage");
 
   const replay = github(
     synchronized.state,
     prEvent("pull_request.synchronize", 41, secondHead),
     "delivery-pr-synchronize"
   );
-  assert.equal(replay.outcome, "duplicate");
-  assert.equal(replay.refSequence, 2);
+  assert.equal(replay.outcome, "deferred");
   assert.strictEqual(replay.state, synchronized.state);
 
   const rollback = github(replay.state, prEvent("pull_request.synchronize", 41, firstHead), "delivery-pr-rollback");
-  assert.equal(rollback.outcome, "created");
-  assert.equal(rollback.scope.refSequence, 3);
-  assert.notEqual(rollback.build.buildTaskId, opened.build.buildTaskId);
+  assert.equal(rollback.outcome, "deferred");
+  const completed = transitionBoardTask(rollback.state, opened.build.buildTaskId, "done", LATER);
+  assert.equal(latestContextBoardFollowup(completed, opened.build.buildTaskId)?.commitSha, firstHead);
 });
 
-test("a newer same-ref admission cancels older queued work while replay leaves the newest build active", () => {
-  const first = github(
-    createEmptyBoardState(),
-    prEvent("pull_request.opened", 52, "1".repeat(40)),
-    "delivery-pr-52-open"
-  );
+test("one repository keeps independent refs queued while coalescing each ref to its newest commit", () => {
+  const first = github(createEmptyBoardState(), pushEvent("1".repeat(40)), "delivery-main-first");
   assert.equal(first.outcome, "created");
 
-  const newer = github(first.state, prEvent("pull_request.synchronize", 52, "2".repeat(40)), "delivery-pr-52-sync");
-  assert.equal(newer.outcome, "created");
-  assert.deepEqual(newer.supersededBuildTaskIds, [first.build.buildTaskId]);
-  assert.equal(findTask(newer.state, first.build.buildTaskId)?.status, "canceled");
-  assert.equal(findTask(newer.state, first.build.graphTaskId)?.status, "canceled");
-  assert.equal(findTask(newer.state, first.build.snapshotTaskId)?.status, "canceled");
-  assert.equal(findTask(newer.state, newer.build.buildTaskId)?.status, "triage");
-  assert.equal(findTask(newer.state, newer.build.snapshotTaskId)?.status, "queued");
+  const main = github(first.state, pushEvent("2".repeat(40)), "delivery-main-second");
+  assert.equal(main.outcome, "deferred");
+  const pull = github(main.state, prEvent("pull_request.opened", 61, "3".repeat(40)), "delivery-pr-open");
+  assert.equal(pull.outcome, "deferred");
+  const newestMain = github(pull.state, pushEvent("4".repeat(40)), "delivery-main-newest");
+  assert.equal(newestMain.outcome, "deferred");
 
-  const staleMessage = newer.state.outbox.find((message) => message.taskId === first.build.snapshotTaskId);
-  assert.equal(staleMessage?.status, "dispatched");
+  const queued = newestMain.state.events.filter((event) => event.type === "context.build_followup_requested");
+  assert.equal(queued.length, 2);
+  assert.deepEqual(queued.map((event) => (event.payload?.followup as { ref: string; commitSha: string }).ref).sort(), [
+    "main",
+    "pull/61/head"
+  ]);
   assert.equal(
-    leaseNextOutboxMessage(newer.state, {
-      topics: ["run-context-input-snapshot"],
-      taskIds: [first.build.snapshotTaskId],
-      leaseId: "lease-stale",
-      writeFenceToken: "fence-stale",
-      now: LATER,
-      expiresAt: "2026-07-29T21:02:00.000Z"
-    }),
-    undefined
+    (
+      queued.find((event) => (event.payload?.followup as { ref: string }).ref === "main")?.payload?.followup as {
+        commitSha: string;
+      }
+    ).commitSha,
+    "4".repeat(40)
   );
-  const supersededEvent = newer.state.events.find(
-    (event) => event.taskId === first.build.buildTaskId && event.type === "context.build_superseded.failed"
-  );
-  assert.deepEqual(supersededEvent?.payload, {
-    actor: "context-build-admission",
-    failureCategory: "build_superseded",
-    reason: "superseded by a newer build for the same repository ref",
-    supersededByBuildTaskId: newer.build.buildTaskId
-  });
 
-  const replay = github(newer.state, prEvent("pull_request.synchronize", 52, "2".repeat(40)), "delivery-pr-52-sync");
-  assert.equal(replay.outcome, "duplicate");
-  assert.strictEqual(replay.state, newer.state);
-  assert.equal(findTask(replay.state, newer.build.buildTaskId)?.status, "triage");
-});
-
-test("a newer PR commit retires an active lease and preserves unrelated or terminal builds", () => {
-  const first = github(
-    createEmptyBoardState(),
-    prEvent("pull_request.opened", 61, "3".repeat(40)),
-    "delivery-pr-61-open"
-  );
-  assert.equal(first.outcome, "created");
-  const unrelated = github(first.state, prEvent("pull_request.opened", 62, "4".repeat(40)), "delivery-pr-62-open");
-  assert.equal(unrelated.outcome, "created");
-  const otherRepository = github(
-    unrelated.state,
-    prEvent("pull_request.opened", 61, "4".repeat(40)),
-    "delivery-pr-61-other-repository",
-    "main",
-    "example/other"
-  );
-  assert.equal(otherRepository.outcome, "created");
-  const otherTenant = github(
-    otherRepository.state,
-    prEvent("pull_request.opened", 61, "4".repeat(40)),
-    "delivery-pr-61-other-tenant",
-    "main",
-    REPOSITORY,
-    "tenant-2"
-  );
-  assert.equal(otherTenant.outcome, "created");
-  const leased = leaseNextOutboxMessage(otherTenant.state, {
-    topics: ["run-context-input-snapshot"],
-    taskIds: [first.build.snapshotTaskId],
-    leaseId: "lease-active",
-    writeFenceToken: "fence-active",
-    now: NOW,
-    expiresAt: "2026-07-29T21:02:00.000Z"
-  });
-  assert.ok(leased);
-  const active = transitionBoardTask(leased.state, first.build.snapshotTaskId, "in_progress", NOW);
-
-  const newer = github(active, prEvent("pull_request.synchronize", 61, "5".repeat(40)), "delivery-pr-61-sync");
-  assert.equal(newer.outcome, "created");
-  assert.equal(findTask(newer.state, first.build.snapshotTaskId)?.status, "canceled");
-  const retired = newer.state.outbox.find((message) => message.taskId === first.build.snapshotTaskId);
-  assert.equal(retired?.status, "dispatched");
-  assert.equal(retired?.dispatchedLeaseId, "lease-active");
-  assert.equal(findTask(newer.state, unrelated.build.buildTaskId)?.status, "triage");
-  assert.equal(findTask(newer.state, otherRepository.build.buildTaskId)?.status, "triage");
-  assert.equal(findTask(newer.state, otherTenant.build.buildTaskId)?.status, "triage");
-
-  const newest = github(newer.state, prEvent("pull_request.synchronize", 61, "6".repeat(40)), "delivery-pr-61-newest");
-  assert.equal(newest.outcome, "created");
-  assert.deepEqual(newest.supersededBuildTaskIds, [newer.build.buildTaskId]);
-  assert.equal(findTask(newest.state, first.build.buildTaskId)?.status, "canceled");
-  assert.equal(findTask(newest.state, unrelated.build.buildTaskId)?.status, "triage");
-  assert.equal(findTask(newest.state, otherRepository.build.buildTaskId)?.status, "triage");
-  assert.equal(findTask(newest.state, otherTenant.build.buildTaskId)?.status, "triage");
-  assert.equal(findTask(newest.state, newest.build.buildTaskId)?.status, "triage");
-});
-
-test("same-commit and non-PR same-ref admissions supersede older queued builds", () => {
-  const head = "7".repeat(40);
-  const opened = github(createEmptyBoardState(), prEvent("pull_request.opened", 71, head), "delivery-pr-71-open");
-  assert.equal(opened.outcome, "created");
-  const sameCommit = github(opened.state, prEvent("pull_request.synchronize", 71, head), "delivery-pr-71-same-commit");
-  assert.equal(sameCommit.outcome, "created");
-  assert.deepEqual(sameCommit.supersededBuildTaskIds, [opened.build.buildTaskId]);
-  assert.equal(findTask(sameCommit.state, opened.build.buildTaskId)?.status, "canceled");
-
-  const pushed = github(sameCommit.state, pushEvent("8".repeat(40)), "delivery-push-newer");
-  assert.equal(pushed.outcome, "created");
-  assert.deepEqual(pushed.supersededBuildTaskIds, []);
-  assert.equal(findTask(pushed.state, opened.build.buildTaskId)?.status, "canceled");
-  assert.equal(findTask(pushed.state, sameCommit.build.buildTaskId)?.status, "triage");
-
-  const newerPush = github(pushed.state, pushEvent("9".repeat(40)), "delivery-push-newest");
-  assert.equal(newerPush.outcome, "created");
-  assert.deepEqual(newerPush.supersededBuildTaskIds, [pushed.build.buildTaskId]);
-  assert.equal(findTask(newerPush.state, pushed.build.buildTaskId)?.status, "canceled");
-  assert.equal(findTask(newerPush.state, newerPush.build.buildTaskId)?.status, "triage");
+  const completed = transitionBoardTask(newestMain.state, first.build.buildTaskId, "done", LATER);
+  assert.equal(latestContextBoardFollowup(completed, first.build.buildTaskId)?.commitSha, "3".repeat(40));
 });
 
 test("an invested default-ref build retains only the newest follow-up until it becomes terminal", () => {
@@ -559,6 +454,16 @@ test("a recoverable failed build retains its follow-up until checkpoint repair p
   );
 });
 
+test("an unrecoverable failed build releases its queued successor instead of deadlocking the repository", () => {
+  const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-terminal-first");
+  assert.equal(first.outcome, "created");
+  const deferred = github(first.state, pushEvent("8".repeat(40)), "delivery-terminal-followup");
+  assert.equal(deferred.outcome, "deferred");
+  const failed = transitionBoardTask(deferred.state, first.build.buildTaskId, "failed", LATER);
+
+  assert.equal(latestContextBoardFollowup(failed, first.build.buildTaskId)?.commitSha, "8".repeat(40));
+});
+
 test("a deadline-interrupted build retains its follow-up even though its resume anchor is canceled", () => {
   const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-deadline-first");
   assert.equal(first.outcome, "created");
@@ -586,7 +491,7 @@ test("a deadline-interrupted build retains its follow-up even though its resume 
   assert.equal(newer.state.tasks.filter((task) => task.type === contextBoardTaskTypes.build).length, 1);
 });
 
-test("a stale deferred follow-up cannot supersede a newer ref sequence", () => {
+test("a new delivery after predecessor completion stays queued until promotion binds the published seed", () => {
   const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-stale-first");
   assert.equal(first.outcome, "created");
   const active = transitionBoardTask(first.state, first.build.buildTaskId, "in_progress", NOW);
@@ -595,11 +500,13 @@ test("a stale deferred follow-up cannot supersede a newer ref sequence", () => {
 
   const completed = transitionBoardTask(deferred.state, first.build.buildTaskId, "done", LATER);
   const newer = github(completed, pushEvent("9".repeat(40)), "delivery-newer-build");
-  assert.equal(newer.outcome, "created");
-  assert.equal(newer.scope.refSequence, 2);
+  assert.equal(newer.outcome, "deferred");
 
-  assert.equal(latestContextBoardFollowup(newer.state, first.build.buildTaskId), undefined);
-  assert.equal(findTask(newer.state, newer.build.buildTaskId)?.status, "triage");
+  const followup = latestContextBoardFollowup(newer.state, first.build.buildTaskId);
+  assert.equal(followup?.commitSha, "9".repeat(40));
+  const promoted = admitContextBoardBuild(newer.state, { source: "followup", ...followup, now: LATER });
+  assert.equal(promoted.outcome, "created");
+  assert.equal(promoted.scope.refSequence, 2);
 });
 
 test("comments, reviews, labels, edits, closes, deleted pushes, and tag pushes create no Context build", () => {

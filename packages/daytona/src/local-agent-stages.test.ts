@@ -9,6 +9,8 @@ import {
   documentationPlannerPrompt,
   documentationPlannerRepairPrompt,
   documentationWriterPrompt,
+  MAX_RESEARCH_FOCUS_PATHS_PER_ASSIGNMENT,
+  MAX_RESEARCH_QUESTIONS_PER_ASSIGNMENT,
   parseCitationAuditStageResult,
   parseCriticStageResult,
   parseDocumentationStagePlan,
@@ -259,6 +261,41 @@ test("research plans retain typed relevance-scored provider history without reco
   assert.match(plannerPrompt, /never construct a URL/);
   assert.match(plannerPrompt, /Use captured issue evidence/);
   assert.match(plannerPrompt, /does not by itself prove the current implementation, causation, resolution/);
+  assert.match(plannerPrompt, /could its concerns be researched, changed, tested, or operated independently/);
+  assert.match(plannerPrompt, /four to six minutes/);
+
+  assert.throws(
+    () =>
+      parseResearchStagePlan({
+        ...plan,
+        assignments: [
+          {
+            ...plan.assignments[0],
+            focusPaths: Array.from(
+              { length: MAX_RESEARCH_FOCUS_PATHS_PER_ASSIGNMENT + 1 },
+              (_, index) => `area-${index}`
+            )
+          }
+        ]
+      }),
+    /split independent concerns into bounded assignments/
+  );
+  assert.throws(
+    () =>
+      parseResearchStagePlan({
+        ...plan,
+        assignments: [
+          {
+            ...plan.assignments[0],
+            questions: Array.from(
+              { length: MAX_RESEARCH_QUESTIONS_PER_ASSIGNMENT + 1 },
+              (_, index) => `How does boundary ${index} work?`
+            )
+          }
+        ]
+      }),
+    /split independent concerns into bounded assignments/
+  );
 
   const workerPrompt = researchWorkerPrompt({
     repository: "example/service",

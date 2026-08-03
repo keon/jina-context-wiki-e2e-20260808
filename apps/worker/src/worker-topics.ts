@@ -35,6 +35,15 @@ export function configuredWorkerClaimMode(value: string | undefined): WorkerClai
   return mode;
 }
 
+export function configuredWorkerPreferredRepository(value: string | undefined): string | undefined {
+  const repository = value?.trim();
+  if (!repository) return undefined;
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) {
+    throw new Error("WORKER_PREFERRED_REPOSITORY must be an owner/repository name");
+  }
+  return repository;
+}
+
 export function configuredWorkerTopics(value: string | undefined): WorkerTopic[] {
   const requested = (value ?? "run-review")
     .split(/[|,]/)

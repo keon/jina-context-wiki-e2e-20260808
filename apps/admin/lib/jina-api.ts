@@ -83,6 +83,8 @@ export interface AdminContextBuild {
     readonly requestedAt: string;
     readonly reason: string;
   };
+  readonly queuedFollowups?: readonly NonNullable<AdminContextBuild["queuedFollowup"]>[];
+  readonly queuedFollowupCount?: number;
   readonly status: "active" | "completed" | "failed";
   readonly failureCode?: string;
   readonly failureReason?: string;
@@ -105,6 +107,8 @@ export interface AdminContextBuildProgress {
   readonly activeModelReservedTokens?: number;
   readonly remainingModelTokens?: number;
   readonly queuedFollowup?: AdminContextBuild["queuedFollowup"];
+  readonly queuedFollowups?: AdminContextBuild["queuedFollowups"];
+  readonly queuedFollowupCount?: number;
   readonly failureCode?: string;
   readonly failureReason?: string;
   readonly stages: readonly AdminContextBuildStage[];

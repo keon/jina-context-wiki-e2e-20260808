@@ -181,6 +181,7 @@ export default async function ContextAdminPage({
                   (stage) => stage.status === "in_progress" || stage.status === "queued" || stage.status === "triage"
                 );
                 const queuedFollowup = progress?.queuedFollowup ?? build.queuedFollowup;
+                const queuedFollowupCount = progress?.queuedFollowupCount ?? build.queuedFollowupCount ?? 0;
                 return (
                   <tr key={build.id}>
                     <td>{build.repository}</td>
@@ -199,6 +200,7 @@ export default async function ContextAdminPage({
                         <span className="muted">
                           Next: {queuedFollowup.ref}
                           {queuedFollowup.commitSha ? `@${queuedFollowup.commitSha.slice(0, 10)}` : ""} after this build
+                          {queuedFollowupCount > 1 ? ` (+${queuedFollowupCount - 1} more)` : ""}
                         </span>
                       ) : null}
                     </td>

@@ -4,6 +4,7 @@ import {
   CAUSAL_GRAPH_TOPICS,
   CONTEXT_BOARD_TOPICS,
   configuredWorkerClaimMode,
+  configuredWorkerPreferredRepository,
   configuredWorkerTopics,
   requiresBoardAgentExecutor,
   workerClaimTimeoutMs
@@ -14,6 +15,12 @@ test("worker claim mode defaults enabled and accepts only the explicit paused dr
   assert.equal(configuredWorkerClaimMode(" enabled "), "enabled");
   assert.equal(configuredWorkerClaimMode("paused"), "paused");
   assert.throws(() => configuredWorkerClaimMode("disabled"), /must be enabled or paused/);
+});
+
+test("worker claim preference accepts only a repository identity", () => {
+  assert.equal(configuredWorkerPreferredRepository(undefined), undefined);
+  assert.equal(configuredWorkerPreferredRepository(" omxyz/jina "), "omxyz/jina");
+  assert.throws(() => configuredWorkerPreferredRepository("omxyz"), /owner\/repository/);
 });
 
 const LEGACY_CONTEXT_TOPICS = ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"] as const;

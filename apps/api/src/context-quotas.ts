@@ -33,7 +33,7 @@ export const DEFAULT_CONTEXT_QUOTA_LIMITS: ContextQuotaLimits = Object.freeze({
   buildRequestsPerWindow: 30,
   buildWindowMs: 60 * 60_000,
   maxActiveBuilds: 4,
-  maxActiveModelTasks: 8,
+  maxActiveModelTasks: 20,
   artifactStorageBytes: 50 * 1024 * 1024 * 1024,
   monthlyModelRequests: 20_000,
   monthlyModelTokens: 500_000_000,

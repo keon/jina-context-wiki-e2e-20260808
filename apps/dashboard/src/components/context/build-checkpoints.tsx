@@ -32,6 +32,7 @@ export function BuildCheckpoints({
   const consumedExecutionSeconds = currentProgress?.consumedExecutionSeconds ?? build.consumedExecutionSeconds;
   const remainingExecutionSeconds = currentProgress?.remainingExecutionSeconds ?? build.remainingExecutionSeconds;
   const queuedFollowup = currentProgress?.queuedFollowup ?? build.queuedFollowup;
+  const queuedFollowupCount = currentProgress?.queuedFollowupCount ?? build.queuedFollowupCount ?? 0;
   return (
     <section className="context-operations-panel" aria-label="Context build checkpoints">
       <header className="context-panel-heading">
@@ -63,7 +64,7 @@ export function BuildCheckpoints({
       </p>
       {queuedFollowup ? (
         <p className="context-alert">
-          Newest queued update: <code>{queuedFollowup.ref}</code>
+          Next queued update: <code>{queuedFollowup.ref}</code>
           {queuedFollowup.commitSha ? (
             <>
               {" "}
@@ -72,6 +73,9 @@ export function BuildCheckpoints({
           ) : null}
           {" — "}
           {queuedFollowup.reason}
+          {queuedFollowupCount > 1
+            ? ` ${queuedFollowupCount - 1} more update${queuedFollowupCount === 2 ? "" : "s"} queued.`
+            : ""}
         </p>
       ) : null}
       <p className={`context-alert ${status === "failed" || invalidPages > 0 ? "danger" : ""}`}>

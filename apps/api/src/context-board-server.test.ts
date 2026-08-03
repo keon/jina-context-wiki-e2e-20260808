@@ -1241,7 +1241,7 @@ test("new build admission reconciles terminal and orphaned quota reservations ag
   }
 });
 
-test("duplicate PR delivery retries model-quota settlement after durable supersession", async () => {
+test("a newer PR delivery queues behind leased work without settling or canceling its predecessor", async () => {
   const tenantId = "tenant-supersession-settlement-retry";
   const repository = "omxyz/supersession-settlement-retry";
   const webhookSecret = "supersession-settlement-retry-secret";
@@ -1317,23 +1317,31 @@ test("duplicate PR delivery retries model-quota settlement after durable superse
 
   try {
     const first = await deliver();
-    assert.equal(first.status, 500, await first.text());
+    assert.equal(first.status, 202, await first.text());
     const committed = stateStore.current().intakeState.board;
-    assert.equal(committed.tasks.find((task) => task.id === old.buildTaskId)?.status, "canceled");
-    assert.ok(
+    assert.notEqual(committed.tasks.find((task) => task.id === old.buildTaskId)?.status, "canceled");
+    assert.equal(
       committed.tasks.some(
         (task) => task.type === contextBoardTaskTypes.build && task.metadata.commitSha === secondHead
+      ),
+      false
+    );
+    assert.ok(
+      committed.events.some(
+        (event) =>
+          event.type === "context.build_followup_requested" &&
+          (event.payload?.followup as { commitSha?: string } | undefined)?.commitSha === secondHead
       )
     );
     assert.equal((await quotaService.snapshot(tenantId)).active.modelTasks, 1);
-    assert.equal(quotaService.failedSettlementAttempts, 1);
+    assert.equal(quotaService.failedSettlementAttempts, 0);
 
     const duplicate = await deliver();
     const duplicateBody = (await duplicate.json()) as { duplicate?: boolean };
     assert.equal(duplicate.status, 200);
     assert.equal(duplicateBody.duplicate, true);
-    assert.equal((await quotaService.snapshot(tenantId)).active.modelTasks, 0);
-    assert.equal(quotaService.successfulSettlementAttempts, 1);
+    assert.equal((await quotaService.snapshot(tenantId)).active.modelTasks, 1);
+    assert.equal(quotaService.successfulSettlementAttempts, 0);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
@@ -1440,6 +1448,133 @@ test("a quota-denied model task does not block later same-tenant non-model work"
     assert.equal(quota.active.modelTasks, 1);
     assert.equal(quota.monthlyModel.requests, 1);
     assert.equal(quota.denials.active_model_tasks?.count, 2);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("a context worker can prefer release-acceptance repository work without excluding normal work", async () => {
+  const tenantId = "tenant-preferred-repository";
+  const ordinaryTaskId = entityId<"task">("ordinary-repository-task");
+  const acceptanceTaskId = entityId<"task">("acceptance-repository-task");
+  const initialBoard = quotaClaimBoard([
+    {
+      tenantId,
+      taskId: ordinaryTaskId,
+      type: contextBoardTaskTypes.snapshot,
+      topic: contextBoardTopics.snapshot,
+      repository: "acme/ordinary"
+    },
+    {
+      tenantId,
+      taskId: acceptanceTaskId,
+      type: contextBoardTaskTypes.snapshot,
+      topic: contextBoardTopics.snapshot,
+      repository: "acme/release-fixture"
+    }
+  ]);
+  const store = mutableStateStore({
+    intakeState: { board: initialBoard, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const internalApiToken = "preferred-repository-token";
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore: store,
+    internalApiToken
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const preferred = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({
+        workerId: "preferred-repository-worker",
+        topics: [contextBoardTopics.snapshot],
+        preferredRepository: "acme/release-fixture"
+      })
+    });
+    assert.equal(preferred.status, 200);
+    assert.equal(((await preferred.json()) as TestClaim).task.id, acceptanceTaskId);
+
+    const fallback = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({
+        workerId: "preferred-repository-worker",
+        topics: [contextBoardTopics.snapshot],
+        preferredRepository: "acme/release-fixture"
+      })
+    });
+    assert.equal(fallback.status, 200);
+    assert.equal(((await fallback.json()) as TestClaim).task.id, ordinaryTaskId);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("snapshot claims serialize checkout work per repository without blocking other repositories", async () => {
+  const tenantId = "tenant-snapshot-repository-fairness";
+  const firstRepositoryTaskId = entityId<"task">("snapshot-fairness-first");
+  const queuedSameRepositoryTaskId = entityId<"task">("snapshot-fairness-same-repository");
+  const otherRepositoryTaskId = entityId<"task">("snapshot-fairness-other-repository");
+  const initialBoard = quotaClaimBoard([
+    {
+      tenantId,
+      taskId: firstRepositoryTaskId,
+      type: contextBoardTaskTypes.snapshot,
+      topic: contextBoardTopics.snapshot,
+      repository: "acme/large-repository"
+    },
+    {
+      tenantId,
+      taskId: queuedSameRepositoryTaskId,
+      type: contextBoardTaskTypes.snapshot,
+      topic: contextBoardTopics.snapshot,
+      repository: "acme/large-repository"
+    },
+    {
+      tenantId,
+      taskId: otherRepositoryTaskId,
+      type: contextBoardTaskTypes.snapshot,
+      topic: contextBoardTopics.snapshot,
+      repository: "acme/other-repository"
+    }
+  ]);
+  const store = mutableStateStore({
+    intakeState: { board: initialBoard, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const internalApiToken = "snapshot-fairness-token";
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore: store,
+    internalApiToken
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const claim = async (workerId: string): Promise<TestClaim> => {
+    const response = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({ workerId, topics: [contextBoardTopics.snapshot] })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    return JSON.parse(text) as TestClaim;
+  };
+
+  try {
+    assert.equal((await claim("snapshot-fairness-worker-1")).task.id, firstRepositoryTaskId);
+    assert.equal((await claim("snapshot-fairness-worker-2")).task.id, otherRepositoryTaskId);
+    const persisted = store.current().intakeState.board;
+    assert.equal(persisted.tasks.find((task) => task.id === queuedSameRepositoryTaskId)?.status, "queued");
+    assert.equal(persisted.outbox.find((message) => message.taskId === queuedSameRepositoryTaskId)?.status, "pending");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
@@ -3188,6 +3323,7 @@ function quotaClaimBoard(
     readonly taskId: TaskId;
     readonly type: typeof contextBoardTaskTypes.researchPlan | typeof contextBoardTaskTypes.snapshot;
     readonly topic: typeof contextBoardTopics.researchPlan | typeof contextBoardTopics.snapshot;
+    readonly repository?: string;
   }[]
 ): BoardState {
   let board = createEmptyBoardState();
@@ -3200,7 +3336,7 @@ function quotaClaimBoard(
       assigneeRole: "context-agent",
       dedupeKey: `quota-claim:${task.tenantId}:${task.taskId}`,
       dispatchTopic: task.topic,
-      metadata: contextMetadata(task.tenantId, "omxyz/jina", `quota-claim-build-${task.tenantId}`)
+      metadata: contextMetadata(task.tenantId, task.repository ?? "omxyz/jina", `quota-claim-build-${task.tenantId}`)
     });
   }
   return reduceBoard(board, NOW);

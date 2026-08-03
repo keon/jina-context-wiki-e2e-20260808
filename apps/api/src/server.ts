@@ -1763,6 +1763,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               )
             }
           : {}),
+        ...publicContextBuildQueuedFollowup(intakeState.board, build.id),
         ...publicContextBuildFailure(intakeState.board, build),
         stages: publicContextBoardStages(intakeState.board, build.id, phaseCheckpoints),
         pages: publicContextBoardCheckpointPages(intakeState.board, build.id),
@@ -2411,7 +2412,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (admission.outcome !== "created") {
       intakeState = { ...intakeState, board: admission.state };
       if (admission.outcome === "deferred") {
-        logger.info("deferred Context build behind the active repository ref build", {
+        logger.info("deferred Context build behind the active repository build", {
           event: "context.build_followup_deferred",
           tenantId,
           repository,
@@ -2935,6 +2936,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const topics = body.topics.map((topic) => requiredString(topic, "topic"));
     const unsupported = topics.filter((topic) => !WORKER_TOPICS.includes(topic as (typeof WORKER_TOPICS)[number]));
     if (unsupported.length) throw invalidRequest(`unsupported worker topics: ${unsupported.join(", ")}`);
+    const preferredRepository =
+      body.preferredRepository === undefined
+        ? undefined
+        : requiredString(body.preferredRepository, "preferredRepository");
+    if (preferredRepository && !/^[\w.-]+\/[\w.-]+$/.test(preferredRepository)) {
+      throw invalidRequest("preferredRepository must be an owner/repository name");
+    }
     const workerRelease = workerReleaseGuard(body);
     const claimRelease = workerRelease ? { ...workerRelease, requireClaimAdmission: true as const } : undefined;
     requireWorkerServiceForTopics(workerRelease, topics);
@@ -2980,12 +2988,42 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             const task = findTask(intakeState.board, message.taskId);
             return task && claimTenantIds.includes(String(task.metadata.tenantId)) ? [message.id] : [];
           });
+          if (preferredRepository) {
+            candidateMessageIds.sort((leftId, rightId) => {
+              const left = findOutboxMessage(intakeState.board, leftId);
+              const right = findOutboxMessage(intakeState.board, rightId);
+              const leftTask = left ? findTask(intakeState.board, left.taskId) : undefined;
+              const rightTask = right ? findTask(intakeState.board, right.taskId) : undefined;
+              return (
+                Number(rightTask?.metadata.repository === preferredRepository) -
+                Number(leftTask?.metadata.repository === preferredRepository)
+              );
+            });
+          }
           const quotaDeniedTenantIds = new Set<string>();
           let quotaDenial: ContextQuotaExceededError | undefined;
           for (const messageId of candidateMessageIds) {
             const candidate = findOutboxMessage(intakeState.board, messageId);
             const candidateTask = candidate ? findTask(intakeState.board, candidate.taskId) : undefined;
             if (!candidate || !candidateTask || !topics.includes(candidate.topic)) continue;
+            if (
+              candidate.topic === contextBoardTopics.snapshot &&
+              intakeState.board.outbox.some((message) => {
+                if (
+                  message.id === candidate.id ||
+                  message.topic !== contextBoardTopics.snapshot ||
+                  message.status !== "leased" ||
+                  !message.leaseExpiresAt ||
+                  message.leaseExpiresAt <= claimNow
+                ) {
+                  return false;
+                }
+                const activeTask = findTask(intakeState.board, message.taskId);
+                return activeTask?.metadata.repository === candidateTask.metadata.repository;
+              })
+            ) {
+              continue;
+            }
             const candidateUsesContextQuota = CONTEXT_QUOTA_MODEL_TOPICS.has(candidate.topic);
             const candidateTenantId = requiredString(candidateTask.metadata.tenantId, "task tenantId");
 
@@ -4075,40 +4113,56 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
 
 function publicContextBuildQueuedFollowup(state: BoardState, buildTaskId: TaskId) {
   const build = state.tasks.find((task) => task.id === buildTaskId && task.type === contextBoardTaskTypes.build);
-  const event = [...state.events]
-    .reverse()
-    .find((candidate) => candidate.taskId === buildTaskId && candidate.type === "context.build_followup_requested");
-  const followup = isRecord(event?.payload?.followup) ? event.payload.followup : undefined;
-  if (!event || !followup) return {};
-  const tenantId = optionalString(followup.tenantId);
-  const requestKey = optionalString(followup.requestKey);
-  const repository = optionalString(followup.repository);
-  const ref = optionalString(followup.ref);
-  const commitSha = optionalString(followup.commitSha);
-  const trigger = optionalString(followup.trigger);
-  if (!tenantId || !requestKey || !repository || !ref || !trigger) return {};
-  if (
-    state.tasks.some(
-      (task) =>
-        task.type === contextBoardTaskTypes.build &&
-        task.metadata.tenantId === tenantId &&
-        task.metadata.requestKey === requestKey
-    )
-  ) {
-    return {};
-  }
+  const tenantId = optionalString(build?.metadata.tenantId);
+  const repository = optionalString(build?.metadata.repository);
+  if (!build || !tenantId || !repository) return {};
+  const queuedFollowups = state.events
+    .filter((event) => event.type === "context.build_followup_requested")
+    .flatMap((event) => {
+      const followup = isRecord(event.payload?.followup) ? event.payload.followup : undefined;
+      const queuedTenantId = optionalString(followup?.tenantId);
+      const requestKey = optionalString(followup?.requestKey);
+      const queuedRepository = optionalString(followup?.repository);
+      const ref = optionalString(followup?.ref);
+      const commitSha = optionalString(followup?.commitSha);
+      const trigger = optionalString(followup?.trigger);
+      if (
+        queuedTenantId !== tenantId ||
+        queuedRepository !== repository ||
+        !requestKey ||
+        !ref ||
+        !trigger ||
+        state.tasks.some(
+          (task) =>
+            task.type === contextBoardTaskTypes.build &&
+            task.metadata.tenantId === queuedTenantId &&
+            task.metadata.requestKey === requestKey
+        )
+      ) {
+        return [];
+      }
+      return [
+        {
+          repository: queuedRepository,
+          ref,
+          ...(commitSha ? { commitSha } : {}),
+          trigger,
+          requestedAt: event.at,
+          reason:
+            build.status === "failed"
+              ? "Waiting for the recoverable failed build to resume from its retained checkpoints and publish."
+              : "Waiting for the active build to finish so its verified checkpoints become the incremental seed.",
+          sequence: event.seq
+        }
+      ];
+    })
+    .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt) || left.sequence - right.sequence)
+    .map(({ sequence: _sequence, ...followup }) => followup);
+  if (queuedFollowups.length === 0) return {};
   return {
-    queuedFollowup: {
-      repository,
-      ref,
-      ...(commitSha ? { commitSha } : {}),
-      trigger,
-      requestedAt: event.at,
-      reason:
-        build?.status === "failed"
-          ? "Waiting for the recoverable failed build to resume from its retained checkpoints and publish."
-          : "Waiting for the active build to finish so its verified checkpoints become the incremental seed."
-    }
+    queuedFollowup: queuedFollowups[0],
+    queuedFollowups,
+    queuedFollowupCount: queuedFollowups.length
   };
 }
 

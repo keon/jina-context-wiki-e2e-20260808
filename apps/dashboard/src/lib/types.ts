@@ -216,6 +216,8 @@ export interface ContextBuildSummary {
   readonly activeModelReservedTokens?: number;
   readonly remainingModelTokens?: number;
   readonly queuedFollowup?: ContextQueuedFollowup;
+  readonly queuedFollowups?: readonly ContextQueuedFollowup[];
+  readonly queuedFollowupCount?: number;
   readonly status: "active" | "completed" | "failed";
   readonly failureCode?: string;
   readonly failureReason?: string;
@@ -292,6 +294,8 @@ export interface ContextBuildProgressResponse {
   readonly activeModelReservedTokens?: number;
   readonly remainingModelTokens?: number;
   readonly queuedFollowup?: ContextQueuedFollowup;
+  readonly queuedFollowups?: readonly ContextQueuedFollowup[];
+  readonly queuedFollowupCount?: number;
   readonly failureCode?: string;
   readonly failureReason?: string;
   readonly stages: readonly ContextBuildStage[];

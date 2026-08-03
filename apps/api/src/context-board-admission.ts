@@ -152,7 +152,7 @@ export function admitContextBoardBuild(
   const deferredReplay = input.source === "followup" ? undefined : existingDeferredRequest(state, tenantId, requestKey);
   if (deferredReplay) {
     const requestedScope = withoutPriorRelease(scopeWithoutSequence);
-    if (JSON.stringify(deferredReplay.scope) !== JSON.stringify(requestedScope)) {
+    if (followupFingerprint(deferredReplay.scope) !== followupFingerprint(requestedScope)) {
       throw new Error("context build request key collides with a different deferred scope");
     }
     return {
@@ -164,48 +164,54 @@ export function admitContextBoardBuild(
     };
   }
 
-  if (scopeWithoutSequence.trigger !== "pull_request") {
-    const active =
-      newestActiveRefBuild(state, scopeWithoutSequence) ??
-      newestRecoverableRefBuild(state, scopeWithoutSequence, input.now);
-    if (active) {
-      const scope = withoutPriorRelease(scopeWithoutSequence);
-      // A follow-up is a coalescing slot, not an append-only queue. Only the
-      // newest revision for this repository ref can be useful after the active
-      // build finishes; retaining every intermediate push makes the durable
-      // Board snapshot grow without bound.
-      const coalescedState: BoardState = {
-        ...state,
-        events: state.events.filter(
-          (event) => event.taskId !== active.id || event.type !== "context.build_followup_requested"
-        )
-      };
-      const deferred = applyCommand(
-        coalescedState,
-        {
-          command: "CommentTask",
-          taskId: active.id,
-          eventType: "context.build_followup_requested",
-          payload: {
-            followup: scope,
-            repository: scope.repository,
-            ref: scope.ref,
-            ...(scope.commitSha ? { commitSha: scope.commitSha } : {}),
-            trigger: scope.trigger,
-            reason: "Queued behind the active build so verified checkpoints are not discarded."
-          }
-        },
-        { actor: { type: "system", id: "context-build-admission" }, now: input.now }
-      );
-      if (!deferred.accepted) throw new Error("failed to defer the next Context build");
-      return {
-        state: deferred.state,
-        outcome: "deferred",
-        activeBuildTaskId: active.id,
-        requestKey,
-        scope
-      };
-    }
+  const active =
+    oldestActiveRepositoryBuild(state, scopeWithoutSequence) ??
+    newestRecoverableRepositoryBuild(state, scopeWithoutSequence, input.now) ??
+    (input.source === "followup" ? undefined : queuedRepositoryAnchor(state, scopeWithoutSequence));
+  if (active) {
+    const scope = withoutPriorRelease(scopeWithoutSequence);
+    // Keep one newest queued revision per repository ref. This bounds push
+    // bursts without allowing a main-branch update to erase an independent PR
+    // or release-branch build waiting behind the same repository predecessor.
+    const coalescedState: BoardState = {
+      ...state,
+      events: state.events.filter((event) => {
+        if (event.type !== "context.build_followup_requested") return true;
+        const queued = queuedFollowup(event.payload?.followup);
+        if (!queued) return true;
+        return (
+          queued.tenantId !== scope.tenantId ||
+          queued.repository !== scope.repository ||
+          queued.ref !== scope.ref ||
+          existingRequestBuilds(state, queued.tenantId, queued.requestKey).length > 0
+        );
+      })
+    };
+    const deferred = applyCommand(
+      coalescedState,
+      {
+        command: "CommentTask",
+        taskId: active.id,
+        eventType: "context.build_followup_requested",
+        payload: {
+          followup: scope,
+          repository: scope.repository,
+          ref: scope.ref,
+          ...(scope.commitSha ? { commitSha: scope.commitSha } : {}),
+          trigger: scope.trigger,
+          reason: "Queued behind the active repository build so its verified history can seed this build."
+        }
+      },
+      { actor: { type: "system", id: "context-build-admission" }, now: input.now }
+    );
+    if (!deferred.accepted) throw new Error("failed to defer the next Context build");
+    return {
+      state: deferred.state,
+      outcome: "deferred",
+      activeBuildTaskId: active.id,
+      requestKey,
+      scope
+    };
   }
 
   const refSequence = nextContextBoardRefSequence(state, {
@@ -229,35 +235,43 @@ export function admitContextBoardBuild(
 }
 
 /**
- * Returns the newest unadmitted follow-up retained on a completed build. Push,
- * issue, and manual admissions are serialized behind the active build so a
- * moving default branch cannot discard hours of verified private checkpoints.
- * Pull-request heads remain freshness-first and are superseded immediately.
+ * Returns the oldest unadmitted repository follow-up after a predecessor
+ * succeeds, is explicitly canceled, or fails without a recoverable checkpoint
+ * branch. Admissions are coalesced to the newest revision per ref, but
+ * independent refs retain FIFO order. Recoverable failures keep the queue
+ * blocked so an operator can resume their durable checkpoints.
  */
 export function latestContextBoardFollowup(state: BoardState, buildTaskId: TaskId): ContextBoardFollowup | undefined {
   const build = state.tasks.find((task) => task.id === buildTaskId && task.type === contextBoardTaskTypes.build);
   if (!build || !isTerminalTaskStatus(build.status)) return undefined;
-  const events = state.events
-    .filter((event) => event.taskId === buildTaskId && event.type === "context.build_followup_requested")
-    .sort((left, right) => right.at.localeCompare(left.at) || right.seq - left.seq);
-  const newest = events[0];
-  if (!newest) return undefined;
-  const followup = parseFollowup(newest.payload?.followup);
-  if (build.status === "failed" && contextBuildHasOperatorRecovery(state, build, newest.at)) {
+  const tenantId = requiredText(build.metadata.tenantId, "tenantId");
+  const repository = normalizeRepository(requiredText(build.metadata.repository, "repository"));
+  if (
+    state.tasks.some(
+      (task) =>
+        task.type === contextBoardTaskTypes.build &&
+        !isTerminalTaskStatus(task.status) &&
+        task.metadata.tenantId === tenantId &&
+        task.metadata.repository === repository
+    )
+  ) {
     return undefined;
   }
-  const predecessorSequence = requiredRefSequence(build.metadata.refSequence);
-  const newerRefBuildExists = state.tasks.some(
-    (task) =>
-      task.type === contextBoardTaskTypes.build &&
-      task.metadata.tenantId === followup.tenantId &&
-      task.metadata.repository === followup.repository &&
-      task.metadata.ref === followup.ref &&
-      typeof task.metadata.refSequence === "number" &&
-      task.metadata.refSequence > predecessorSequence
-  );
-  if (newerRefBuildExists) return undefined;
-  return existingRequestBuilds(state, followup.tenantId, followup.requestKey).length ? undefined : followup;
+  const events = state.events
+    .filter((event) => event.type === "context.build_followup_requested")
+    .map((event) => ({ event, followup: queuedFollowup(event.payload?.followup) }))
+    .filter(
+      (candidate): candidate is { event: (typeof state.events)[number]; followup: ContextBoardFollowup } =>
+        candidate.followup !== undefined &&
+        candidate.followup.tenantId === tenantId &&
+        candidate.followup.repository === repository &&
+        existingRequestBuilds(state, tenantId, candidate.followup.requestKey).length === 0
+    )
+    .sort((left, right) => left.event.at.localeCompare(right.event.at) || left.event.seq - right.event.seq);
+  if (build.status === "failed" && contextBuildHasOperatorRecovery(state, build, events[0]?.event.at ?? build.updatedAt)) {
+    return undefined;
+  }
+  return events[0]?.followup;
 }
 
 const SUPERSEDED_REF_REASON = "superseded by a newer build for the same repository ref";
@@ -380,27 +394,21 @@ function resolveAdmissionScope(input: ContextBoardAdmissionInput): Omit<ContextB
   };
 }
 
-function newestActiveRefBuild(state: BoardState, scope: Pick<ContextBuildScope, "tenantId" | "repository" | "ref">) {
+function oldestActiveRepositoryBuild(state: BoardState, scope: Pick<ContextBuildScope, "tenantId" | "repository">) {
   return state.tasks
     .filter(
       (task) =>
         task.type === contextBoardTaskTypes.build &&
         task.metadata.tenantId === scope.tenantId &&
         task.metadata.repository === scope.repository &&
-        task.metadata.ref === scope.ref &&
-        hasInvestedBuildWork(state, task.id, task.status) &&
         !isTerminalTaskStatus(task.status)
     )
-    .sort(
-      (left, right) =>
-        requiredRefSequence(right.metadata.refSequence) - requiredRefSequence(left.metadata.refSequence) ||
-        right.createdAt.localeCompare(left.createdAt)
-    )[0];
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0];
 }
 
-function newestRecoverableRefBuild(
+function newestRecoverableRepositoryBuild(
   state: BoardState,
-  scope: Pick<ContextBuildScope, "tenantId" | "repository" | "ref">,
+  scope: Pick<ContextBuildScope, "tenantId" | "repository">,
   now: string
 ) {
   return state.tasks
@@ -410,7 +418,6 @@ function newestRecoverableRefBuild(
         task.status === "failed" &&
         task.metadata.tenantId === scope.tenantId &&
         task.metadata.repository === scope.repository &&
-        task.metadata.ref === scope.ref &&
         contextBuildHasOperatorRecovery(state, task, now)
     )
     .sort(
@@ -420,13 +427,20 @@ function newestRecoverableRefBuild(
     )[0];
 }
 
-function hasInvestedBuildWork(state: BoardState, buildTaskId: TaskId, status: string): boolean {
-  if (status === "in_progress" || status === "in_review") return true;
-  return state.tasks.some(
-    (task) =>
-      task.parentTaskId === buildTaskId &&
-      (task.status === "in_progress" || task.status === "in_review" || task.status === "done")
-  );
+function queuedRepositoryAnchor(state: BoardState, scope: Pick<ContextBuildScope, "tenantId" | "repository">) {
+  const pending = state.events
+    .filter((event) => event.type === "context.build_followup_requested")
+    .map((event) => ({ event, followup: queuedFollowup(event.payload?.followup) }))
+    .filter(
+      (candidate) =>
+        candidate.followup?.tenantId === scope.tenantId &&
+        candidate.followup.repository === scope.repository &&
+        existingRequestBuilds(state, scope.tenantId, candidate.followup.requestKey).length === 0
+    )
+    .sort((left, right) => left.event.at.localeCompare(right.event.at) || left.event.seq - right.event.seq)[0];
+  return pending?.event.taskId
+    ? state.tasks.find((task) => task.id === pending.event.taskId && task.type === contextBoardTaskTypes.build)
+    : undefined;
 }
 
 function withoutPriorRelease(
@@ -442,7 +456,7 @@ function parseFollowup(value: unknown): ContextBoardFollowup {
   }
   const input = value as Record<string, unknown>;
   const trigger = input.trigger;
-  if (trigger !== "push" && trigger !== "issue" && trigger !== "manual") {
+  if (trigger !== "push" && trigger !== "issue" && trigger !== "manual" && trigger !== "pull_request") {
     throw new Error("deferred Context build trigger is invalid");
   }
   const tenantId = requiredText(input.tenantId, "tenantId");
@@ -470,6 +484,29 @@ function parseFollowup(value: unknown): ContextBoardFollowup {
     ...(derivationTokenBudget ? { derivationTokenBudget } : {}),
     trigger
   };
+}
+
+function queuedFollowup(value: unknown): ContextBoardFollowup | undefined {
+  try {
+    return parseFollowup(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function followupFingerprint(scope: ContextBoardFollowup): string {
+  return JSON.stringify([
+    scope.tenantId,
+    scope.repository,
+    scope.ref,
+    scope.requestKey,
+    scope.commitSha ?? null,
+    scope.githubInstallationId ?? null,
+    scope.derivationDetail ?? null,
+    scope.derivationBudgetSeconds ?? null,
+    scope.derivationTokenBudget ?? null,
+    scope.trigger
+  ]);
 }
 
 function requiredText(value: unknown, label: string): string {

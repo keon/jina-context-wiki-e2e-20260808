@@ -319,7 +319,8 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | `_JINA_API_CPU`                                          |                                              `1` | API CPU allocation.                                                                                        |
 | `_JINA_API_MEMORY`                                       |                                            `1Gi` | API memory allocation.                                                                                     |
 | `_JINA_CONTEXT_WORKER_MEMORY`                            |                                            `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.                                  |
-| `_JINA_CONTEXT_WORKER_MAX_INSTANCES`                     |                                             `20` | Maximum concurrency-one Context workers for parallel derivation stages.                                    |
+| `_JINA_CONTEXT_WORKER_MIN_INSTANCES`                     |                                             `20` | Warm polling executors; Board queue depth does not trigger Cloud Run request autoscaling.                  |
+| `_JINA_CONTEXT_WORKER_MAX_INSTANCES`                     |                                            `100` | Hard ceiling for concurrency-one Context workers. Twenty are kept warm by default.                         |
 | `_JINA_TASK_WORKER_MAX_INSTANCES`                        |                                              `5` | Maximum concurrency-one generic task workers.                                                              |
 | `_JINA_CONTEXT_DAYTONA_SNAPSHOT`                         |      `jina-context-board-codex-0-145-0-bwrap-v2` | Audited immutable Codex-and-bubblewrap-ready snapshot.                                                     |
 | `_JINA_CONTEXT_DAYTONA_IMAGE`                            |                                            empty | Required unless the snapshot substitution is set; pin an image by digest.                                  |
@@ -336,7 +337,7 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | `_JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET`               |                                       `24000000` | Hard input-plus-output model-token ceiling for the acceptance build.                                       |
 | `_JINA_ACCEPTANCE_TIMEOUT_MS`                            |                                       `10800000` | Three-hour acceptance polling window.                                                                      |
 | `_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS`                   |                                          `11700` | Three hours fifteen minutes, leaving cleanup/logging time.                                                 |
-| `_JINA_DEPLOYMENT_ACCEPTANCE_MODE`                       |                                           `full` | `full` runs the release Context build; explicit `mechanical` gates only on candidate readiness.            |
+| `_JINA_DEPLOYMENT_ACCEPTANCE_MODE`                       |                                     `mechanical` | Nonblocking release gate; explicit `full` also runs the multi-hour candidate Context build before cutover. |
 | `_JINA_CONTEXT_RESET_MODE`                               |                                       `disabled` | Set to `legacy-once` only for the audited first v2 transition.                                             |
 | `_JINA_CONFIRM_CONTEXT_RESET`                            |                                            empty | Must equal `delete-rebuildable-context` only with `legacy-once`.                                           |
 
@@ -745,12 +746,16 @@ one immutable artifact metadata row and one current-pointer row regardless of gr
 cardinality. The API image built by this lane is used only by its migration and
 activation jobs; it is never deployed as the shared API service.
 
-Context derivation runs with three warm workers and may scale to twenty workers by
-default so independent research, page-writing, and audit stages can execute in
-parallel. The generic task service keeps one warm worker and may scale to five.
-Override the ceilings with `JINA_CONTEXT_WORKER_MAX_INSTANCES` and
-`JINA_TASK_WORKER_MAX_INSTANCES`; model provider limits and tenant token budgets
-remain the authoritative cost bounds.
+Context derivation keeps twenty polling workers warm by default so independent research,
+page-writing, and audit stages can execute in parallel. These workers pull from the
+Board without inbound requests, so Cloud Run request autoscaling cannot observe queue
+depth; setting only a maximum left production at the old three-instance minimum and
+starved research leaves. Override the actual pool with
+`JINA_CONTEXT_WORKER_MIN_INSTANCES` and `JINA_CONTEXT_WORKER_MAX_INSTANCES`. The generic
+task service keeps one warm worker and may scale to five. Model provider limits and
+tenant token budgets remain the authoritative cost bounds. Each tenant may hold twenty
+active model-task reservations, matching one repository's maximum research fan-out;
+the 100-worker service ceiling provides shared headroom across tenants and repositories.
 
 The production transition program is copied into both immutable backend images at
 `/opt/jina/context-production-preflight.mjs` and executed from that path by the Daytona,
@@ -816,16 +821,14 @@ The coordinated `cloudbuild.yaml` invocation above calls
     `--no-traffic` and exact revision suffixes, then proves that each worker service
     contains exactly its paused drain and its claim-enabled candidate, both use the
     coordinated image digest, and only the candidate targets the tagged candidate API;
-11. by default, executes the full production acceptance job exclusively against the
-    tagged candidate API, workers, dashboard, and admin, requiring health attestations
-    and Board completion receipts naming the exact release and worker revision; an
-    explicitly eligible single failed branch may resume from its retained checkpoint,
-    including citation-quality pages, repository-wide quality gates, and earlier planning
-    stages, with at most four total acceptance recoveries. Ineligible, ambiguous,
-    multi-branch, and infrastructure failures remain terminal. An operator may
-    explicitly set `_JINA_DEPLOYMENT_ACCEPTANCE_MODE=mechanical` to cut over after all
-    five candidates are ready and worker isolation is proven, deferring the expensive
-    full Context build to a later final verification release;
+11. by default, performs the mechanical candidate gate and cuts over after all five
+    candidates are healthy and worker isolation is proven. This keeps a multi-hour
+    repository build out of the deployment lease and avoids pausing the production
+    worker generation while Context work is queued. An operator may explicitly set
+    `_JINA_DEPLOYMENT_ACCEPTANCE_MODE=full` for a blocking release that also executes the
+    candidate-only production acceptance job. That job requires health attestations and
+    Board completion receipts naming the exact release and worker revision; an eligible
+    failed branch may resume its retained checkpoints with at most four recoveries;
 12. only after the selected acceptance gate succeeds, routes all five exact candidate
     revisions to 100%, replaces every older traffic tag with the one accepted release
     tag, deletes both paused drains, proves that each worker service contains only its
@@ -856,12 +859,14 @@ was not verified, but never invokes candidate cleanup or attempts a mixed-versio
 rollback. A failure after both cleanup proofs instead reports the exact later phase and
 explicitly states that no release-control repair is needed.
 
-`mechanical` is an operator override, not the default release policy. It still runs
+`mechanical` is the default release policy. It still runs
 validation, the model-free Daytona infrastructure preflight, backup, worker drain, lease
 fencing, migration, candidate health/readiness, worker-generation isolation, coordinated
 cutover, and control-artifact cleanup. It skips only `jina-acceptance`, so it does not claim that derived Context,
-retrieval, token isolation, or web rendering has passed end to end. Return to `full` for
-the single final production verification after implementation work is complete.
+retrieval, token isolation, or web rendering has passed end to end. Verify those as an
+ordinary post-cutover Context build without holding the deployment lease or pausing the
+serving worker generation. Use `full` only when a blocking candidate-only acceptance is
+specifically required.
 Prior worker revisions are not rollback candidates.
 Once cutover begins there is likewise no supported mixed-version rollback; if a traffic
 update fails, finish routing the exact already-accepted revisions and repeat the
