@@ -99,6 +99,7 @@ import {
   sanitizeGitHubReviewCommentPayload
 } from "./github-provider-sanitizer.js";
 import { buildBoardPageIndex } from "./board-pageindex.js";
+import { gapRepairPageProblems, gapRepairPagePrompt } from "./board-gap-repair.js";
 import {
   canonicalPublicPageMarkdown,
   contextBoardPublicSnapshot,
@@ -2681,7 +2682,18 @@ async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">):
       }
     });
     await restoreContextDirectory(outputDirectory, gapCandidate);
-    let pages: ContextPageArtifact[] = [];
+    let pages = await structurallyRepairContextDraft({
+      work,
+      snapshot,
+      checkoutDirectory: checkout.directory,
+      stageRoot,
+      outputDirectory,
+      currentPages,
+      publicationPlan: publication.plan,
+      publicationPlanArtifact: publicationArtifact,
+      snapshotArtifact: publication.snapshotArtifact,
+      phaseCheckpointKey
+    });
     let citationAudit: Awaited<ReturnType<typeof auditContextDraftCitations>> | undefined;
     let priorReferences = priorCitationAudit.references;
     let priorResults = priorCitationAudit.results;
@@ -2777,6 +2789,148 @@ async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">):
       rm(stageRoot, { recursive: true, force: true })
     ]);
   }
+}
+
+async function structurallyRepairContextDraft(input: {
+  readonly work: ClaimedWork<"run-context-gap-repair">;
+  readonly snapshot: IngestEvidenceInput;
+  readonly checkoutDirectory: string;
+  readonly stageRoot: string;
+  readonly outputDirectory: string;
+  readonly currentPages: readonly { readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[];
+  readonly publicationPlan: DocumentationStagePlan;
+  readonly publicationPlanArtifact: ContextArtifactRef;
+  readonly snapshotArtifact: ContextArtifactRef;
+  readonly phaseCheckpointKey: (phase: string, value: unknown) => string;
+}): Promise<ContextPageArtifact[]> {
+  const candidateCheckpoint = await captureContextDirectory(input.outputDirectory);
+  const candidateByPath = new Map(candidateCheckpoint.files.map((file) => [file.path, file.bodyMarkdown]));
+  const expectedPaths = new Set(input.currentPages.map(({ page }) => page.documentPath));
+  const restoredPaths = input.currentPages
+    .filter(({ page }) => !candidateByPath.has(page.documentPath))
+    .map(({ page }) => page.documentPath);
+  const discardedPaths = candidateCheckpoint.files
+    .filter((file) => !expectedPaths.has(file.path))
+    .map((file) => file.path);
+  if (restoredPaths.length > 0 || discardedPaths.length > 0) {
+    logger.warn("normalized global repair output to its declared page catalog", {
+      event: "context.gap_repair.catalog_normalized",
+      taskId: input.work.task.id,
+      contextBuildId: input.work.task.metadata.contextBuildId,
+      restoredPaths,
+      discardedPaths
+    });
+  }
+  await restoreContextDirectory(input.outputDirectory, {
+    version: 1,
+    files: input.currentPages.map(({ page }) => ({
+      path: page.documentPath,
+      bodyMarkdown: candidateByPath.get(page.documentPath) ?? page.bodyMarkdown
+    }))
+  });
+
+  const pages: ContextPageArtifact[] = [];
+  for (const { page: currentPage } of input.currentPages) {
+    const plannedPage = input.publicationPlan.pages.find((candidate) => candidate.path === currentPage.documentPath);
+    if (!plannedPage) throw new Error(`context gap repair cannot find ${currentPage.documentPath} in its plan`);
+    const targetPath = join(input.outputDirectory, currentPage.documentPath);
+    let bodyMarkdown = canonicalPublicPageMarkdown(await readFile(targetPath, "utf8"));
+    const maximumStructuralRepairPasses = 3;
+    for (let structuralPass = 1; structuralPass <= maximumStructuralRepairPasses; structuralPass += 1) {
+      const problems = gapRepairPageProblems({
+        currentPage,
+        candidateBodyMarkdown: bodyMarkdown,
+        plannedPage,
+        publicationPlan: input.publicationPlan,
+        snapshot: input.snapshot
+      });
+      if (problems.length === 0) break;
+      logger.warn(`global repair page ${currentPage.documentPath} requires targeted correction`, {
+        event: "context.gap_repair.page_validation_failed",
+        taskId: input.work.task.id,
+        contextBuildId: input.work.task.metadata.contextBuildId,
+        documentPath: currentPage.documentPath,
+        structuralPass,
+        bodyDigest: createHash("sha256").update(bodyMarkdown).digest("hex"),
+        problemCount: problems.length,
+        problems: problems.slice(0, 16).map((problem) => problem.slice(0, 500))
+      });
+      if (structuralPass === maximumStructuralRepairPasses) {
+        throw new Error(
+          `context gap repair could not restore ${currentPage.documentPath} after ${maximumStructuralRepairPasses - 1} targeted corrections: ${problems
+            .slice(0, 8)
+            .join("; ")}`
+        );
+      }
+
+      const repairRoot = join(
+        input.stageRoot,
+        "structural-repair",
+        safeStageId(currentPage.documentPath),
+        String(structuralPass)
+      );
+      const repairOutputDirectory = join(repairRoot, "context");
+      const repairTargetPath = join(repairOutputDirectory, currentPage.documentPath);
+      const diagnosticsPath = join(repairRoot, "host-findings.json");
+      await mkdir(dirname(repairTargetPath), { recursive: true });
+      await Promise.all([
+        writeFile(repairTargetPath, bodyMarkdown, "utf8"),
+        writeFile(
+          diagnosticsPath,
+          `${JSON.stringify({ version: 1, documentPath: currentPage.documentPath, problems }, null, 2)}\n`,
+          "utf8"
+        )
+      ]);
+      const phase = `gap-structural-repair.${safeStageId(currentPage.documentPath)}.pass-${structuralPass}`;
+      const bodyDigest = createHash("sha256").update(bodyMarkdown).digest("hex");
+      const correction = await checkpointedContextCandidate(input.work, {
+        phase,
+        checkpointKey: input.phaseCheckpointKey(phase, { bodyDigest, problems }),
+        kind: "context-page",
+        generate: async () => {
+          await requireBoardAgentStageRunner().run({
+            id: `gap-structural-${safeStageId(currentPage.documentPath)}-${structuralPass}`,
+            prompt: gapRepairPagePrompt({
+              targetPath: repairTargetPath,
+              repositoryDirectory: input.checkoutDirectory,
+              diagnosticsPath,
+              plannedPage,
+              publicationPlan: input.publicationPlan,
+              coveragePrompt: pageRepairCoveragePrompt(plannedPage, input.publicationPlan.pages)
+            }),
+            workingDirectory: repairRoot,
+            additionalDirectories: [input.checkoutDirectory, input.outputDirectory],
+            writableDirectories: [repairOutputDirectory],
+            outputFiles: [repairTargetPath],
+            budgetSeconds: stageBudgetSeconds("CONTEXT_GAP_STRUCTURAL_REPAIR_SECONDS", 600)
+          });
+          await assertOnlyContextPage(repairOutputDirectory, currentPage.documentPath);
+          return { bodyMarkdown: canonicalPublicPageMarkdown(await readFile(repairTargetPath, "utf8")) };
+        }
+      });
+      if (!isRecord(correction) || typeof correction.bodyMarkdown !== "string") {
+        throw new Error(`context gap structural checkpoint is invalid for ${currentPage.documentPath}`);
+      }
+      bodyMarkdown = canonicalPublicPageMarkdown(correction.bodyMarkdown);
+      await writeFile(targetPath, bodyMarkdown, "utf8");
+      logger.info(`recorded targeted global repair correction for ${currentPage.documentPath}`, {
+        event: "context.gap_repair.page_corrected",
+        taskId: input.work.task.id,
+        contextBuildId: input.work.task.metadata.contextBuildId,
+        documentPath: currentPage.documentPath,
+        structuralPass,
+        bodyDigest: createHash("sha256").update(bodyMarkdown).digest("hex")
+      });
+    }
+    pages.push({
+      documentPath: currentPage.documentPath,
+      title: markdownTitle(bodyMarkdown, currentPage.documentPath),
+      bodyMarkdown,
+      publicationPlanArtifact: input.publicationPlanArtifact,
+      snapshotArtifact: input.snapshotArtifact
+    });
+  }
+  return pages;
 }
 
 async function loadContextDraftPages(input: {

@@ -82,6 +82,7 @@ export function BuildCheckpoints({
       <div className="context-projector-table">
         {stages.map((stage) => {
           const stageFailure = stage.status === "failed" ? contextFailureText(stage) : undefined;
+          const latestPhase = stage.phaseCheckpoints?.at(-1);
           return (
             <div className="context-projector-row" key={stage.id}>
               <div className="context-stage-details">
@@ -96,6 +97,12 @@ export function BuildCheckpoints({
                   <span className="context-failure-reason">
                     Previous attempt: {stage.lastRetryFailureReason}
                     {stage.lastRetryAt ? ` · ${formatTime(stage.lastRetryAt)}` : ""}
+                  </span>
+                ) : null}
+                {latestPhase ? (
+                  <span className="muted">
+                    Last durable phase: {humanize(latestPhase.phase)} · attempt {latestPhase.attempt} ·{" "}
+                    {formatTime(latestPhase.recordedAt)}
                   </span>
                 ) : null}
                 {stageFailure ? <span className="context-failure-reason">{stageFailure}</span> : null}

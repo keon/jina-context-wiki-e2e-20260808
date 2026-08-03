@@ -111,6 +111,15 @@ so only unsupported or changed groups return to the model. This gives a repair
 that makes partial progress another chance without paying to re-audit the rest of
 the context tree.
 
+The global repair candidate is not accepted as one all-or-nothing directory. The
+host restores missing declared pages from their validated checkpoints, drops
+undeclared output, and validates each changed page independently. An invalid page
+gets a bounded, page-specific structural correction whose input and output are
+phase-checkpointed; valid siblings are retained untouched. A worker retry therefore
+continues at the first unfinished page correction, even when the original global
+agent call already completed, instead of regenerating the candidate or discarding
+valid repairs.
+
 After all page aggregates pass, two independent gates run:
 
 - `challenge-context-sources` compares the candidate public bytes with the exact source

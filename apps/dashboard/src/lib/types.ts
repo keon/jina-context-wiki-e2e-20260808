@@ -182,6 +182,11 @@ interface ContextBuildStage {
   readonly lastRetryAt?: string;
   readonly lastRetryFailureCode?: string;
   readonly lastRetryFailureReason?: string;
+  readonly phaseCheckpoints?: readonly {
+    readonly phase: string;
+    readonly attempt: number;
+    readonly recordedAt: string;
+  }[];
   readonly updatedAt: string;
 }
 

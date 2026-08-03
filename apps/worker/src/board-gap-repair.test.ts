@@ -85,6 +85,9 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
     "[A maintainer can trace the complete request path through `createRequest`, `normalizeRequest`, `selectRoute`, and `executeRoute`](src/runtime.ts#L3-L16).",
     ""
   ].join("\n");
+  const invalidGlobalMarkdown = ["# Architecture", "", "The global candidate accidentally hollowed the page."].join(
+    "\n"
+  );
   await writeFile(
     fakeCodex,
     [
@@ -124,6 +127,15 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
       "    process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 80, cached_input_tokens: 40, output_tokens: 20 } }) + '\\n');",
       "    return;",
       "  }",
+      "  if (prompt.includes('bounded global-repair page correction stage')) {",
+      "    const target = /Edit only (.+?)\\. The candidate/.exec(prompt);",
+      "    if (!target) process.exit(7);",
+      "    fs.mkdirSync(path.dirname(target[1]), { recursive: true });",
+      `    fs.writeFileSync(target[1], ${JSON.stringify(repairedMarkdown)});`,
+      "    fs.writeFileSync(args[outputIndex + 1], JSON.stringify({ completed: true }));",
+      "    process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 50, cached_input_tokens: 25, output_tokens: 10 } }) + '\\n');",
+      "    return;",
+      "  }",
       "  if (prompt.includes('bounded source-aware citation repair stage')) {",
       "    fs.writeFileSync(args[outputIndex + 1], JSON.stringify({ completed: true }));",
       "    process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 30, cached_input_tokens: 15, output_tokens: 5 } }) + '\\n');",
@@ -133,7 +145,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
       "  if (!match || !prompt.includes('Source challenge result')) process.exit(5);",
       "  const target = path.join(match[1], 'architecture.md');",
       "  fs.mkdirSync(path.dirname(target), { recursive: true });",
-      `  fs.writeFileSync(target, ${JSON.stringify(repairedMarkdown)});`,
+      `  fs.writeFileSync(target, ${JSON.stringify(invalidGlobalMarkdown)});`,
       "  fs.writeFileSync(args[outputIndex + 1], JSON.stringify({ completed: true }));",
       "  process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 100, cached_input_tokens: 50, output_tokens: 10 } }) + '\\n');",
       "});"
@@ -463,7 +475,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
       uploadedLease = body;
       const content = Buffer.from(String(body.contentBase64), "base64");
       uploadedDraft = JSON.parse(content.toString("utf8")) as Record<string, unknown>;
-      const key = `context-v2/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/context-draft/task_gap_repair-attempt-${String(body.attempt)}-${String(body.name)}`;
+      const key = `context-v2/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/${String(body.kind)}/task_gap_repair-attempt-${String(body.attempt)}-${String(body.name)}`;
       const ref: ArtifactRef = {
         uri: `file:///${key}`,
         key,
@@ -579,12 +591,12 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.equal(completion?.outcome, "done", output);
   assert.equal(completionAttempts.length, 2);
   assert.deepEqual(completionAttempts[0]?.modelUsage, {
-    inputTokens: 400,
-    cachedInputTokens: 200,
-    outputTokens: 80
+    inputTokens: 450,
+    cachedInputTokens: 225,
+    outputTokens: 90
   });
   assert.deepEqual(completion?.modelUsage, { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
-  assert.ok(phaseCheckpoints.size >= 5);
+  assert.ok(phaseCheckpoints.size >= 6);
   const finalAudit = record(uploadedDraft?.citationAudit);
   assert.match(String(record(finalAudit.worker).summary), /Reused \d+ exact digest-bound supported citation verdicts/);
   const finalReferences = record(uploadedDraft?.citationAuditInput).references as readonly unknown[];

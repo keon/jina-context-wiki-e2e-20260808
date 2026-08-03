@@ -248,6 +248,9 @@ export default async function ContextAdminPage({
                                 : ""}
                               {stage.lastRetryFailureReason ? ` · previous: ${stage.lastRetryFailureReason}` : ""} ·
                               updated {formatTimestamp(stage.updatedAt)}
+                              {stage.phaseCheckpoints?.at(-1)
+                                ? ` · durable phase ${stage.phaseCheckpoints.at(-1)!.phase.replaceAll("-", " ")} at ${formatTimestamp(stage.phaseCheckpoints.at(-1)!.recordedAt)}`
+                                : ""}
                             </li>
                           ))}
                         </ul>

@@ -4085,6 +4085,7 @@ function publicContextTaskRuntime(
     : undefined;
   const taskPhaseCheckpoints = phaseCheckpoints
     .filter((checkpoint) => checkpoint.taskId === task.id)
+    .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt) || left.phase.localeCompare(right.phase))
     .map((checkpoint) => ({
       phase: checkpoint.phase,
       attempt: checkpoint.attempt,
