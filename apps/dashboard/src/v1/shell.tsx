@@ -71,6 +71,7 @@ function sectionForPath(pathname: string | null): NavKey {
   const path = pathname ?? "/";
   if (path.startsWith("/issues")) return "issues";
   if (path.startsWith("/causal-graph")) return "causal-graph";
+  if (path.startsWith("/operations/context")) return "context";
   if (path.startsWith("/context")) return "context";
   if (path.startsWith("/models")) return "models";
   if (path.startsWith("/integrations")) return "integrations";

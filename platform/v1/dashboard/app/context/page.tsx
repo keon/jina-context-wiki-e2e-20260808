@@ -606,7 +606,7 @@ export default function ContextPage() {
             <strong>{repositoryFilter || "Choose a repository"}</strong>
           </div>
           {activeRepository ? (
-            <code>{activeRepository.defaultBranch}</code>
+            <code>{documents[0]?.ref ?? activeRepository.defaultBranch}</code>
           ) : null}
         </div>
         <div className="context-repository-bar__actions">

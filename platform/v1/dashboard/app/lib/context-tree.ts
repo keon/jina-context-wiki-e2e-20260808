@@ -15,6 +15,7 @@ export type ContextDocumentSummary = {
   releaseId: string;
   logicalId: string;
   repository: string;
+  ref?: string;
   kind: string;
   title: string;
   summary: string;
