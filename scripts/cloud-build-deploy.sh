@@ -1378,6 +1378,8 @@ gcloud run deploy jina-context-worker \
   --memory="${context_worker_memory}" \
   --timeout=300 \
   --scaling=auto \
+  --min="${context_worker_min_instances}" \
+  --max="${context_worker_max_instances}" \
   --min-instances="${context_worker_min_instances}" \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
@@ -1397,6 +1399,8 @@ gcloud run deploy jina-task-worker \
   --concurrency=1 \
   --timeout=300 \
   --scaling=auto \
+  --min=1 \
+  --max="${task_worker_max_instances}" \
   --min-instances=1 \
   --max-instances="${task_worker_max_instances}" \
   --no-cpu-throttling \
@@ -1515,6 +1519,8 @@ gcloud run deploy jina-context-worker \
   --memory="${context_worker_memory}" \
   --timeout=300 \
   --scaling=auto \
+  --min="${context_worker_min_instances}" \
+  --max="${context_worker_max_instances}" \
   --min-instances="${context_worker_min_instances}" \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
@@ -1536,6 +1542,8 @@ gcloud run deploy jina-task-worker \
   --concurrency=1 \
   --timeout=300 \
   --scaling=auto \
+  --min=1 \
+  --max="${task_worker_max_instances}" \
   --min-instances=1 \
   --max-instances="${task_worker_max_instances}" \
   --no-cpu-throttling \

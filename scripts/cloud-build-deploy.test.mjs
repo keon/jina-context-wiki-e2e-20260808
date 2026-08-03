@@ -232,8 +232,12 @@ test("coordinated releases hold one renewable durable lease and reject overlap b
   assert.match(apiServer, /DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 \* 60 \* 1000/);
   assert.match(deployment, /JINA_CONTEXT_WORKER_LEASE_MS:-300000/);
   assert.match(deployment, /JINA_CONTEXT_WORKER_MAX_INSTANCES:-100/);
+  assert.equal(deployment.match(/--max="\$\{context_worker_max_instances\}"/g)?.length, 2);
+  assert.equal(deployment.match(/--min="\$\{context_worker_min_instances\}"/g)?.length, 2);
   assert.equal(deployment.match(/--max-instances="\$\{context_worker_max_instances\}"/g)?.length, 2);
   assert.match(deployment, /JINA_TASK_WORKER_MAX_INSTANCES:-5/);
+  assert.equal(deployment.match(/--max="\$\{task_worker_max_instances\}"/g)?.length, 2);
+  assert.equal(deployment.match(/--min=1/g)?.length, 2);
   assert.equal(deployment.match(/--max-instances="\$\{task_worker_max_instances\}"/g)?.length, 2);
   assert.match(deployment, /WORKER_HEARTBEAT_INTERVAL_MS=\$\{context_worker_heartbeat_interval_ms\}/);
   assert.match(deployment, /must cover at least three worker heartbeat intervals/);
