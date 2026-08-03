@@ -2,7 +2,6 @@ import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { gzipSync } from "node:zlib";
 
 const LEGACY_CONTEXT_TABLES = ["derivation_progress", "pipeline_builds", "pipeline_stages"];
 const TABLES_ADDED_AFTER_LEGACY = [
@@ -124,104 +123,80 @@ async function preflightDaytona() {
   if (Boolean(snapshot) === Boolean(image)) {
     throw new Error("Daytona preflight requires exactly one snapshot or image");
   }
-  const secretName = requiredEnv("CONTEXT_DAYTONA_MODEL_SECRET");
-  const secretEnvironment = requiredEnv("CONTEXT_DAYTONA_MODEL_SECRET_ENV");
-  const allowedDomains = requiredEnv("CONTEXT_DAYTONA_MODEL_DOMAINS")
-    .split(",")
-    .map((domain) => domain.trim())
-    .filter(Boolean);
   const daytonaModulePath = process.env.CONTEXT_DAYTONA_MODULE_PATH ?? "/app/node_modules/@jina/daytona/dist/index.js";
   const resolvedDaytonaModulePath = realpathSync(daytonaModulePath);
-  const { DaytonaBoardAgentStageRunner } = await import(pathToFileURL(resolvedDaytonaModulePath).href);
-  if (snapshot) {
-    const daytonaRequire = createRequire(resolvedDaytonaModulePath);
-    const { Daytona } = await import(pathToFileURL(daytonaRequire.resolve("@daytona/sdk")).href);
-    const daytona = new Daytona({ apiKey });
-    try {
+  const daytonaRequire = createRequire(resolvedDaytonaModulePath);
+  const sdkModulePath = optionalEnv("CONTEXT_DAYTONA_SDK_MODULE_PATH");
+  const { Daytona } = await import(
+    pathToFileURL(sdkModulePath ? realpathSync(sdkModulePath) : daytonaRequire.resolve("@daytona/sdk")).href
+  );
+  const daytona = new Daytona({ apiKey });
+  let sandbox;
+  let failure;
+  try {
+    if (snapshot) {
       const snapshotRecord = await daytona.snapshot.get(snapshot);
       if (snapshotRecord.name !== snapshot || snapshotRecord.state !== "active") {
         throw new Error(`Daytona snapshot ${snapshot} is not active`);
       }
-    } catch (error) {
-      // The SDK cause is untrusted and may include request credentials.
-      // eslint-disable-next-line preserve-caught-error
-      throw new Error(
-        `Daytona snapshot verification failed: ${sanitizedDiagnostic(error instanceof Error ? error.message : error, [
-          apiKey
-        ])}`
-      );
-    } finally {
-      await daytona[Symbol.asyncDispose]();
     }
-  }
-
-  const configuredModel = optionalEnv("CONTEXT_CODEX_MODEL") ?? "gpt-5.6-terra";
-  const archive = archiveWithFile("README.md", "production Daytona preflight\n");
-  let result;
-  try {
-    const runner = new DaytonaBoardAgentStageRunner({
-      daytonaApiKey: apiKey,
-      ...(snapshot ? { snapshot } : { image }),
-      modelSecret: {
-        environmentVariable: secretEnvironment,
-        secretName
+    sandbox = await daytona.create(
+      {
+        language: "typescript",
+        ...(snapshot ? { snapshot } : { image }),
+        envVars: { NODE_ENV: "production", LANG: "C.UTF-8" },
+        labels: { "jina-preflight": "context" },
+        networkBlockAll: true,
+        public: false,
+        ephemeral: true,
+        ttlMinutes: 5
       },
-      allowedDomains,
-      model: configuredModel.replace(/^openai\//, ""),
-      effort: optionalEnv("CONTEXT_CODEX_EFFORT") ?? "low",
-      verbosity: optionalEnv("CONTEXT_CODEX_VERBOSITY") ?? "high",
-      setupTimeoutSeconds: 300,
-      protectedValues: [apiKey]
-    });
-    result = await runner.run({
-      id: "production-preflight",
-      prompt:
-        'Use the shell tool to write exactly TOOL_OK, with no trailing newline, to the only declared output file. Verify the file, then return exactly {"status":"AUTH_OK"}.',
-      schema: {
-        type: "object",
-        properties: { status: { type: "string", enum: ["AUTH_OK"] } },
-        required: ["status"],
-        additionalProperties: false
-      },
-      repository: {
-        commitSha: "0".repeat(40),
-        archive,
-        sha256: createHash("sha256").update(archive).digest("hex")
-      },
-      artifacts: [],
-      limits: {
-        timeoutSeconds: 180,
-        contextTokens: positiveIntegerEnv("CONTEXT_CODEX_CONTEXT_TOKENS", 128_000),
-        compactTokens: positiveIntegerEnv("CONTEXT_CODEX_COMPACT_TOKENS", 96_000),
-        attempt: 1,
-        maxAttempts: 1,
-        maxOutputBytes: 1_024
-      },
-      outputFiles: [{ path: "tool-ok", contentType: "text/plain", maxBytes: 64 }]
-    });
+      { timeout: 300 }
+    );
+    const command = await sandbox.process.executeCommand(
+      'set -eu\nprintf TOOL_OK > /tmp/jina-context-preflight\ntest "$(cat /tmp/jina-context-preflight)" = TOOL_OK\nprintf AUTH_OK',
+      undefined,
+      { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8" },
+      60
+    );
+    if (command.exitCode !== 0 || String(command.result ?? "").trim() !== "AUTH_OK") {
+      throw new Error(`sandbox command failed: ${sanitizedDiagnostic(command.result, [apiKey])}`);
+    }
   } catch (error) {
-    // The original cause can contain provider stderr or credentials. Deliberately
-    // do not attach it to the process-visible error after constructing the safe diagnostic.
-    // eslint-disable-next-line preserve-caught-error
-    throw new Error(
-      `Daytona production BoardAgent preflight failed: ${sanitizedDiagnostic(
+    failure = new Error(
+      `Daytona production sandbox preflight failed: ${sanitizedDiagnostic(
         error instanceof Error ? error.message : error,
         [apiKey]
       )}`
     );
+  } finally {
+    try {
+      if (sandbox) await sandbox.delete(60, true);
+    } catch (error) {
+      if (!failure) {
+        failure = new Error(
+          `Daytona production sandbox preflight cleanup failed: ${sanitizedDiagnostic(
+            error instanceof Error ? error.message : error,
+            [apiKey]
+          )}`
+        );
+      }
+    }
+    try {
+      await daytona[Symbol.asyncDispose]();
+    } catch (error) {
+      if (!failure) {
+        failure = new Error(
+          `Daytona production sandbox preflight cleanup failed: ${sanitizedDiagnostic(
+            error instanceof Error ? error.message : error,
+            [apiKey]
+          )}`
+        );
+      }
+    }
   }
-  const response = JSON.parse(Buffer.from(result.bytes).toString("utf8"));
-  const toolOutput = result.files.find((file) => file.path === "tool-ok");
-  if (
-    response.status !== "AUTH_OK" ||
-    Object.keys(response).length !== 1 ||
-    result.files.length !== 1 ||
-    !toolOutput ||
-    Buffer.from(toolOutput.bytes).toString("utf8") !== "TOOL_OK"
-  ) {
-    throw new Error("Daytona production BoardAgent preflight returned an invalid bounded result");
-  }
-  console.log(`Daytona production BoardAgent preflight passed for ${snapshot ?? image}`);
+  if (failure) throw failure;
+  console.log(`Daytona production sandbox preflight passed for ${snapshot ?? image}`);
 }
 
 async function withDatabase(operation) {
@@ -1006,36 +981,6 @@ function required(name, value) {
 function optionalEnv(name) {
   const value = process.env[name]?.trim();
   return value || undefined;
-}
-
-function positiveIntegerEnv(name, fallback) {
-  const raw = optionalEnv(name);
-  if (!raw) return fallback;
-  if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-  return Number(raw);
-}
-
-function archiveWithFile(name, body) {
-  const payload = Buffer.from(body, "utf8");
-  const header = Buffer.alloc(512);
-  header.write(name, 0, "utf8");
-  header.write("0000644\0", 100, "ascii");
-  header.write("0000000\0", 108, "ascii");
-  header.write("0000000\0", 116, "ascii");
-  header.write(payload.length.toString(8).padStart(11, "0") + "\0", 124, "ascii");
-  header.write("00000000000\0", 136, "ascii");
-  header.fill(0x20, 148, 156);
-  header[156] = 0x30;
-  header.write("ustar\0", 257, "ascii");
-  header.write("00", 263, "ascii");
-  let checksum = 0;
-  for (const byte of header) checksum += byte;
-  header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, "ascii");
-  return gzipSync(
-    Buffer.concat([header, payload, Buffer.alloc((512 - (payload.length % 512)) % 512), Buffer.alloc(1024)])
-  );
 }
 
 function sanitizedDiagnostic(value, protectedValues = []) {

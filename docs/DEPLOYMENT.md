@@ -221,13 +221,19 @@ The API mounts:
 - `jina-context-private-checkpoint-key` as
   `CONTEXT_PRIVATE_CHECKPOINT_KEY`.
 
-Both `jina-context-private-checkpoint-key` in Google Secret Manager and the name supplied
-by `_JINA_CONTEXT_DAYTONA_MODEL_SECRET` in Daytona organization Secrets must exist before
-release. The latter is created through a Daytona user session with organization Secret
-permission; the deployment API key may use it to create sandboxes even when it is not
-allowed to list or create organization Secrets. The Daytona preflight proves actual use
-by mounting the reference into an ephemeral sandbox. Neither prerequisite is
-auto-created by Cloud Build.
+`jina-context-private-checkpoint-key` in Google Secret Manager must exist before release.
+The name supplied by `_JINA_CONTEXT_DAYTONA_MODEL_SECRET` must also exist in Daytona when
+the managed provider or managed fallback is enabled. That Secret is created through a
+Daytona user session with organization Secret permission; the deployment API key may use
+it to create sandboxes even when it cannot list or create organization Secrets. Neither
+prerequisite is auto-created by Cloud Build.
+
+Before any Cloud SQL mutation, every coordinated release creates a network-blocked,
+ephemeral Daytona sandbox from the configured immutable snapshot or image, executes a
+bounded filesystem command, and deletes it. This probe verifies Daytona access and the
+sandbox runtime without coupling deployment availability to one model provider. A full
+release then verifies the tenant-selected model and credential through the real Context
+acceptance build. Mechanical releases deliberately make no model-health claim.
 
 The migration job runs as `jina-migration`, mounts
 `jina-primary-owner-db-password`, and connects to the primary database as the
@@ -851,9 +857,9 @@ rollback. A failure after both cleanup proofs instead reports the exact later ph
 explicitly states that no release-control repair is needed.
 
 `mechanical` is an operator override, not the default release policy. It still runs
-validation, Daytona preflight, backup, worker drain, lease fencing, migration, candidate
-health/readiness, worker-generation isolation, coordinated cutover, and control-artifact
-cleanup. It skips only `jina-acceptance`, so it does not claim that derived Context,
+validation, the model-free Daytona infrastructure preflight, backup, worker drain, lease
+fencing, migration, candidate health/readiness, worker-generation isolation, coordinated
+cutover, and control-artifact cleanup. It skips only `jina-acceptance`, so it does not claim that derived Context,
 retrieval, token isolation, or web rendering has passed end to end. Return to `full` for
 the single final production verification after implementation work is complete.
 Prior worker revisions are not rollback candidates.

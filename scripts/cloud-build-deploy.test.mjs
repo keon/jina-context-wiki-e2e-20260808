@@ -121,9 +121,10 @@ test("mechanical deployment is an explicit opt-in and full acceptance remains th
     deployment,
     /if \[\[ "\$\{deployment_acceptance_mode\}" == "full" \]\]; then[\s\S]+?gcloud run jobs execute jina-acceptance[\s\S]+?else[\s\S]+?Mechanical deployment mode/
   );
-  assert.match(
-    deployment,
-    /if \[\[ "\$\{deployment_acceptance_mode\}" == "full" \]\]; then[\s\S]+?gcloud run jobs execute jina-context-daytona-preflight[\s\S]+?else[\s\S]+?skipping model-executing Daytona preflight/
+  assert.equal(deployment.match(/gcloud run jobs execute jina-context-daytona-preflight/g)?.length, 1);
+  assert.ok(
+    deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight") <
+      deployment.indexOf('if [[ "${deployment_acceptance_mode}" == "full" ]]')
   );
 });
 
@@ -741,7 +742,7 @@ test("production gate has a measured three-hour acceptance window", () => {
   assert.match(deployment, /--task-timeout="\$\{acceptance_job_timeout_seconds\}s"/);
 });
 
-test("full releases probe the exact Daytona BoardAgent contract before Cloud SQL mutation", () => {
+test("all releases probe the Daytona sandbox before Cloud SQL mutation", () => {
   const preflight = deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight");
   const backup = deployment.indexOf("gcloud sql backups create");
   const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate");
@@ -749,23 +750,19 @@ test("full releases probe the exact Daytona BoardAgent contract before Cloud SQL
   assert.ok(backup > preflight);
   assert.ok(migration > backup);
   assert.match(productionPreflight, /daytona\.snapshot\.get/);
-  assert.match(productionPreflight, /DaytonaBoardAgentStageRunner/);
-  assert.match(productionPreflight, /modelSecret:\s*\{[\s\S]*environmentVariable: secretEnvironment,[\s\S]*secretName/);
-  assert.match(productionPreflight, /result = await runner\.run/);
-  assert.match(productionPreflight, /CONTEXT_CODEX_MODEL"\) \?\? "gpt-5\.6-terra"/);
-  assert.match(productionPreflight, /CONTEXT_CODEX_EFFORT"\) \?\? "low"/);
-  assert.match(productionPreflight, /CONTEXT_CODEX_VERBOSITY"\) \?\? "high"/);
-  assert.match(productionPreflight, /CONTEXT_CODEX_CONTEXT_TOKENS", 128_000/);
-  assert.match(productionPreflight, /CONTEXT_CODEX_COMPACT_TOKENS", 96_000/);
+  assert.match(productionPreflight, /sandbox = await daytona\.create/);
+  assert.match(productionPreflight, /networkBlockAll: true/);
+  assert.match(productionPreflight, /ephemeral: true/);
+  assert.match(productionPreflight, /ttlMinutes: 5/);
+  assert.match(productionPreflight, /sandbox\.process\.executeCommand/);
   assert.match(productionPreflight, /AUTH_OK/);
-  assert.match(productionPreflight, /outputFiles: \[\{ path: "tool-ok", contentType: "text\/plain", maxBytes: 64 \}\]/);
-  assert.match(productionPreflight, /protectedValues: \[apiKey\]/);
-  assert.match(productionPreflight, /result\.files\.find\(\(file\) => file\.path === "tool-ok"\)/);
-  assert.doesNotMatch(productionPreflight, /codex exec|for attempt in 1 2 3|responses_websockets/);
+  assert.match(productionPreflight, /sandbox\.delete\(60, true\)/);
+  assert.doesNotMatch(productionPreflight, /DaytonaBoardAgentStageRunner|modelSecret|codex exec/);
   assert.match(
     deployment,
-    /daytona_preflight_env=.*CONTEXT_CODEX_MODEL=gpt-5\.6-terra.*CONTEXT_CODEX_EFFORT=low.*CONTEXT_CODEX_VERBOSITY=high.*CONTEXT_CODEX_CONTEXT_TOKENS=\$\{context_codex_context_tokens\}.*CONTEXT_CODEX_COMPACT_TOKENS=\$\{context_codex_compact_tokens\}/
+    /daytona_preflight_env="\^~\^CONTEXT_DAYTONA_MODULE_PATH=\/app\/node_modules\/@jina\/daytona\/dist\/index\.js"/
   );
+  assert.doesNotMatch(deployment.match(/daytona_preflight_env=.*$/m)?.[0] ?? "", /MODEL_SECRET|CONTEXT_CODEX/);
 });
 
 test("production context worker claims exactly the Board topics", () => {
