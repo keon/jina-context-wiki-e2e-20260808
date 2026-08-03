@@ -254,6 +254,13 @@ else
   fail "Vercel staging admin project is missing"
 fi
 
+if command -v vercel >/dev/null 2>&1 && vercel project inspect jina-staging-docs \
+    --scope omlabs >/dev/null 2>&1; then
+  pass "Vercel staging docs project exists"
+else
+  fail "Vercel staging docs project is missing"
+fi
+
 staging_domain_mappings=(
   "api.staging.usejina.com:jina-api-staging"
   "mcp.staging.usejina.com:jina-api-staging"
@@ -262,7 +269,7 @@ staging_domain_mappings=(
 for mapping in "${staging_domain_mappings[@]}"; do
   domain_name="${mapping%%:*}"
   expected_service="${mapping#*:}"
-  mapping_json="$(gcloud beta run domain-mappings describe "${domain_name}" \
+  mapping_json="$(gcloud beta run domain-mappings describe --domain="${domain_name}" \
     --project="${staging_project}" --region="${region}" --format=json 2>/dev/null || true)"
   mapped_service="$(jq -r '.spec.routeName // empty' <<<"${mapping_json}")"
   certificate_ready="$(jq -r \

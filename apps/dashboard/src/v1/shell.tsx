@@ -15,63 +15,69 @@ type NavKey =
   | "reviews"
   | "issues"
   | "context"
+  | "causal-graph"
   | "models"
   | "integrations"
   | "organization"
-  | "jina"
   | "billing"
   | "usage"
-  | "board"
-  | "history"
-  | "task-types"
-  | "context-operations";
+  | "settings";
 
-const NAV: Array<{ key: NavKey; label: string; href: string; icon: () => ReactNode }> = [
-  { key: "reviews", label: "Reviews", href: "/reviews", icon: ReviewsIcon },
-  { key: "issues", label: "Issues", href: "/issues", icon: ReviewsIcon },
-  { key: "context", label: "Context", href: "/context", icon: ContextIcon },
-  { key: "models", label: "Models", href: "/models", icon: ModelsIcon },
-  { key: "integrations", label: "Integrations", href: "/integrations", icon: IntegrationsIcon },
-  { key: "organization", label: "Organization", href: "/organization", icon: OrganizationIcon },
-  { key: "jina", label: ".jina Guide", href: "/jina", icon: JinaGuideIcon },
-  { key: "usage", label: "Usage", href: "/usage", icon: UsageIcon },
-  { key: "billing", label: "Billing", href: "/billing", icon: BillingIcon },
-  { key: "board", label: "Work Board", href: "/board", icon: ReviewsIcon },
-  { key: "history", label: "Event History", href: "/history", icon: UsageIcon },
-  { key: "task-types", label: "Task Types", href: "/tasks", icon: ModelsIcon },
-  { key: "context-operations", label: "Context Ops", href: "/operations/context", icon: ContextIcon },
+type NavItem = { key: NavKey; label: string; href: string; icon: () => ReactNode };
+
+const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
+  {
+    label: "Workspace",
+    items: [
+      { key: "reviews", label: "Reviews", href: "/reviews", icon: ReviewsIcon },
+      { key: "issues", label: "Issues", href: "/issues", icon: IssuesIcon },
+      { key: "context", label: "Context Wiki", href: "/context", icon: ContextIcon },
+      { key: "causal-graph", label: "Causal Graph", href: "/causal-graph", icon: GraphIcon },
+    ],
+  },
+  {
+    label: "Configure",
+    items: [
+      { key: "integrations", label: "Integrations", href: "/integrations", icon: IntegrationsIcon },
+      { key: "models", label: "Models", href: "/models", icon: ModelsIcon },
+    ],
+  },
+  {
+    label: "Organization",
+    items: [
+      { key: "organization", label: "Members & Access", href: "/organization", icon: OrganizationIcon },
+      { key: "usage", label: "Usage", href: "/usage", icon: UsageIcon },
+      { key: "billing", label: "Billing", href: "/billing", icon: BillingIcon },
+    ],
+  },
 ];
+
+const DOCS_URL = process.env.NEXT_PUBLIC_DOCS_URL ?? "https://docs.usejina.com";
 
 const SECTION_TITLE: Record<NavKey, string> = {
   reviews: "Reviews",
   issues: "Issues",
-  context: "Context",
+  context: "Context Wiki",
+  "causal-graph": "Causal Graph",
   models: "Models",
   integrations: "Integrations",
-  organization: "Organization settings",
-  jina: "Using .jina",
+  organization: "Members & Access",
   usage: "Usage",
   billing: "Billing",
-  board: "Work Board",
-  history: "Event History",
-  "task-types": "Task Types",
-  "context-operations": "Context Operations",
+  settings: "Settings",
 };
 
 function sectionForPath(pathname: string | null): NavKey {
   const path = pathname ?? "/";
   if (path.startsWith("/issues")) return "issues";
+  if (path.startsWith("/causal-graph")) return "causal-graph";
   if (path.startsWith("/context")) return "context";
   if (path.startsWith("/models")) return "models";
   if (path.startsWith("/integrations")) return "integrations";
   if (path.startsWith("/organization")) return "organization";
-  if (path.startsWith("/jina")) return "jina";
   if (path.startsWith("/usage")) return "usage";
   if (path.startsWith("/billing")) return "billing";
-  if (path.startsWith("/board")) return "board";
-  if (path.startsWith("/history")) return "history";
-  if (path.startsWith("/tasks")) return "task-types";
-  if (path.startsWith("/operations/context")) return "context-operations";
+  if (path.startsWith("/settings")) return "settings";
   return "reviews"; // "/", "/runs", and "/reviews/..." details
 }
 
@@ -153,7 +159,6 @@ export function Shell({ children }: { children: ReactNode }) {
           <div className="header__inner">
             <span className="header__title">{SECTION_TITLE[section]}</span>
             <div className="header__actions">
-              <TenantSwitcher />
               <span className="header__stamp">
                 {data ? `Updated ${formatRelative(data.generated_at)}` : "Not loaded"}
               </span>
@@ -192,7 +197,7 @@ function CodexReconnectNotice() {
 
 /** Compact workspace menu for switching tenants or creating an organization. */
 function TenantSwitcher() {
-  const { tenants, switcherVisible, selected, selectTenant, addTenant } = useTenant();
+  const { tenants, selected, selectTenant, addTenant } = useTenant();
   const [open, setOpen] = useState(false);
   const [createMode, setCreateMode] = useState(false);
   const [organizationName, setOrganizationName] = useState("");
@@ -214,7 +219,7 @@ function TenantSwitcher() {
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [open]);
 
-  if (!switcherVisible || !selected) return null;
+  if (!selected) return null;
 
   const pick = (tenantId: string) => {
     selectTenant(tenantId);
@@ -379,29 +384,43 @@ function Sidebar({
 }) {
   return (
     <aside className="sidebar">
-      <Link className="brand" href="/reviews">
-        <span className="brand__mark">J</span>
-        <span className="brand__name">Jina</span>
-      </Link>
+      <div className="sidebar__workspace">
+        <TenantSwitcher />
+      </div>
 
-      <nav className="nav">
-        {NAV.map((item) => {
-          const Icon = item.icon;
-          return (
-            <Link
-              key={item.key}
-              className={`nav__item${item.key === section ? " nav__item--active" : ""}`}
-              href={item.href}
-            >
-              <Icon />
-              {item.label}
-            </Link>
-          );
-        })}
+      <nav className="nav" aria-label="Dashboard navigation">
+        {NAV_GROUPS.map((group) => (
+          <div className="nav__group" key={group.label}>
+            <span className="nav__group-label">{group.label}</span>
+            {group.items.map((item) => {
+              const Icon = item.icon;
+              return (
+                <Link
+                  key={item.key}
+                  className={`nav__item${item.key === section ? " nav__item--active" : ""}`}
+                  href={item.href}
+                >
+                  <Icon />
+                  {item.label}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       <div className="sidebar__spacer" />
 
+      <nav className="nav nav--utility" aria-label="Utilities">
+        <a className="nav__item" href={DOCS_URL} target="_blank" rel="noreferrer">
+          <JinaGuideIcon />
+          Documentation
+        </a>
+        <Link className={`nav__item${section === "settings" ? " nav__item--active" : ""}`} href="/settings">
+          <SettingsIcon />
+          Settings
+        </Link>
+      </nav>
       <AuthControls viewer={viewer} authLoading={authLoading} onLoggedOut={onLoggedOut} />
     </aside>
   );
@@ -425,16 +444,21 @@ function AuthControls({
   }
 
   return (
-    <div className="user">
-      {viewer.user?.avatar_url ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img className="user__avatar" src={viewer.user.avatar_url} alt="" />
-      ) : null}
-      <span className="user__name">{viewer.user?.login}</span>
-      <button type="button" className="btn btn--ghost btn--sm" onClick={() => void logout(onLoggedOut)}>
-        Sign out
-      </button>
-    </div>
+    <details className="user-menu">
+      <summary className="user">
+        {viewer.user?.avatar_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img className="user__avatar" src={viewer.user.avatar_url} alt="" />
+        ) : null}
+        <span className="user__name">{viewer.user?.login}</span>
+        <ChevronIcon />
+      </summary>
+      <div className="user-menu__popover">
+        <button type="button" className="user-menu__action" onClick={() => void logout(onLoggedOut)}>
+          Sign out
+        </button>
+      </div>
+    </details>
   );
 }
 
@@ -459,6 +483,26 @@ function ReviewsIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function IssuesIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M8 4.75v3.75M8 11.15v.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function GraphIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="3" cy="4" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="13" cy="3" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="8" cy="13" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <path d="m4.4 4 7.1-.8M3.8 5.35l3.4 6.3m4.9-7.3-3.3 7.3" stroke="currentColor" strokeWidth="1.2" />
     </svg>
   );
 }
@@ -507,6 +551,20 @@ function JinaGuideIcon() {
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M3 1.75h6.5L13 5.25v9H3z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
       <path d="M9.5 1.75v3.5H13M5.5 8h5M5.5 10.5h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="2.25" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M8 1.75v1.5M8 12.75v1.5M14.25 8h-1.5M3.25 8h-1.5M12.42 3.58l-1.06 1.06M4.64 11.36l-1.06 1.06M12.42 12.42l-1.06-1.06M4.64 4.64 3.58 3.58"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }

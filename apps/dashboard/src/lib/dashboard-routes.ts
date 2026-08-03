@@ -1,6 +1,7 @@
 export const PRODUCT_DASHBOARD_ROUTES = [
   "/",
   "/billing",
+  "/causal-graph",
   "/context",
   "/integrations",
   "/issues",
@@ -13,6 +14,7 @@ export const PRODUCT_DASHBOARD_ROUTES = [
   "/reviews/[reviewRunId]/scenarios/[scenarioId]",
   "/runs",
   "/signin",
+  "/settings",
   "/usage"
 ] as const;
 

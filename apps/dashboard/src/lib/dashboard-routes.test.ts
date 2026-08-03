@@ -6,6 +6,7 @@ test("the merged dashboard retains the complete v1 route inventory", () => {
   assert.deepEqual(PRODUCT_DASHBOARD_ROUTES, [
     "/",
     "/billing",
+    "/causal-graph",
     "/context",
     "/integrations",
     "/issues",
@@ -18,6 +19,7 @@ test("the merged dashboard retains the complete v1 route inventory", () => {
     "/reviews/[reviewRunId]/scenarios/[scenarioId]",
     "/runs",
     "/signin",
+    "/settings",
     "/usage"
   ]);
 });

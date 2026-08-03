@@ -22,8 +22,8 @@ delete it, change its production webhook, or transfer `app.usejina.com` during s
 | Models and triggers             | Codex/ChatGPT subscription routing, BYOK and managed routing, Codex device/manual connect/reconnect/disconnect, model catalog/search/pricing, per-stage defaults and reasoning effort, fallback policy, automatic/manual review trigger mode | `/models`                                                                  |
 | Integrations                    | OpenRouter OAuth/manual key, native OpenAI key, provider disconnect/reconnect, GitHub organization/install connections and repository backfill                                                                                               | `/integrations`                                                            |
 | Billing and usage               | Autumn customer/plan state, subscriptions, manual top-up, auto-reload, automatic-review limits, credit and dollar views, billing activity, 7/30/90-day usage, daily usage, and recent runs                                                   | `/billing`, `/usage`                                                       |
-| Repository guidance             | `.jina` quick start, runtime defaults, global/per-stage instruction precedence, examples, limits, and copyable setup prompt                                                                                                                  | `/jina`                                                                    |
-| Existing v2 operations          | Board filters/task inspector/dependencies, event history, task-type/workflow trees, Context operational catalog and build inspection                                                                                                         | `/board`, `/history`, `/tasks`, `/operations/context`                      |
+| Repository guidance             | `.jina` quick start, runtime defaults, global/per-stage instruction precedence, examples, limits, and onboarding documentation                                                                                                                | Standalone `apps/docs` site                                                |
+| Existing v2 operations          | Board filters/task inspector/dependencies, event history, task-type/workflow trees, Context operational catalog and build inspection                                                                                                         | Operator-only admin surface                                                |
 
 ## Non-dashboard runtime retained
 
@@ -71,6 +71,7 @@ Staging must be isolated before any webhook or customer traffic is admitted:
 | Context stack      | `jina-api-staging`, `jina-context-worker-staging`, `jina-task-worker-staging`, migration job, registry, and bucket in the staging project |
 | Trigger workers    | Trigger.dev project `jina-staging-isolated` (`proj_rqckjugodcaghbpgggbz`) and staging-only keys                                           |
 | Dashboard          | Vercel project `omlabs/jina-staging-dashboard`, rooted at `apps/dashboard`, serving `https://app.staging.usejina.com`                     |
+| Documentation      | Vercel project `omlabs/jina-staging-docs`, rooted at `apps/docs`, serving `https://docs.staging.usejina.com`                             |
 | Admin              | Vercel project `omlabs/jina-staging-admin`, rooted at `apps/admin`, serving `https://admin.staging.usejina.com`                           |
 | GitHub identity    | Separate staging GitHub App/OAuth identity installed only on test repositories                                                            |
 | Secrets            | Names and values containing/owned by staging; no production database URL, webhook secret, internal token, OAuth secret, or encryption key |
@@ -103,7 +104,12 @@ Provisioned platform resources:
   dedicated vendor-account keys if hard provider-account isolation is required.
 - Vercel project `omlabs/jina-staging-dashboard`, served at
   `https://app.staging.usejina.com`. HTTP Basic Auth is removed; GitHub OAuth is the
-  dashboard identity boundary. All product and operational routes return `200`.
+  dashboard identity boundary. Its customer navigation is grouped into Workspace,
+  Configure, and Organization sections, with the organization switcher first.
+- Vercel project `omlabs/jina-staging-docs`, served at
+  `https://docs.staging.usejina.com`, is a standalone Next.js app containing
+  onboarding, GitHub, review workflow, Context Wiki, Causal Graph, `.jina`, model,
+  account, billing, and troubleshooting guides.
 - Vercel project `omlabs/jina-staging-admin`, served at
   `https://admin.staging.usejina.com`, uses a staging-only server credential and
   tenant binding. Its V2 API credential never reaches the browser.

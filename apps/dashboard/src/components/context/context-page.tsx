@@ -10,7 +10,7 @@ import { BuildCheckpoints } from "./build-checkpoints.tsx";
 import { ContextBrowser } from "./context-browser.tsx";
 import { IssueGraphBrowser } from "./issue-graph-browser.tsx";
 
-export function ContextPage() {
+export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causal-graph" }) {
   const { selected } = useTenant();
   const releasesPath = selected ? operationsApiUrl(selected.tenantId, "context/releases") : "";
   const buildsPath = selected ? tenantDashboardApiUrl(selected.tenantId, "context/builds") : "";
@@ -84,9 +84,13 @@ export function ContextPage() {
     <section id="context-page" className="context-page">
       <header className="context-page-header">
         <div>
-          <span className="context-eyebrow">Repository context</span>
-          <h1>Evidence-backed workspace</h1>
-          <p>Derived context, verified source citations, and build checkpoints for one immutable repository view.</p>
+          <span className="context-eyebrow">{view === "causal-graph" ? "Repository history" : "Repository context"}</span>
+          <h1>{view === "causal-graph" ? "Causal Graph" : "Context Wiki"}</h1>
+          <p>
+            {view === "causal-graph"
+              ? "Trace commit-derived issues, evidence, and causal relationships across repository history."
+              : "Browse derived documentation, verified source citations, and build checkpoints for one immutable repository view."}
+          </p>
         </div>
         <label className="context-scope-picker">
           <span>Repository and ref</span>
@@ -104,7 +108,7 @@ export function ContextPage() {
         </label>
       </header>
 
-      {release ? (
+      {view === "wiki" && release ? (
         <>
           <ReleaseStrip release={release} />
           {build ? <BuildCheckpoints build={build} release={release} /> : null}
@@ -114,7 +118,7 @@ export function ContextPage() {
             apiBasePath={operationsApiUrl(selected!.tenantId, "context")}
           />
         </>
-      ) : (
+      ) : view === "wiki" ? (
         <>
           {build ? <BuildCheckpoints build={build} /> : null}
           <section className="context-empty-state" aria-live="polite">
@@ -125,8 +129,10 @@ export function ContextPage() {
             </p>
           </section>
         </>
-      )}
-      {repository && ref ? <IssueGraphBrowser repository={repository} ref={ref} build={causalGraphBuild} /> : null}
+      ) : null}
+      {view === "causal-graph" && repository && ref ? (
+        <IssueGraphBrowser repository={repository} ref={ref} build={causalGraphBuild} />
+      ) : null}
     </section>
   );
 }

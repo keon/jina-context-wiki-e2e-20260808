@@ -7,6 +7,15 @@ dashboard project/origin, GitHub App, OAuth credentials, and webhook secret.
 The isolated GCP project shares the Om Labs billing account only; it does not
 share runtime resources or identities with production.
 
+Staging web surfaces are split by responsibility:
+
+- `https://app.staging.usejina.com` serves the customer dashboard.
+- `https://docs.staging.usejina.com` serves the standalone Next.js documentation app.
+- `https://admin.staging.usejina.com` serves operator-only administration.
+
+The dashboard's `NEXT_PUBLIC_DOCS_URL` must use the staging docs origin, and the
+docs app's `NEXT_PUBLIC_DASHBOARD_URL` must use the staging dashboard origin.
+
 ## GitHub Environment
 
 Create a GitHub Actions environment named `Staging`. Restrict it to the
