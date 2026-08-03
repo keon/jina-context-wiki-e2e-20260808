@@ -91,6 +91,7 @@ required_variables=(
   JINA_GITHUB_OAUTH_CLIENT_ID
   JINA_TRIGGER_PROJECT_REF
   JINA_GRAPH_API_URL
+  JINA_MCP_URL
   JINA_CONTEXT_TENANT_ID
   JINA_BILLING_ENFORCE
   WEBHOOK_SECRET_NAME
@@ -123,6 +124,25 @@ for variable_name in "${required_variables[@]}"; do
     pass "GitHub Staging variable ${variable_name} is configured"
   fi
 done
+
+require_exact_staging_variable() {
+  local variable_name="$1"
+  local expected_value="$2"
+  local actual_value
+  actual_value="$(jq -r --arg name "${variable_name}" \
+    '.variables[]? | select(.name == $name) | .value' <<<"${variables_json}")"
+  if [[ "${actual_value}" == "${expected_value}" ]]; then
+    pass "GitHub Staging variable ${variable_name} uses ${expected_value}"
+  else
+    fail "GitHub Staging variable ${variable_name} must equal ${expected_value}"
+  fi
+}
+
+require_exact_staging_variable JINA_DASHBOARD_URL https://app.staging.usejina.com
+require_exact_staging_variable JINA_DASHBOARD_ORIGIN https://app.staging.usejina.com
+require_exact_staging_variable JINA_API_BASE_URL https://legacy-api.staging.usejina.com
+require_exact_staging_variable JINA_GRAPH_API_URL https://api.staging.usejina.com
+require_exact_staging_variable JINA_MCP_URL https://mcp.staging.usejina.com/mcp
 
 context_tenant_id="$(jq -r '.variables[]? | select(.name == "JINA_CONTEXT_TENANT_ID") | .value' \
   <<<"${variables_json}")"
@@ -226,6 +246,34 @@ if command -v vercel >/dev/null 2>&1 && vercel project inspect jina-staging-dash
 else
   fail "Vercel staging dashboard project is missing"
 fi
+
+if command -v vercel >/dev/null 2>&1 && vercel project inspect jina-staging-admin \
+    --scope omlabs >/dev/null 2>&1; then
+  pass "Vercel staging admin project exists"
+else
+  fail "Vercel staging admin project is missing"
+fi
+
+staging_domain_mappings=(
+  "api.staging.usejina.com:jina-api-staging"
+  "mcp.staging.usejina.com:jina-api-staging"
+  "legacy-api.staging.usejina.com:jina-code-review-api-staging"
+)
+for mapping in "${staging_domain_mappings[@]}"; do
+  domain_name="${mapping%%:*}"
+  expected_service="${mapping#*:}"
+  mapping_json="$(gcloud beta run domain-mappings describe "${domain_name}" \
+    --project="${staging_project}" --region="${region}" --format=json 2>/dev/null || true)"
+  mapped_service="$(jq -r '.spec.routeName // empty' <<<"${mapping_json}")"
+  certificate_ready="$(jq -r \
+    '[.status.conditions[]? | select(.type == "CertificateProvisioned" and .status == "True")] | length > 0' \
+    <<<"${mapping_json}")"
+  if [[ "${mapped_service}" == "${expected_service}" && "${certificate_ready}" == "true" ]]; then
+    pass "Staging domain ${domain_name} routes to ${expected_service} with TLS"
+  else
+    fail "Staging domain ${domain_name} must route to ${expected_service} with TLS"
+  fi
+done
 
 if ((failures > 0)); then
   printf '%d staging readiness check(s) failed\n' "${failures}" >&2

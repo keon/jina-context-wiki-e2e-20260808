@@ -32,9 +32,9 @@ Save these as GitHub Environment variables on `Staging`:
 | `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT` | `jina-api-staging-runtime@jina-staging-20260802.iam.gserviceaccount.com` |
 | `CLOUD_SQL_INSTANCE` | `jina-db-staging` |
 | `ARTIFACT_REGISTRY_REPOSITORY` | `jina-code-review-staging` |
-| `JINA_API_BASE_URL` | `https://jina-code-review-api-staging-679811160186.us-east1.run.app` |
-| `JINA_DASHBOARD_ORIGIN` | `https://staging.usejina.com` |
-| `JINA_DASHBOARD_URL` | `https://staging.usejina.com` |
+| `JINA_API_BASE_URL` | `https://legacy-api.staging.usejina.com` |
+| `JINA_DASHBOARD_ORIGIN` | `https://app.staging.usejina.com` |
+| `JINA_DASHBOARD_URL` | `https://app.staging.usejina.com` |
 | `JINA_GITHUB_APP_ID` | staging GitHub App id |
 | `JINA_GITHUB_APP_SLUG` or `JINA_GITHUB_APP_INSTALL_URL` | staging GitHub App slug/install URL |
 | `JINA_GITHUB_OAUTH_CLIENT_ID` | staging OAuth App client id |
@@ -56,7 +56,8 @@ Optional staging variables:
 | `JINA_DASHBOARD_ORIGIN` | Extra comma-separated dashboard origins; if set, must contain `staging`. |
 | `JINA_BILLING_ENFORCE` | `off`, `shadow`, or `on`. `off` never mounts an Autumn secret. |
 | `AUTUMN_SECRET_KEY_SECRET_NAME` | `jina-staging-autumn-secret-key`. Required only for `shadow` or `on`. |
-| `JINA_GRAPH_API_URL` | Optional staging V2 Context API HTTPS origin; if set, it must contain `staging` and be paired with `GRAPH_API_TOKEN_SECRET_NAME`. |
+| `JINA_GRAPH_API_URL` | Canonical staging V2 API origin: `https://api.staging.usejina.com`; pair it with `GRAPH_API_TOKEN_SECRET_NAME`. |
+| `JINA_MCP_URL` | Canonical staging MCP endpoint: `https://mcp.staging.usejina.com/mcp`. |
 | `JINA_GRAPH_REQUEST_TIMEOUT_MS` | Optional timeout for staging V2 Context requests and webhook relay; defaults to 20,000 ms. |
 | `GRAPH_API_TOKEN_SECRET_NAME` | Staging-scoped Secret Manager name for the static `JINA_GRAPH_API_TOKEN` fallback; required when `JINA_GRAPH_API_URL` is set. |
 | `GRAPH_INTERNAL_TOKEN_SECRET_NAME` | Optional staging-scoped Secret Manager name containing V2's `INTERNAL_API_TOKEN`; enables delegated dashboard tokens and review MCP access when Context is configured. |
@@ -193,10 +194,10 @@ variables) so managed reviews can run.
 
 Create a separate staging GitHub App:
 
-- Webhook URL: `https://jina-code-review-api-staging-679811160186.us-east1.run.app/webhooks/github`
+- Webhook URL: `https://legacy-api.staging.usejina.com/webhooks/github`
 - Webhook secret: value stored in `jina-staging-github-webhook-secret`
-- OAuth callback: `https://jina-code-review-api-staging-679811160186.us-east1.run.app/auth/github/callback`
-- Setup URL: `https://staging.usejina.com/integrations`
+- OAuth callback: `https://legacy-api.staging.usejina.com/auth/github/callback`
+- Setup URL: `https://app.staging.usejina.com/integrations`
 - Install it only on staging/test repositories.
 
 The production GitHub App is installed organization-wide on `omxyz`. Creating
@@ -218,12 +219,13 @@ scope before opening a PR.
 7. Run `Deploy API` from the `staging` branch with `target_environment=Staging`.
 8. Run `Deploy Trigger` from the `staging` branch with `target_environment=Staging`.
 9. Deploy the dashboard with
-   `NEXT_PUBLIC_API_BASE_URL=https://jina-code-review-api-staging-679811160186.us-east1.run.app`.
+   `NEXT_PUBLIC_API_BASE_URL=https://legacy-api.staging.usejina.com` and
+   `JINA_API_URL=https://api.staging.usejina.com`.
 10. Install the staging GitHub App on a test repository and open a PR.
 
 ## Validation
 
-- `GET https://jina-code-review-api-staging-679811160186.us-east1.run.app/v1/healthz`
+- `GET https://legacy-api.staging.usejina.com/v1/healthz`
   returns `status: ok`.
 - Staging GitHub App webhook delivery gets HTTP 200.
 - A test PR creates a Jina comment/check under the staging app identity.
@@ -247,7 +249,7 @@ and the staging App was returned to private visibility.
 - Result: parent and runtime runs completed successfully, the runtime review was
   published by `jina-staging-gcloud-omxyz`, nine findings were persisted, and
   the completed investigation rendered at
-  `https://staging.usejina.com/reviews/b587d680-8451-4752-befc-c44248edfa6b`.
+  `https://app.staging.usejina.com/reviews/b587d680-8451-4752-befc-c44248edfa6b`.
 - Isolation proof: the pull request's only App comment/review author was
   `jina-staging-gcloud-omxyz`; staging logs contained none of the production GCP
   project, Trigger project, dashboard domain, or GitHub App identifiers.
