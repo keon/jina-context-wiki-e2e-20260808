@@ -67,12 +67,21 @@ test("Board source-challenge parsing accepts the same research subjects as local
   assert.equal(board.addedTasks[0]?.subjectId, "core-id-api-and-wire-format");
 });
 
-test("Board source-challenge parsing canonicalizes the host-owned task catalog", () => {
+test("Board source-challenge parsing canonicalizes host-owned identity", () => {
   const result = parseBoardSourceChallengeStageResult(
-    { ...challenge, acceptedTaskIds: ["invented-task"] },
+    {
+      ...challenge,
+      inputDigest: "wrong-input-digest",
+      publicSnapshotDigest: "wrong-public-snapshot-digest",
+      worker: { ...challenge.worker, id: "wrong-worker" },
+      acceptedTaskIds: ["invented-task"]
+    },
     { ...expected, researchPlan }
   );
 
+  assert.equal(result.inputDigest, expected.inputDigest);
+  assert.equal(result.publicSnapshotDigest, expected.publicSnapshotDigest);
+  assert.equal(result.worker.id, expected.workerId);
   assert.deepEqual(result.acceptedTaskIds, ["understand-id-format"]);
 });
 
@@ -144,16 +153,16 @@ test("Board source-challenge repair canonicalizes the host-owned accepted task c
 
 test("Board source-challenge validation never retries a rejected correction", async () => {
   let attempts = 0;
+  const invalid = {
+    ...challenge,
+    addedTasks: [{ ...challenge.addedTasks[0], subjectId: "unknown-subject" }]
+  };
   await assert.rejects(
-    parseBoardSourceChallengeStageResultWithRepair(
-      { ...challenge, worker: { ...challenge.worker, id: "wrong-worker" } },
-      { ...expected, researchPlan },
-      async () => {
-        attempts += 1;
-        return { ...challenge, worker: { ...challenge.worker, id: "still-wrong" } };
-      }
-    ),
-    /source_challenge_contract: source challenge worker id/
+    parseBoardSourceChallengeStageResultWithRepair(invalid, { ...expected, researchPlan }, async () => {
+      attempts += 1;
+      return invalid;
+    }),
+    /source_challenge_contract: source challenge task .* names unknown subject unknown-subject/
   );
   assert.equal(attempts, 1);
 });

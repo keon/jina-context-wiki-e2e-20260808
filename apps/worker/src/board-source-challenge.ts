@@ -13,16 +13,10 @@ export function parseBoardSourceChallengeStageResult(
   }
 ): ReturnType<typeof parseSourceChallengeStageResult> {
   const { researchPlan, ...validation } = expected;
-  return parseSourceChallengeStageResult(
-    canonicalAcceptedTaskIds(
-      value,
-      expected.existingTasks.map((task) => task.id)
-    ),
-    {
-      ...validation,
-      existingSubjectIds: researchPlan.assignments.map((assignment) => assignment.id)
-    }
-  );
+  return parseSourceChallengeStageResult(canonicalHostOwnedIdentity(value, expected), {
+    ...validation,
+    existingSubjectIds: researchPlan.assignments.map((assignment) => assignment.id)
+  });
 }
 
 export async function parseBoardSourceChallengeStageResultWithRepair(
@@ -34,13 +28,7 @@ export async function parseBoardSourceChallengeStageResultWithRepair(
     return parseBoardSourceChallengeStageResult(value, expected);
   } catch (error) {
     const diagnostic = error instanceof Error ? error.message : String(error);
-    const corrected = await repair(
-      diagnostic,
-      canonicalAcceptedTaskIds(
-        value,
-        expected.existingTasks.map((task) => task.id)
-      )
-    );
+    const corrected = await repair(diagnostic, canonicalHostOwnedIdentity(value, expected));
     try {
       return parseBoardSourceChallengeStageResult(corrected, expected);
     } catch (correctionError) {
@@ -51,12 +39,25 @@ export async function parseBoardSourceChallengeStageResultWithRepair(
 }
 
 /**
- * `acceptedTaskIds` is a redundant acknowledgement of the host-owned catalog,
- * not model judgment. Canonicalize it before validation so a challenger cannot
- * invent or omit catalog identity while every substantive finding remains
- * strictly parsed and evidence-checked.
+ * Worker and snapshot identity plus `acceptedTaskIds` are redundant echoes of
+ * host-owned inputs, not model judgment. Canonicalize them before validation
+ * so the bounded repair receives the first substantive diagnostic instead of
+ * spending its only pass on identity bookkeeping.
  */
-function canonicalAcceptedTaskIds(value: unknown, acceptedTaskIds: readonly string[]): unknown {
+function canonicalHostOwnedIdentity(
+  value: unknown,
+  expected: Parameters<typeof parseBoardSourceChallengeStageResult>[1]
+): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  return { ...(value as Record<string, unknown>), acceptedTaskIds: [...acceptedTaskIds] };
+  const result = value as Record<string, unknown>;
+  const worker = result.worker;
+  return {
+    ...result,
+    inputDigest: expected.inputDigest,
+    publicSnapshotDigest: expected.publicSnapshotDigest,
+    ...(worker && typeof worker === "object" && !Array.isArray(worker)
+      ? { worker: { ...(worker as Record<string, unknown>), id: expected.workerId } }
+      : {}),
+    acceptedTaskIds: expected.existingTasks.map((task) => task.id)
+  };
 }
