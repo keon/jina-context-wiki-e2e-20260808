@@ -47,7 +47,7 @@ export type BillingConfig = {
 };
 
 type AuthConfig = {
-  mode: "disabled" | "github";
+  mode: "disabled" | "github" | "clerk";
   githubClientId?: string;
   githubClientSecret?: string;
   githubScopes: string;
@@ -56,6 +56,8 @@ type AuthConfig = {
   cookieSecure: boolean;
   cookieSameSite: "Lax" | "Strict" | "None";
   sessionTtlSeconds: number;
+  clerkPublishableKey?: string;
+  clerkSecretKey?: string;
 };
 
 export type TriggerConfig = {
@@ -184,7 +186,12 @@ export function dashboardOriginAllowed(allowedOrigins: DashboardAllowedOrigins, 
 function parseAuthConfig(env: NodeJS.ProcessEnv): AuthConfig {
   const explicitMode = optionalEnv(env, "DASHBOARD_AUTH_MODE");
   const hasGithubOAuth = Boolean(optionalEnv(env, "GITHUB_OAUTH_CLIENT_ID") && optionalEnv(env, "GITHUB_OAUTH_CLIENT_SECRET"));
-  const mode = explicitMode === "github" || (!explicitMode && hasGithubOAuth) ? "github" : "disabled";
+  const hasClerk = Boolean(optionalEnv(env, "CLERK_PUBLISHABLE_KEY") && optionalEnv(env, "CLERK_SECRET_KEY"));
+  const mode = explicitMode === "clerk" || (!explicitMode && hasClerk)
+    ? "clerk"
+    : explicitMode === "github" || (!explicitMode && hasGithubOAuth)
+      ? "github"
+      : "disabled";
   const dashboardUrl = dashboardUrlFromEnv(env);
 
   return {
@@ -198,6 +205,9 @@ function parseAuthConfig(env: NodeJS.ProcessEnv): AuthConfig {
     cookieSecure: parseBoolean(env.DASHBOARD_COOKIE_SECURE, dashboardUrl.startsWith("https://")),
     cookieSameSite: parseSameSite(env.DASHBOARD_COOKIE_SAMESITE, dashboardUrl.startsWith("https://") ? "None" : "Lax"),
     sessionTtlSeconds: parsePositiveInteger(env.DASHBOARD_SESSION_TTL_SECONDS, 60 * 60 * 24 * 7),
+    clerkPublishableKey:
+      mode === "clerk" ? requiredEnv(env, "CLERK_PUBLISHABLE_KEY") : optionalEnv(env, "CLERK_PUBLISHABLE_KEY"),
+    clerkSecretKey: mode === "clerk" ? requiredEnv(env, "CLERK_SECRET_KEY") : optionalEnv(env, "CLERK_SECRET_KEY"),
   };
 }
 

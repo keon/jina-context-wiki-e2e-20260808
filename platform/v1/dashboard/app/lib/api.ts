@@ -5,35 +5,12 @@ import type {
 } from "./types";
 import { normalizeViewerTenants, type ViewerTenant } from "./tenants";
 
-const apiBaseUrl = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL);
-
 export function apiUrl(path: string, params?: URLSearchParams): string {
-  if (!apiBaseUrl) {
-    throw new Error(
-      "NEXT_PUBLIC_API_BASE_URL is not configured. Refusing to send credentialed requests to the dashboard's own origin.",
-    );
-  }
-  const url = new URL(`${apiBaseUrl}${path}`, window.location.origin);
+  const url = new URL(`/legacy-api${path}`, window.location.origin);
   if (params) {
     url.search = params.toString();
   }
   return url.toString();
-}
-
-function normalizeApiBaseUrl(value: string | undefined): string {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return "";
-  }
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error(`Unsupported API URL protocol: ${parsed.protocol}`);
-    }
-    return parsed.origin;
-  } catch {
-    throw new Error("NEXT_PUBLIC_API_BASE_URL must be an absolute http(s) origin.");
-  }
 }
 
 /**

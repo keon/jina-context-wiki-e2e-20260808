@@ -70,6 +70,23 @@ test("rejects wildcard dashboard origin because credentialed dashboard CORS need
   );
 });
 
+test("Clerk auth requires both server and browser keys", () => {
+  const config = loadConfig(baseEnv({
+    NODE_ENV: "development",
+    DASHBOARD_AUTH_MODE: "clerk",
+    CLERK_PUBLISHABLE_KEY: "pk_test_example",
+    CLERK_SECRET_KEY: "sk_test_example",
+  }));
+  assert.equal(config.auth.mode, "clerk");
+  assert.equal(config.auth.clerkPublishableKey, "pk_test_example");
+  assert.equal(config.auth.clerkSecretKey, "sk_test_example");
+
+  assert.throws(
+    () => loadConfig(baseEnv({ NODE_ENV: "development", DASHBOARD_AUTH_MODE: "clerk" })),
+    /Missing required environment variable CLERK_PUBLISHABLE_KEY/,
+  );
+});
+
 test("rejects a Trigger.dev development key in production", () => {
   assert.throws(
     () => loadConfig(baseEnv({ NODE_ENV: "production" })),

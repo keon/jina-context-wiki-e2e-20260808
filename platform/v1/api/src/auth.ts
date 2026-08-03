@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { createClerkClient } from "@clerk/backend";
 
 import type { Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -14,6 +15,7 @@ import {
   saveOauthState,
   saveSession,
   syncTenantMemberships,
+  syncClerkTenantMemberships,
   updateSessionIfCurrent,
   upsertGithubUserIdentity,
   type ViewerOrgMembership,
@@ -101,6 +103,8 @@ export type DashboardSession = {
   expiresAt: number;
   createdAt: string;
   updatedAt: string;
+  clerkUserId?: string;
+  clerkOrganizationId?: string;
 };
 
 type OAuthTokenResponse = {
@@ -138,7 +142,7 @@ export function cookieSecurity(config: AppConfig): { sameSite: AppConfig["auth"]
 // survive restarts and are shared across Cloud Run instances.
 
 function dashboardAuthEnabled(config: AppConfig): boolean {
-  return config.auth.mode === "github";
+  return config.auth.mode !== "disabled";
 }
 
 export async function githubLogin(c: Context, config: AppConfig): Promise<Response> {
@@ -197,6 +201,11 @@ export async function githubCallback(c: Context, config: AppConfig): Promise<Res
 }
 
 export async function logout(c: Context, config: AppConfig): Promise<Response> {
+  if (config.auth.mode === "clerk") {
+    const session = await currentSession(c, config);
+    if (session) await deleteSession(session.id).catch(() => {});
+    return c.json({ ok: true });
+  }
   const sessionId = getCookie(c, config.auth.sessionCookieName);
   if (sessionId) {
     await deleteSession(sessionId).catch(() => {});
@@ -312,6 +321,10 @@ async function currentSession(c: Context, config: AppConfig): Promise<DashboardS
     return undefined;
   }
 
+  if (config.auth.mode === "clerk") {
+    return currentClerkSession(c, config);
+  }
+
   const sessionId = getCookie(c, config.auth.sessionCookieName);
   if (!sessionId) {
     return undefined;
@@ -328,6 +341,90 @@ async function currentSession(c: Context, config: AppConfig): Promise<DashboardS
     return undefined;
   }
 
+  return session;
+}
+
+async function currentClerkSession(c: Context, config: AppConfig): Promise<DashboardSession | undefined> {
+  const clerk = createClerkClient({
+    secretKey: config.auth.clerkSecretKey,
+    publishableKey: config.auth.clerkPublishableKey,
+  });
+  const state = await clerk.authenticateRequest(c.req.raw, {
+    publishableKey: config.auth.clerkPublishableKey,
+    acceptsToken: "session_token",
+    authorizedParties: config.dashboardAllowedOrigins === "*" ? undefined : config.dashboardAllowedOrigins,
+  });
+  if (!state.isAuthenticated) return undefined;
+  const auth = state.toAuth();
+  if (!auth?.userId || !auth.sessionId) return undefined;
+
+  const cacheId = `clerk:${auth.sessionId}`;
+  const cached = await getSession(cacheId).catch(() => undefined);
+  if (
+    cached &&
+    cached.expiresAt > Date.now() &&
+    !sessionAccessStale(cached) &&
+    cached.clerkOrganizationId === (auth.orgId ?? undefined)
+  ) {
+    return cached;
+  }
+
+  const user = await clerk.users.getUser(auth.userId);
+  const githubAccount = user.externalAccounts.find((account) => account.provider === "oauth_github");
+  const githubUserId = Number(githubAccount?.externalId);
+  const githubLogin = githubAccount?.username?.trim();
+  if (!Number.isSafeInteger(githubUserId) || githubUserId <= 0 || !githubLogin) {
+    throw new ApiError(403, "Connect GitHub to your Clerk profile before using Jina");
+  }
+
+  const oauth = await clerk.users.getUserOauthAccessToken(auth.userId, "github");
+  const githubAccessToken = oauth.data[0]?.token;
+  if (!githubAccessToken) {
+    throw new ApiError(403, "Reconnect GitHub in your Clerk profile before using Jina");
+  }
+  const access = await loadGithubSessionAccess(githubAccessToken);
+  const identity = await upsertGithubUserIdentity({
+    githubUserId,
+    githubLogin,
+    displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || githubLogin,
+    avatarUrl: user.imageUrl,
+  });
+  if (!identity) throw new ApiError(503, "Jina identity storage is unavailable");
+
+  const memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
+  await syncClerkTenantMemberships({
+    githubUserId,
+    githubLogin,
+    userId: identity.userId,
+    memberships: memberships.data.map((membership) => ({
+      organizationId: membership.organization.id,
+      name: membership.organization.name,
+      role: membership.role === "org:admin" ? "admin" : "member",
+    })),
+  });
+
+  const now = new Date().toISOString();
+  const session: DashboardSession = {
+    id: cacheId,
+    userId: identity.userId,
+    accessToken: githubAccessToken,
+    user: {
+      id: githubUserId,
+      login: githubLogin,
+      name: [user.firstName, user.lastName].filter(Boolean).join(" ") || githubLogin,
+      avatar_url: user.imageUrl,
+      html_url: `https://github.com/${encodeURIComponent(githubLogin)}`,
+    },
+    organizations: access.organizations.map(githubOrgForSession),
+    projects: access.repositories.map(githubRepoForSession),
+    teams: access.teams,
+    expiresAt: Date.now() + config.auth.sessionTtlSeconds * 1_000,
+    createdAt: cached?.createdAt ?? now,
+    updatedAt: now,
+    clerkUserId: auth.userId,
+    clerkOrganizationId: auth.orgId ?? undefined,
+  };
+  await saveSession(session);
   return session;
 }
 
@@ -674,7 +771,7 @@ async function githubJson<T>(accessToken: string, path: string): Promise<T> {
 }
 
 function ensureGithubAuth(config: AppConfig): void {
-  if (!dashboardAuthEnabled(config)) {
+  if (config.auth.mode !== "github") {
     throw new ApiError(404, "GitHub dashboard authentication is not configured");
   }
 }
@@ -686,6 +783,9 @@ function ensureGithubAuth(config: AppConfig): void {
 // when API_BASE_URL is unconfigured (local dev), where forwarded headers are not in play.
 // `path` is the provider-specific callback path (shared by GitHub login and OpenRouter OAuth).
 export function callbackUrlFor(c: Context, config: AppConfig, path: string): string {
+  if (config.auth?.mode === "clerk" && path.startsWith("/v1/dashboard/")) {
+    return new URL(`/legacy-api${path}`, config.dashboardUrl).toString();
+  }
   if (config.apiBaseUrl) {
     return new URL(path, config.apiBaseUrl).toString();
   }

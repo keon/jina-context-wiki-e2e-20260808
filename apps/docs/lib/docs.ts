@@ -282,14 +282,14 @@ export const docs: Doc[] = [
     sections: [
       {
         heading: "Jina organizations",
-        body: ["A Jina organization is the ownership boundary for GitHub connections, repositories, generated context, model settings, usage, and billing. It is distinct from a GitHub organization."],
+        body: ["A Clerk organization is Jina's ownership boundary for GitHub connections, repositories, generated context, model settings, usage, and billing. It remains distinct from any GitHub organization you connect."],
       },
       {
         heading: "Roles",
         bullets: [
           "Admins can change organization settings, integrations, models, billing, and Context builds.",
           "Members can use and inspect organization resources but cannot change admin-controlled settings.",
-          "Personal workspaces are tied to the signed-in GitHub identity.",
+          "Clerk manages invitations, membership, roles, and the active organization; GitHub remains the repository identity and installation provider.",
         ],
       },
       {

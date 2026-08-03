@@ -48,6 +48,9 @@ Save these as GitHub Environment variables on `Staging`:
 | `JINA_GITHUB_APP_SLUG` or `JINA_GITHUB_APP_INSTALL_URL` | staging GitHub App slug/install URL |
 | `JINA_GITHUB_OAUTH_CLIENT_ID` | staging OAuth App client id |
 | `JINA_GITHUB_OAUTH_SCOPES` | `read:user read:org repo` |
+| `JINA_DASHBOARD_AUTH_MODE` | `clerk` |
+| `JINA_CLERK_PUBLISHABLE_KEY` | Clerk development-instance publishable key |
+| `CLERK_SECRET_KEY_SECRET_NAME` | `jina-staging-clerk-secret-key` |
 | `JINA_TRIGGER_API_URL` | `https://api.trigger.dev` |
 | `JINA_TRIGGER_PROJECT_REF` | `proj_rqckjugodcaghbpgggbz` |
 | `WEBHOOK_SECRET_NAME` | `jina-staging-github-webhook-secret` |

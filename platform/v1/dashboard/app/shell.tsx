@@ -1,14 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import { OrganizationSwitcher, UserButton } from "@clerk/nextjs";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useDashboard, useTenant } from "./providers";
-import { Badge } from "./components/ui";
-import { apiUrl, createJinaOrganization, logout, parseInstallationResult } from "./lib/api";
+import { useEffect, useState, type ReactNode } from "react";
+import { useDashboard } from "./providers";
+import { apiUrl, parseInstallationResult } from "./lib/api";
 import { normalizeCodexHarnessInfo } from "./lib/codex-harness";
 import { formatRelative } from "./lib/presentation";
-import { tenantRoleLabel, tenantTypeLabel } from "./lib/tenants";
 import type { InstallationResult, ViewerResponse } from "./lib/types";
 
 type NavKey =
@@ -82,7 +81,7 @@ function sectionForPath(pathname: string | null): NavKey {
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { data, viewer, error, loading, authLoading, authRequired, reload, reloadViewer } = useDashboard();
+  const { data, viewer, error, loading, authLoading, authRequired, reload } = useDashboard();
   const pathname = usePathname();
   const router = useRouter();
   const section = sectionForPath(pathname);
@@ -152,7 +151,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
   return (
     <div className="app">
-      <Sidebar viewer={viewer} authLoading={authLoading} section={section} onLoggedOut={reloadViewer} />
+      <Sidebar viewer={viewer} authLoading={authLoading} section={section} />
 
       <div className="content">
         <header className="header">
@@ -195,197 +194,26 @@ function CodexReconnectNotice() {
   );
 }
 
-/** Compact workspace menu for switching tenants or creating an organization. */
-function TenantSwitcher() {
-  const { tenants, selected, selectTenant, addTenant } = useTenant();
-  const [open, setOpen] = useState(false);
-  const [createMode, setCreateMode] = useState(false);
-  const [organizationName, setOrganizationName] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-        setOpen(false);
-        setCreateMode(false);
-        setOrganizationName("");
-        setCreateError(null);
-      }
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
-  }, [open]);
-
-  if (!selected) return null;
-
-  const pick = (tenantId: string) => {
-    selectTenant(tenantId);
-    setOpen(false);
-    setCreateMode(false);
-    setOrganizationName("");
-    setCreateError(null);
-  };
-
-  const submitOrganization = async () => {
-    const name = organizationName.trim();
-    if (!name || creating) return;
-    setCreating(true);
-    setCreateError(null);
-    try {
-      const tenant = await createJinaOrganization(name);
-      addTenant(tenant);
-      setOrganizationName("");
-      setCreateMode(false);
-      setOpen(false);
-    } catch (error) {
-      setCreateError(error instanceof Error ? error.message : "Could not create organization");
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  return (
-    <div className="model-pill-wrap" ref={containerRef}>
-      <button
-        type="button"
-        className="model-pill"
-        aria-expanded={open}
-        aria-controls={open ? "tenant-workspace-menu" : undefined}
-        aria-label="Switch workspace or create an organization"
-        onClick={() => {
-          if (open) {
-            setOpen(false);
-            setCreateMode(false);
-            setOrganizationName("");
-            setCreateError(null);
-          } else {
-            setOpen(true);
-          }
-        }}
-      >
-        <span className="model-pill__name">{selected.login}</span>
-        <span className="tenant-pill__type">{tenantTypeLabel(selected.type)}</span>
-        <ChevronIcon />
-      </button>
-
-      {open ? (
-        <div className="model-pop" id="tenant-workspace-menu">
-          {createMode ? (
-            <form
-              className="tenant-pop__form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submitOrganization();
-              }}
-            >
-              <label className="form-field">
-                <span className="form-field__label">Jina organization name</span>
-                <input
-                  autoFocus
-                  className="input"
-                  value={organizationName}
-                  maxLength={80}
-                  placeholder="Acme Research"
-                  onChange={(event) => setOrganizationName(event.target.value)}
-                />
-              </label>
-              <p className="tenant-pop__hint">
-                Create the Jina workspace first. You can connect GitHub organizations afterward.
-              </p>
-              {createError ? (
-                <span className="tenant-pop__error" role="alert">
-                  {createError}
-                </span>
-              ) : null}
-              <div className="tenant-pop__actions">
-                <button
-                  type="button"
-                  className="btn btn--ghost btn--sm"
-                  disabled={creating}
-                  onClick={() => {
-                    setCreateMode(false);
-                    setOrganizationName("");
-                    setCreateError(null);
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="btn btn--primary btn--sm"
-                  disabled={creating || organizationName.trim().length === 0}
-                >
-                  {creating ? "Creating…" : "Create"}
-                </button>
-              </div>
-            </form>
-          ) : (
-            <>
-              <div className="model-pop__list">
-                {tenants.map((tenant) => {
-                  const active = tenant.tenant_id === selected.tenantId;
-                  return (
-                    <button
-                      type="button"
-                      key={tenant.tenant_id}
-                      aria-current={active ? "true" : undefined}
-                      className={`model-pop__opt${active ? " model-pop__opt--active" : ""}`}
-                      onClick={() => pick(tenant.tenant_id)}
-                    >
-                      <span className="model-pop__opt-name">{tenant.login}</span>
-                      <span className="tenant-pop__badges">
-                        <Badge tone="info">{tenantTypeLabel(tenant.type)}</Badge>
-                        {tenant.type === "Organization" ? <Badge>{tenantRoleLabel(tenant.role)}</Badge> : null}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                type="button"
-                className="tenant-pop__create"
-                onClick={() => {
-                  setCreateMode(true);
-                  setCreateError(null);
-                }}
-              >
-                <span aria-hidden="true">+</span>
-                Create organization
-              </button>
-            </>
-          )}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function ChevronIcon() {
-  return (
-    <svg className="model-pill__chev" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M4 6.5 8 10l4-3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 function Sidebar({
   viewer,
   authLoading,
   section,
-  onLoggedOut,
 }: {
   viewer: ViewerResponse | null;
   authLoading: boolean;
   section: NavKey;
-  onLoggedOut: () => void;
 }) {
   return (
     <aside className="sidebar">
       <div className="sidebar__workspace">
-        <TenantSwitcher />
+        <OrganizationSwitcher
+          hidePersonal={false}
+          afterCreateOrganizationUrl="/reviews"
+          afterSelectOrganizationUrl="/reviews"
+          afterSelectPersonalUrl="/reviews"
+          organizationProfileMode="modal"
+          createOrganizationMode="modal"
+        />
       </div>
 
       <nav className="nav" aria-label="Dashboard navigation">
@@ -421,47 +249,16 @@ function Sidebar({
           Settings
         </Link>
       </nav>
-      <AuthControls viewer={viewer} authLoading={authLoading} onLoggedOut={onLoggedOut} />
+      <div className="user clerk-user-menu">
+        <UserButton
+          userProfileMode="modal"
+          userProfileProps={{ additionalOAuthScopes: { github: ["read:org", "repo"] } }}
+        />
+        <span className="user__name">{viewer?.user?.login ?? (authLoading ? "Loading…" : "Account")}</span>
+      </div>
     </aside>
   );
 }
-
-function AuthControls({
-  viewer,
-  authLoading,
-  onLoggedOut,
-}: {
-  viewer: ViewerResponse | null;
-  authLoading: boolean;
-  onLoggedOut: () => void;
-}) {
-  if (authLoading || !viewer) {
-    return <div className="user__role">Loading session…</div>;
-  }
-
-  if (!viewer.auth.enabled) {
-    return <div className="user__role">Authentication disabled</div>;
-  }
-
-  return (
-    <details className="user-menu">
-      <summary className="user">
-        {viewer.user?.avatar_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img className="user__avatar" src={viewer.user.avatar_url} alt="" />
-        ) : null}
-        <span className="user__name">{viewer.user?.login}</span>
-        <ChevronIcon />
-      </summary>
-      <div className="user-menu__popover">
-        <button type="button" className="user-menu__action" onClick={() => void logout(onLoggedOut)}>
-          Sign out
-        </button>
-      </div>
-    </details>
-  );
-}
-
 
 function InstallResultNotice({ result }: { result: InstallationResult }) {
   const label = result.action === "update" ? "Installation updated" : "Installation complete";

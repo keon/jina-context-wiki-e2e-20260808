@@ -529,6 +529,9 @@ export function createApp(config: AppConfig): Hono {
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
+      if (config.auth.mode === "clerk") {
+        throw new ApiError(409, "Organizations are managed through Clerk");
+      }
       const session = await requireDashboardSession(c, config);
       if (!session) {
         throw new ApiError(401, "dashboard authentication required");
@@ -549,6 +552,9 @@ export function createApp(config: AppConfig): Hono {
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
+      if (config.auth.mode === "clerk") {
+        throw new ApiError(409, "Organizations are managed through Clerk");
+      }
       const session = await requireDashboardSession(c, config);
       const tenantId = tenantIdParam(c);
       await requireTenantMembership(session, tenantId, { requireAdmin: true });

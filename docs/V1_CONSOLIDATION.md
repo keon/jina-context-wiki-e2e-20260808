@@ -103,8 +103,9 @@ Provisioned platform resources:
   names and cannot be selected through a production-secret fallback. Replace them with
   dedicated vendor-account keys if hard provider-account isolation is required.
 - Vercel project `omlabs/jina-staging-dashboard`, served at
-  `https://app.staging.usejina.com`. HTTP Basic Auth is removed; GitHub OAuth is the
-  dashboard identity boundary. Its customer navigation is grouped into Workspace,
+  `https://app.staging.usejina.com`. HTTP Basic Auth is removed; Clerk is the
+  dashboard identity and organization-membership boundary, with GitHub retained as
+  a repository integration. Its customer navigation is grouped into Workspace,
   Configure, and Organization sections, with the organization switcher first.
 - Vercel project `omlabs/jina-staging-docs`, served at
   `https://docs.staging.usejina.com`, is a standalone Next.js app containing
@@ -122,8 +123,8 @@ Provisioned platform resources:
   dashboard proxy reaches the empty staging Board through the bound operations
   tenant.
 - Staging GitHub App `jina-staging-gcloud-omxyz` (App ID `4461130`) uses only
-  the legacy staging API webhook/OAuth callback and `app.staging.usejina.com` setup/homepage
-  URLs. GitHub OAuth sign-in and the installation callback are verified. A
+  the legacy staging API webhook and `app.staging.usejina.com` setup/homepage
+  URLs. Clerk's GitHub connection and the GitHub App installation callback are verified. A
   staging-only PR under the personal `keon` account completed the real webhook,
   Trigger, Daytona, GitHub publication, API persistence, and dashboard-detail
   flow under review id `b587d680-8451-4752-befc-c44248edfa6b`. Its temporary

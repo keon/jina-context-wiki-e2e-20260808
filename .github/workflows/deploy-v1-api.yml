@@ -53,6 +53,8 @@ jobs:
       GITHUB_APP_SLUG_VALUE: ${{ vars.JINA_GITHUB_APP_SLUG }}
       GITHUB_OAUTH_CLIENT_ID_VALUE: ${{ vars.JINA_GITHUB_OAUTH_CLIENT_ID }}
       GITHUB_OAUTH_SCOPES_VALUE: ${{ vars.JINA_GITHUB_OAUTH_SCOPES }}
+      DASHBOARD_AUTH_MODE_VALUE: ${{ vars.JINA_DASHBOARD_AUTH_MODE || 'github' }}
+      CLERK_PUBLISHABLE_KEY_VALUE: ${{ vars.JINA_CLERK_PUBLISHABLE_KEY }}
       TRIGGER_API_URL_VALUE: ${{ vars.JINA_TRIGGER_API_URL }}
       BILLING_ENFORCE_VALUE: ${{ vars.JINA_BILLING_ENFORCE }}
       GRAPH_API_URL_VALUE: ${{ vars.JINA_GRAPH_API_URL }}
@@ -75,6 +77,7 @@ jobs:
       INTERNAL_API_TOKEN_SECRET_NAME: ${{ vars.INTERNAL_API_TOKEN_SECRET_NAME }}
       TRIGGER_SECRET_KEY_SECRET_NAME: ${{ vars.TRIGGER_SECRET_KEY_SECRET_NAME }}
       OAUTH_CLIENT_SECRET_NAME: ${{ vars.OAUTH_CLIENT_SECRET_NAME }}
+      CLERK_SECRET_KEY_SECRET_NAME: ${{ vars.CLERK_SECRET_KEY_SECRET_NAME }}
       DATABASE_URL_SECRET_NAME: ${{ vars.DATABASE_URL_SECRET_NAME }}
       ENCRYPTION_KEY_SECRET_NAME: ${{ vars.ENCRYPTION_KEY_SECRET_NAME }}
       AUTUMN_SECRET_KEY_SECRET_NAME: ${{ vars.AUTUMN_SECRET_KEY_SECRET_NAME }}
@@ -181,6 +184,16 @@ jobs:
               elif [ -n "${GRAPH_API_TOKEN_SECRET_NAME:-}" ]; then
                 unsafe+=("GRAPH_API_TOKEN_SECRET_NAME is set while JINA_GRAPH_API_URL is unset")
               fi
+              if [ "${DASHBOARD_AUTH_MODE_VALUE:-github}" = "clerk" ]; then
+                if [ -z "${CLERK_PUBLISHABLE_KEY_VALUE:-}" ]; then
+                  unsafe+=("JINA_CLERK_PUBLISHABLE_KEY is unset")
+                fi
+                if [ -z "${CLERK_SECRET_KEY_SECRET_NAME:-}" ]; then
+                  unsafe+=("CLERK_SECRET_KEY_SECRET_NAME is unset")
+                else
+                  staging_values+=(CLERK_SECRET_KEY_SECRET_NAME)
+                fi
+              fi
               for name in "${staging_values[@]}"; do
                 if [[ "${!name:-}" != *staging* ]]; then
                   unsafe+=("$name must contain staging")
@@ -210,6 +223,7 @@ jobs:
             echo "INTERNAL_API_TOKEN_SECRET_NAME=$INTERNAL_API_TOKEN_SECRET_NAME"
             echo "TRIGGER_SECRET_KEY_SECRET_NAME=$TRIGGER_SECRET_KEY_SECRET_NAME"
             echo "OAUTH_CLIENT_SECRET_NAME=$OAUTH_CLIENT_SECRET_NAME"
+            echo "CLERK_SECRET_KEY_SECRET_NAME=${CLERK_SECRET_KEY_SECRET_NAME:-}"
             echo "DATABASE_URL_SECRET_NAME=$DATABASE_URL_SECRET_NAME"
             echo "ENCRYPTION_KEY_SECRET_NAME=$ENCRYPTION_KEY_SECRET_NAME"
             echo "AUTUMN_SECRET_KEY_SECRET_NAME=$AUTUMN_SECRET_KEY_SECRET_NAME"
@@ -630,7 +644,7 @@ jobs:
           NODE
             rm -f "$log_file"
           }
-          env_vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT_ID}|DASHBOARD_AUTH_MODE=github|DASHBOARD_URL=${DASHBOARD_URL}|API_BASE_URL=${API_BASE_URL}|DASHBOARD_COOKIE_SAMESITE=None|DASHBOARD_COOKIE_SECURE=true|GITHUB_APP_ID=${GITHUB_APP_ID_VALUE}|GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID_VALUE}|GITHUB_OAUTH_SCOPES=${GITHUB_OAUTH_SCOPES_VALUE}|TRIGGER_API_URL=${TRIGGER_API_URL_VALUE}"
+          env_vars="^|^GOOGLE_CLOUD_PROJECT=${PROJECT_ID}|DASHBOARD_AUTH_MODE=${DASHBOARD_AUTH_MODE_VALUE}|DASHBOARD_URL=${DASHBOARD_URL}|API_BASE_URL=${API_BASE_URL}|DASHBOARD_COOKIE_SAMESITE=None|DASHBOARD_COOKIE_SECURE=true|GITHUB_APP_ID=${GITHUB_APP_ID_VALUE}|GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID_VALUE}|GITHUB_OAUTH_SCOPES=${GITHUB_OAUTH_SCOPES_VALUE}|TRIGGER_API_URL=${TRIGGER_API_URL_VALUE}"
           if [ -n "${DASHBOARD_ORIGIN:-}" ]; then
             env_vars="${env_vars}|DASHBOARD_ORIGIN=${DASHBOARD_ORIGIN}"
           fi
@@ -659,6 +673,10 @@ jobs:
           # to enable it, which also mounts the Autumn Secret Manager secret. All
           # secret names resolve to staging-scoped values on staging deploys.
           secrets="GITHUB_WEBHOOK_SECRET=${WEBHOOK_SECRET_NAME}:latest,GITHUB_APP_PRIVATE_KEY=${APP_PRIVATE_KEY_SECRET_NAME}:latest,INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN_SECRET_NAME}:latest,TRIGGER_SECRET_KEY=${TRIGGER_SECRET_KEY_SECRET_NAME}:latest,GITHUB_OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET_NAME}:latest,DATABASE_URL=${DATABASE_URL_SECRET_NAME}:latest,SECRETS_ENCRYPTION_KEY=${ENCRYPTION_KEY_SECRET_NAME}:latest"
+          if [ "${DASHBOARD_AUTH_MODE_VALUE}" = "clerk" ]; then
+            env_vars="${env_vars}|CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY_VALUE}"
+            secrets="${secrets},CLERK_SECRET_KEY=${CLERK_SECRET_KEY_SECRET_NAME}:latest"
+          fi
           if [ "${BILLING_ENFORCE_VALUE:-off}" != "off" ]; then
             env_vars="${env_vars}|JINA_BILLING_ENFORCE=${BILLING_ENFORCE_VALUE}"
             secrets="${secrets},AUTUMN_SECRET_KEY=${AUTUMN_SECRET_KEY_SECRET_NAME}:latest"

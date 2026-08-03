@@ -89,6 +89,8 @@ required_variables=(
   JINA_GITHUB_APP_ID
   JINA_GITHUB_APP_SLUG
   JINA_GITHUB_OAUTH_CLIENT_ID
+  JINA_DASHBOARD_AUTH_MODE
+  JINA_CLERK_PUBLISHABLE_KEY
   JINA_TRIGGER_PROJECT_REF
   JINA_GRAPH_API_URL
   JINA_MCP_URL
@@ -99,6 +101,7 @@ required_variables=(
   INTERNAL_API_TOKEN_SECRET_NAME
   TRIGGER_SECRET_KEY_SECRET_NAME
   OAUTH_CLIENT_SECRET_NAME
+  CLERK_SECRET_KEY_SECRET_NAME
   DATABASE_URL_SECRET_NAME
   ENCRYPTION_KEY_SECRET_NAME
   GRAPH_API_TOKEN_SECRET_NAME
@@ -191,6 +194,7 @@ v1_secrets=(
   jina-staging-internal-api-token
   jina-staging-trigger-secret-key
   jina-staging-github-oauth-client-secret
+  jina-staging-clerk-secret-key
   jina-staging-database-url
   jina-staging-secrets-encryption-key
   jina-staging-graph-api-token

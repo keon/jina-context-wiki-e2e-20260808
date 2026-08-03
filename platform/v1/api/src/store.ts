@@ -1231,7 +1231,58 @@ export type ViewerTenant = {
   login: string;
   type: string; // 'User' | 'Organization'
   role: TenantRole;
+  clerk_organization_id?: string;
 };
+
+export type ClerkOrgMembership = {
+  organizationId: string;
+  name: string;
+  role: TenantRole;
+};
+
+/** Reconcile Clerk's authoritative organization memberships into Jina tenants. */
+export async function syncClerkTenantMemberships(input: {
+  githubUserId: number;
+  githubLogin: string;
+  userId: string;
+  memberships: ClerkOrgMembership[];
+}): Promise<void> {
+  if (!databaseConfigured()) return;
+  await withTransaction(async (client) => {
+    const keepTenantIds: string[] = [];
+    for (const membership of input.memberships) {
+      const tenant = await client.query<{ id: string }>(
+        `insert into tenants (kind, name, clerk_organization_id)
+         values ('team', $1, $2)
+         on conflict (clerk_organization_id) where clerk_organization_id is not null
+         do update set name = excluded.name, kind = 'team'
+         returning id`,
+        [membership.name, membership.organizationId],
+      );
+      const tenantId = tenant.rows[0]!.id;
+      keepTenantIds.push(tenantId);
+      await client.query(
+        `insert into tenant_members
+           (tenant_id, github_user_id, github_login, user_id, role, source, synced_at)
+         values ($1, $2, $3, $4, $5, 'clerk', now())
+         on conflict (tenant_id, github_user_id) do update set
+           github_login = excluded.github_login,
+           user_id = excluded.user_id,
+           role = excluded.role,
+           source = 'clerk',
+           synced_at = now()`,
+        [tenantId, input.githubUserId, input.githubLogin, input.userId, membership.role],
+      );
+    }
+    await client.query(
+      `delete from tenant_members
+        where user_id = $1::uuid
+          and source = 'clerk'
+          and not (tenant_id = any($2::uuid[]))`,
+      [input.userId, keepTenantIds],
+    );
+  });
+}
 
 export type TenantGithubConnection = {
   installation_id: number;
@@ -1485,6 +1536,7 @@ export async function listViewerTenants(githubUserId: number, userId?: string): 
     login: string;
     type: string;
     role: string;
+    clerk_organization_id: string | null;
   }>(
     `select
        m.tenant_id,
@@ -1494,7 +1546,8 @@ export async function listViewerTenants(githubUserId: number, userId?: string): 
            then 'User'
          else 'Organization'
        end as type,
-       m.role
+       m.role,
+       t.clerk_organization_id
        from tenant_members m
        join tenants t on t.id = m.tenant_id
       where t.merged_into_tenant_id is null
@@ -1510,6 +1563,7 @@ export async function listViewerTenants(githubUserId: number, userId?: string): 
       login: row.login,
       type: row.type,
       role: row.role === "admin" ? "admin" : "member",
+      ...(row.clerk_organization_id ? { clerk_organization_id: row.clerk_organization_id } : {}),
     })),
   );
 }

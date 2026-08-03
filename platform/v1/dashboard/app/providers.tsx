@@ -10,6 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useOrganization } from "@clerk/nextjs";
 import { apiUrl, reviewRunsPath } from "./lib/api";
 import { startCompletionPolling } from "./lib/completion-polling";
 import {
@@ -101,7 +102,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       if (response.status === 401) {
         if (!current()) return;
         setViewer({
-          auth: { mode: "github", enabled: true },
+          auth: { mode: "clerk", enabled: true },
           authenticated: false,
           organizations: [],
           teams: [],
@@ -338,6 +339,7 @@ function writeStoredTenantId(viewerUserId: number | null, tenantId: string): voi
  * inside DashboardProvider.
  */
 export function TenantProvider({ children }: { children: ReactNode }) {
+  const { organization, isLoaded: clerkOrganizationLoaded } = useOrganization();
   const { viewer, authRequired, authLoading, reloadViewer, setTenantScope } = useDashboard();
   const [tenants, setTenants] = useState<ViewerTenant[]>([]);
   // False until a successful fetch. Authenticated review reads stay blocked on failure;
@@ -353,6 +355,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
 
   const authenticated = Boolean(viewer && !authRequired);
   const viewerUserId = viewer?.user?.id ?? null;
+  const clerkOrganizationId = organization?.id ?? null;
   const legacyReviewMode = Boolean(viewer && (!viewer.auth.enabled || localDashboardFixtureEnabled()));
 
   useEffect(() => {
@@ -452,7 +455,18 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       polling.stop();
       abortRef.current?.abort();
     };
-  }, [authLoading, authenticated, legacyReviewMode, viewerUserId, setTenantScope]);
+  }, [authLoading, authenticated, legacyReviewMode, viewerUserId, clerkOrganizationId, setTenantScope]);
+
+  useEffect(() => {
+    if (!clerkOrganizationLoaded || !loaded || tenants.length === 0) return;
+    const clerkTenant = clerkOrganizationId
+      ? tenants.find((tenant) => tenant.clerk_organization_id === clerkOrganizationId)
+      : tenants.find((tenant) => tenant.type === "User");
+    if (clerkTenant && clerkTenant.tenant_id !== selectedTenantId) {
+      setSelectedTenantId(clerkTenant.tenant_id);
+      writeStoredTenantId(viewerUserId, clerkTenant.tenant_id);
+    }
+  }, [clerkOrganizationId, clerkOrganizationLoaded, loaded, selectedTenantId, tenants, viewerUserId]);
 
   const selectTenant = useCallback(
     (tenantId: string) => {

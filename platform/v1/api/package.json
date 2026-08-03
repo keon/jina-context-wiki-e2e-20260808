@@ -15,6 +15,7 @@
     "test": "node --test --import tsx src/**/*.test.ts"
   },
   "dependencies": {
+    "@clerk/backend": "^3.15.0",
     "@hono/node-server": "^2.0.12",
     "hono": "^4.12.33",
     "pg": "^8.13.1"

@@ -14,6 +14,7 @@ export type ViewerTenant = {
   login: string;
   type: TenantType;
   role: TenantRole;
+  clerk_organization_id?: string;
 };
 
 /**
@@ -97,7 +98,15 @@ export function normalizeViewerTenants(raw: unknown): ViewerTenant[] {
     ) {
       throw new TypeError("Invalid tenant entry");
     }
-    tenants.push({ tenant_id: tenantId, login, type: record.type, role: record.role });
+    tenants.push({
+      tenant_id: tenantId,
+      login,
+      type: record.type,
+      role: record.role,
+      ...(typeof record.clerk_organization_id === "string" && record.clerk_organization_id.trim()
+        ? { clerk_organization_id: record.clerk_organization_id.trim() }
+        : {}),
+    });
   }
   return sortViewerTenants(tenants);
 }

@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { GeistMono } from "geist/font/mono";
 import { GeistSans } from "geist/font/sans";
 import { UnifiedDashboardShell } from "../components/unified-dashboard-shell.tsx";
+import { ClerkProvider } from "@clerk/nextjs";
 import "../v1/theme.css";
 import "../v1/styles.css";
 import "./globals.css";
@@ -16,7 +17,9 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
   return (
     <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>
       <body>
-        <UnifiedDashboardShell>{children}</UnifiedDashboardShell>
+        <ClerkProvider>
+          <UnifiedDashboardShell>{children}</UnifiedDashboardShell>
+        </ClerkProvider>
       </body>
     </html>
   );

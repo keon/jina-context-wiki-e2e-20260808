@@ -38,7 +38,7 @@ type DashboardTeam = {
 };
 
 export type ViewerResponse = {
-  auth: { mode: "disabled" | "github"; enabled: boolean };
+  auth: { mode: "disabled" | "github" | "clerk"; enabled: boolean };
   github_app?: { install_url?: string; installed?: boolean };
   authenticated: boolean;
   user?: {
