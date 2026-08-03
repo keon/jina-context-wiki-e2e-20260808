@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { OrganizationSwitcher, UserButton } from "@clerk/nextjs";
+import { OrganizationSwitcher, UserButton, useAuth } from "@clerk/nextjs";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { useDashboard } from "./providers";
 import { apiUrl, parseInstallationResult } from "./lib/api";
+import { clerkAuthRedirect } from "./lib/auth-navigation";
 import { normalizeCodexHarnessInfo } from "./lib/codex-harness";
 import { formatRelative } from "./lib/presentation";
 import type { InstallationResult, ViewerResponse } from "./lib/types";
@@ -81,7 +82,8 @@ function sectionForPath(pathname: string | null): NavKey {
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { data, viewer, error, loading, authLoading, authRequired, reload } = useDashboard();
+  const { data, viewer, error, loading, authLoading, reload } = useDashboard();
+  const { isLoaded: clerkLoaded, isSignedIn } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
   const section = sectionForPath(pathname);
@@ -124,24 +126,28 @@ export function Shell({ children }: { children: ReactNode }) {
     router.replace(window.location.pathname);
   }, [installationResult, router]);
 
-  // Gate the app: push unauthenticated visitors to the dedicated sign-in page,
-  // and bounce authenticated ones away from it.
+  // Clerk is the source of truth for navigation. The legacy API may briefly
+  // return 401 while a fresh Clerk session is being exchanged or while the API
+  // is unavailable; using that response to navigate creates a /signin ↔
+  // /reviews redirect loop because Clerk already considers the user signed in.
   useEffect(() => {
-    if (authLoading) return;
-    if (authRequired && !isSignin) {
-      router.replace("/signin");
-    } else if (!authRequired && isSignin) {
-      router.replace("/reviews");
-    }
-  }, [authLoading, authRequired, isSignin, router]);
+    const destination = clerkAuthRedirect({
+      isLoaded: clerkLoaded,
+      isSignedIn: Boolean(isSignedIn),
+      isSigninPage: isSignin,
+    });
+    if (destination) router.replace(destination);
+  }, [clerkLoaded, isSignedIn, isSignin, router]);
 
   // Dedicated, chrome-less sign-in screen.
   if (isSignin) {
     return <div className="auth-shell">{children}</div>;
   }
 
-  // Resolving the session, or redirecting an unauthenticated visitor to /signin.
-  if (authLoading || authRequired) {
+  // Resolve the Clerk session before rendering protected application chrome.
+  // API authentication state is rendered as data/error state, never as a
+  // competing redirect authority.
+  if (!clerkLoaded || !isSignedIn) {
     return (
       <div className="auth-shell">
         <div className="auth-loading">Loading…</div>
