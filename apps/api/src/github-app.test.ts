@@ -98,12 +98,12 @@ test("manual Context admission creates a resumable board build and exposes only 
     headers: contextHeaders(),
     body: JSON.stringify({
       repository: mixedCaseRepository,
-      derivationTokenBudget: 50_000_001,
+      derivationTokenBudget: 72_000_001,
       requestKey: "over-token-budget-build"
     })
   });
   assert.equal(overTokenBudget.response.status, 400);
-  assert.match(JSON.stringify(overTokenBudget.body), /between 250000 and 50000000/);
+  assert.match(JSON.stringify(overTokenBudget.body), /between 250000 and 72000000/);
 
   const created = await api("/context/build", {
     method: "POST",
