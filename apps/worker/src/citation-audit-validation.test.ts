@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { CitationAuditReference, CitationAuditStageResult } from "@jina/daytona";
 import {
+  bindCitationAuditHostIdentity,
   citationAuditDelta,
   retainAssignedCitationAuditResults,
   retryCitationAuditValidation
@@ -29,6 +30,34 @@ test("citation audit drops unassigned critic findings but preserves strict assig
 test("citation audit filtering leaves malformed envelopes for the strict parser", () => {
   const malformed = { version: 1, results: "invalid" };
   assert.equal(retainAssignedCitationAuditResults(malformed, ["expected"]), malformed);
+});
+
+test("citation audit binds immutable workflow identity from the host", () => {
+  assert.deepEqual(
+    bindCitationAuditHostIdentity(
+      {
+        version: 99,
+        inputDigest: "model-input",
+        publicSnapshotDigest: "model-snapshot",
+        worker: { id: "model-worker", summary: "Audited the assigned references." },
+        results: [{ citationId: "expected", verdict: "supported", rationale: "Supported.", correction: null }],
+        summary: "Complete."
+      },
+      {
+        workerId: "host-worker",
+        inputDigest: "a".repeat(64),
+        publicSnapshotDigest: "b".repeat(64)
+      }
+    ),
+    {
+      version: 1,
+      inputDigest: "a".repeat(64),
+      publicSnapshotDigest: "b".repeat(64),
+      worker: { id: "host-worker", summary: "Audited the assigned references." },
+      results: [{ citationId: "expected", verdict: "supported", rationale: "Supported.", correction: null }],
+      summary: "Complete."
+    }
+  );
 });
 
 test("citation audit semantic validation retries with the exact host diagnostic", async () => {

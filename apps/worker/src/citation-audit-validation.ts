@@ -51,6 +51,34 @@ export function retainAssignedCitationAuditResults(value: unknown, citationIds: 
   };
 }
 
+/**
+ * Bind immutable workflow identity at the trust boundary instead of asking the
+ * model to reproduce it. The model still supplies the audit judgments and
+ * summaries; the strict result parser validates those after this normalization.
+ */
+export function bindCitationAuditHostIdentity(
+  value: unknown,
+  expected: {
+    readonly workerId: string;
+    readonly inputDigest: string;
+    readonly publicSnapshotDigest: string;
+  }
+): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (!record.worker || typeof record.worker !== "object" || Array.isArray(record.worker)) return value;
+  return {
+    ...record,
+    version: 1,
+    inputDigest: expected.inputDigest,
+    publicSnapshotDigest: expected.publicSnapshotDigest,
+    worker: {
+      ...(record.worker as Record<string, unknown>),
+      id: expected.workerId
+    }
+  };
+}
+
 export function citationAuditDelta(input: {
   readonly references: readonly CitationAuditReference[];
   readonly priorReferences?: readonly CitationAuditReference[];

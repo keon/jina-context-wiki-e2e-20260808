@@ -89,6 +89,7 @@ import {
 import { ISSUE_GRAPH_STAGE_SCHEMA, issueGraphPrompt } from "./causal-graph-derivation.js";
 import { canonicalCausalGraphCommitTimestamp } from "./causal-graph-history.js";
 import {
+  bindCitationAuditHostIdentity,
   citationAuditDelta,
   retainAssignedCitationAuditResults,
   retryCitationAuditValidation
@@ -1971,12 +1972,16 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
               },
               parse: (value) => {
                 const citationIds = references.map((reference) => reference.citationId);
-                return parseCitationAuditStageResult(retainAssignedCitationAuditResults(value, citationIds), {
+                const expected = {
                   workerId,
                   inputDigest,
                   publicSnapshotDigest,
                   citationIds
-                });
+                };
+                return parseCitationAuditStageResult(
+                  retainAssignedCitationAuditResults(bindCitationAuditHostIdentity(value, expected), citationIds),
+                  expected
+                );
               }
             })
           );
@@ -3186,12 +3191,16 @@ async function auditContextDraftCitations(input: {
         },
         parse: (candidate) => {
           const citationIds = batch.map((reference) => reference.citationId);
-          return parseCitationAuditStageResult(retainAssignedCitationAuditResults(candidate, citationIds), {
+          const expected = {
             workerId,
             inputDigest,
             publicSnapshotDigest,
             citationIds
-          });
+          };
+          return parseCitationAuditStageResult(
+            retainAssignedCitationAuditResults(bindCitationAuditHostIdentity(candidate, expected), citationIds),
+            expected
+          );
         }
       })
     );
