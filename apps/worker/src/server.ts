@@ -3048,19 +3048,12 @@ async function auditContextDraftCitations(input: {
   const batches = citationReferenceBatches(delta.pendingReferences);
   for (let index = 0; index < batches.length; index += 1) {
     const batch = batches[index]!;
-    const phase = `gap-audit.pass-${input.auditPass}.batch-${index + 1}`;
-    const checkpointKey = contextPhaseCheckpointKey(input.work, "context-gap-audit-phase-checkpoints-v1", phase, {
-      inputDigest,
-      citationIds: batch.map((reference) => reference.citationId)
-    });
-    const candidate = await checkpointedContextCandidate(input.work, {
-      phase,
-      checkpointKey,
-      kind: "context-draft",
-      generate: async () => {
-        const output = await requireBoardAgentStageRunner().run({
-          id: `gap-audit-${input.pass}-${input.auditPass}-${index + 1}`,
-          prompt: citationAuditStagePrompt({
+    batchAudits.push(
+      await retryCitationAuditValidation({
+        attempts: 2,
+        run: async (attempt, priorDiagnostic) => {
+          const expectedCitationIds = batch.map((reference) => reference.citationId);
+          const basePrompt = citationAuditStagePrompt({
             workerId,
             repository: input.snapshot.repository,
             repositoryDirectory: input.checkoutDirectory,
@@ -3068,29 +3061,63 @@ async function auditContextDraftCitations(input: {
             references: batch,
             inputDigest,
             publicSnapshotDigest
-          }),
-          schema: CITATION_AUDIT_STAGE_SCHEMA,
-          workingDirectory: input.checkoutDirectory,
-          additionalDirectories: [input.stageRoot],
-          readOnly: true,
-          budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_AUDIT_SECONDS", 600)
-        });
-        return output.parsed;
-      }
-    });
-    batchAudits.push(
-      parseCitationAuditStageResult(
-        retainAssignedCitationAuditResults(
-          candidate,
-          batch.map((reference) => reference.citationId)
-        ),
-        {
-          workerId,
-          inputDigest,
-          publicSnapshotDigest,
-          citationIds: batch.map((reference) => reference.citationId)
+          });
+          const prompt = priorDiagnostic
+            ? [
+                basePrompt,
+                "The preceding result failed deterministic host validation. This is the one bounded format-correction retry; do not change the citation judgments merely to satisfy the schema.",
+                `Exact host diagnostic: ${priorDiagnostic}`,
+                `Expected worker ID: ${workerId}`,
+                `Expected inputDigest: ${inputDigest}`,
+                `Expected publicSnapshotDigest: ${publicSnapshotDigest}`,
+                `Expected citation IDs, each exactly once and no others:\n${JSON.stringify(expectedCitationIds, null, 2)}`
+              ].join("\n\n")
+            : basePrompt;
+          if (priorDiagnostic) {
+            logger.warn("retrying global citation audit after deterministic host validation", {
+              event: "context.gap_audit.validation_retry",
+              taskId: input.work.task.id,
+              contextBuildId: input.work.task.metadata.contextBuildId,
+              auditPass: input.auditPass,
+              batch: index + 1,
+              attempt,
+              diagnostic: priorDiagnostic
+            });
+          }
+          const phase = `gap-audit.pass-${input.auditPass}.batch-${index + 1}.attempt-${attempt}`;
+          const checkpointKey = contextPhaseCheckpointKey(input.work, "context-gap-audit-phase-checkpoints-v2", phase, {
+            inputDigest,
+            expectedCitationIds,
+            priorDiagnostic: priorDiagnostic ?? null
+          });
+          return checkpointedContextCandidate(input.work, {
+            phase,
+            checkpointKey,
+            kind: "citation-audit",
+            generate: async () => {
+              const output = await requireBoardAgentStageRunner().run({
+                id: `gap-audit-${input.pass}-${input.auditPass}-${index + 1}-format-${attempt}`,
+                prompt,
+                schema: CITATION_AUDIT_STAGE_SCHEMA,
+                workingDirectory: input.checkoutDirectory,
+                additionalDirectories: [input.stageRoot],
+                readOnly: true,
+                budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_AUDIT_SECONDS", 600)
+              });
+              return output.parsed;
+            }
+          });
+        },
+        parse: (candidate) => {
+          const citationIds = batch.map((reference) => reference.citationId);
+          return parseCitationAuditStageResult(retainAssignedCitationAuditResults(candidate, citationIds), {
+            workerId,
+            inputDigest,
+            publicSnapshotDigest,
+            citationIds
+          });
         }
-      )
+      })
     );
   }
   const result = parseCitationAuditStageResult(

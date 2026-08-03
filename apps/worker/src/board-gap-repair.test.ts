@@ -107,20 +107,21 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
       "    const publicDigest = /publicSnapshotDigest ([a-f0-9]{64})/.exec(prompt);",
       "    const refs = /Citation references with exact source excerpts:\\n([\\s\\S]*?)\\n\\nRepository source is read-only/.exec(prompt);",
       "    if (!worker || !inputDigest || !publicDigest || !refs) process.exit(6);",
-      "    const references = JSON.parse(refs[1]);",
+      "    const references = JSON.parse(refs[1].split('\\n\\nThe preceding result failed')[0]);",
       `    const auditCountPath = ${JSON.stringify(auditCountPath)};`,
       `    const auditBatchSizesPath = ${JSON.stringify(auditBatchSizesPath)};`,
       "    const auditCount = fs.existsSync(auditCountPath) ? Number(fs.readFileSync(auditCountPath, 'utf8')) : 0;",
       "    fs.writeFileSync(auditCountPath, String(auditCount + 1));",
       "    fs.appendFileSync(auditBatchSizesPath, String(references.length) + '\\n');",
+      "    const results = references.map((ref, index) => index === 0 && auditCount < 2",
+      "      ? { citationId: ref.citationId, verdict: 'unsupported', rationale: 'Exercise the bounded targeted repair loop.', correction: null }",
+      "      : { citationId: ref.citationId, verdict: 'supported', rationale: 'The exact fixture excerpt supports the claim.', correction: null });",
       "    const result = {",
       "      version: 1,",
       "      inputDigest: inputDigest[1],",
       "      publicSnapshotDigest: publicDigest[1],",
       "      worker: { id: worker[1], summary: auditCount < 2 ? 'One fixture citation needs repair.' : 'Every fixture citation is supported.' },",
-      "      results: references.map((ref, index) => index === 0 && auditCount < 2",
-      "        ? { citationId: ref.citationId, verdict: 'unsupported', rationale: 'Exercise the bounded targeted repair loop.', correction: null }",
-      "        : { citationId: ref.citationId, verdict: 'supported', rationale: 'The exact fixture excerpt supports the claim.', correction: null }),",
+      "      results: auditCount === 0 ? results.slice(0, -1) : results,",
       "      summary: auditCount < 2 ? 'One fixture citation is unsupported.' : 'All fixture citations are supported.'",
       "    };",
       "    fs.writeFileSync(args[outputIndex + 1], JSON.stringify(result));",
@@ -591,9 +592,9 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.equal(completion?.outcome, "done", output);
   assert.equal(completionAttempts.length, 2);
   assert.deepEqual(completionAttempts[0]?.modelUsage, {
-    inputTokens: 450,
-    cachedInputTokens: 225,
-    outputTokens: 90
+    inputTokens: 420,
+    cachedInputTokens: 210,
+    outputTokens: 85
   });
   assert.deepEqual(completion?.modelUsage, { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
   assert.ok(phaseCheckpoints.size >= 6);
@@ -601,7 +602,8 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.match(String(record(finalAudit.worker).summary), /Reused \d+ exact digest-bound supported citation verdicts/);
   const finalReferences = record(uploadedDraft?.citationAuditInput).references as readonly unknown[];
   const auditBatchSizes = (await readFile(auditBatchSizesPath, "utf8")).trim().split("\n").map(Number);
-  assert.deepEqual(auditBatchSizes, [finalReferences.length - 1, 1, 1]);
+  assert.deepEqual(auditBatchSizes, [finalReferences.length - 1, finalReferences.length - 1, 1]);
+  assert.match(output, /context\.gap_audit\.validation_retry/);
   const result = record(completion?.result);
   assert.equal(result.version, 1);
   assert.match(String(result.publicSnapshotDigest), /^[a-f0-9]{64}$/);
