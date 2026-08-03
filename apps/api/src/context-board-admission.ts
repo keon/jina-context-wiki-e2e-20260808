@@ -268,7 +268,10 @@ export function latestContextBoardFollowup(state: BoardState, buildTaskId: TaskI
         existingRequestBuilds(state, tenantId, candidate.followup.requestKey).length === 0
     )
     .sort((left, right) => left.event.at.localeCompare(right.event.at) || left.event.seq - right.event.seq);
-  if (build.status === "failed" && contextBuildHasOperatorRecovery(state, build, events[0]?.event.at ?? build.updatedAt)) {
+  if (
+    build.status === "failed" &&
+    contextBuildHasOperatorRecovery(state, build, events[0]?.event.at ?? build.updatedAt)
+  ) {
     return undefined;
   }
   return events[0]?.followup;
