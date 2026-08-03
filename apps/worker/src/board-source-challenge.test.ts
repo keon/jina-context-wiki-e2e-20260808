@@ -67,6 +67,15 @@ test("Board source-challenge parsing accepts the same research subjects as local
   assert.equal(board.addedTasks[0]?.subjectId, "core-id-api-and-wire-format");
 });
 
+test("Board source-challenge parsing canonicalizes the host-owned task catalog", () => {
+  const result = parseBoardSourceChallengeStageResult(
+    { ...challenge, acceptedTaskIds: ["invented-task"] },
+    { ...expected, researchPlan }
+  );
+
+  assert.deepEqual(result.acceptedTaskIds, ["understand-id-format"]);
+});
+
 test("Board source-challenge parsing still rejects genuinely unknown subjects", () => {
   const unknownSubjectChallenge = {
     ...challenge,

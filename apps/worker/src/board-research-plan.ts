@@ -19,7 +19,7 @@ export interface ResearchPlanValidationOptions {
  * directory with readable evidence, and the assignments must account for each
  * readable deterministic repository area.
  */
-function parseBoardResearchPlan(candidate: unknown, options: ResearchPlanValidationOptions): ResearchStagePlan {
+export function parseBoardResearchPlan(candidate: unknown, options: ResearchPlanValidationOptions): ResearchStagePlan {
   const plan = parseResearchStagePlan(candidate);
   const readablePaths = options.repositoryFiles.filter((file) => file.contentAvailable).map((file) => file.path);
   if (readablePaths.length === 0) {

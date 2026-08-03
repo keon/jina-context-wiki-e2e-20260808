@@ -141,6 +141,8 @@ test("source challenge validation repair is bounded to the rejected structured r
     evidencePath: "/checkpoint/evidence.json",
     repositoryPaths: ["src/server.ts"],
     existingSubjectIds: ["runtime-request-lifecycle"],
+    inputDigest: "a".repeat(64),
+    publicSnapshotDigest: "b".repeat(64),
     diagnostic: "evidence reference is not a checkpoint repository path: access-service.md",
     previousResult: { worker: { id: "source-challenge-3" } }
   });
@@ -152,6 +154,9 @@ test("source challenge validation repair is bounded to the rejected structured r
   assert.match(prompt, /document path, page title, or newly paraphrased slug is not an existing subject ID/i);
   assert.match(prompt, /access-service\.md/);
   assert.match(prompt, /source-challenge-3/);
+  assert.match(prompt, new RegExp("a{64}"));
+  assert.match(prompt, new RegExp("b{64}"));
+  assert.match(prompt, /host-owned identity fields are immutable/);
 });
 
 test("research plans retain typed relevance-scored provider history without reconstructed links", () => {

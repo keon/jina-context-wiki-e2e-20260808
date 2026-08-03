@@ -2384,6 +2384,8 @@ export function sourceChallengeValidationRepairPrompt(input: {
   readonly evidencePath: string;
   readonly repositoryPaths: readonly string[];
   readonly existingSubjectIds: readonly string[];
+  readonly inputDigest: string;
+  readonly publicSnapshotDigest: string;
   readonly diagnostic: string;
   readonly previousResult: unknown;
 }): string {
@@ -2393,7 +2395,7 @@ export function sourceChallengeValidationRepairPrompt(input: {
     `You may inspect the read-only checkpoint repository at ${input.repositoryDirectory} and captured provider/history evidence at ${input.evidencePath}.`,
     "For code, tests, configuration, or documentation evidence, reference only an exact case-sensitive value from the repository path inventory. Generated Context page paths are not repository evidence. Provider/history references must use their natural immutable URL or identifier. Every exactQuote must occur in the referenced source.",
     "When an added task belongs to an existing subject, subjectId must be copied exactly from the canonical existing-subject ID list below. A document path, page title, or newly paraphrased slug is not an existing subject ID. A genuinely omitted subject must instead be declared in omittedSubjects and referenced by its exact new ID.",
-    `Keep worker.id exactly ${input.workerId}. Return the complete corrected JSON object only.`,
+    `Keep worker.id exactly ${input.workerId}, inputDigest exactly ${input.inputDigest}, and publicSnapshotDigest exactly ${input.publicSnapshotDigest}. These host-owned identity fields are immutable. Return the complete corrected JSON object only.`,
     `Canonical existing-subject IDs:\n${JSON.stringify(input.existingSubjectIds)}`,
     `Repository path inventory:\n${JSON.stringify(input.repositoryPaths)}`,
     `Validator diagnostic:\n${input.diagnostic}`,

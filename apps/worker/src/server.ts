@@ -82,7 +82,10 @@ import {
   configuredPortableContextBoardAgentStageRunner,
   type PortableContextBoardAgentStageRunner
 } from "./board-agent-stage-adapter.js";
-import { parseBoardSourceChallengeStageResultWithRepair } from "./board-source-challenge.js";
+import {
+  parseBoardSourceChallengeStageResult,
+  parseBoardSourceChallengeStageResultWithRepair
+} from "./board-source-challenge.js";
 import { ISSUE_GRAPH_STAGE_SCHEMA, issueGraphPrompt } from "./causal-graph-derivation.js";
 import { canonicalCausalGraphCommitTimestamp } from "./causal-graph-history.js";
 import {
@@ -114,11 +117,12 @@ import {
 } from "./board-page-repair.js";
 import type { PageRepairCheckpointDiagnostics } from "./board-page-repair.js";
 import {
+  parseBoardPublicationPlan,
   parsePublicationPlanWithRepair,
   promoteUnsafeRetainedPages,
   retainedPublicationPlanProblems
 } from "./board-publication-plan.js";
-import { parseResearchPlanWithRepair } from "./board-research-plan.js";
+import { parseBoardResearchPlan, parseResearchPlanWithRepair } from "./board-research-plan.js";
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
@@ -1271,7 +1275,7 @@ async function runContextResearchPlan(
     const runner = requireBoardAgentStageRunner();
     const repositoryAreas = repositoryContextAreas(snapshot.files);
     const checkpointKey = (phase: string) =>
-      contextPhaseCheckpointKey(work, "research-plan-phase-checkpoints-v1", phase, {
+      contextPhaseCheckpointKey(work, "research-plan-phase-checkpoints-v2", phase, {
         snapshotSha256: snapshotArtifact.sha256,
         priorReleaseSha256: priorContext?.seed.releaseArtifact.sha256 ?? null
       });
@@ -1320,6 +1324,9 @@ async function runContextResearchPlan(
         return checkpointedContextCandidate(work, {
           phase: "research-plan.repair",
           checkpointKey: checkpointKey("research-plan.repair"),
+          validate: (value) => {
+            parseBoardResearchPlan(value, validationOptions);
+          },
           generate: async () => {
             const repaired = await runner.run({
               id: "research-planner-repair",
@@ -1489,11 +1496,43 @@ async function runContextPublicationPlan(
     const priorContextPath = await writePriorContextPacket(stageRoot, priorContext);
     const runner = requireBoardAgentStageRunner();
     const checkpointKey = (phase: string) =>
-      contextPhaseCheckpointKey(work, "publication-plan-phase-checkpoints-v1", phase, {
+      contextPhaseCheckpointKey(work, "publication-plan-phase-checkpoints-v2", phase, {
         researchPlanSha256: work.task.metadata.planArtifact.sha256,
         researchReportSha256s: reportArtifacts.map((artifact) => artifact.sha256).sort(),
         priorReleaseSha256: priorContext?.seed.releaseArtifact.sha256 ?? null
       });
+    const publicationPlanValidation = {
+      options: {
+        researchAssignments: planPacket.plan.assignments,
+        repositoryAreas,
+        ...(priorContext ? { priorPages: priorContext.pages } : {})
+      },
+      ...(priorContext
+        ? {
+            normalize: (value: unknown) =>
+              promoteUnsafeRetainedPages({
+                candidate: value,
+                options: {
+                  researchAssignments: planPacket.plan.assignments,
+                  repositoryAreas,
+                  priorPages: priorContext.pages
+                },
+                priorPages: priorContext.certifiedPages,
+                snapshot
+              }),
+            validate: (value: DocumentationStagePlan) => {
+              const problems = retainedPublicationPlanProblems({
+                plan: value,
+                priorPages: priorContext.certifiedPages,
+                snapshot
+              });
+              if (problems.length > 0) {
+                throw new Error(`incremental retain validation requires revise: ${problems.slice(0, 12).join("; ")}`);
+              }
+            }
+          }
+        : {})
+    };
     const candidate = await checkpointedContextCandidate(work, {
       phase: "publication-plan.candidate",
       checkpointKey: checkpointKey("publication-plan.candidate"),
@@ -1517,36 +1556,7 @@ async function runContextPublicationPlan(
     });
     const plan = await parsePublicationPlanWithRepair({
       candidate,
-      options: {
-        researchAssignments: planPacket.plan.assignments,
-        repositoryAreas,
-        ...(priorContext ? { priorPages: priorContext.pages } : {})
-      },
-      ...(priorContext
-        ? {
-            normalize: (candidate: unknown) =>
-              promoteUnsafeRetainedPages({
-                candidate,
-                options: {
-                  researchAssignments: planPacket.plan.assignments,
-                  repositoryAreas,
-                  priorPages: priorContext.pages
-                },
-                priorPages: priorContext.certifiedPages,
-                snapshot
-              }),
-            validate: (candidate: DocumentationStagePlan) => {
-              const problems = retainedPublicationPlanProblems({
-                plan: candidate,
-                priorPages: priorContext.certifiedPages,
-                snapshot
-              });
-              if (problems.length > 0) {
-                throw new Error(`incremental retain validation requires revise: ${problems.slice(0, 12).join("; ")}`);
-              }
-            }
-          }
-        : {}),
+      ...publicationPlanValidation,
       repair: async ({ invalidPlan, diagnostic }) => {
         logger.warn("publication planner contract rejected model output; scheduling bounded correction", {
           event: "context.publication_plan.repair_scheduled",
@@ -1559,6 +1569,9 @@ async function runContextPublicationPlan(
         return checkpointedContextCandidate(work, {
           phase: "publication-plan.repair",
           checkpointKey: checkpointKey("publication-plan.repair"),
+          validate: (value) => {
+            parseBoardPublicationPlan(value, publicationPlanValidation);
+          },
           generate: async () => {
             const repaired = await runner.run({
               id: "documentation-planner-repair",
@@ -2391,7 +2404,7 @@ async function runContextSourceChallenge(
     );
     const repairCheckpointKey = contextPhaseCheckpointKey(
       work,
-      "source-challenge-phase-checkpoints-v2",
+      "source-challenge-phase-checkpoints-v3",
       "source-challenge.repair",
       { inputDigest, existingSubjectIds }
     );
@@ -2414,6 +2427,16 @@ async function runContextSourceChallenge(
         return checkpointedContextCandidate(work, {
           phase: "source-challenge.repair",
           checkpointKey: repairCheckpointKey,
+          validate: (value) => {
+            parseBoardSourceChallengeStageResult(value, {
+              workerId,
+              inputDigest,
+              publicSnapshotDigest,
+              existingTasks,
+              researchPlan,
+              repositoryPaths: repositoryInventory.paths
+            });
+          },
           generate: async () => {
             const repaired = await runner.run({
               ...stageInput,
@@ -2424,6 +2447,8 @@ async function runContextSourceChallenge(
                 evidencePath,
                 repositoryPaths: repositoryInventory.paths,
                 existingSubjectIds,
+                inputDigest,
+                publicSnapshotDigest,
                 diagnostic,
                 previousResult
               })

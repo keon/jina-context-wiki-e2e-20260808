@@ -13,10 +13,16 @@ export function parseBoardSourceChallengeStageResult(
   }
 ): ReturnType<typeof parseSourceChallengeStageResult> {
   const { researchPlan, ...validation } = expected;
-  return parseSourceChallengeStageResult(value, {
-    ...validation,
-    existingSubjectIds: researchPlan.assignments.map((assignment) => assignment.id)
-  });
+  return parseSourceChallengeStageResult(
+    canonicalAcceptedTaskIds(
+      value,
+      expected.existingTasks.map((task) => task.id)
+    ),
+    {
+      ...validation,
+      existingSubjectIds: researchPlan.assignments.map((assignment) => assignment.id)
+    }
+  );
 }
 
 export async function parseBoardSourceChallengeStageResultWithRepair(
@@ -24,17 +30,16 @@ export async function parseBoardSourceChallengeStageResultWithRepair(
   expected: Parameters<typeof parseBoardSourceChallengeStageResult>[1],
   repair: (diagnostic: string, previousResult: unknown) => Promise<unknown>
 ): Promise<ReturnType<typeof parseBoardSourceChallengeStageResult>> {
-  const canonical = canonicalAcceptedTaskIds(
-    value,
-    expected.existingTasks.map((task) => task.id)
-  );
   try {
-    return parseBoardSourceChallengeStageResult(canonical, expected);
+    return parseBoardSourceChallengeStageResult(value, expected);
   } catch (error) {
     const diagnostic = error instanceof Error ? error.message : String(error);
-    const corrected = canonicalAcceptedTaskIds(
-      await repair(diagnostic, canonical),
-      expected.existingTasks.map((task) => task.id)
+    const corrected = await repair(
+      diagnostic,
+      canonicalAcceptedTaskIds(
+        value,
+        expected.existingTasks.map((task) => task.id)
+      )
     );
     try {
       return parseBoardSourceChallengeStageResult(corrected, expected);

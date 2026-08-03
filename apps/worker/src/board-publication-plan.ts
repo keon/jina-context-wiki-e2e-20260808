@@ -10,6 +10,23 @@ import { parsePlanWithSingleRepair, type BoundedPlanRepairRequest } from "./boar
 
 export type PublicationPlanRepairRequest = BoundedPlanRepairRequest;
 
+interface PublicationPlanValidation {
+  readonly options: Parameters<typeof parseDocumentationStagePlan>[1];
+  readonly validate?: (plan: DocumentationStagePlan) => void;
+  readonly normalize?: (candidate: unknown) => unknown;
+}
+
+export function parseBoardPublicationPlan(
+  candidate: unknown,
+  input: PublicationPlanValidation
+): DocumentationStagePlan {
+  const withQuestions = completeMaintenanceQuestionCoverage(candidate, input.options.researchAssignments);
+  const completed = completeRepositoryAreaCoverage(withQuestions, input.options);
+  const plan = parseDocumentationStagePlan(input.normalize?.(completed) ?? completed, input.options);
+  input.validate?.(plan);
+  return plan;
+}
+
 /**
  * Gives a schema-valid but semantically rejected publication plan one bounded
  * correction pass. The host remains authoritative: both candidates go through
@@ -17,24 +34,20 @@ export type PublicationPlanRepairRequest = BoundedPlanRepairRequest;
  */
 export async function parsePublicationPlanWithRepair(input: {
   readonly candidate: unknown;
-  readonly options: Parameters<typeof parseDocumentationStagePlan>[1];
-  readonly validate?: (plan: DocumentationStagePlan) => void;
-  readonly normalize?: (candidate: unknown) => unknown;
+  readonly options: PublicationPlanValidation["options"];
+  readonly validate?: PublicationPlanValidation["validate"];
+  readonly normalize?: PublicationPlanValidation["normalize"];
   readonly repair: (request: PublicationPlanRepairRequest) => Promise<unknown>;
 }): Promise<DocumentationStagePlan> {
-  const prepare = (candidate: unknown): unknown => {
-    const withQuestions = completeMaintenanceQuestionCoverage(candidate, input.options.researchAssignments);
-    const completed = completeRepositoryAreaCoverage(withQuestions, input.options);
-    return input.normalize?.(completed) ?? completed;
-  };
   return parsePlanWithSingleRepair({
-    candidate: prepare(input.candidate),
-    parse: (candidate) => {
-      const plan = parseDocumentationStagePlan(candidate, input.options);
-      input.validate?.(plan);
-      return plan;
-    },
-    repair: async (request) => prepare(await input.repair(request))
+    candidate: input.candidate,
+    parse: (candidate) =>
+      parseBoardPublicationPlan(candidate, {
+        options: input.options,
+        ...(input.validate ? { validate: input.validate } : {}),
+        ...(input.normalize ? { normalize: input.normalize } : {})
+      }),
+    repair: input.repair
   });
 }
 
