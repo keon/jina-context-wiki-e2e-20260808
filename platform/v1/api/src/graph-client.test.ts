@@ -639,7 +639,7 @@ test("dashboard Context maps the current V2 release catalog and reads the exact 
         releases: [{
           id: "release-1",
           repository: "omxyz/a",
-          ref: "main",
+          ref: "pull/2/head",
           commitSha: "b".repeat(40),
           createdAt: "2026-07-31T00:00:00.000Z",
           publishedAt: "2026-07-31T00:10:00.000Z",
@@ -701,6 +701,7 @@ test("dashboard Context maps the current V2 release catalog and reads the exact 
     releaseId: "release-1",
     logicalId: "topic:omxyz/a:architecture/overview",
     repository: "omxyz/a",
+    ref: "pull/2/head",
     kind: "topic",
     title: "Architecture",
     summary: "How the system fits together.",

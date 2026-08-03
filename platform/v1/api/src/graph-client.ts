@@ -166,6 +166,7 @@ export type ContextDocumentSummary = {
   releaseId: string;
   logicalId: string;
   repository: string;
+  ref: string;
   kind: string;
   title: string;
   summary: string;
@@ -882,12 +883,14 @@ export class GraphApiClient {
     const selected = repositories
       .filter((entry) => !repository || entry.name.toLowerCase() === repository.toLowerCase())
       .flatMap((entry) => {
-        const release = releases.releases.find(
+        const candidates = releases.releases.filter(
           (candidate) =>
             candidate.repository.toLowerCase() === entry.name.toLowerCase() &&
-            candidate.ref === entry.defaultBranch &&
             candidate.contextStatus !== "unavailable",
         );
+        // Prefer the default-branch head, but do not hide a published PR-scoped
+        // Context release when it is the repository's only available release.
+        const release = candidates.find((candidate) => candidate.ref === entry.defaultBranch) ?? candidates[0];
         return release ? [release] : [];
       });
     const catalogs = await Promise.all(
@@ -1135,6 +1138,7 @@ function contextDocumentSummary(
     releaseId: release.id,
     logicalId: document.logicalId,
     repository: release.repository,
+    ref: release.ref,
     kind: document.kind ?? document.logicalId.split(":", 1)[0] ?? "topic",
     title: document.title,
     summary: document.summary,
