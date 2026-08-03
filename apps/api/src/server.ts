@@ -35,6 +35,7 @@ import {
   contextBoardTaskTypeDefinitions,
   contextBoardTaskTypes,
   contextBoardTopics,
+  boardWorkArtifactKind,
   causalGraphBoardTaskTypes,
   causalGraphBoardTaskTypeDefinitions,
   causalGraphBoardTopics,
@@ -1844,7 +1845,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (!contextArtifactKinds.includes(kind as ContextArtifactKind)) {
         throw invalidRequest("unsupported context artifact kind");
       }
-      const expectedKind = contextBoardArtifactKind(lease.task.type);
+      const expectedKind = boardWorkArtifactKind(lease.task.type);
       if (kind !== expectedKind) throw invalidRequest(`task output must use artifact kind ${expectedKind}`);
       const name = requiredString(body.name, "name");
       if (!/^[a-z0-9][a-z0-9._-]{0,180}$/.test(name)) throw invalidRequest("artifact name is invalid");
@@ -4855,42 +4856,6 @@ function contextBoardDependencyResults(state: BoardState, taskId: TaskId) {
   });
 }
 
-function contextBoardArtifactKind(taskType: string): ContextArtifactKind {
-  switch (taskType) {
-    case contextBoardTaskTypes.snapshot:
-      return "evidence-snapshot";
-    case contextBoardTaskTypes.researchPlan:
-      return "research-plan";
-    case contextBoardTaskTypes.research:
-      return "research-report";
-    case contextBoardTaskTypes.publicationPlan:
-      return "publication-plan";
-    case contextBoardTaskTypes.pageWrite:
-    case contextBoardTaskTypes.pageRepair:
-      return "context-page";
-    case contextBoardTaskTypes.gapRepair:
-      return "context-draft";
-    case contextBoardTaskTypes.pageAudit:
-      return "citation-audit";
-    case contextBoardTaskTypes.sourceChallenge:
-    case contextBoardTaskTypes.taskEvaluation:
-      return "gate-evaluation";
-    case contextBoardTaskTypes.certification:
-      return "certification";
-    case contextBoardTaskTypes.publication:
-      return "context-release";
-    case contextBoardTaskTypes.pageIndex:
-      return "pageindex-tree";
-    case causalGraphBoardTaskTypes.snapshot:
-      return "issue-history";
-    case causalGraphBoardTaskTypes.derive:
-    case causalGraphBoardTaskTypes.publication:
-      return "issue-graph";
-    default:
-      throw new Error(`context board task ${taskType} does not produce an artifact`);
-  }
-}
-
 function parseContextArtifactRef(value: unknown): ContextArtifactRef {
   const input = isRecord(value) ? value : undefined;
   if (!input) throw invalidRequest("artifact must be an object");
@@ -4991,7 +4956,7 @@ function assertCurrentTaskOutputArtifact(
     tenantId: requiredString(task.metadata.tenantId, "tenantId"),
     repository: requiredRepositoryName(task.metadata.repository, "repository"),
     buildId: buildTaskId
-  })}/${contextBoardArtifactKind(task.type)}/`;
+  })}/${boardWorkArtifactKind(task.type)}/`;
   const relative = artifact.key.slice(prefix.length);
   if (
     !artifact.key.startsWith(prefix) ||

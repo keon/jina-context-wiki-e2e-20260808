@@ -379,6 +379,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   let uploadedDraft: Record<string, unknown> | undefined;
   let uploadedLease: Record<string, unknown> | undefined;
   let uploadedArtifact: ArtifactRef | undefined;
+  const uploadedKinds: string[] = [];
   let claimedTopics: unknown;
   let claimAttempt = 0;
   const completionAttempts: Record<string, unknown>[] = [];
@@ -474,6 +475,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
     }
     if (request.url === "/internal/context/board/artifacts") {
       uploadedLease = body;
+      uploadedKinds.push(String(body.kind));
       const content = Buffer.from(String(body.contentBase64), "base64");
       uploadedDraft = JSON.parse(content.toString("utf8")) as Record<string, unknown>;
       const key = `context-v2/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/${String(body.kind)}/task_gap_repair-attempt-${String(body.attempt)}-${String(body.name)}`;
@@ -582,6 +584,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.equal(uploadedLease?.taskId, "task_gap_repair");
   assert.equal(uploadedLease?.leaseId, "lease_gap_repair_2");
   assert.equal(uploadedLease?.writeFenceToken, "fence_gap_repair_2");
+  assert.deepEqual(new Set(uploadedKinds), new Set(["context-draft"]));
   assert.equal(uploadedDraft?.version, 1);
   const pages = uploadedDraft?.pages as readonly Record<string, unknown>[];
   assert.equal(pages.length, 1);

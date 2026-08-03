@@ -14,7 +14,11 @@ import {
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
 import { fingerprint, isFullCommitSha, normalizeIsoTime, normalizeRepository } from "../domain/fingerprint.js";
 import { isDerivationDetail, type DerivationDetail } from "../derive/verbosity.js";
-import { isContextArtifactKeyInScope, type ContextArtifactRef } from "../ports/artifact-store.js";
+import {
+  isContextArtifactKeyInScope,
+  type ContextArtifactKind,
+  type ContextArtifactRef
+} from "../ports/artifact-store.js";
 import { parseContextPriorReleaseSeed, type ContextPriorReleaseSeed } from "../publication/board-publication.js";
 import { contextPageChanges, type ContextPageChange } from "./incremental.js";
 
@@ -207,6 +211,50 @@ export const causalGraphBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] 
     causalGraphBoardTopics.publication
   )
 ];
+
+export function boardWorkArtifactKind(taskType: string): ContextArtifactKind {
+  switch (taskType) {
+    case contextBoardTaskTypes.snapshot:
+      return "evidence-snapshot";
+    case contextBoardTaskTypes.researchPlan:
+      return "research-plan";
+    case contextBoardTaskTypes.research:
+      return "research-report";
+    case contextBoardTaskTypes.publicationPlan:
+      return "publication-plan";
+    case contextBoardTaskTypes.pageWrite:
+    case contextBoardTaskTypes.pageRepair:
+      return "context-page";
+    case contextBoardTaskTypes.gapRepair:
+      return "context-draft";
+    case contextBoardTaskTypes.pageAudit:
+      return "citation-audit";
+    case contextBoardTaskTypes.sourceChallenge:
+    case contextBoardTaskTypes.taskEvaluation:
+      return "gate-evaluation";
+    case contextBoardTaskTypes.certification:
+      return "certification";
+    case contextBoardTaskTypes.publication:
+      return "context-release";
+    case contextBoardTaskTypes.pageIndex:
+      return "pageindex-tree";
+    case causalGraphBoardTaskTypes.snapshot:
+      return "issue-history";
+    case causalGraphBoardTaskTypes.derive:
+    case causalGraphBoardTaskTypes.publication:
+      return "issue-graph";
+    default:
+      throw new Error(`Board task ${taskType} does not produce an artifact`);
+  }
+}
+
+export function boardWorkArtifactKindForTopic(topic: ContextBoardTopic | CausalGraphBoardTopic): ContextArtifactKind {
+  const definition = [...contextBoardTaskTypeDefinitions, ...causalGraphBoardTaskTypeDefinitions].find(
+    (candidate) => candidate.dispatchTopic === topic
+  );
+  if (!definition) throw new Error(`Board topic ${topic} does not produce an artifact`);
+  return boardWorkArtifactKind(definition.type);
+}
 
 const SYSTEM_ACTOR = { type: "system", id: "context-board" } as const;
 const MAX_CONTEXT_METADATA_BYTES = 32 * 1024;

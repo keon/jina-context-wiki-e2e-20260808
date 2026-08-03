@@ -60,6 +60,7 @@ import {
   LocalPageIndexClient,
   MAX_CONTEXT_REPAIR_PASS,
   assertContextPriorReleaseMatches,
+  boardWorkArtifactKindForTopic,
   contextGateRepairMustChangeSnapshot,
   contextPriorReleaseCatalog,
   contextArtifactKey,
@@ -814,7 +815,6 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
     const checkpoint = await checkpointedContextCandidate(work, {
       phase,
       checkpointKey,
-      kind: "issue-graph",
       generate: async () => {
         const output = await requireBoardAgentStageRunner().run({
           id: "issue-causality-derivation",
@@ -1155,7 +1155,6 @@ async function checkpointedContextCandidate(
   input: {
     readonly phase: string;
     readonly checkpointKey: string;
-    readonly kind: ContextArtifactKind;
     readonly generate: () => Promise<unknown>;
   }
 ): Promise<unknown> {
@@ -1174,7 +1173,7 @@ async function checkpointedContextCandidate(
   }
   const candidate = await input.generate();
   const artifact = await uploadContextBoardArtifact(work, {
-    kind: input.kind,
+    kind: boardWorkArtifactKindForTopic(work.topic),
     name: `${input.phase}.json`,
     contentType: "application/json",
     content: Buffer.from(JSON.stringify(candidate), "utf8")
@@ -1276,7 +1275,6 @@ async function runContextResearchPlan(
     const candidate = await checkpointedContextCandidate(work, {
       phase: "research-plan.candidate",
       checkpointKey: checkpointKey("research-plan.candidate"),
-      kind: "research-plan",
       generate: async () => {
         const output = await runner.run({
           id: "research-planner",
@@ -1319,7 +1317,6 @@ async function runContextResearchPlan(
         return checkpointedContextCandidate(work, {
           phase: "research-plan.repair",
           checkpointKey: checkpointKey("research-plan.repair"),
-          kind: "research-plan",
           generate: async () => {
             const repaired = await runner.run({
               id: "research-planner-repair",
@@ -1404,7 +1401,6 @@ async function runContextResearch(work: ClaimedWork<"run-context-research">): Pr
     const candidate = await checkpointedContextCandidate(work, {
       phase: "research-report.candidate",
       checkpointKey,
-      kind: "research-report",
       generate: async () => {
         const output = await requireBoardAgentStageRunner().run({
           id: `research-${assignment.id}`,
@@ -1495,7 +1491,6 @@ async function runContextPublicationPlan(
     const candidate = await checkpointedContextCandidate(work, {
       phase: "publication-plan.candidate",
       checkpointKey: checkpointKey("publication-plan.candidate"),
-      kind: "publication-plan",
       generate: async () => {
         const output = await runner.run({
           id: "documentation-planner",
@@ -1558,7 +1553,6 @@ async function runContextPublicationPlan(
         return checkpointedContextCandidate(work, {
           phase: "publication-plan.repair",
           checkpointKey: checkpointKey("publication-plan.repair"),
-          kind: "publication-plan",
           generate: async () => {
             const repaired = await runner.run({
               id: "documentation-planner-repair",
@@ -1742,7 +1736,6 @@ async function runContextPageWrite(work: ClaimedWork<"run-context-page-write">):
     const candidate = await checkpointedContextCandidate(work, {
       phase: "context-page-write.candidate",
       checkpointKey,
-      kind: "context-page",
       generate: async () => {
         await requireBoardAgentStageRunner().run({
           id: `write-${safeStageId(page.id)}`,
@@ -1934,7 +1927,6 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
                 return checkpointedContextCandidate(work, {
                   phase,
                   checkpointKey,
-                  kind: "citation-audit",
                   generate: async () => {
                     const output = await requireBoardAgentStageRunner().run({
                       id: `${safeStageId(workerId)}-${index + 1}-format-${attempt}`,
@@ -2146,7 +2138,6 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
     const candidate = await checkpointedContextCandidate(work, {
       phase: "context-page-repair.candidate",
       checkpointKey,
-      kind: "context-page",
       generate: async () => {
         await requireBoardAgentStageRunner().run({
           id: `repair-${safeStageId(page.documentPath)}-${work.task.metadata.pass}`,
@@ -2390,7 +2381,6 @@ async function runContextSourceChallenge(
     const candidate = await checkpointedContextCandidate(work, {
       phase: "source-challenge.candidate",
       checkpointKey: candidateCheckpointKey,
-      kind: "gate-evaluation",
       generate: async () => (await runner.run(stageInput)).parsed
     });
     const result = await parseBoardSourceChallengeStageResultWithRepair(
@@ -2407,7 +2397,6 @@ async function runContextSourceChallenge(
         return checkpointedContextCandidate(work, {
           phase: "source-challenge.repair",
           checkpointKey: repairCheckpointKey,
-          kind: "gate-evaluation",
           generate: async () => {
             const repaired = await runner.run({
               ...stageInput,
@@ -2504,7 +2493,6 @@ async function runContextTaskEvaluation(
       const candidate = await checkpointedContextCandidate(work, {
         phase,
         checkpointKey,
-        kind: "gate-evaluation",
         generate: async () => {
           const output = await requireBoardAgentStageRunner().run({
             id: contractAttempt === 1 ? workerId : `${workerId}-contract-repair-${contractAttempt - 1}`,
@@ -2659,7 +2647,6 @@ async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">):
     const gapCandidate = await checkpointedContextCandidate(work, {
       phase: "gap-repair.candidate",
       checkpointKey: phaseCheckpointKey("gap-repair.candidate", priorSnapshotDigest),
-      kind: "context-draft",
       generate: async () => {
         await requireBoardAgentStageRunner().run({
           id: `gap-repair-${work.task.metadata.pass}`,
@@ -2735,7 +2722,6 @@ async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">):
       const repairCandidate = await checkpointedContextCandidate(work, {
         phase: repairPhase,
         checkpointKey: phaseCheckpointKey(repairPhase, citationAudit.resultDigest),
-        kind: "context-draft",
         generate: async () => {
           await requireBoardAgentStageRunner().run({
             id: `gap-citation-repair-${work.task.metadata.pass}-${auditPass}`,
@@ -2886,7 +2872,6 @@ async function structurallyRepairContextDraft(input: {
       const correction = await checkpointedContextCandidate(input.work, {
         phase,
         checkpointKey: input.phaseCheckpointKey(phase, { bodyDigest, problems }),
-        kind: "context-page",
         generate: async () => {
           await requireBoardAgentStageRunner().run({
             id: `gap-structural-${safeStageId(currentPage.documentPath)}-${structuralPass}`,
@@ -3093,7 +3078,6 @@ async function auditContextDraftCitations(input: {
           return checkpointedContextCandidate(input.work, {
             phase,
             checkpointKey,
-            kind: "citation-audit",
             generate: async () => {
               const output = await requireBoardAgentStageRunner().run({
                 id: `gap-audit-${input.pass}-${input.auditPass}-${index + 1}-format-${attempt}`,

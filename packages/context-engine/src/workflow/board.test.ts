@@ -17,6 +17,8 @@ import {
   addContextResearchPlan,
   addContextResearchWork,
   assertContextBoardMetadata,
+  boardWorkArtifactKind,
+  boardWorkArtifactKindForTopic,
   causalGraphBoardTaskTypes,
   contextBoardTaskTypes,
   contextBoardTopics,
@@ -37,6 +39,14 @@ import {
 import type { ContextArtifactRef } from "../ports/artifact-store.js";
 
 const NOW = "2026-07-29T18:00:00.000Z";
+
+test("Board work owns one artifact-kind contract shared by tasks and topics", () => {
+  assert.equal(boardWorkArtifactKind(contextBoardTaskTypes.gapRepair), "context-draft");
+  assert.equal(boardWorkArtifactKindForTopic(contextBoardTopics.gapRepair), "context-draft");
+  assert.equal(boardWorkArtifactKind(contextBoardTaskTypes.pageAudit), "citation-audit");
+  assert.equal(boardWorkArtifactKindForTopic(contextBoardTopics.pageAudit), "citation-audit");
+  assert.throws(() => boardWorkArtifactKind(contextBoardTaskTypes.build), /does not produce an artifact/);
+});
 
 test("causal graph is a fixed snapshot, one-run derivation, publication chain", () => {
   const created = createCausalGraphBoardBuild(createEmptyBoardState(), {
