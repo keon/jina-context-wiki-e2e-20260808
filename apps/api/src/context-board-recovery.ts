@@ -15,19 +15,31 @@ export function contextBuildBoardState(state: BoardState, buildTaskId: TaskId): 
 }
 
 export function contextDeadlineInterruptedTaskIds(state: BoardState, build: BoardTask): readonly TaskId[] {
+  return contextLimitInterruptedTaskIds(state, build, "context.build_time_budget_exceeded.failed");
+}
+
+export function contextTokenInterruptedTaskIds(state: BoardState, build: BoardTask): readonly TaskId[] {
+  return contextLimitInterruptedTaskIds(state, build, "context.build_token_budget_exceeded.failed");
+}
+
+function contextLimitInterruptedTaskIds(
+  state: BoardState,
+  build: BoardTask,
+  failureEventType: "context.build_time_budget_exceeded.failed" | "context.build_token_budget_exceeded.failed"
+): readonly TaskId[] {
   if (build.type !== contextBoardTaskTypes.build || build.status !== "failed") return [];
   const latestReopen = [...state.events]
     .reverse()
     .find((event) => event.taskId === build.id && event.type === "task.operator_reopened");
-  const deadlineFailure = [...state.events]
+  const limitFailure = [...state.events]
     .reverse()
-    .find((event) => event.taskId === build.id && event.type === "context.build_time_budget_exceeded.failed");
-  if (!deadlineFailure || (latestReopen && deadlineFailure.seq <= latestReopen.seq)) return [];
+    .find((event) => event.taskId === build.id && event.type === failureEventType);
+  if (!limitFailure || (latestReopen && limitFailure.seq <= latestReopen.seq)) return [];
   const reconciliation = state.events.find(
     (event) =>
       event.taskId === build.id &&
       event.type === "aggregate.terminal_reconciled" &&
-      event.seq > deadlineFailure.seq &&
+      event.seq > limitFailure.seq &&
       Array.isArray(event.payload?.canceledTaskIds)
   );
   if (!reconciliation) return [];
@@ -120,6 +132,7 @@ export function contextBuildHasOperatorRecovery(state: BoardState, build: BoardT
   return (
     boardOperatorRetryEligibility(buildState, { buildTaskId: build.id, now }).eligible ||
     contextDeadlineInterruptedTaskIds(buildState, build).length > 0 ||
+    contextTokenInterruptedTaskIds(buildState, build).length > 0 ||
     contextPageRemediationTaskIds(buildState, build).length > 0 ||
     contextGateRemediationTaskId(buildState, build) !== undefined
   );

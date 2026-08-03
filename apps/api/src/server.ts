@@ -93,7 +93,8 @@ import {
   contextBuildHasOperatorRecovery,
   contextDeadlineInterruptedTaskIds,
   contextGateRemediationTaskId,
-  contextPageRemediationTaskIds
+  contextPageRemediationTaskIds,
+  contextTokenInterruptedTaskIds
 } from "./context-board-recovery.js";
 import { compactTerminalContextBuildHistory } from "./context-board-compaction.js";
 import {
@@ -311,12 +312,13 @@ const DEFAULT_DERIVATION_BUDGET_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
 const MAX_CONTEXT_OPERATOR_DEADLINE_EXTENSION_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
 const MAX_CONTEXT_RECOVERED_DERIVATION_BUDGET_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
 const MIN_DERIVATION_TOKEN_BUDGET = DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens;
-const MAX_DERIVATION_TOKEN_BUDGET = 50_000_000;
+const MAX_DERIVATION_TOKEN_BUDGET = 72_000_000;
 // Cold repository initialization includes research, document generation, and
 // independent citation repair. Retain enough headroom for certification and
 // atomic publication after the model-heavy page stages finish. Incremental
 // builds reuse the published catalog and normally consume substantially less.
 const DEFAULT_DERIVATION_TOKEN_BUDGET = 36_000_000;
+const DEFAULT_CONTEXT_OPERATOR_TOKEN_EXTENSION = 12_000_000;
 // Repository research stages regularly use 0.5M-1M tokens. The quota service
 // keeps its smaller global reservation for concurrency accounting, while the
 // per-build guard uses this observed upper estimate so parallel claims cannot
@@ -1129,6 +1131,167 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
+    const tokenBudgetBuildId = contextBuildTokenBudgetRoute(url.pathname);
+    if (request.method === "POST" && tokenBudgetBuildId) {
+      requireTenantAdmin(principal);
+      const body = parseJsonObject(await readRawBody(request));
+      if (body.acknowledged !== true) {
+        throw invalidRequest("acknowledged must be true before extending a Context build token budget");
+      }
+      const additionalTokens = requiredPositiveInteger(body.additionalTokens, "additionalTokens");
+      const expectedDerivationTokenBudget = requiredPositiveInteger(
+        body.expectedDerivationTokenBudget,
+        "expectedDerivationTokenBudget"
+      );
+      if (additionalTokens > DEFAULT_CONTEXT_OPERATOR_TOKEN_EXTENSION) {
+        throw invalidRequest(
+          `additionalTokens cannot exceed ${DEFAULT_CONTEXT_OPERATOR_TOKEN_EXTENSION} per acknowledgement`
+        );
+      }
+      const requestKey = requiredString(body.requestKey, "requestKey");
+      if (requestKey.length > 240 || !/^[a-zA-Z0-9._:@/-]+$/.test(requestKey)) {
+        throw invalidRequest("requestKey must be at most 240 safe identifier characters");
+      }
+      const reason = requiredString(body.reason, "reason");
+      if (reason.length > 2_000) throw invalidRequest("reason must be at most 2000 characters");
+
+      const buildTaskId = entityId<"task">(tokenBudgetBuildId) as TaskId;
+      const visibleBuild = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, tokenBudgetBuildId);
+      if (!visibleBuild) throw notFound("build not found");
+      const repository = requiredRepositoryName(visibleBuild.metadata.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+
+      let quotaResumed = false;
+      let extended;
+      try {
+        extended = await mutate(async () => {
+          const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, tokenBudgetBuildId);
+          if (!build) throw notFound("build not found");
+          const prior = intakeState.board.events.find(
+            (event) => event.type === "context.build_token_budget_extended" && event.payload?.requestKey === requestKey
+          );
+          if (prior) {
+            if (
+              prior.taskId !== build.id ||
+              prior.payload?.additionalModelTokens !== additionalTokens ||
+              prior.payload?.previousDerivationTokenBudget !== expectedDerivationTokenBudget ||
+              prior.payload?.acknowledged !== true
+            ) {
+              throw new ApiError(409, "idempotency_conflict", "requestKey was already used for another extension");
+            }
+            return {
+              state: intakeState.board,
+              replay: true,
+              previousBudget: requiredPositiveInteger(
+                prior.payload.previousDerivationTokenBudget,
+                "previousDerivationTokenBudget"
+              ),
+              nextBudget: requiredPositiveInteger(prior.payload.nextDerivationTokenBudget, "nextDerivationTokenBudget"),
+              resumedTaskId: typeof prior.payload.resumedTaskId === "string" ? prior.payload.resumedTaskId : undefined,
+              tasks: []
+            };
+          }
+
+          const candidates =
+            build.status === "failed" ? contextTokenInterruptedTaskIds(intakeState.board, build) : [undefined];
+          if (build.status === "failed" && candidates.length === 0) {
+            throw new OperatorRetryRejectedError(
+              "unsafe_graph_state",
+              "only a build failed by the model-token ceiling can be resumed by adding tokens"
+            );
+          }
+          let lastError: unknown;
+          for (const candidate of candidates) {
+            try {
+              const prepared = prepareContextTokenBudgetExtension(intakeState.board, {
+                buildTaskId,
+                ...(candidate ? { taskId: candidate } : {}),
+                additionalTokens,
+                expectedBudget: expectedDerivationTokenBudget,
+                requestKey,
+                actorId: principal.principalId,
+                reason,
+                now: nowIso()
+              });
+              if (!candidate) {
+                intakeState = { ...intakeState, board: prepared.state };
+                return { ...prepared, replay: false, tasks: [] };
+              }
+              const recoveredBuild = findTask(prepared.state, build.id);
+              const target = findTask(prepared.state, candidate);
+              if (!recoveredBuild || !target) throw new Error("token-budget recovery task disappeared");
+              assertContextOperatorRetrySafety(prepared.state, recoveredBuild, target);
+              const retried = retryFailedBoardTask(prepared.state, {
+                buildTaskId,
+                taskId: candidate,
+                requestKey,
+                actorId: principal.principalId,
+                reason,
+                now: nowIso()
+              });
+              if (!retried.replay && config.contextQuotaService) {
+                const quota = await config.contextQuotaService.resumeBuild({
+                  tenantId: principal.tenantId,
+                  buildId: build.id
+                });
+                quotaResumed = quota.outcome === "admitted";
+              }
+              intakeState = { ...intakeState, board: retried.state };
+              return {
+                ...prepared,
+                state: retried.state,
+                replay: retried.replay,
+                resumedTaskId: candidate,
+                tasks: [
+                  {
+                    taskId: retried.nextMessage.taskId,
+                    attempt: retried.nextMessage.payload.attempt,
+                    outboxMessageId: retried.nextMessage.id
+                  }
+                ]
+              };
+            } catch (error) {
+              lastError = error;
+            }
+          }
+          throw (
+            lastError ?? new OperatorRetryRejectedError("unsafe_graph_state", "no token-interrupted task can resume")
+          );
+        });
+      } catch (error) {
+        if (quotaResumed && config.contextQuotaService) {
+          await config.contextQuotaService
+            .completeBuild({ tenantId: principal.tenantId, buildId: visibleBuild.id })
+            .catch(() => undefined);
+        }
+        if (error instanceof OperatorRetryRejectedError) {
+          throw new ApiError(409, "operator_retry_rejected", error.message);
+        }
+        throw error;
+      }
+      if (!extended) {
+        if (quotaResumed && config.contextQuotaService) {
+          await config.contextQuotaService
+            .completeBuild({ tenantId: principal.tenantId, buildId: visibleBuild.id })
+            .catch(() => undefined);
+        }
+        throw new ApiError(409, "conflict", "token-budget extension raced another update");
+      }
+      json(response, extended.replay ? 200 : 202, {
+        accepted: true,
+        acknowledged: true,
+        duplicate: extended.replay,
+        buildId: visibleBuild.id,
+        previousDerivationTokenBudget: extended.previousBudget,
+        additionalModelTokens: additionalTokens,
+        derivationTokenBudget: extended.nextBudget,
+        maximumDerivationTokenBudget: MAX_DERIVATION_TOKEN_BUDGET,
+        resumed: Boolean(extended.resumedTaskId),
+        ...(extended.resumedTaskId ? { resumedTaskId: extended.resumedTaskId } : {}),
+        tasks: extended.tasks
+      });
+      return;
+    }
     const operatorBatchRetryBuildId = contextBuildRetryRoute(url.pathname);
     if (request.method === "POST" && operatorBatchRetryBuildId) {
       requireTenantAdmin(principal);
@@ -1756,6 +1919,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof build.metadata.derivationTokenBudget === "number"
           ? {
               derivationTokenBudget: build.metadata.derivationTokenBudget,
+              maximumDerivationTokenBudget: MAX_DERIVATION_TOKEN_BUDGET,
+              recommendedTokenBudgetExtension: Math.min(
+                DEFAULT_CONTEXT_OPERATOR_TOKEN_EXTENSION,
+                Math.max(0, MAX_DERIVATION_TOKEN_BUDGET - build.metadata.derivationTokenBudget)
+              ),
               consumedModelTokens: contextBuildConsumedModelTokens(intakeState.board, build.id),
               activeModelReservedTokens: contextBuildActiveModelReservations(intakeState.board, build.id),
               remainingModelTokens: Math.max(
@@ -4045,7 +4213,9 @@ function requiredScope(pathname: string, method: string): ContextScope | "intern
   if (method === "POST") {
     if (pathname === "/mcp" || pathname === "/context/search") return "context:query";
     if (pathname === "/context/build" || pathname === "/causal-graph/build") return "context:build";
-    if (contextBuildRetryRoute(pathname) || contextTaskRetryRoute(pathname)) return "context:admin";
+    if (contextBuildRetryRoute(pathname) || contextTaskRetryRoute(pathname) || contextBuildTokenBudgetRoute(pathname)) {
+      return "context:admin";
+    }
     return "internal-only";
   }
   if (method !== "GET") return "internal-only";
@@ -4702,6 +4872,113 @@ function contextBuildModelReservationBlocked(state: BoardState, build: BoardTask
   return consumed + activeReserved + contextBuildModelTaskReservation(build) > tokenBudget;
 }
 
+function prepareContextTokenBudgetExtension(
+  state: BoardState,
+  input: {
+    readonly buildTaskId: TaskId;
+    readonly taskId?: TaskId;
+    readonly additionalTokens: number;
+    readonly expectedBudget: number;
+    readonly requestKey: string;
+    readonly actorId: string;
+    readonly reason: string;
+    readonly now: IsoTimestamp;
+  }
+): {
+  readonly state: BoardState;
+  readonly previousBudget: number;
+  readonly nextBudget: number;
+  readonly resumedTaskId?: TaskId;
+} {
+  const build = findTask(state, input.buildTaskId);
+  if (!build || build.type !== contextBoardTaskTypes.build || build.status === "done" || build.status === "canceled") {
+    throw new OperatorRetryRejectedError(
+      "unsafe_graph_state",
+      "token-budget extension requires an active build or a build failed by its model-token ceiling"
+    );
+  }
+  const target = input.taskId ? findTask(state, input.taskId) : undefined;
+  if (
+    build.status === "failed" &&
+    (!target ||
+      target.kind !== "dispatchable" ||
+      target.status !== "canceled" ||
+      target.metadata.contextBuildId !== build.id ||
+      !contextTokenInterruptedTaskIds(state, build).includes(target.id))
+  ) {
+    throw new OperatorRetryRejectedError(
+      "unsafe_graph_state",
+      "token-budget recovery requires the exact dispatchable task canceled by the model-token ceiling"
+    );
+  }
+  if (build.status !== "failed" && target) {
+    throw new OperatorRetryRejectedError("unsafe_graph_state", "an active build does not require a recovery task");
+  }
+  const previousBudget = requiredPositiveInteger(build.metadata.derivationTokenBudget, "derivationTokenBudget");
+  if (previousBudget !== input.expectedBudget) {
+    throw new OperatorRetryRejectedError(
+      "unsafe_graph_state",
+      `Context build token budget changed from the acknowledged ${input.expectedBudget}; refresh before extending it again`
+    );
+  }
+  const nextBudget = previousBudget + input.additionalTokens;
+  if (!Number.isSafeInteger(nextBudget) || nextBudget > MAX_DERIVATION_TOKEN_BUDGET) {
+    throw new OperatorRetryRejectedError(
+      "unsafe_graph_state",
+      `Context build token budget cannot exceed ${MAX_DERIVATION_TOKEN_BUDGET}`
+    );
+  }
+  let next = applyCommand(
+    state,
+    {
+      command: "CommentTask",
+      taskId: build.id,
+      eventType: "context.build_token_budget_extended",
+      payload: {
+        acknowledged: true,
+        previousDerivationTokenBudget: previousBudget,
+        additionalModelTokens: input.additionalTokens,
+        nextDerivationTokenBudget: nextBudget,
+        ...(target ? { resumedTaskId: target.id } : {}),
+        requestKey: input.requestKey,
+        reason: input.reason
+      }
+    },
+    { actor: { type: "user", id: input.actorId }, now: input.now }
+  ).state;
+  if (target) {
+    next = applyCommand(
+      next,
+      {
+        command: "CommentTask",
+        taskId: target.id,
+        eventType: "context.token_interrupted_task_reclassified",
+        payload: { fromStatus: "canceled", toStatus: "failed", requestKey: input.requestKey, reason: input.reason }
+      },
+      { actor: { type: "user", id: input.actorId }, now: input.now }
+    ).state;
+  }
+  next = {
+    ...next,
+    tasks: next.tasks.map((task) => {
+      if (task.id === build.id) {
+        return {
+          ...task,
+          metadata: { ...task.metadata, derivationTokenBudget: nextBudget },
+          updatedAt: input.now
+        };
+      }
+      return target && task.id === target.id ? { ...task, status: "failed" as const, updatedAt: input.now } : task;
+    })
+  };
+  return {
+    state: next,
+    previousBudget,
+    nextBudget,
+    ...(target ? { resumedTaskId: target.id } : {})
+  };
+}
+
 function prepareContextDeadlineRetry(
   state: BoardState,
   input: {
@@ -4884,6 +5161,26 @@ function contextBoardOperatorRetryEligibility(state: BoardState, build: BoardTas
     };
   }
   const buildState = contextBuildBoardState(state, build.id);
+  const tokenInterruptedTaskIds = contextTokenInterruptedTaskIds(buildState, build);
+  if (tokenInterruptedTaskIds.length > 0) {
+    const tokenBudget =
+      typeof build.metadata.derivationTokenBudget === "number" ? build.metadata.derivationTokenBudget : 0;
+    return {
+      eligible: false,
+      recoverableTaskIds: [tokenInterruptedTaskIds[0]!],
+      blockers: [
+        {
+          code:
+            tokenBudget >= MAX_DERIVATION_TOKEN_BUDGET ? "model_token_budget_maximum" : "model_token_budget_exhausted",
+          detail:
+            tokenBudget >= MAX_DERIVATION_TOKEN_BUDGET
+              ? "the build reached the maximum model-token budget"
+              : "the interrupted build requires an explicit acknowledged model-token budget extension"
+        }
+      ],
+      mode: "token_budget_recovery" as const
+    };
+  }
   const deadlineInterruptedTaskIds = contextDeadlineInterruptedTaskIds(buildState, build);
   for (const taskId of deadlineInterruptedTaskIds) {
     try {
@@ -5671,6 +5968,7 @@ function metricsRoute(pathname: string): string {
   if (pathname.startsWith("/context/builds/") && pathname.endsWith("/progress")) return "/context/builds/:id/progress";
   if (contextBuildRetryRoute(pathname)) return "/context/builds/:id/retry";
   if (contextTaskRetryRoute(pathname)) return "/context/builds/:id/tasks/:taskId/retry";
+  if (contextBuildTokenBudgetRoute(pathname)) return "/context/builds/:id/token-budget";
   if (routeId(pathname, "/internal/context/builds/", "/worker-completions")) {
     return "/internal/context/builds/:id/worker-completions";
   }
@@ -5712,6 +6010,11 @@ function contextTaskRetryRoute(pathname: string): { readonly buildId: string; re
 
 function contextBuildRetryRoute(pathname: string): string | undefined {
   const match = /^\/context\/builds\/([^/]+)\/retry$/.exec(pathname);
+  return match?.[1];
+}
+
+function contextBuildTokenBudgetRoute(pathname: string): string | undefined {
+  const match = /^\/context\/builds\/([^/]+)\/token-budget$/.exec(pathname);
   return match?.[1];
 }
 

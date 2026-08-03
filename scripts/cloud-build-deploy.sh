@@ -68,6 +68,7 @@ context_daytona_image="${JINA_CONTEXT_DAYTONA_IMAGE:-}"
 context_daytona_model_secret="${JINA_CONTEXT_DAYTONA_MODEL_SECRET:-}"
 context_daytona_model_secret_env="${JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV:-OPENAI_API_KEY}"
 context_daytona_model_domains="${JINA_CONTEXT_DAYTONA_MODEL_DOMAINS:-api.openai.com}"
+context_checkpoint_publication_override_build_ids="${JINA_CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS:-}"
 v1_api_url="${JINA_V1_API_URL:-https://api.usejina.com}"
 v1_internal_token_secret="${JINA_V1_INTERNAL_API_TOKEN_SECRET:-jina-v1-internal-api-token}"
 context_reset_mode="${JINA_CONTEXT_RESET_MODE:-disabled}"
@@ -263,6 +264,11 @@ if [[ "${context_daytona_model_secret_env}" != "OPENAI_API_KEY" &&
 fi
 if [[ "${context_daytona_snapshot}${context_daytona_image}${context_daytona_model_domains}" == *"~"* ]]; then
   echo "Daytona configuration must not contain the Cloud Run environment delimiter" >&2
+  exit 2
+fi
+if [[ -n "${context_checkpoint_publication_override_build_ids}" &&
+      ! "${context_checkpoint_publication_override_build_ids}" =~ ^task_[a-f0-9]{32}(,task_[a-f0-9]{32})*$ ]]; then
+  echo "JINA_CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS must contain exact comma-separated Context build IDs" >&2
   exit 2
 fi
 CONTEXT_DAYTONA_MODEL_DOMAINS="${context_daytona_model_domains}" python3 - <<'PY'
@@ -648,6 +654,9 @@ context_worker_environment() {
     environment+="~CONTEXT_DAYTONA_SNAPSHOT=${context_daytona_snapshot}"
   else
     environment+="~CONTEXT_DAYTONA_IMAGE=${context_daytona_image}"
+  fi
+  if [[ -n "${context_checkpoint_publication_override_build_ids}" ]]; then
+    environment+="~CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS=${context_checkpoint_publication_override_build_ids}"
   fi
   printf '%s\n' "${environment}"
 }

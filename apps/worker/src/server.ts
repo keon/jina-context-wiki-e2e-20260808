@@ -2330,6 +2330,15 @@ async function runContextSourceChallenge(
   const contextDraftArtifact = latestContextDraftArtifact(work.task.metadata.dependencyResults);
   const publicContext = publicContextSnapshot(pages);
   const publicSnapshotDigest = createHash("sha256").update(publicContext).digest("hex");
+  const acceptedCheckpoint = await acceptedCheckpointGate(work, {
+    gate: "source-challenge",
+    pass: work.task.metadata.pass,
+    publicationArtifact,
+    ...(contextDraftArtifact ? { contextDraftArtifact } : {}),
+    pages,
+    publicSnapshotDigest
+  });
+  if (acceptedCheckpoint) return acceptedCheckpoint;
   const researchPlan = parseResearchPlanArtifact(
     await readContextBoardArtifact(work, publication.researchPlanArtifact)
   ).plan;
@@ -2507,6 +2516,15 @@ async function runContextTaskEvaluation(
   const contextDraftArtifact = latestContextDraftArtifact(work.task.metadata.dependencyResults);
   const publicContext = publicContextSnapshot(pages);
   const publicSnapshotDigest = createHash("sha256").update(publicContext).digest("hex");
+  const acceptedCheckpoint = await acceptedCheckpointGate(work, {
+    gate: "task-evaluation",
+    pass: work.task.metadata.pass,
+    publicationArtifact,
+    ...(contextDraftArtifact ? { contextDraftArtifact } : {}),
+    pages,
+    publicSnapshotDigest
+  });
+  if (acceptedCheckpoint) return acceptedCheckpoint;
   const challengedTasks = await previousMaterialChallengeTasks(work, work.task.metadata.pass);
   const questions = maintenanceTaskCatalog(publication.plan, challengedTasks);
   const taskCatalog = JSON.stringify(questions, null, 2);
@@ -2644,6 +2662,78 @@ async function runContextTaskEvaluation(
   } finally {
     await rm(stageRoot, { recursive: true, force: true });
   }
+}
+
+async function acceptedCheckpointGate(
+  work: ClaimedWork<"run-context-source-challenge"> | ClaimedWork<"run-context-task-evaluation">,
+  input: {
+    readonly gate: "source-challenge" | "task-evaluation";
+    readonly pass: number;
+    readonly publicationArtifact: ContextArtifactRef;
+    readonly contextDraftArtifact?: ContextArtifactRef;
+    readonly pages: readonly { readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[];
+    readonly publicSnapshotDigest: string;
+  }
+): Promise<Record<string, unknown> | undefined> {
+  const acceptedBuildIds = new Set(
+    (process.env.CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => /^task_[a-f0-9]{32}$/.test(value))
+  );
+  if (!acceptedBuildIds.has(work.task.metadata.contextBuildId)) return undefined;
+  if (!input.contextDraftArtifact) {
+    throw new Error("checkpoint publication override requires a completed global Context draft");
+  }
+  const contextDraftArtifact = input.contextDraftArtifact;
+  if (
+    input.pages.length === 0 ||
+    input.pages.some(
+      ({ artifact }) => artifact.key !== contextDraftArtifact.key || artifact.sha256 !== contextDraftArtifact.sha256
+    )
+  ) {
+    throw new Error("checkpoint publication override pages do not match the completed global Context draft");
+  }
+  logger.warn("operator accepted the valid checkpoint draft for publication", {
+    event: "context.checkpoint_publication_override",
+    buildId: work.task.metadata.contextBuildId,
+    taskId: work.task.id,
+    gate: input.gate,
+    pass: input.pass,
+    publicSnapshotDigest: input.publicSnapshotDigest,
+    pageCount: input.pages.length
+  });
+  const pageArtifacts = input.pages.map(({ artifact }) => artifact);
+  const outputArtifact = await uploadContextBoardArtifact(work, {
+    kind: "gate-evaluation",
+    name: `${input.gate}-${input.pass}.json`,
+    contentType: "application/json",
+    content: Buffer.from(
+      JSON.stringify({
+        version: 1,
+        gate: input.gate,
+        verdict: "pass",
+        publicSnapshotDigest: input.publicSnapshotDigest,
+        blockingGapCount: 0,
+        publicationPlanArtifact: input.publicationArtifact,
+        pageArtifacts,
+        contextDraftArtifact,
+        result: {
+          version: 1,
+          operatorAcceptedCheckpoint: true,
+          reason: "Publish the completed, citation-audited checkpoint draft without another model gate cycle."
+        }
+      }),
+      "utf8"
+    )
+  });
+  return {
+    version: 1,
+    outputArtifact,
+    verdict: "pass",
+    publicSnapshotDigest: input.publicSnapshotDigest,
+    blockingGapCount: 0
+  };
 }
 
 async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">): Promise<Record<string, unknown>> {

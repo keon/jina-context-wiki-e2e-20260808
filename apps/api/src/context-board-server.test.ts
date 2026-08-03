@@ -843,6 +843,53 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
     assert.equal(tokenBody.failureCode, "build_token_budget_exceeded");
     assert.equal(tokenBody.consumedModelTokens, 300_001);
 
+    const tokenExtensionUrl = `${baseUrl}/context/builds/${encodeURIComponent(tokenLimited.buildTaskId)}/token-budget`;
+    const unacknowledged = await fetch(tokenExtensionUrl, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        acknowledged: false,
+        additionalTokens: 1_000_000,
+        expectedDerivationTokenBudget: 250_000,
+        requestKey: "operator:token-budget-unacknowledged",
+        reason: "continue the checkpointed build"
+      })
+    });
+    assert.equal(unacknowledged.status, 400);
+
+    const tokenExtensionBody = {
+      acknowledged: true,
+      additionalTokens: 1_000_000,
+      expectedDerivationTokenBudget: 250_000,
+      requestKey: "operator:token-budget-extension",
+      reason: "continue the checkpointed build"
+    };
+    for (const [expectedStatus, duplicate] of [
+      [202, false],
+      [200, true]
+    ] as const) {
+      const extended = await fetch(tokenExtensionUrl, {
+        method: "POST",
+        headers: adminHeaders,
+        body: JSON.stringify(tokenExtensionBody)
+      });
+      const extendedBody = (await extended.json()) as Record<string, unknown>;
+      assert.equal(extended.status, expectedStatus, JSON.stringify(extendedBody));
+      assert.equal(extendedBody.duplicate, duplicate);
+      assert.equal(extendedBody.acknowledged, true);
+      assert.equal(extendedBody.previousDerivationTokenBudget, 250_000);
+      assert.equal(extendedBody.derivationTokenBudget, 1_250_000);
+      assert.equal(extendedBody.resumed, true);
+      assert.equal(extendedBody.resumedTaskId, researchPlan.taskId);
+    }
+    const recoveredBoard = stateStore.current().intakeState.board;
+    assert.equal(findTask(recoveredBoard, tokenLimited.buildTaskId)?.metadata.derivationTokenBudget, 1_250_000);
+    assert.equal(findTask(recoveredBoard, researchPlan.taskId)?.status, "queued");
+    assert.equal(
+      recoveredBoard.events.filter((event) => event.type === "context.build_token_budget_extended").length,
+      1
+    );
+
     for (const changed of [true, false]) {
       const cancellation = await fetch(
         `${baseUrl}/internal/context/builds/${encodeURIComponent(cancelable.buildTaskId)}/cancel`,
