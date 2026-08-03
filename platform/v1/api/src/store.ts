@@ -1946,12 +1946,12 @@ export async function saveTenantProviderKey(
   await query(
     `insert into tenant_integrations
        (tenant_id, ${cols.key}, ${cols.at}, configured_by_user_id, configured_by_login, updated_at)
-     values ($1, $2, case when $2 is not null then now() else null end, $3, $4, now())
+     values ($1, $2::text, case when $2::text is not null then now() else null end, $3, $4, now())
      on conflict (tenant_id) do update set
-        ${cols.key} = $2,
-        ${cols.at} = case when $2 is not null then now() else null end,
-        configured_by_user_id = case when $2 is not null then $3 else tenant_integrations.configured_by_user_id end,
-        configured_by_login = case when $2 is not null then $4 else tenant_integrations.configured_by_login end,
+        ${cols.key} = $2::text,
+        ${cols.at} = case when $2::text is not null then now() else null end,
+        configured_by_user_id = case when $2::text is not null then $3 else tenant_integrations.configured_by_user_id end,
+        configured_by_login = case when $2::text is not null then $4 else tenant_integrations.configured_by_login end,
         updated_at = now()`,
     [tenantId, encryptKey(key), configuredByUserId, configuredByLogin],
   );
