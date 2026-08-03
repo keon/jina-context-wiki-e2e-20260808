@@ -90,6 +90,7 @@ import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } 
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
 import {
   contextBuildBoardState,
+  contextBuildHasOperatorRecovery,
   contextDeadlineInterruptedTaskIds,
   contextGateRemediationTaskId,
   contextPageRemediationTaskIds
@@ -1835,14 +1836,33 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, cancelContextBuildId);
         if (!build) return undefined;
         if (isTerminalTaskStatus(build.status)) {
-          return { status: build.status, changed: false };
+          if (contextBuildHasOperatorRecovery(intakeState.board, build, nowIso())) {
+            const abandoned = applyCommand(
+              intakeState.board,
+              {
+                command: "CommentTask",
+                taskId: build.id,
+                eventType: "context.build_operator_recovery_abandoned",
+                payload: { reason }
+              },
+              { actor: { type: "user", id: principal.principalId }, now: nowIso() }
+            );
+            if (!abandoned.accepted) {
+              throw new Error(
+                `context build recovery abandonment was rejected: ${abandoned.rejection?.reason ?? "unknown"}`
+              );
+            }
+            intakeState = { ...intakeState, board: abandoned.state };
+            return { status: build.status, changed: true, recoveryAbandoned: true };
+          }
+          return { status: build.status, changed: false, recoveryAbandoned: false };
         }
         const at = nowIso();
         intakeState = {
           ...intakeState,
           board: terminateContextBuild(intakeState.board, build, "canceled", "build_canceled", reason, at)
         };
-        return { status: "canceled" as const, changed: true };
+        return { status: "canceled" as const, changed: true, recoveryAbandoned: false };
       });
       if (!canceled) throw new ApiError(409, "conflict", "context build cancellation raced another update");
       if (config.contextQuotaService && isTerminalTaskStatus(canceled.status)) {
@@ -1857,12 +1877,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           buildId: cancelContextBuildId
         });
       }
+      const followupPromoted = canceled.changed
+        ? await tryPromoteContextBoardFollowup(principal.tenantId, entityId<"task">(cancelContextBuildId))
+        : false;
       json(response, 200, {
         accepted: true,
         buildId: cancelContextBuildId,
         status: canceled.status,
         canceled: canceled.status === "canceled",
-        changed: canceled.changed
+        changed: canceled.changed,
+        ...(canceled.recoveryAbandoned ? { recoveryAbandoned: true } : {}),
+        ...(followupPromoted ? { followupPromoted: true } : {})
       });
       return;
     }

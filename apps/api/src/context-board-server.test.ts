@@ -2638,6 +2638,89 @@ test("tenant-admin operator retry resumes a failed publication planner from reta
   }
 });
 
+test("operator cancellation abandons recoverable failure and promotes its queued repository follow-up", async () => {
+  const tenantId = "tenant-abandon-recovery";
+  const repository = "omxyz/jina";
+  const failed = failedPublicationPlannerFixture(tenantId, repository, "abandon-recovery");
+  const queuedCommitSha = "b".repeat(40);
+  const queued = applyCommand(
+    failed.state,
+    {
+      command: "CommentTask",
+      taskId: failed.buildId,
+      eventType: "context.build_followup_requested",
+      payload: {
+        followup: {
+          tenantId,
+          repository,
+          ref: "main",
+          commitSha: queuedCommitSha,
+          trigger: "push",
+          requestKey: "push:queued-after-abandonment"
+        }
+      }
+    },
+    { actor: { type: "system", id: "context-build-admission" }, now: NOW }
+  );
+  assert.equal(queued.accepted, true);
+  const store = mutableStateStore({
+    intakeState: { board: queued.state, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const internalApiToken = "abandon-recovery-internal-token";
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore: store,
+    internalApiToken
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const response = await fetch(`${baseUrl}/internal/context/builds/${encodeURIComponent(failed.buildId)}/cancel`, {
+      method: "POST",
+      headers: {
+        ...devHeaders(tenantId, "svc:operator"),
+        authorization: `Bearer ${internalApiToken}`
+      },
+      body: JSON.stringify({ reason: "the retained plan is incompatible with the deployed contract" })
+    });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, responseText);
+    assert.deepEqual(JSON.parse(responseText), {
+      accepted: true,
+      buildId: failed.buildId,
+      status: "failed",
+      canceled: false,
+      changed: true,
+      recoveryAbandoned: true,
+      followupPromoted: true
+    });
+
+    const persisted = store.current().intakeState.board;
+    assert.equal(
+      persisted.events.some(
+        (event) => event.taskId === failed.buildId && event.type === "context.build_operator_recovery_abandoned"
+      ),
+      true
+    );
+    const promoted = persisted.tasks.find(
+      (task) =>
+        task.type === contextBoardTaskTypes.build &&
+        task.id !== failed.buildId &&
+        task.metadata.tenantId === tenantId &&
+        task.metadata.repository === repository
+    );
+    assert.ok(promoted);
+    assert.equal(promoted.status, "triage");
+    assert.equal(promoted.metadata.commitSha, queuedCommitSha);
+    assert.equal(promoted.metadata.refSequence, 2);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("tenant-admin batch retry atomically resumes all failed parallel page branches", async () => {
   const tenantId = "tenant-batch-operator";
   const repository = "omxyz/jina";

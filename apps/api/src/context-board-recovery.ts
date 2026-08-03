@@ -109,6 +109,13 @@ function isAfterLatestOperatorReopen(state: BoardState, taskId: TaskId, eventSeq
 
 export function contextBuildHasOperatorRecovery(state: BoardState, build: BoardTask, now: string): boolean {
   if (build.type !== contextBoardTaskTypes.build || build.status !== "failed") return false;
+  if (
+    state.events.some(
+      (event) => event.taskId === build.id && event.type === "context.build_operator_recovery_abandoned"
+    )
+  ) {
+    return false;
+  }
   const buildState = contextBuildBoardState(state, build.id);
   return (
     boardOperatorRetryEligibility(buildState, { buildTaskId: build.id, now }).eligible ||
