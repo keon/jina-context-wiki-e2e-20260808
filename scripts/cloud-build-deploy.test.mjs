@@ -171,6 +171,11 @@ test("a failed graceful drain reopens claim admission without replacing the serv
   assert.ok(forcedDrain > resume);
   assert.match(productionPreflight, /action === "worker-drain"/);
   assert.match(productionPreflight, /action === "worker-resume"/);
+  assert.doesNotMatch(productionPreflight, /cannot (?:drain|resume) an inactive worker generation/);
+  assert.match(
+    productionPreflight,
+    /action === "worker-resume"[\s\S]+?if \(row\?\.worker_claims_enabled\)[\s\S]+?worker_accepts_claims=true/
+  );
   assert.match(productionPreflight, /command === "board-await-drain"/);
   assert.match(productionPreflight, /release_control\.board_drain_wait/);
   assert.match(productionPreflight, /release_control\.board_drained_and_worker_paused/);

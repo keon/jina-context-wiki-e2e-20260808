@@ -331,25 +331,24 @@ async function updateReleaseControl(pool, action) {
           [release.leaseSeconds]
         );
       } else if (action === "worker-drain") {
-        if (!row?.worker_claims_enabled) {
-          throw new Error("cannot drain an inactive worker generation");
-        }
         await client.query(
           `update jina_runtime.release_control
            set worker_accepts_claims=false,
                updated_at=clock_timestamp()
-           where id=1`
+         where id=1`
         );
       } else if (action === "worker-resume") {
-        if (!row?.worker_claims_enabled) {
-          throw new Error("cannot resume an inactive worker generation");
+        // A rejected prior release deliberately leaves workers inactive. A
+        // subsequent release must be able to pass through the same drain and
+        // rollback protocol without reviving that unaccepted generation.
+        if (row?.worker_claims_enabled) {
+          await client.query(
+            `update jina_runtime.release_control
+             set worker_accepts_claims=true,
+                 updated_at=clock_timestamp()
+             where id=1`
+          );
         }
-        await client.query(
-          `update jina_runtime.release_control
-           set worker_accepts_claims=true,
-               updated_at=clock_timestamp()
-           where id=1`
-        );
       } else if (action === "worker-pause") {
         await pauseWorkerGeneration(client);
       } else if (action === "worker-enable") {
@@ -396,7 +395,7 @@ async function updateReleaseControl(pool, action) {
         leaseSeconds: release.leaseSeconds,
         workerClaimsEnabled: action === "worker-enable" ? true : action === "worker-pause" ? false : undefined,
         workerAcceptsClaims:
-          action === "worker-enable" || action === "worker-resume"
+          action === "worker-enable" || (action === "worker-resume" && row?.worker_claims_enabled)
             ? true
             : action === "worker-drain" || action === "worker-pause"
               ? false
