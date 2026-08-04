@@ -8,14 +8,12 @@ import { useDashboard } from "./providers";
 import { apiUrl, parseInstallationResult } from "./lib/api";
 import { clerkAuthRedirect } from "./lib/auth-navigation";
 import { normalizeCodexHarnessInfo } from "./lib/codex-harness";
+import { WORKSPACE_NAV_ITEMS, type WorkspaceNavKey } from "./lib/navigation";
 import { formatRelative } from "./lib/presentation";
 import type { InstallationResult, ViewerResponse } from "./lib/types";
 
 type NavKey =
-  | "reviews"
-  | "issues"
-  | "context"
-  | "causal-graph"
+  | WorkspaceNavKey
   | "models"
   | "integrations"
   | "organization"
@@ -25,15 +23,18 @@ type NavKey =
 
 type NavItem = { key: NavKey; label: string; href: string; icon: () => ReactNode };
 
+const WORKSPACE_ICONS: Record<WorkspaceNavKey, () => ReactNode> = {
+  reviews: ReviewsIcon,
+  issues: IssuesIcon,
+  "task-board": TaskBoardIcon,
+  context: ContextIcon,
+  "causal-graph": GraphIcon,
+};
+
 const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   {
     label: "Workspace",
-    items: [
-      { key: "reviews", label: "Reviews", href: "/reviews", icon: ReviewsIcon },
-      { key: "issues", label: "Issues", href: "/issues", icon: IssuesIcon },
-      { key: "context", label: "Context Wiki", href: "/context", icon: ContextIcon },
-      { key: "causal-graph", label: "Causal Graph", href: "/causal-graph", icon: GraphIcon },
-    ],
+    items: WORKSPACE_NAV_ITEMS.map((item) => ({ ...item, icon: WORKSPACE_ICONS[item.key] })),
   },
   {
     label: "Configure",
@@ -57,6 +58,7 @@ const DOCS_URL = process.env.NEXT_PUBLIC_DOCS_URL ?? "https://docs.usejina.com";
 const SECTION_TITLE: Record<NavKey, string> = {
   reviews: "Reviews",
   issues: "Issues",
+  "task-board": "Task Board",
   context: "Context Wiki",
   "causal-graph": "Causal Graph",
   models: "Models",
@@ -70,6 +72,7 @@ const SECTION_TITLE: Record<NavKey, string> = {
 function sectionForPath(pathname: string | null): NavKey {
   const path = pathname ?? "/";
   if (path.startsWith("/issues")) return "issues";
+  if (path.startsWith("/board")) return "task-board";
   if (path.startsWith("/causal-graph")) return "causal-graph";
   if (path.startsWith("/operations/context")) return "context";
   if (path.startsWith("/context")) return "context";
@@ -296,6 +299,16 @@ function IssuesIcon() {
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.3" />
       <path d="M8 4.75v3.75M8 11.15v.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function TaskBoardIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.75" y="2.25" width="3.25" height="11.5" rx="1" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="6.4" y="2.25" width="3.25" height="7" rx="1" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="11" y="2.25" width="3.25" height="9.25" rx="1" stroke="currentColor" strokeWidth="1.3" />
     </svg>
   );
 }

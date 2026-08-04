@@ -103,8 +103,8 @@ export default function BoardPage() {
       <section id="board-page">
         <header className="page-heading">
           <div>
-            <h1>Board</h1>
-            <p>Live operational work across repositories and workflows.</p>
+            <h1>Task Board</h1>
+            <p>Live tasks across repositories, reviews, Context builds, and causal graph workflows.</p>
           </div>
         </header>
         <BoardToolbar filters={effectiveFilters} options={options} onFilterChange={setFilter} />
