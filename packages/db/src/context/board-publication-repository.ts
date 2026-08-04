@@ -86,6 +86,21 @@ export class PostgresBoardContextPublicationRepository
     );
     const row = result.rows[0];
     if (!row) return undefined;
+    // Releases produced before the compact Context workflow used the
+    // `context-v2/...` object namespace. They remain valid historical
+    // publications, but their artifacts cannot be safely reused by the new
+    // `context/...` workflow scope. Treat an exact-scoped legacy pointer as a
+    // cold-start boundary so the next build replaces it with a canonical
+    // release; malformed or cross-scope pointers still fail closed below.
+    if (
+      isLegacyContextV2ReleaseArtifact(row.release_artifact, {
+        tenantId,
+        repository,
+        releaseId: row.release_id
+      })
+    ) {
+      return undefined;
+    }
     return parseContextPriorReleaseSeed({
       version: 1,
       tenantId,
@@ -239,6 +254,28 @@ export class PostgresBoardContextPublicationRepository
       client.release();
     }
   }
+}
+
+function isLegacyContextV2ReleaseArtifact(
+  value: unknown,
+  input: { readonly tenantId: string; readonly repository: string; readonly releaseId: string }
+): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const artifact = value as Record<string, unknown>;
+  if (artifact.contentType !== "application/json" || typeof artifact.key !== "string") return false;
+  const repositorySegments = input.repository.split("/").map((segment) => encodeURIComponent(segment));
+  const prefix = [
+    "context-v2",
+    "tenants",
+    encodeURIComponent(input.tenantId),
+    "repositories",
+    ...repositorySegments,
+    "builds"
+  ].join("/");
+  return (
+    artifact.key.startsWith(`${prefix}/`) &&
+    artifact.key.endsWith(`/context-release/${encodeURIComponent(input.releaseId)}.json`)
+  );
 }
 
 async function assertPublicationEvidenceNotErased(

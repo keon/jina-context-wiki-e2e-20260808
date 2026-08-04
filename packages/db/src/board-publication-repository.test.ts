@@ -82,9 +82,36 @@ test("current release seed lookup rejects an artifact outside the requested tena
   );
 });
 
-function releaseArtifact(tenantId: string) {
+test("current release seed lookup cold-starts across the legacy context-v2 artifact boundary", async () => {
+  const database = {
+    async queryAs() {
+      return {
+        rows: [
+          {
+            release_id: RELEASE_ID,
+            ref_sequence: "7",
+            commit_sha: "a".repeat(40),
+            public_snapshot_digest: "b".repeat(64),
+            release_artifact: releaseArtifact(TENANT, "context-v2")
+          }
+        ]
+      };
+    }
+  } as unknown as ContextDatabase;
+
+  const seed = await new PostgresBoardContextPublicationRepository(database).findCurrentReleaseSeed({
+    tenantId: TENANT,
+    repository: REPOSITORY,
+    ref: REF
+  });
+
+  assert.equal(seed, undefined);
+});
+
+function releaseArtifact(tenantId: string, root = "context") {
   const key =
-    `context/tenants/${tenantId}/repositories/omxyz/jina/builds/` + `task_prior/context-release/${RELEASE_ID}.json`;
+    `${root}/tenants/${tenantId}/repositories/omxyz/jina/builds/` +
+    `task_prior/context-release/${RELEASE_ID}.json`;
   return {
     uri: `gs://context-artifacts/${key}`,
     key,
