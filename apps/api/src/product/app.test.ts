@@ -149,29 +149,39 @@ test("internal ContextGraph MCP access stays unavailable unless the exact reposi
 });
 
 test("Context execution profiles require internal auth and return a bounded default without a database", async () => {
-  const app = createApp(testConfig());
-  const body = JSON.stringify({ tenant_id: "tenant-1", build_id: "build-1" });
-  const unauthorized = await app.request("/internal/context/execution-profile", {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body,
-  });
-  assert.equal(unauthorized.status, 401);
+  const databaseUrl = process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL;
+  try {
+    const app = createApp(testConfig());
+    const body = JSON.stringify({ tenant_id: "tenant-1", build_id: "build-1" });
+    const unauthorized = await app.request("/internal/context/execution-profile", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body,
+    });
+    assert.equal(unauthorized.status, 401);
 
-  const response = await app.request("/internal/context/execution-profile", {
-    method: "POST",
-    headers: { ...JSON_HEADERS, authorization: "Bearer internal-token" },
-    body,
-  });
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    provider: "managed",
-    model: "openai/gpt-5.6-terra",
-    effort: "low",
-    fallback_policy: "fail_notify",
-    credential: { kind: "managed" },
-    settings_revision: "unconfigured",
-  });
+    const response = await app.request("/internal/context/execution-profile", {
+      method: "POST",
+      headers: { ...JSON_HEADERS, authorization: "Bearer internal-token" },
+      body,
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      provider: "managed",
+      model: "openai/gpt-5.6-terra",
+      effort: "low",
+      fallback_policy: "fail_notify",
+      credential: { kind: "managed" },
+      settings_revision: "unconfigured",
+    });
+  } finally {
+    if (databaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = databaseUrl;
+    }
+  }
 });
 
 test("parseReviewGraphAvailabilityBody rejects an ambiguous repository scope", () => {

@@ -7,6 +7,11 @@ corepack prepare pnpm@11.15.1 --activate
 pnpm install --frozen-lockfile --store-dir=/tmp/pnpm-store
 pnpm typecheck
 pnpm lint
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  pnpm --filter @jina/api build
+  pnpm --filter @jina/api migrate:product
+  unset DATABASE_URL
+fi
 pnpm test
 pnpm audit --prod --audit-level=high
 

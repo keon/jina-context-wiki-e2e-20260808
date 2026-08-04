@@ -181,13 +181,23 @@ test("resolveIntegrations returns openai_model_pricing for a managed run (no har
   };
   // A bound review_run_id with no DB configured -> empty resolved keys -> managed run, so the injected
   // pricing loader is consulted and its map is echoed back to the worker.
-  const ctx = internalContext({ review_run_id: "run-1" });
-  await resolveIntegrations(ctx.c, internalConfig, async () => pricing);
-  const body = ctx.captured() as Record<string, unknown>;
-  assert.deepEqual(body.openai_model_pricing, pricing);
-  assert.equal(body.openrouter_api_key, null);
-  assert.equal(body.codex_harness_auth, null);
-  assert.equal(body.codex_harness_connected_at_ms, null);
+  const databaseUrl = process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL;
+  try {
+    const ctx = internalContext({ review_run_id: "run-1" });
+    await resolveIntegrations(ctx.c, internalConfig, async () => pricing);
+    const body = ctx.captured() as Record<string, unknown>;
+    assert.deepEqual(body.openai_model_pricing, pricing);
+    assert.equal(body.openrouter_api_key, null);
+    assert.equal(body.codex_harness_auth, null);
+    assert.equal(body.codex_harness_connected_at_ms, null);
+  } finally {
+    if (databaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = databaseUrl;
+    }
+  }
 });
 
 test("resolveIntegrations 400s when review_run_id is absent (no un-preferenced fallback)", async () => {
