@@ -11,8 +11,11 @@ containing `staging`, then pass
 that tag and the UUID-valued `JINA_CONTEXT_TENANT_ID` to
 `scripts/deploy-staging.sh`. The script is fail-closed on any resource, service
 account, secret, database, tenant, bucket, URL, or image tag that is not explicitly
-staging-scoped. The staging deploy also installs the Board-recorded 15-minute billing
-retry schedule and the OpenTelemetry sidecars. Production continues to use the
+staging-scoped. The coordinated staging deploy also invokes the isolated
+`scripts/deploy-staging-causal-graph.sh` lane with that same image tag, preventing the
+unified API and causal worker from drifting across an artifact-protocol change. The
+staging deploy installs the Board-recorded 15-minute billing retry schedule and the
+OpenTelemetry sidecars, including the causal worker's release-gated sidecar. Production continues to use the
 coordinated `cloudbuild.yaml` path below.
 
 Cloud Build validates, builds, and deploys one coordinated release to

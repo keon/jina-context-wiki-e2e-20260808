@@ -3,6 +3,8 @@ set -euo pipefail
 
 : "${IMAGE_TAG:?IMAGE_TAG is required and must identify images already pushed by cloudbuild.staging-images.yaml}"
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 project="${GCP_PROJECT_ID:-jina-staging-20260802}"
 region="${GCP_REGION:-us-east1}"
 sql_instance="${CLOUD_SQL_INSTANCE:-jina-staging-20260802:us-east1:jina-db-staging}"
@@ -361,6 +363,20 @@ for attempt in $(seq 1 20); do
   fi
   sleep 3
 done
+
+# Keep the isolated causal lane on the same source image during every
+# coordinated staging deploy. The standalone script remains available for a
+# causal-only release, but a normal staging cutover must not leave an older
+# artifact protocol behind the unified API.
+GCP_PROJECT_ID="${project}" \
+GCP_REGION="${region}" \
+CLOUD_SQL_INSTANCE="${sql_instance}" \
+JINA_DB_NAME="${database_name}" \
+JINA_DB_USER="${runtime_user}" \
+JINA_MIGRATION_DB_USER="${owner_user}" \
+JINA_ARTIFACT_REGISTRY_REPOSITORY="${artifact_repository}" \
+IMAGE_TAG="${IMAGE_TAG}" \
+bash "${script_dir}/deploy-staging-causal-graph.sh"
 
 printf 'Jina staging deployed successfully\n'
 printf 'API: %s\n' "${api_url}"

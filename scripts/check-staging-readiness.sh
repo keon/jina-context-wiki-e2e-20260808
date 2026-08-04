@@ -282,6 +282,23 @@ else
   fail "Causal graph staging release credential is missing"
 fi
 
+causal_service_json="$(gcloud run services describe jina-causal-graph-worker \
+  --project="${staging_project}" --region="${region}" --format=json 2>/dev/null || true)"
+if jq -e '
+    [.spec.template.spec.containers[]? | select(.name == "otel-collector")] | length == 1
+  ' <<<"${causal_service_json}" >/dev/null &&
+  jq -e '
+    [.spec.template.spec.containers[]? |
+      select(.name != "otel-collector") |
+      .env[]? |
+      select(.name == "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" and .value == "http://localhost:4318/v1/traces")
+    ] | length == 1
+  ' <<<"${causal_service_json}" >/dev/null; then
+  pass "Causal graph staging worker exports OTel traces through its sidecar"
+else
+  fail "Causal graph staging worker is missing its OTel sidecar contract"
+fi
+
 if command -v vercel >/dev/null 2>&1 && vercel project inspect jina-staging-dashboard \
     --scope omlabs >/dev/null 2>&1; then
   pass "Vercel staging dashboard project exists"

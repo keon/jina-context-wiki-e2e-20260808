@@ -55,3 +55,13 @@ test("causal graph staging keeps bounded warm capacity", () => {
   assert.match(deployment, /--max-instances=3/);
   assert.match(deployment, /--concurrency=1/);
 });
+
+test("causal graph staging exports OTel traces from the activated revision", () => {
+  assert.match(deployment, /OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=\$\{otel_endpoint\}/);
+  assert.match(deployment, /--container=otel-collector/);
+  assert.match(deployment, /otelcol-google:0\.156\.0/);
+  const collector = deployment.indexOf("--container=otel-collector");
+  const activation = deployment.indexOf('gcloud run jobs deploy "${activation_job}"');
+  assert.ok(collector > 0);
+  assert.ok(activation > collector);
+});

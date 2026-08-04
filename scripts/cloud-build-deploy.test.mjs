@@ -90,6 +90,7 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--min-instances=3/);
   assert.match(stagingDeployment, /--max-instances=10/);
   assert.match(stagingDeployment, /--max-instances=5/);
+  assert.match(stagingDeployment, /deploy-staging-causal-graph\.sh/);
   for (const topic of LEGACY_TOPICS) assert.doesNotMatch(stagingDeployment, new RegExp(topic));
   assert.match(stagingDatabaseCutover, /for _attempt in \$\(seq 1 180\)/);
   assert.match(stagingDatabaseCutover, /jina-v1-staging-db-password/);

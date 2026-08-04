@@ -13,6 +13,9 @@ artifact_repository="${JINA_ARTIFACT_REGISTRY_REPOSITORY:-jina-staging}"
 gar="${region}-docker.pkg.dev/${project}/${artifact_repository}"
 api_image="${gar}/api:${IMAGE_TAG}"
 worker_image="${gar}/worker:${IMAGE_TAG}"
+otel_collector_image="us-docker.pkg.dev/cloud-ops-agents-artifacts/google-cloud-opentelemetry-collector/otelcol-google:0.156.0"
+otel_collector_config='{"receivers":{"otlp":{"protocols":{"http":{"endpoint":"0.0.0.0:4318"}}}},"processors":{"memory_limiter":{"check_interval":"1s","limit_mib":128,"spike_limit_mib":32},"batch":{"send_batch_size":256,"timeout":"5s"}},"exporters":{"googlecloud":{}},"extensions":{"health_check":{"endpoint":"0.0.0.0:13133"}},"service":{"extensions":["health_check"],"pipelines":{"traces":{"receivers":["otlp"],"processors":["memory_limiter","batch"],"exporters":["googlecloud"]}}}}'
+otel_endpoint="http://localhost:4318/v1/traces"
 
 api_service="jina-api-staging"
 worker_service="jina-causal-graph-worker"
@@ -123,7 +126,6 @@ gcloud run jobs execute "${migration_job}" \
 
 release_id="${IMAGE_TAG}"
 release_suffix="$(python3 -c 'import hashlib, sys; print("cg-" + hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "${release_id}")"
-worker_revision="${worker_service}-${release_suffix}"
 candidate_tag="c-${release_suffix:3:8}"
 release_credential="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 release_secret_version_name="$(
@@ -138,8 +140,11 @@ if [[ ! "${release_secret_version}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'Causal graph worker credential did not produce a Secret Manager version\n' >&2
   exit 2
 fi
+candidate_revision_suffix="${release_suffix}-b${release_secret_version}"
+worker_revision_suffix="${release_suffix}-r${release_secret_version}"
+worker_revision="${worker_service}-${worker_revision_suffix}"
 
-worker_environment="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${causal_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CAUSAL_GRAPH_CODEX_MODEL=gpt-5.6-terra~CAUSAL_GRAPH_DERIVE_SECONDS=900~CONTEXT_DAYTONA_SNAPSHOT=${daytona_snapshot}"
+worker_environment="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${causal_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CAUSAL_GRAPH_CODEX_MODEL=gpt-5.6-terra~CAUSAL_GRAPH_DERIVE_SECONDS=900~CONTEXT_DAYTONA_SNAPSHOT=${daytona_snapshot}"
 worker_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,CAUSAL_GRAPH_OPENAI_API_KEY=${openai_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
 
 # A first revision can receive traffic, but the API rejects all of its claims
@@ -159,6 +164,7 @@ gcloud run deploy "${worker_service}" \
   --no-allow-unauthenticated \
   --service-account="${worker_service_account}" \
   --concurrency=1 \
+  --cpu=1 \
   --memory=1Gi \
   --timeout=300 \
   --min-instances=1 \
@@ -167,8 +173,27 @@ gcloud run deploy "${worker_service}" \
   --set-env-vars="${worker_environment}" \
   --set-secrets="${worker_secrets}" \
   "${worker_traffic_args[@]}" \
-  --revision-suffix="${release_suffix}" \
+  --revision-suffix="${candidate_revision_suffix}" \
   --quiet
+
+# Add trace export in a second, still-zero-traffic revision. Cloud Run carries
+# the candidate worker container forward and the deterministic suffix below is
+# the exact revision activated by the release-control transaction.
+gcloud run deploy "${worker_service}" \
+  --project="${project}" \
+  --region="${region}" \
+  --no-traffic \
+  --revision-suffix="${worker_revision_suffix}" \
+  --quiet \
+  --container=otel-collector \
+  --image="${otel_collector_image}" \
+  --port=default \
+  --cpu=0.5 \
+  --memory=256Mi \
+  --args=--config=env:OTELCOL_CONFIG \
+  --set-env-vars="^~^OTELCOL_CONFIG=${otel_collector_config}" \
+  --startup-probe="initialDelaySeconds=0,timeoutSeconds=10,periodSeconds=10,failureThreshold=5,httpGet.path=/,httpGet.port=13133" \
+  --liveness-probe="timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/,httpGet.port=13133"
 
 gcloud run jobs deploy "${activation_job}" \
   --project="${project}" \
