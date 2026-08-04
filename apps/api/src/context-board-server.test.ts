@@ -177,6 +177,176 @@ test("collapsed Context planner checkpoints each allowed intermediate artifact k
   }
 });
 
+test("Context publication completion accepts its authoritative release artifact", async () => {
+  const tenantId = "tenant-publication-completion";
+  const repository = "omxyz/publication-completion";
+  const commitSha = "7".repeat(40);
+  const internalApiToken = "publication-completion-token";
+  const created = createContextWorkflowBoardBuild(createEmptyBoardState(), {
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-prompts-1",
+    validatorVersion: "context-validator-1",
+    pageIndexVersion: "pageindex-1",
+    executionProfileDigest: "f".repeat(64),
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "manual:publication-completion",
+    commitSha,
+    trigger: "manual",
+    now: NOW
+  });
+  const artifactRoot = await mkdtemp(join(tmpdir(), "jina-publication-completion-"));
+  const artifactStore = new FileContextArtifactStore(artifactRoot);
+  const snapshotArtifact = await artifactStore.put({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "evidence-snapshot",
+    name: `${created.snapshotTaskId}-attempt-1-snapshot.json`,
+    contentType: "application/json",
+    content: '{"version":1}'
+  });
+  let applied = applyContextWorkflowBoardTaskResult(
+    created.state,
+    created.snapshotTaskId,
+    {
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      outputArtifact: snapshotArtifact,
+      commitSha
+    },
+    NOW
+  );
+  let board = reduceBoard(setTaskStatus(applied.state, created.snapshotTaskId, "done"), NOW);
+  const planner = board.tasks.find((task) => task.type === contextWorkflowBoardTaskTypes.planner);
+  assert.ok(planner);
+  const planArtifact = await artifactStore.put({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "publication-plan",
+    name: `${planner.id}-attempt-1-plan.json`,
+    contentType: "application/json",
+    content: '{"version":1}'
+  });
+  const briefArtifact = await artifactStore.put({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "research-report",
+    name: `${planner.id}-attempt-1-architecture-brief.json`,
+    contentType: "application/json",
+    content: '{"version":1}'
+  });
+  applied = applyContextWorkflowBoardTaskResult(
+    board,
+    planner.id,
+    {
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      outputArtifact: planArtifact,
+      pages: [
+        {
+          subjectId: "architecture",
+          path: "architecture.md",
+          title: "Architecture",
+          operation: "add",
+          briefArtifact
+        }
+      ]
+    },
+    NOW
+  );
+  board = reduceBoard(setTaskStatus(applied.state, planner.id, "done"), NOW);
+  const page = board.tasks.find((task) => task.type === contextWorkflowBoardTaskTypes.page);
+  assert.ok(page);
+  const pageArtifact = await artifactStore.put({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "context-page",
+    name: `${page.id}-attempt-1-architecture.json`,
+    contentType: "application/json",
+    content: '{"version":1}'
+  });
+  applied = applyContextWorkflowBoardTaskResult(
+    board,
+    page.id,
+    {
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      outputArtifact: pageArtifact,
+      disposition: {
+        status: "accepted",
+        pageArtifact,
+        evidenceFingerprint: "a".repeat(64),
+        generationFingerprint: "b".repeat(64)
+      },
+      phaseReceiptIds: []
+    },
+    NOW
+  );
+  board = reduceBoard(setTaskStatus(applied.state, page.id, "done"), NOW);
+  const publication = board.tasks.find((task) => task.type === contextWorkflowBoardTaskTypes.publication);
+  assert.ok(publication);
+  assert.equal(publication.status, "queued");
+
+  const releaseId = `cr_${"c".repeat(32)}`;
+  const releaseArtifact = await artifactStore.put({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "context-release",
+    name: `${releaseId}.json`,
+    contentType: "application/json",
+    content: '{"version":1}'
+  });
+  const stateStore = mutableStateStore({ intakeState: { board, pullRequests: [] }, devDeliverySequence: 0 });
+  const server = createApiServer({
+    tenantId,
+    stateStore,
+    internalApiToken,
+    contextArtifactStore: artifactStore
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const claim = await claimContextTask(baseUrl, internalApiToken, contextWorkflowBoardTopics.publication);
+    assert.equal(claim.task.id, publication.id);
+    const mismatchedCompletion = await workerComplete(baseUrl, internalApiToken, {
+      ...leaseFromClaim(claim),
+      outcome: "done",
+      result: {
+        contract: CONTEXT_WORKFLOW_CONTRACT,
+        schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+        outputArtifact: releaseArtifact,
+        releaseId: `cr_${"d".repeat(32)}`
+      }
+    });
+    assert.equal(mismatchedCompletion.status, 400, await mismatchedCompletion.text());
+    const completion = await workerComplete(baseUrl, internalApiToken, {
+      ...leaseFromClaim(claim),
+      outcome: "done",
+      result: {
+        contract: CONTEXT_WORKFLOW_CONTRACT,
+        schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+        outputArtifact: releaseArtifact,
+        releaseId
+      }
+    });
+    assert.equal(completion.status, 200, await completion.text());
+    assert.equal(findTask(stateStore.current().intakeState.board, publication.id)?.status, "done");
+    assert.equal(findTask(stateStore.current().intakeState.board, created.buildTaskId)?.status, "done");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    await rm(artifactRoot, { recursive: true, force: true });
+  }
+});
+
 test("collapsed Context planner can be operator-retried after a terminal failure", async () => {
   const tenantId = "tenant-collapsed-planner-retry";
   const repository = "omxyz/collapsed-planner-retry";
@@ -262,17 +432,14 @@ test("collapsed Context planner can be operator-retried after a terminal failure
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   try {
-    const response = await fetch(
-      `${baseUrl}/context/builds/${created.buildTaskId}/tasks/${planner.id}/retry`,
-      {
-        method: "POST",
-        headers: devHeaders(tenantId, principalId),
-        body: JSON.stringify({
-          requestKey: "operator:collapsed-planner-retry",
-          reason: "resume after a compatibility deployment"
-        })
-      }
-    );
+    const response = await fetch(`${baseUrl}/context/builds/${created.buildTaskId}/tasks/${planner.id}/retry`, {
+      method: "POST",
+      headers: devHeaders(tenantId, principalId),
+      body: JSON.stringify({
+        requestKey: "operator:collapsed-planner-retry",
+        reason: "resume after a compatibility deployment"
+      })
+    });
     const body = (await response.json()) as Record<string, unknown>;
     assert.equal(response.status, 202, JSON.stringify(body));
     assert.equal(body.taskId, planner.id);

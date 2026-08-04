@@ -2449,7 +2449,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const phase = requiredContextPhaseCheckpointLabel(body.phase, "phase");
       const checkpointKey = requiredContextPhaseCheckpointKey(body.checkpointKey, "checkpointKey");
       const artifact = parseContextArtifactRef(body.artifact);
-      assertCurrentTaskOutputArtifact(lease.task, lease.buildTaskId, lease.message.payload.attempt, artifact);
+      assertCurrentTaskUploadedArtifact(lease.task, lease.buildTaskId, lease.message.payload.attempt, artifact);
       const recorded = await contextPhaseCheckpointStore.record({
         tenantId: principal.tenantId,
         repository: requiredRepositoryName(lease.task.metadata.repository, "repository"),
@@ -3844,11 +3844,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const parsed = isContextWorkflowBoardTaskType(currentTask.type)
         ? parseContextWorkflowBoardTaskResult(intakeState.board, currentTask.id, body.result)
         : parseContextBoardTaskResult(intakeState.board, currentTask.id, body.result);
-      assertCurrentTaskOutputArtifact(
+      assertCurrentTaskCompletionArtifact(
         currentTask,
         requiredString(currentTask.metadata.contextBuildId, "contextBuildId"),
         attempt,
-        parsed.outputArtifact
+        parsed.outputArtifact,
+        "releaseId" in parsed && typeof parsed.releaseId === "string" ? parsed.releaseId : undefined
       );
       if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
       const content = await config.contextArtifactStore.get(parsed.outputArtifact);
@@ -5832,7 +5833,7 @@ function requiredContextPhaseCheckpointKey(value: unknown, label: string): strin
   return checkpointKey;
 }
 
-function assertCurrentTaskOutputArtifact(
+function assertCurrentTaskUploadedArtifact(
   task: BoardTask,
   buildTaskId: string,
   attempt: number,
@@ -5849,12 +5850,42 @@ function assertCurrentTaskOutputArtifact(
     const prefix = `${scopePrefix}${kind}/`;
     if (!artifact.key.startsWith(prefix)) return false;
     const relative = artifact.key.slice(prefix.length);
-    return (
-      /^[a-z0-9][a-z0-9._-]{0,480}$/.test(relative) &&
-      (task.type === contextBoardTaskTypes.publication || relative.startsWith(currentAttemptPrefix))
-    );
+    return /^[a-z0-9][a-z0-9._-]{0,480}$/.test(relative) && relative.startsWith(currentAttemptPrefix);
   });
   if (!belongsToCurrentAttempt) {
+    throw invalidRequest("artifact was not uploaded by the current task attempt");
+  }
+}
+
+function assertCurrentTaskCompletionArtifact(
+  task: BoardTask,
+  buildTaskId: string,
+  attempt: number,
+  artifact: ContextArtifactRef,
+  releaseId?: string
+): void {
+  assertBoardArtifactScope(task, buildTaskId, artifact);
+  const scopePrefix = `${contextArtifactScopePrefix({
+    tenantId: requiredString(task.metadata.tenantId, "tenantId"),
+    repository: requiredRepositoryName(task.metadata.repository, "repository"),
+    buildId: buildTaskId
+  })}/`;
+  const artifactKind = boardWorkArtifactKind(task.type);
+  const kindPrefix = `${scopePrefix}${artifactKind}/`;
+  if (!artifact.key.startsWith(kindPrefix)) {
+    throw invalidRequest("completion artifact has the wrong kind for its task");
+  }
+  const relative = artifact.key.slice(kindPrefix.length);
+  if (artifactKind === "context-release") {
+    // Context releases are written only by the authoritative API publication
+    // transaction, not by the leased worker's generic upload endpoint.
+    if (!releaseId || !/^cr_[0-9a-f]{32}$/.test(releaseId) || relative !== `${releaseId}.json`) {
+      throw invalidRequest("completion release artifact has an invalid authoritative identity");
+    }
+    return;
+  }
+  const currentAttemptPrefix = `${task.id}-attempt-${attempt}-`;
+  if (!/^[a-z0-9][a-z0-9._-]{0,480}$/.test(relative) || !relative.startsWith(currentAttemptPrefix)) {
     throw invalidRequest("completion artifact was not uploaded by the current task attempt");
   }
 }

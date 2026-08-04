@@ -89,6 +89,7 @@ import {
   contextGateRepairMustChangeSnapshot,
   contextPriorReleaseCatalog,
   contextArtifactKey,
+  parseBoardPageIndexTreeArtifact,
   parseCertifiedContextReleaseArtifact,
   parseContextPriorReleaseSeed,
   repositoryAclFingerprint,
@@ -1469,17 +1470,58 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   } catch {
     throw new Error("published Context release artifact is not valid JSON");
   }
-  const built = await buildBoardPageIndex(boardPageIndexClient, release, {
-    timeoutMs: positiveInt(process.env.CONTEXT_PAGEINDEX_BUILD_TIMEOUT_MS, 5 * 60_000),
-    maxDocumentCharacters: positiveInt(process.env.CONTEXT_PAGEINDEX_MAX_DOCUMENT_CHARACTERS, 2_000_000),
-    maxNodes: positiveInt(process.env.CONTEXT_PAGEINDEX_MAX_NODES, 20_000)
-  });
-  const treeArtifact = await uploadContextBoardArtifact(work, {
-    kind: "pageindex-tree",
-    name: `${releaseId}.json`,
-    contentType: "application/json",
-    content: Buffer.from(built.artifactContent, "utf8")
-  });
+  const pageIndexPhase = "pageindex-tree.complete";
+  const pageIndexCheckpointKey = contextPhaseCheckpointKey(
+    work,
+    "context-publication-pageindex-checkpoint-v1",
+    pageIndexPhase,
+    { releaseId, releaseArtifactSha256: outputArtifact.sha256 }
+  );
+  let selectedPageIndex = await loadContextBoardPhaseCheckpoint(work, pageIndexPhase, pageIndexCheckpointKey);
+  if (!selectedPageIndex) {
+    const built = await buildBoardPageIndex(boardPageIndexClient, release, {
+      timeoutMs: positiveInt(process.env.CONTEXT_PAGEINDEX_BUILD_TIMEOUT_MS, 5 * 60_000),
+      maxDocumentCharacters: positiveInt(process.env.CONTEXT_PAGEINDEX_MAX_DOCUMENT_CHARACTERS, 2_000_000),
+      maxNodes: positiveInt(process.env.CONTEXT_PAGEINDEX_MAX_NODES, 20_000)
+    });
+    const treeArtifact = await uploadContextBoardArtifact(work, {
+      kind: "pageindex-tree",
+      // The pinned PageIndex adapter can legally return a different valid tree
+      // after a response-loss retry. Keep candidates immutable and let the
+      // durable checkpoint select the one attachment for this publication.
+      name: `${releaseId}.${built.artifactSha256}.json`,
+      contentType: "application/json",
+      content: Buffer.from(built.artifactContent, "utf8")
+    });
+    await recordContextBoardPhaseCheckpoint(work, {
+      phase: pageIndexPhase,
+      checkpointKey: pageIndexCheckpointKey,
+      artifact: treeArtifact
+    });
+    selectedPageIndex = await loadContextBoardPhaseCheckpoint(work, pageIndexPhase, pageIndexCheckpointKey);
+    if (!selectedPageIndex) throw new Error("recorded publication PageIndex checkpoint is unavailable");
+    logger.info("recorded durable publication PageIndex checkpoint", {
+      event: "context.phase_checkpoint.recorded",
+      taskId: work.task.id,
+      contextBuildId: work.task.metadata.contextBuildId,
+      phase: pageIndexPhase,
+      checkpointKey: pageIndexCheckpointKey,
+      checkpointAttempt: selectedPageIndex.checkpoint.attempt,
+      artifactSha256: selectedPageIndex.checkpoint.artifact.sha256
+    });
+  } else {
+    logger.info("resumed publication PageIndex from a durable checkpoint", {
+      event: "context.phase_checkpoint.reused",
+      taskId: work.task.id,
+      contextBuildId: work.task.metadata.contextBuildId,
+      phase: pageIndexPhase,
+      checkpointKey: pageIndexCheckpointKey,
+      checkpointAttempt: selectedPageIndex.checkpoint.attempt,
+      artifactSha256: selectedPageIndex.checkpoint.artifact.sha256
+    });
+  }
+  assertPublicationPageIndexCheckpoint(selectedPageIndex.value, work, releaseId);
+  const treeArtifact = selectedPageIndex.checkpoint.artifact;
   const attached = await internalApiJson<Record<string, unknown>>(
     "/internal/context/board/pageindex/attach",
     leaseBody(work, { releaseId, releaseArtifact: outputArtifact, treeArtifact })
@@ -1487,12 +1529,39 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   if (attached.version !== 1 || requiredString(attached.releaseId, "PageIndex attached releaseId") !== releaseId) {
     throw new Error("PageIndex attachment did not bind the published Context release");
   }
+  const attachedArtifact = parseArtifactRef(attached.outputArtifact, "PageIndex attached outputArtifact");
+  if (
+    attachedArtifact.key !== treeArtifact.key ||
+    attachedArtifact.sha256 !== treeArtifact.sha256 ||
+    attachedArtifact.bytes !== treeArtifact.bytes
+  ) {
+    throw new Error("PageIndex attachment changed the selected immutable tree artifact identity");
+  }
   return {
     contract: CONTEXT_WORKFLOW_CONTRACT,
     schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
     outputArtifact,
     releaseId
   };
+}
+
+function assertPublicationPageIndexCheckpoint(
+  value: unknown,
+  work: ClaimedWork<"run-context-publication">,
+  releaseId: string
+): void {
+  const tree = parseBoardPageIndexTreeArtifact(value);
+  if (
+    tree.release.releaseId !== releaseId ||
+    tree.release.tenantId !== work.task.metadata.tenantId ||
+    tree.release.repository !== work.task.metadata.repository ||
+    tree.release.ref !== work.task.metadata.ref ||
+    tree.release.refSequence !== work.task.metadata.refSequence ||
+    tree.release.commitSha !== work.task.metadata.commitSha ||
+    tree.release.buildId !== work.task.metadata.contextBuildId
+  ) {
+    throw new Error("publication PageIndex checkpoint does not match the exact leased release");
+  }
 }
 
 async function captureContextInput(work: ClaimedWork<"run-context-input-snapshot">): Promise<IngestEvidenceInput> {
