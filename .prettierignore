@@ -7,4 +7,4 @@ pnpm-lock.yaml
 .next/
 next-env.d.ts
 platform/v1/
-apps/dashboard/src/v1/
+apps/dashboard/src/dashboard/

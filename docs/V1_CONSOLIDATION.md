@@ -3,10 +3,11 @@
 ## Objective
 
 `omxyz/jina` is the source repository for both the original Jina review product and the
-v2 Board/Context platform. The imported source is pinned in `platform/v1` at
-`omxyz/jina-simulation@a2b795785e4bc5034052ab1b1bd9e1bd9ad42062`. The active
-`apps/dashboard` application compiles the synchronized source at
-`apps/dashboard/src/v1` so all routes use one React and Next.js runtime.
+v2 Board/Context platform. The imported backend source is pinned in `platform/v1` at
+`omxyz/jina-simulation@a2b795785e4bc5034052ab1b1bd9e1bd9ad42062`. The customer UI now
+has one source of truth: `apps/dashboard`. Its product modules live in
+`apps/dashboard/src/dashboard`, and its complete Next.js route tree lives in
+`apps/dashboard/src/app`.
 
 The old repository remains a rollback source until production promotion succeeds. Do not
 delete it, change its production webhook, or transfer `app.usejina.com` during staging.
@@ -22,7 +23,7 @@ delete it, change its production webhook, or transfer `app.usejina.com` during s
 | Models and triggers             | Codex/ChatGPT subscription routing, BYOK and managed routing, Codex device/manual connect/reconnect/disconnect, model catalog/search/pricing, per-stage defaults and reasoning effort, fallback policy, automatic/manual review trigger mode | `/models`                                                                  |
 | Integrations                    | OpenRouter OAuth/manual key, native OpenAI key, provider disconnect/reconnect, GitHub organization/install connections and repository backfill                                                                                               | `/integrations`                                                            |
 | Billing and usage               | Autumn customer/plan state, subscriptions, manual top-up, auto-reload, automatic-review limits, credit and dollar views, billing activity, 7/30/90-day usage, daily usage, and recent runs                                                   | `/billing`, `/usage`                                                       |
-| Repository guidance             | `.jina` quick start, runtime defaults, global/per-stage instruction precedence, examples, limits, and onboarding documentation                                                                                                                | Standalone `apps/docs` site                                                |
+| Repository guidance             | `.jina` quick start, runtime defaults, global/per-stage instruction precedence, examples, limits, and onboarding documentation                                                                                                               | Standalone `apps/docs` site                                                |
 | Existing v2 operations          | Board filters/task inspector/dependencies, event history, task-type/workflow trees, Context operational catalog and build inspection                                                                                                         | Operator-only admin surface                                                |
 
 ## Non-dashboard runtime retained
@@ -40,13 +41,14 @@ delete it, change its production webhook, or transfer `app.usejina.com` during s
   scenario-generation tasks remain retired exactly as they were upstream; the dashboard
   continues to render existing historical records.
 
-## Source synchronization contract
+## Dashboard source contract
 
-`platform/v1/dashboard/app` is the vendored upstream source. `apps/dashboard/src/v1` is
-the compiled mirror. `apps/dashboard/scripts/check-v1-sync.mjs` compares every file by
-SHA-256 before tests, so drift fails CI. Dashboard route wrappers are intentionally thin;
-`apps/dashboard/src/lib/dashboard-routes.test.ts` locks the complete v1 and v2 route
-inventory.
+`apps/dashboard` is the only dashboard package and deployment source. Product modules
+that originated in the first dashboard now live directly under `src/dashboard`; they are
+not mirrored or compiled from `platform/v1`. Route wrappers remain intentionally thin,
+and `apps/dashboard/src/lib/dashboard-routes.test.ts` locks the complete customer and
+operations route inventory. The `platform/v1` tree contains backend compatibility
+services only.
 
 Deployment workflows live at:
 
@@ -64,14 +66,14 @@ Staging must be isolated before any webhook or customer traffic is admitted:
 | Resource           | Required staging target                                                                                                                   |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | GitHub environment | `omxyz/jina` environment `Staging`, branch-restricted to `staging`                                                                        |
-| Main API           | V2 Cloud Run `jina-api-staging` at `https://api.staging.usejina.com`                                                                     |
-| Legacy V1 API      | Cloud Run `jina-code-review-api-staging` at `https://legacy-api.staging.usejina.com` until V1 is absorbed into V2                       |
-| MCP                | V2's `/mcp` surface at `https://mcp.staging.usejina.com/mcp`                                                                             |
+| Main API           | V2 Cloud Run `jina-api-staging` at `https://api.staging.usejina.com`                                                                      |
+| Legacy V1 API      | Cloud Run `jina-code-review-api-staging` at `https://legacy-api.staging.usejina.com` until V1 is absorbed into V2                         |
+| MCP                | V2's `/mcp` surface at `https://mcp.staging.usejina.com/mcp`                                                                              |
 | Product database   | PostgreSQL 16 `jina-db-staging` in `jina-staging-20260802`, database `jina_staging`, staging-only logins and encryption key               |
 | Context stack      | `jina-api-staging`, `jina-context-worker-staging`, `jina-task-worker-staging`, migration job, registry, and bucket in the staging project |
 | Trigger workers    | Trigger.dev project `jina-staging-isolated` (`proj_rqckjugodcaghbpgggbz`) and staging-only keys                                           |
 | Dashboard          | Vercel project `omlabs/jina-staging-dashboard`, rooted at `apps/dashboard`, serving `https://app.staging.usejina.com`                     |
-| Documentation      | Vercel project `omlabs/jina-staging-docs`, rooted at `apps/docs`, serving `https://docs.staging.usejina.com`                             |
+| Documentation      | Vercel project `omlabs/jina-staging-docs`, rooted at `apps/docs`, serving `https://docs.staging.usejina.com`                              |
 | Admin              | Vercel project `omlabs/jina-staging-admin`, rooted at `apps/admin`, serving `https://admin.staging.usejina.com`                           |
 | GitHub identity    | Separate staging GitHub App/OAuth identity installed only on test repositories                                                            |
 | Secrets            | Names and values containing/owned by staging; no production database URL, webhook secret, internal token, OAuth secret, or encryption key |
@@ -169,9 +171,9 @@ signed-webhook fixture, and verify App installation scope before opening a PR.
 
 ## Verification gates
 
-1. The imported baseline must pass 409 API tests, 216 Trigger tests, 112 v1 dashboard
-   tests, API/Trigger typechecks, and all production builds.
-2. The merged dashboard must pass its route/synchronization tests and a Next.js
+1. The imported baseline must pass the complete API and Trigger suites, 137 dashboard
+   tests, API/Trigger/dashboard typechecks, and all production builds.
+2. The dashboard must pass its route inventory tests and a Next.js
    production build containing every route in the inventory above.
 3. Run all 29 product migration files against a fresh PostgreSQL 16 staging database, then
    run the PostgreSQL projection/identity/tenant isolation tests.
@@ -190,7 +192,7 @@ signed-webhook fixture, and verify App installation scope before opening a PR.
 ## Production promotion
 
 Promote the exact accepted commit. Apply additive migrations first, deploy the product
-API with zero traffic, deploy Trigger workers, deploy the merged dashboard without moving
+API with zero traffic, deploy Trigger workers, deploy the dashboard without moving
 the production domain, and run read-only acceptance. Then canary the API, move the
 dashboard domain, and finally update the production GitHub App only if its webhook origin
 changes. Keep the previous Cloud Run revision, Vercel deployment, Trigger deployment,

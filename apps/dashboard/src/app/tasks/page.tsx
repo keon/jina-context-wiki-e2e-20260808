@@ -7,7 +7,7 @@ import { WorkflowTreesPanel } from "../../components/task-types/workflow-trees.t
 import { usePoll } from "../../lib/poll.ts";
 import { operationsApiUrl, tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import type { OverviewResponse, TaskTypeDefinition } from "../../lib/types.ts";
-import { useTenant } from "../../v1/providers.tsx";
+import { useTenant } from "../../dashboard/providers.tsx";
 
 export default function TaskTypesPage() {
   const { selected } = useTenant();

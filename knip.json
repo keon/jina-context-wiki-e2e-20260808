@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "ignore": ["platform/v1/**", "apps/dashboard/src/v1/**", ".github/workflows/**"],
+  "ignore": ["platform/v1/**", ".github/workflows/**"],
   "ignoreBinaries": ["codex"],
   "workspaces": {
     ".": {

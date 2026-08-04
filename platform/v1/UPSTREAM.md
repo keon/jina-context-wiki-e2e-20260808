@@ -5,16 +5,13 @@ This directory contains the complete application imported from
 
 - Upstream commit: `a2b795785e4bc5034052ab1b1bd9e1bd9ad42062`
 - Imported on: 2026-08-01
-- Active surfaces: review API, migrations, Trigger.dev workers, evaluation tools,
-  and all dashboard feature modules.
+- Active surfaces: review API, migrations, Trigger.dev workers, and evaluation tools.
 
-The root `apps/dashboard` owns the single deployed route tree. Its product routes
-compile the synchronized source mirror at `apps/dashboard/src/v1`, while the
-operational Board, History, Task Types, and Context views remain under their own
-routes. The mirror deliberately resolves the monorepo's single React and Next.js
-runtime instead of loading a second framework copy from this vendored package.
-Keep the vendored source, the mirror, and this file updated together whenever the
-upstream import is refreshed.
+The root `apps/dashboard` owns the single deployed route tree and all dashboard source.
+The imported dashboard has been fully promoted into that application under
+`apps/dashboard/src/dashboard`; `platform/v1` no longer contains or deploys a second
+Next.js package. Keep this provenance file focused on the retained backend compatibility
+surface whenever the upstream import is refreshed.
 
 ## Consolidation hardening
 

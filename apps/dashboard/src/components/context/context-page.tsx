@@ -5,7 +5,7 @@ import { formatTime, humanize, shortId } from "../../lib/format.ts";
 import { operationsApiUrl, tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import { usePoll } from "../../lib/poll.ts";
 import type { ContextBuildListResponse, ContextBuildSummary, ContextRelease } from "../../lib/types.ts";
-import { useTenant } from "../../v1/providers.tsx";
+import { useTenant } from "../../dashboard/providers.tsx";
 import { BuildCheckpoints } from "./build-checkpoints.tsx";
 import { ContextBrowser } from "./context-browser.tsx";
 import { IssueGraphBrowser } from "./issue-graph-browser.tsx";
@@ -55,25 +55,28 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
     });
   }, [builds, releases]);
   const [scopeKey, setScopeKey] = useState("");
+  const [scopeWasChosen, setScopeWasChosen] = useState(false);
 
   useEffect(() => {
     const stillExists = scopes.some((scope) => `${scope.repository}\0${scope.ref}` === scopeKey);
-    if (!stillExists) {
-      const first =
-        view === "causal-graph"
-          ? scopes.find((scope) =>
-              builds.some(
-                (candidate) =>
-                  candidate.repository === scope.repository &&
-                  candidate.ref === scope.ref &&
-                  candidate.buildKind === "causal_graph" &&
-                  candidate.status === "completed"
-              )
-            ) ?? scopes[0]
-          : scopes[0];
+    const completedGraphScope =
+      view === "causal-graph"
+        ? scopes.find((scope) =>
+            builds.some(
+              (candidate) =>
+                candidate.repository === scope.repository &&
+                candidate.ref === scope.ref &&
+                candidate.buildKind === "causal_graph" &&
+                candidate.status === "completed"
+            )
+          )
+        : undefined;
+    const shouldChooseCompletedGraph = !scopeWasChosen && completedGraphScope !== undefined;
+    if (!stillExists || shouldChooseCompletedGraph) {
+      const first = completedGraphScope ?? scopes[0];
       setScopeKey(first ? `${first.repository}\0${first.ref}` : "");
     }
-  }, [builds, scopeKey, scopes, view]);
+  }, [builds, scopeKey, scopeWasChosen, scopes, view]);
 
   const [repository = "", ref = ""] = scopeKey.split("\0");
   const release = releases.find((candidate) => candidate.repository === repository && candidate.ref === ref);
@@ -105,7 +108,14 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
         </div>
         <label className="context-scope-picker">
           <span>Repository and ref</span>
-          <select value={scopeKey} disabled={scopes.length === 0} onChange={(event) => setScopeKey(event.target.value)}>
+          <select
+            value={scopeKey}
+            disabled={scopes.length === 0}
+            onChange={(event) => {
+              setScopeWasChosen(true);
+              setScopeKey(event.target.value);
+            }}
+          >
             {scopes.length === 0 ? <option value="">No published context</option> : null}
             {scopes.map((scope) => {
               const value = `${scope.repository}\0${scope.ref}`;

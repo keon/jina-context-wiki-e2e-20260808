@@ -2,8 +2,8 @@
 
 Jina is a multi-tenant code-review and repository-context platform. It combines the
 original Jina review product (GitHub App intake, Trigger.dev orchestration, Daytona review
-workers, billing, integrations, model routing, and customer dashboard) with the v2
-tenant-scoped Board and Context engine in one repository and one merged dashboard.
+workers, billing, integrations, and model routing) with the v2 tenant-scoped Board and
+Context engine in one repository and one customer dashboard application.
 
 ## Quick start
 
@@ -16,7 +16,7 @@ pnpm dev
 `pnpm dev` starts the API on port 4000 and dashboard on port 3000.
 `pnpm --filter @jina/admin dev` starts the tenant-wide administration app on port 3100.
 Start the review API on port 8080 in a second terminal with
-`npm --prefix platform/v1/api run dev`; the merged dashboard uses it for the product
+`npm --prefix platform/v1/api run dev`; the dashboard uses it for the product
 routes and the port-4000 API for the operational routes.
 Development uses in-memory stores unless PostgreSQL configuration is supplied. Production
 requires PostgreSQL, `INTERNAL_API_TOKEN`, `CONTEXT_API_TOKEN`, and either fixed or
@@ -131,14 +131,13 @@ production uses the API-key path and never copies a developer session.
 ```text
 apps/api/             webhooks, board API, context API, MCP, leases
 apps/admin/           tenant-wide context health UI
-apps/dashboard/       operator board and context workspace
+apps/dashboard/       single customer dashboard, operations, and Context workspace
 apps/worker/          review and context-stage workers
 apps/workflows/       local review CLI and deterministic simulation
 platform/v1/api/      product API, GitHub auth/webhooks, billing, review state
 platform/v1/trigger/  Trigger.dev review orchestration and Daytona runtime
 platform/v1/migrations/ original Jina product schema
 platform/v1/evals/    review evaluation datasets and tools
-platform/v1/dashboard/ pinned upstream dashboard source and provenance
 packages/board/       generic tasks, dependencies, commands, reducer
 packages/context-engine/ evidence, derived context, releases, retrieval
 packages/db/          PostgreSQL stores, context adapters, migrations

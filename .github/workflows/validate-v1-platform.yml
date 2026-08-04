@@ -1,4 +1,4 @@
-name: Validate V1 Platform and Merged Dashboard
+name: Validate Platform and Dashboard
 
 on:
   pull_request:
@@ -6,7 +6,6 @@ on:
       - platform/v1/api/**
       - platform/v1/trigger/**
       - platform/v1/migrations/**
-      - platform/v1/dashboard/**
       - apps/dashboard/**
       - pnpm-lock.yaml
       - .github/workflows/deploy-v1-api.yml

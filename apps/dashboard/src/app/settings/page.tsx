@@ -1,1 +1,1 @@
-export { default } from "@jina-v1-dashboard/app/settings/page";
+export { default } from "@dashboard/settings/page";

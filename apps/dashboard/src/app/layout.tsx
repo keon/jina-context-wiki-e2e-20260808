@@ -4,8 +4,8 @@ import { GeistMono } from "geist/font/mono";
 import { GeistSans } from "geist/font/sans";
 import { UnifiedDashboardShell } from "../components/unified-dashboard-shell.tsx";
 import { ClerkProvider } from "@clerk/nextjs";
-import "../v1/theme.css";
-import "../v1/styles.css";
+import "../dashboard/theme.css";
+import "../dashboard/styles.css";
 import "./globals.css";
 
 export const metadata: Metadata = {

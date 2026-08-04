@@ -13,7 +13,7 @@
     "jsx": "preserve",
     "allowImportingTsExtensions": true,
     "paths": {
-      "@jina-v1-dashboard/app/*": ["./src/v1/*"]
+      "@dashboard/*": ["./src/dashboard/*"]
     },
     "types": ["node"],
     "plugins": [{ "name": "next" }]

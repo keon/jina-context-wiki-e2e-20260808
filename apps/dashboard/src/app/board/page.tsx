@@ -9,7 +9,7 @@ import { EMPTY_BOARD_FILTERS, filterBoardTasks, partitionBoardTasks, uniqueValue
 import { usePoll } from "../../lib/poll.ts";
 import { tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import type { BoardState, OverviewResponse } from "../../lib/types.ts";
-import { useTenant } from "../../v1/providers.tsx";
+import { useTenant } from "../../dashboard/providers.tsx";
 
 const EMPTY_BOARD: BoardState = { tasks: [], dependencies: [] };
 

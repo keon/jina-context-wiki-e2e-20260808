@@ -9,7 +9,7 @@ import { humanize } from "../../lib/format.ts";
 import { usePoll } from "../../lib/poll.ts";
 import { tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import type { OverviewResponse } from "../../lib/types.ts";
-import { useTenant } from "../../v1/providers.tsx";
+import { useTenant } from "../../dashboard/providers.tsx";
 
 function FilterSelect({
   id,

@@ -819,7 +819,7 @@ export class GraphApiClient {
     return this.request(`/context/diff?${query.toString()}`, context);
   }
 
-  /** Run the Context engine's grounded document search for the merged dashboard. */
+  /** Run the Context engine's grounded document search for the dashboard. */
   async searchContextCatalog(
     context: RequestContext,
     input: { repository: string; releaseId: string; query: string },

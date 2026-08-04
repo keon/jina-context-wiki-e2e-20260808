@@ -20,7 +20,7 @@ The remaining limitations belong to the static path and the unfinished reporting
 
 - neither static credential can safely serve as a personal, multi-tenant credential;
 - calls made with one static credential cannot be attributed to distinct people or tokens;
-- Jina v1 dashboard reads use delegated per-tenant tokens, while each review receives a
+- Dashboard reads through the compatibility API use delegated per-tenant tokens, while each review receives a
   separate short-lived, exact-repository token; the static context credential remains only
   as a rollout fallback; and
 - there is no `GET /context/usage` or dashboard workflow that exposes per-token consumption.
@@ -159,8 +159,8 @@ is blocked can still inspect state.
 
 ## Dashboard issuance
 
-The issuing interface belongs in the Jina v1 dashboard, which owns user sessions and tenant
-membership, and which already presents Organization, Usage, and Billing. This API mints.
+The issuing interface belongs in `apps/dashboard`, which owns user sessions and tenant
+membership and already presents Organization, Usage, and Billing. The compatibility API mints.
 
 A person names a token, chooses scopes, and sets an expiry. The v1 API calls the mint
 endpoint with the internal credential and asserts the tenant and principal **from the

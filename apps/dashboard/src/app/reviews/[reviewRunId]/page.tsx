@@ -1,1 +1,1 @@
-export { default } from "@jina-v1-dashboard/app/reviews/[reviewRunId]/page";
+export { default } from "@dashboard/reviews/[reviewRunId]/page";
