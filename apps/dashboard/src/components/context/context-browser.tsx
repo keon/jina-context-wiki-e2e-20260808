@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { contextCitationHref, contextCitationLabel, contextRelevantSourceFiles } from "../../lib/context-citations.ts";
+import { isCurrentContextDiff, resolveContextDiffReleaseId } from "../../lib/context-diff.ts";
 import { usePoll } from "../../lib/poll.ts";
 import type {
   ContextCatalogDocument,
@@ -361,12 +362,14 @@ function ContextDiff({
   const [diff, setDiff] = useState<ContextDiffResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const candidateIdsKey = candidates.map((candidate) => candidate.id).join("\0");
 
   useEffect(() => {
-    setFromReleaseId(candidates[0]?.id ?? "");
-    setDiff(null);
+    const candidateIds = candidateIdsKey ? candidateIdsKey.split("\0") : [];
+    setFromReleaseId((current) => resolveContextDiffReleaseId(current, candidateIds));
+    setDiff((current) => (isCurrentContextDiff(current, release.id, candidateIds) ? current : null));
     setError("");
-  }, [candidates, release.id]);
+  }, [candidateIdsKey, release.id]);
 
   async function compare(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -408,7 +411,14 @@ function ContextDiff({
         <form className="knowledge-tool__form" onSubmit={(event) => void compare(event)}>
           <label className="knowledge-select">
             <span className="sr-only">Earlier release</span>
-            <select value={fromReleaseId} onChange={(event) => setFromReleaseId(event.target.value)}>
+            <select
+              value={fromReleaseId}
+              onChange={(event) => {
+                setFromReleaseId(event.target.value);
+                setDiff(null);
+                setError("");
+              }}
+            >
               {candidates.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.commitSha.slice(0, 12)} · {item.publishedAt ?? item.createdAt}
