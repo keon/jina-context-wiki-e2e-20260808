@@ -347,6 +347,163 @@ test("Context publication completion accepts its authoritative release artifact"
   }
 });
 
+test("omitted Context page completion accepts its current citation audit", async () => {
+  const tenantId = "tenant-omitted-page-completion";
+  const repository = "omxyz/omitted-page-completion";
+  const commitSha = "6".repeat(40);
+  const internalApiToken = "omitted-page-completion-token";
+  const created = createContextWorkflowBoardBuild(createEmptyBoardState(), {
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-prompts-1",
+    validatorVersion: "context-validator-1",
+    pageIndexVersion: "pageindex-1",
+    executionProfileDigest: "f".repeat(64),
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "manual:omitted-page-completion",
+    commitSha,
+    trigger: "manual",
+    now: NOW
+  });
+  const artifactRoot = await mkdtemp(join(tmpdir(), "jina-omitted-page-completion-"));
+  const artifactStore = new FileContextArtifactStore(artifactRoot);
+  const snapshotArtifact = await artifactStore.put({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "evidence-snapshot",
+    name: `${created.snapshotTaskId}-attempt-1-snapshot.json`,
+    contentType: "application/json",
+    content: '{"version":1}'
+  });
+  let applied = applyContextWorkflowBoardTaskResult(
+    created.state,
+    created.snapshotTaskId,
+    {
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      outputArtifact: snapshotArtifact,
+      commitSha
+    },
+    NOW
+  );
+  let board = reduceBoard(setTaskStatus(applied.state, created.snapshotTaskId, "done"), NOW);
+  const planner = board.tasks.find((task) => task.type === contextWorkflowBoardTaskTypes.planner);
+  assert.ok(planner);
+  const planArtifact = await artifactStore.put({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "publication-plan",
+    name: `${planner.id}-attempt-1-plan.json`,
+    contentType: "application/json",
+    content: '{"version":1}'
+  });
+  const briefArtifact = await artifactStore.put({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "research-report",
+    name: `${planner.id}-attempt-1-architecture-brief.json`,
+    contentType: "application/json",
+    content: '{"version":1}'
+  });
+  applied = applyContextWorkflowBoardTaskResult(
+    board,
+    planner.id,
+    {
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      outputArtifact: planArtifact,
+      pages: [
+        {
+          subjectId: "architecture",
+          path: "architecture.md",
+          title: "Architecture",
+          operation: "add",
+          briefArtifact
+        }
+      ]
+    },
+    NOW
+  );
+  board = reduceBoard(setTaskStatus(applied.state, planner.id, "done"), NOW);
+  const page = board.tasks.find((task) => task.type === contextWorkflowBoardTaskTypes.page);
+  assert.ok(page);
+  const stateStore = mutableStateStore({ intakeState: { board, pullRequests: [] }, devDeliverySequence: 0 });
+  const quotaService = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
+  await quotaService.admitBuild({ tenantId, buildId: created.buildTaskId });
+  const server = createApiServer({
+    tenantId,
+    stateStore,
+    internalApiToken,
+    contextArtifactStore: artifactStore,
+    contextQuotaService: quotaService
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const claim = await claimContextTask(baseUrl, internalApiToken, contextWorkflowBoardTopics.page);
+    assert.equal(claim.task.id, page.id);
+    const auditArtifact = await uploadWorkerArtifact(
+      baseUrl,
+      internalApiToken,
+      claim,
+      "citation-audit",
+      "final-audit.json"
+    );
+    const pageArtifact = await artifactStore.put({
+      tenantId,
+      repository,
+      buildId: created.buildTaskId,
+      kind: "context-page",
+      name: `${page.id}-attempt-1-page.json`,
+      contentType: "application/json",
+      content: '{"version":1}'
+    });
+    const mismatchedCompletion = await workerComplete(baseUrl, internalApiToken, {
+      ...leaseFromClaim(claim),
+      outcome: "done",
+      modelUsage: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 1 },
+      result: {
+        contract: CONTEXT_WORKFLOW_CONTRACT,
+        schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+        outputArtifact: auditArtifact,
+        disposition: {
+          status: "accepted",
+          pageArtifact,
+          evidenceFingerprint: "a".repeat(64),
+          generationFingerprint: "b".repeat(64)
+        },
+        phaseReceiptIds: []
+      }
+    });
+    assert.equal(mismatchedCompletion.status, 400, await mismatchedCompletion.text());
+
+    const completion = await workerComplete(baseUrl, internalApiToken, {
+      ...leaseFromClaim(claim),
+      outcome: "done",
+      modelUsage: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 1 },
+      result: {
+        contract: CONTEXT_WORKFLOW_CONTRACT,
+        schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+        outputArtifact: auditArtifact,
+        disposition: { status: "omitted", reasonCode: "unsupported_core_claims" },
+        phaseReceiptIds: []
+      }
+    });
+    assert.equal(completion.status, 200, await completion.text());
+    assert.equal(findTask(stateStore.current().intakeState.board, page.id)?.status, "done");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    await rm(artifactRoot, { recursive: true, force: true });
+  }
+});
+
 test("collapsed Context planner can be operator-retried after a terminal failure", async () => {
   const tenantId = "tenant-collapsed-planner-retry";
   const repository = "omxyz/collapsed-planner-retry";
