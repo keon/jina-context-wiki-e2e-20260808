@@ -183,6 +183,10 @@ function isBoardWorkTaskType(value: string): boolean {
   return isContextWorkflowBoardTaskType(value) || isExistingBoardWorkTaskType(value);
 }
 
+function isContextWorkTaskType(value: string): boolean {
+  return isContextWorkflowBoardTaskType(value) || isContextBoardTaskType(value);
+}
+
 function boardWorkArtifactKind(taskType: string): ContextArtifactKind {
   if (isContextWorkflowBoardTaskType(taskType)) {
     return contextWorkflowBoardArtifactKind(taskType);
@@ -1400,7 +1404,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await requireRepositoryAccess(principal, repository);
       const visibleTargets = taskIds.map((taskId) => {
         const target = findTask(intakeState.board, taskId);
-        if (!target || target.metadata.contextBuildId !== visibleBuild.id || !isContextBoardTaskType(target.type)) {
+        if (!target || target.metadata.contextBuildId !== visibleBuild.id || !isContextWorkTaskType(target.type)) {
           throw notFound("build task not found");
         }
         assertContextOperatorRetrySafety(intakeState.board, visibleBuild, target);
@@ -1415,7 +1419,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           if (!build) throw notFound("build not found");
           const targets = taskIds.map((taskId) => {
             const target = findTask(intakeState.board, taskId);
-            if (!target || target.metadata.contextBuildId !== build.id || !isContextBoardTaskType(target.type)) {
+            if (!target || target.metadata.contextBuildId !== build.id || !isContextWorkTaskType(target.type)) {
               throw notFound("build task not found");
             }
             assertContextOperatorRetrySafety(intakeState.board, build, target);
@@ -1590,7 +1594,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (
         !visibleTarget ||
         visibleTarget.metadata.contextBuildId !== visibleBuild.id ||
-        !isContextBoardTaskType(visibleTarget.type)
+        !isContextWorkTaskType(visibleTarget.type)
       ) {
         throw notFound("build task not found");
       }
@@ -1644,7 +1648,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             !build ||
             !target ||
             target.metadata.contextBuildId !== build.id ||
-            !isContextBoardTaskType(target.type)
+            !isContextWorkTaskType(target.type)
           ) {
             throw notFound("build task not found");
           }

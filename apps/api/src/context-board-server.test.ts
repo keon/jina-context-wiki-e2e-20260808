@@ -20,6 +20,7 @@ import {
   contextArtifactKey,
   contextBoardTaskTypes,
   contextBoardTopics,
+  contextWorkflowBoardTaskTypes,
   contextWorkflowBoardTopics,
   contextPublicSnapshotDigest,
   createContextBoardBuild,
@@ -173,6 +174,112 @@ test("collapsed Context planner checkpoints each allowed intermediate artifact k
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     await rm(artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("collapsed Context planner can be operator-retried after a terminal failure", async () => {
+  const tenantId = "tenant-collapsed-planner-retry";
+  const repository = "omxyz/collapsed-planner-retry";
+  const principalId = "svc:operator";
+  const commitSha = "9".repeat(40);
+  const created = createContextWorkflowBoardBuild(createEmptyBoardState(), {
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-prompts-1",
+    validatorVersion: "context-validator-1",
+    pageIndexVersion: "pageindex-1",
+    executionProfileDigest: "f".repeat(64),
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "manual:collapsed-planner-retry",
+    commitSha,
+    trigger: "manual",
+    now: NOW
+  });
+  const snapshotContent = Buffer.from('{"snapshot":true}', "utf8");
+  const snapshotKey = contextArtifactKey({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "evidence-snapshot",
+    name: `${created.snapshotTaskId}-attempt-1-snapshot.json`,
+    contentType: "application/json",
+    content: snapshotContent
+  });
+  const expanded = applyContextWorkflowBoardTaskResult(
+    created.state,
+    created.snapshotTaskId,
+    {
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      outputArtifact: {
+        uri: `gs://context-test/${snapshotKey}`,
+        key: snapshotKey,
+        contentType: "application/json",
+        bytes: snapshotContent.byteLength,
+        sha256: createHash("sha256").update(snapshotContent).digest("hex")
+      },
+      commitSha
+    },
+    NOW
+  );
+  let board = reduceBoard(setTaskStatus(expanded.state, created.snapshotTaskId, "done"), NOW);
+  const planner = board.tasks.find((task) => task.type === contextWorkflowBoardTaskTypes.planner);
+  assert.ok(planner);
+  const claim = leaseNextOutboxMessage(board, {
+    topics: [contextWorkflowBoardTopics.planner],
+    taskIds: [planner.id],
+    leaseId: "collapsed-planner-retry-lease",
+    writeFenceToken: "collapsed-planner-retry-fence",
+    now: NOW,
+    expiresAt: "2026-07-29T22:00:00.000Z"
+  });
+  assert.ok(claim);
+  board = transitionBoardTask(claim.state, planner.id, "in_progress", NOW);
+  board = markOutboxDispatched(board, claim.message.id, NOW);
+  board = transitionBoardTask(board, planner.id, "failed", NOW);
+  board = reduceBoard(board, NOW);
+
+  const contextStore = new MemoryContextEngineStore();
+  await contextStore.replaceRepositoryAccess(tenantId, principalId, [repository]);
+  const stateStore = mutableStateStore({
+    intakeState: { board, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const quotaService = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
+  await quotaService.admitBuild({ tenantId, buildId: created.buildTaskId });
+  await quotaService.completeBuild({ tenantId, buildId: created.buildTaskId });
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore,
+    contextStore,
+    contextQuotaService: quotaService
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const response = await fetch(
+      `${baseUrl}/context/builds/${created.buildTaskId}/tasks/${planner.id}/retry`,
+      {
+        method: "POST",
+        headers: devHeaders(tenantId, principalId),
+        body: JSON.stringify({
+          requestKey: "operator:collapsed-planner-retry",
+          reason: "resume after a compatibility deployment"
+        })
+      }
+    );
+    const body = (await response.json()) as Record<string, unknown>;
+    assert.equal(response.status, 202, JSON.stringify(body));
+    assert.equal(body.taskId, planner.id);
+    assert.equal(body.attempt, 2);
+    assert.equal(findTask(stateStore.current().intakeState.board, planner.id)?.status, "queued");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 });
 
