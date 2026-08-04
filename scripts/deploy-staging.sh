@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${IMAGE_TAG:?IMAGE_TAG is required and must identify images already pushed by cloudbuild.images.yaml}"
+: "${IMAGE_TAG:?IMAGE_TAG is required and must identify images already pushed by cloudbuild.staging-images.yaml}"
 
 project="${GCP_PROJECT_ID:-jina-staging-20260802}"
 region="${GCP_REGION:-us-east1}"

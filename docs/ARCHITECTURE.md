@@ -364,11 +364,19 @@ configuration is present and otherwise lists the static targets. Execution requi
 ```text
 apps/api/                  HTTP, MCP, auth, workflow coordination
 apps/worker/               Git checkout, ingestion, local/Daytona derivation
-apps/dashboard/            repository context explorer and checkpoints
+apps/dashboard/            only customer dashboard application
 apps/admin/                tenant-wide release and citation health
+apps/docs/                 customer documentation application
 packages/context-engine/   evidence, derivation, validation, release, retrieval
 packages/daytona/          isolated Codex executors
 packages/db/               PostgreSQL stores, roles, GCS artifacts, reset
 packages/github/           signed webhook parsing and trigger policy
 services/pageindex-worker/ pinned self-hosted PageIndex Markdown bridge
+services/review-trigger/   Trigger.dev review orchestration and Daytona review runtime
 ```
+
+`apps/api` owns the only HTTP listener. Product/review, Board, Context, causal graph,
+MCP, webhook, and internal worker routes ship in the same backend image.
+`apps/dashboard` owns the only customer dashboard; its `/api` proxy forwards to that
+listener. Staging uses the equivalent `*.staging.usejina.com` domains and isolated
+cloud resources, secrets, GitHub App, Clerk instance, and database credentials.

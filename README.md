@@ -1,9 +1,9 @@
 # Jina
 
-Jina is a multi-tenant code-review and repository-context platform. It combines the
-original Jina review product (GitHub App intake, Trigger.dev orchestration, Daytona review
-workers, billing, integrations, and model routing) with the v2 tenant-scoped Board and
-Context engine in one repository and one customer dashboard application.
+Jina is a multi-tenant code-review and repository-intelligence platform. GitHub App
+intake, review orchestration, isolated Daytona execution, billing, model routing, the
+task Board, Context, causal graphs, MCP, and the customer dashboard live in this
+repository and share one tenant boundary.
 
 ## Quick start
 
@@ -58,9 +58,9 @@ deduplicate unchanged heads, and supersede stale ref work. Ingestion fetches the
 authoritative remote branch head and rejects the build if the ref has moved since the
 event, rather than indexing a historical commit as current.
 
-The imported v1 review runtime publishes validated GitHub review feedback and runs
-execution-first investigations in isolated Daytona sandboxes. The v2 Board review task
-remains a separate operational workflow; automated fixes are not shipped.
+The review runtime publishes validated GitHub feedback and runs execution-first
+investigations in isolated Daytona sandboxes. The Board review task is a separate
+operational workflow; automated fixes are not shipped.
 
 ## Repository context
 
@@ -131,7 +131,7 @@ production uses the API-key path and never copies a developer session.
 
 ```text
 apps/api/             product/review API, webhooks, billing, Board, Context, MCP
-apps/api/product-migrations/ original Jina product schema
+apps/api/product-migrations/ product and review schema
 apps/admin/           tenant-wide context health UI
 apps/dashboard/       single customer dashboard, operations, and Context workspace
 apps/worker/          review and context-stage workers
@@ -150,7 +150,6 @@ packages/observability/ structured logging, traces, live metrics
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Unified API architecture](docs/API_CONSOLIDATION.md)
 - [Agentic context derivation](docs/AGENTIC_DERIVATION.md)
 - [Context quality benchmark](docs/CONTEXT_QUALITY_BENCHMARK.md)
 - [Daytona Board-stage acceptance](docs/CONTEXT_DAYTONA_BOARD_STAGE_ACCEPTANCE.md)
@@ -158,7 +157,7 @@ packages/observability/ structured logging, traces, live metrics
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
 - [Deployment](docs/DEPLOYMENT.md)
-- [Shared database tenancy](docs/SHARED_TENANCY.md)
+- [API tokens and authentication](docs/API_TOKENS.md)
 - [GitHub App setup](docs/GITHUB_APP.md)
 - [Observability](docs/OBSERVABILITY.md)
-- [Billing policy helper](docs/BILLING.md)
+- [Billing and credits](docs/BILLING.md)

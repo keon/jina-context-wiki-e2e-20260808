@@ -5,8 +5,8 @@ import type { OpenaiModelPrice } from "../daytona/openrouter-proxy.js";
 // Resolve per-user provider keys from the API. review_run_id binds resolution to
 // the current run (the API hardens /internal/integrations/resolve to validate it).
 //
-// FAIL-CLOSED (see docs/BILLING_OPENROUTER_AUTUMN.md "Key Resolution Is
-// Fail-Closed"): a successful response with an openrouter key means a BYOH/"user"
+// FAIL-CLOSED (see docs/BILLING.md "Credential routing"): a successful response
+// with an openrouter key means a BYOH/"user"
 // run; absent/null means a "managed" run that falls back to the env
 // OPENROUTER_API_KEY. A request FAILURE must THROW -- never silently fall back to
 // the managed key, or a BYOH tenant hitting a transient error would be mischarged

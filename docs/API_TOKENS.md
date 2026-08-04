@@ -20,9 +20,9 @@ The remaining limitations belong to the static path and the unfinished reporting
 
 - neither static credential can safely serve as a personal, multi-tenant credential;
 - calls made with one static credential cannot be attributed to distinct people or tokens;
-- Dashboard reads through the compatibility API use delegated per-tenant tokens, while each review receives a
-  separate short-lived, exact-repository token; the static context credential remains only
-  as a rollout fallback; and
+- Dashboard reads through the unified API use delegated per-tenant tokens, while each
+  review receives a separate short-lived, exact-repository token; the static context
+  credential remains only as a rollout fallback; and
 - there is no `GET /context/usage` or dashboard workflow that exposes per-token consumption.
 
 ## The model
@@ -141,9 +141,9 @@ The remaining reporting design is one usage record per billable operation, keyed
 | `search_context` / MCP    | Tenant query-rate controls; deterministic search uses no model                                     | Attribute query count to principal/token          |
 | list/read/diff            | Read authorization and request controls; no derivation model is needed                             | Count only if product analytics require it        |
 
-Billing stays in Jina v1. The planned API exposes usage for v1 to poll rather than adding a
-dependency from this API onto v1; a missed poll is recoverable where a dropped webhook would
-silently under-bill.
+Customer credit billing is owned by the unified API and Autumn. Context quota accounting
+is a separate admission and observability boundary; future per-token Context usage can be
+rolled into the same tenant usage surface without introducing another service dependency.
 
 The planned `GET /context/usage`, scoped by the caller's own token, is the self-service surface: a person
 sees their usage, a tenant administrator sees the tenant's. It takes its own `context:usage`
@@ -159,11 +159,11 @@ is blocked can still inspect state.
 
 ## Dashboard issuance
 
-The issuing interface belongs in `apps/dashboard`, which owns user sessions and tenant
-membership and already presents Organization, Usage, and Billing. The compatibility API mints.
+The issuing interface belongs in `apps/dashboard`, which owns Clerk sessions and tenant
+membership and already presents Organization, Usage, and Billing. The unified API mints.
 
-A person names a token, chooses scopes, and sets an expiry. The v1 API calls the mint
-endpoint with the internal credential and asserts the tenant and principal **from the
+A person names a token, chooses scopes, and sets an expiry. The dashboard proxy calls the
+mint endpoint and asserts the tenant and principal **from the
 authenticated session**, never from the request body. The secret is shown once, with a copy
 control, and cannot be retrieved afterwards.
 
@@ -178,17 +178,18 @@ Issuance and revocation are recorded with their actor.
 
 ## Sequencing
 
-0. **Done.** Widen the context credential to the read-only projections. Unblocks the v1
-   context page and is a strict subset of `context:read`.
+0. **Done.** Widen the context credential to the read-only projections. This unblocked the
+   dashboard Context page and remains a strict subset of `context:read`.
 1. **Done.** Token model here: mint, verify, scope-check, hash at rest, revoke. Both static
    tokens keep working, so nothing breaks — the pre-existing static-token scope test passes
    untouched, which is how that promise is checked.
 2. **Done at the tenant quota boundary.** Exact Board build-model usage and model-free
    query-rate usage are persisted idempotently and exposed in administrator quota metrics.
 3. Add usage records keyed by `tokenId`, covering builds, deterministic search, and MCP.
-   Expose `GET /context/usage`; v1 polls and meters.
+   Expose `GET /context/usage` through the unified API.
 4. Add dashboard issuance and per-token usage on the existing Usage page.
-5. Move v1 to delegated per-tenant tokens and retire the static context token.
+5. Retire the static context token after every remaining service caller uses delegated,
+   repository-scoped, or per-principal tokens.
 
 Tenant model accounting is trustworthy for Board build-model attempts whenever Codex emits
 valid `turn.completed.usage`; public Context searches never contribute model usage.

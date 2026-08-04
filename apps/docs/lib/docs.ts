@@ -33,9 +33,9 @@ export const docs: Doc[] = [
       {
         heading: "Onboarding checklist",
         steps: [
-          "Sign in to the Jina dashboard with GitHub.",
+          "Sign in through Clerk and choose the Jina organization you want to use.",
           "Select or create the Jina organization that should own repositories, billing, and generated artifacts.",
-          "Open Integrations and install the staging GitHub App on the repositories you want reviewed.",
+          "Open Integrations and install the GitHub App shown there on the repositories you want reviewed.",
           "Open Models and select a provider and model for each review stage.",
           "Open a pull request or push a new commit to an existing pull request.",
           "Confirm the run appears under Reviews and the resulting review is posted to GitHub.",
@@ -207,6 +207,41 @@ export const docs: Doc[] = [
     ],
   },
   {
+    slug: "context-mcp",
+    group: "Repository intelligence",
+    title: "Use Context through MCP",
+    description: "Give coding agents read-only, repository-scoped access to published Jina Context.",
+    sections: [
+      {
+        heading: "MCP endpoint",
+        body: [
+          "Jina exposes a stateless Streamable HTTP MCP server. Use the MCP URL and credential issued for your organization; do not copy dashboard cookies or internal service tokens into an agent configuration.",
+          "A credential is bound to a tenant, principal, scopes, expiry, and repository access. Request headers cannot switch it into another organization.",
+        ],
+        code: "Production: https://mcp.usejina.com/mcp\nStaging:    https://mcp.staging.usejina.com/mcp",
+        note: "Self-service token issuance is not available in the dashboard yet. Ask a Jina operator for a scoped credential and store it in your MCP client's secret or environment configuration.",
+      },
+      {
+        heading: "Available tools",
+        bullets: [
+          "search_context — find relevant excerpts in the current published release.",
+          "list_context — browse the published document hierarchy.",
+          "read_context — read one published document with citations.",
+          "diff_context — compare two immutable Context releases.",
+        ],
+      },
+      {
+        heading: "Safe usage",
+        bullets: [
+          "Treat source citations and commit SHAs as the authority when a result affects a code change.",
+          "Rebuild Context after meaningful default-branch changes before relying on it for current behavior.",
+          "Revoke a credential that was pasted into source, logs, an issue, or any shared transcript.",
+          "A 401 means the credential is missing, expired, revoked, or invalid; reconnect instead of adding tenant headers.",
+        ],
+      },
+    ],
+  },
+  {
     slug: "jina-configuration",
     group: "Configuration",
     title: "Configure reviews with .jina",
@@ -295,6 +330,22 @@ export const docs: Doc[] = [
       {
         heading: "Before switching organizations",
         body: ["Check the organization switcher at the top of the sidebar before installing GitHub, changing models, starting a Context build, or viewing billing. Every page is scoped to the selected organization."],
+      },
+      {
+        heading: "Credits and plans",
+        body: [
+          "Billing and credit balances belong to the active Jina organization. Startup includes 10,000 monthly credits and Growth includes 50,000; purchased overage credits remain until used.",
+          "A completed review can include infrastructure credits and managed-model credits. Failed, superseded, and cancelled reviews are waived. Reviews that use your own connected model credential still consume infrastructure credits.",
+        ],
+      },
+      {
+        heading: "Usage and spending controls",
+        bullets: [
+          "Usage shows daily consumption and per-pull-request infrastructure and AI credit totals.",
+          "Billing shows the current plan, granted, used, and remaining credits, invoices, and top-up controls.",
+          "An automatic-review limit pauses automatic triggers after the selected cycle spend; authorized manual reviews remain available.",
+          "If billing data is temporarily unavailable, Jina says so instead of showing a fabricated zero balance.",
+        ],
       },
     ],
   },

@@ -13,7 +13,7 @@
  * partial API response never blanks the page.
  */
 
-// $1 = 100 Jina Credits (see docs/BILLING_OPENROUTER_AUTUMN.md "Credit math").
+// $1 = 100 Jina Credits (see docs/BILLING.md "Credit math").
 export const CREDITS_PER_USD = 100;
 
 type BillingStatus = "ok" | "unavailable" | "not_configured";

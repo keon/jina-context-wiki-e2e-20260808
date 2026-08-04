@@ -4,7 +4,7 @@
 // recorded usage into the worker result file. The API turns those records into
 // billing events server-side; nothing about Autumn or credit rates lives here.
 //
-// Responsibilities (see docs/BILLING_OPENROUTER_AUTUMN.md "The capture proxy"):
+// Responsibilities (see docs/BILLING.md "Usage capture and settlement"):
 //  - Forward every request to https://openrouter.ai preserving path/method/body,
 //    streaming the response body through unchanged (SSE included).
 //  - Pass through the Authorization header; inject the managed key only if absent.

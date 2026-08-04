@@ -1,13 +1,13 @@
 # Deployment
 
-The original Jina product API is absorbed into `apps/api`; product/review, Board,
-Context, causal graph, and MCP routes ship in one backend image. Trigger.dev review
-workers remain under `services/review-trigger` and deploy through
+The unified API lives in `apps/api`; product/review, Board, Context, causal graph,
+and MCP routes ship in one backend image. Trigger.dev review workers remain under
+`services/review-trigger` and deploy through
 `.github/workflows/deploy-review-trigger.yml`. The customer dashboard deploys from
 `apps/dashboard`.
 
-Run `scripts/check-staging-readiness.sh` before a staging release. Build immutable v2
-API/worker images with `cloudbuild.images.yaml` and a tag containing `staging`, then pass
+Run `scripts/check-staging-readiness.sh` before a staging release. Build immutable
+API/worker images with `cloudbuild.staging-images.yaml` and a tag containing `staging`, then pass
 that tag and the UUID-valued `JINA_CONTEXT_TENANT_ID` to
 `scripts/deploy-staging.sh`. The script is fail-closed on any resource, service
 account, secret, database, tenant, bucket, URL, or image tag that is not explicitly
@@ -1075,8 +1075,10 @@ Google service account and database-using runtime service accounts require
 `roles/cloudsql.client` there. The migration-owner password secret remains in `jina-v2`
 and grants direct secret access only to `jina-migration`. Project-level Cloud SQL IAM
 does not imply secret access, and secret access does not imply Cloud SQL connectivity.
-The exact commands and database-role boundary are in
-[SHARED_TENANCY.md](SHARED_TENANCY.md).
+The coordinated deploy validates both cross-project Cloud SQL grants and the
+migration/runtime database-role boundary before it changes traffic. Treat a failure of
+either check as a release blocker; never compensate by granting the migration secret to
+a runtime identity.
 
 ## Production acceptance
 
