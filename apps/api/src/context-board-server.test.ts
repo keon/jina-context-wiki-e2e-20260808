@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  CONTEXT_WORKFLOW_CONTRACT,
+  CONTEXT_WORKFLOW_SCHEMA_REVISION,
   FileContextArtifactStore,
   MemoryContextEngineStore,
   addContextGateRepairRound,
@@ -18,8 +20,10 @@ import {
   contextArtifactKey,
   contextBoardTaskTypes,
   contextBoardTopics,
+  contextWorkflowBoardTopics,
   contextPublicSnapshotDigest,
   createContextBoardBuild,
+  createContextWorkflowBoardBuild,
   MAX_CONTEXT_GATE_REPAIR_PASS,
   MAX_CONTEXT_REPAIR_PASS,
   serializeCertifiedContextReleaseArtifact,
@@ -41,9 +45,136 @@ import {
 } from "@jina/board";
 import { entityId } from "@jina/shared-kernel";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
+import { applyContextWorkflowBoardTaskResult } from "./context-workflow-runtime.js";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const NOW = "2026-07-29T21:00:00.000Z";
+
+test("collapsed Context planner checkpoints each allowed intermediate artifact kind", async () => {
+  const tenantId = "tenant-collapsed-planner-checkpoint";
+  const repository = "omxyz/collapsed-planner-checkpoint";
+  const internalApiToken = "collapsed-planner-checkpoint-token";
+  const commitSha = "8".repeat(40);
+  const created = createContextWorkflowBoardBuild(createEmptyBoardState(), {
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-prompts-1",
+    validatorVersion: "context-validator-1",
+    pageIndexVersion: "pageindex-1",
+    executionProfileDigest: "f".repeat(64),
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "manual:collapsed-planner-checkpoint",
+    commitSha,
+    trigger: "manual",
+    now: NOW
+  });
+  const snapshotContent = Buffer.from('{"snapshot":true}', "utf8");
+  const snapshotKey = contextArtifactKey({
+    tenantId,
+    repository,
+    buildId: created.buildTaskId,
+    kind: "evidence-snapshot",
+    name: `${created.snapshotTaskId}-attempt-1-snapshot.json`,
+    contentType: "application/json",
+    content: snapshotContent
+  });
+  const snapshotArtifact: ContextArtifactRef = {
+    uri: `gs://context-test/${snapshotKey}`,
+    key: snapshotKey,
+    contentType: "application/json",
+    bytes: snapshotContent.byteLength,
+    sha256: createHash("sha256").update(snapshotContent).digest("hex")
+  };
+  const expanded = applyContextWorkflowBoardTaskResult(
+    created.state,
+    created.snapshotTaskId,
+    {
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      outputArtifact: snapshotArtifact,
+      commitSha
+    },
+    NOW
+  );
+  const store = mutableStateStore({
+    intakeState: {
+      board: reduceBoard(setTaskStatus(expanded.state, created.snapshotTaskId, "done"), NOW),
+      pullRequests: []
+    },
+    devDeliverySequence: 0
+  });
+  const artifactRoot = await mkdtemp(join(tmpdir(), "jina-collapsed-planner-checkpoints-"));
+  const quotaService = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
+  await quotaService.admitBuild({ tenantId, buildId: created.buildTaskId });
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore: store,
+    internalApiToken,
+    contextArtifactStore: new FileContextArtifactStore(artifactRoot),
+    contextQuotaService: quotaService
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const claimResponse = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({ workerId: "collapsed-planner-test", topics: [contextWorkflowBoardTopics.planner] })
+    });
+    const claimText = await claimResponse.text();
+    assert.equal(claimResponse.status, 200, claimText);
+    const claim = JSON.parse(claimText) as {
+      message: { id: string; leaseId: string; attempt: number; writeFenceToken: string };
+      task: { id: string };
+    };
+    const lease = {
+      messageId: claim.message.id,
+      taskId: claim.task.id,
+      leaseId: claim.message.leaseId,
+      attempt: claim.message.attempt,
+      writeFenceToken: claim.message.writeFenceToken
+    };
+    for (const [kind, phase, checkpointDigit] of [
+      ["research-plan", "research-plan.candidate", "c"],
+      ["research-report", "research.result", "d"],
+      ["publication-plan", "publication-plan.candidate", "e"]
+    ] as const) {
+      const candidateResponse = await fetch(`${baseUrl}/internal/context/board/artifacts`, {
+        method: "POST",
+        headers: internalHeaders(internalApiToken),
+        body: JSON.stringify({
+          ...lease,
+          kind,
+          name: `${phase}.json`,
+          contentType: "application/json",
+          contentBase64: Buffer.from('{"candidate":true}').toString("base64")
+        })
+      });
+      const candidateText = await candidateResponse.text();
+      assert.equal(candidateResponse.status, 201, candidateText);
+      const candidate = (JSON.parse(candidateText) as { artifact: ContextArtifactRef }).artifact;
+      const checkpointResponse = await fetch(`${baseUrl}/internal/context/board/phase-checkpoints`, {
+        method: "POST",
+        headers: internalHeaders(internalApiToken),
+        body: JSON.stringify({
+          ...lease,
+          phase,
+          checkpointKey: checkpointDigit.repeat(64),
+          artifact: candidate
+        })
+      });
+      assert.equal(checkpointResponse.status, 201, await checkpointResponse.text());
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    await rm(artifactRoot, { recursive: true, force: true });
+  }
+});
 
 test.skip("obsolete multi-stage worker completion contract", async () => {
   const tenantId = "tenant-1";

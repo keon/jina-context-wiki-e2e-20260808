@@ -5839,17 +5839,22 @@ function assertCurrentTaskOutputArtifact(
   artifact: ContextArtifactRef
 ): void {
   assertBoardArtifactScope(task, buildTaskId, artifact);
-  const prefix = `${contextArtifactScopePrefix({
+  const scopePrefix = `${contextArtifactScopePrefix({
     tenantId: requiredString(task.metadata.tenantId, "tenantId"),
     repository: requiredRepositoryName(task.metadata.repository, "repository"),
     buildId: buildTaskId
-  })}/${boardWorkArtifactKind(task.type)}/`;
-  const relative = artifact.key.slice(prefix.length);
-  if (
-    !artifact.key.startsWith(prefix) ||
-    !/^[a-z0-9][a-z0-9._-]{0,480}$/.test(relative) ||
-    (task.type !== contextBoardTaskTypes.publication && !relative.startsWith(`${task.id}-attempt-${attempt}-`))
-  ) {
+  })}/`;
+  const currentAttemptPrefix = `${task.id}-attempt-${attempt}-`;
+  const belongsToCurrentAttempt = [...boardTaskArtifactKinds(task.type)].some((kind) => {
+    const prefix = `${scopePrefix}${kind}/`;
+    if (!artifact.key.startsWith(prefix)) return false;
+    const relative = artifact.key.slice(prefix.length);
+    return (
+      /^[a-z0-9][a-z0-9._-]{0,480}$/.test(relative) &&
+      (task.type === contextBoardTaskTypes.publication || relative.startsWith(currentAttemptPrefix))
+    );
+  });
+  if (!belongsToCurrentAttempt) {
     throw invalidRequest("completion artifact was not uploaded by the current task attempt");
   }
 }

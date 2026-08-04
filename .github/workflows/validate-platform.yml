@@ -46,7 +46,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @jina/api build
-      - run: pnpm --filter @jina/api migrate:product
+      - run: pnpm --filter @jina/api exec node dist/product/migrate-all.js
       - run: pnpm --filter @jina/api test
       - run: pnpm --filter @jina/api identity:backfill -- --dry-run --require-converged
 
@@ -93,5 +93,6 @@ jobs:
           node-version: "24"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @jina/review-agent build
       - run: pnpm --filter @jina/worker typecheck
       - run: pnpm --filter @jina/worker test
