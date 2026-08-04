@@ -189,6 +189,14 @@ gcloud run deploy "${api_service}" \
   --set-env-vars="${api_env}" \
   --set-secrets="${api_secrets}" \
   --quiet
+# A previous emergency rollback pins traffic to a named revision. Cloud Run
+# preserves that pin across later deploys, so explicitly restore latest-revision
+# routing before any health check can accidentally verify the rollback target.
+gcloud run services update-traffic "${api_service}" \
+  --project="${project}" \
+  --region="${region}" \
+  --to-latest \
+  --quiet
 
 api_url="$(gcloud run services describe "${api_service}" \
   --project="${project}" \

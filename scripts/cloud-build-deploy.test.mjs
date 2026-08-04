@@ -71,6 +71,7 @@ test("staging keeps the absorbed product database URL isolated from the V2 datab
   await execFileAsync("bash", ["-n", "scripts/deploy-staging-v2.sh"]);
   assert.match(stagingDeployment, /JINA_PRODUCT_DATABASE_URL=\$\{product_database_secret\}:latest/);
   assert.doesNotMatch(stagingDeployment, /(?:^|[,\"])(?:DATABASE_URL)=\$\{product_database_secret\}:latest/m);
+  assert.match(stagingDeployment, /services update-traffic "\$\{api_service\}"[\s\S]+?--to-latest/);
 });
 
 test("production compute, images, artifacts, and shared database are co-located in us-east1", () => {
