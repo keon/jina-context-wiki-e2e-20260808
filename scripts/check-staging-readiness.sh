@@ -199,11 +199,8 @@ product_secrets=(
   jina-staging-secrets-encryption-key
   jina-staging-graph-api-token
   jina-staging-graph-internal-token
+  jina-staging-autumn-secret-key
 )
-if [[ "$(jq -r '.variables[]? | select(.name == "JINA_BILLING_ENFORCE") | .value' \
-    <<<"${variables_json}")" != "off" ]]; then
-  product_secrets+=(jina-staging-autumn-secret-key)
-fi
 for secret_name in "${product_secrets[@]}"; do
   if gcloud secrets versions describe latest --secret="${secret_name}" \
       --project="${staging_project}" >/dev/null 2>&1; then

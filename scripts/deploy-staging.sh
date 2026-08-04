@@ -40,6 +40,7 @@ trigger_secret="jina-staging-trigger-secret-key"
 clerk_secret="jina-staging-clerk-secret-key"
 graph_token_secret="jina-staging-graph-api-token"
 graph_internal_token_secret="jina-staging-graph-internal-token"
+autumn_secret="jina-staging-autumn-secret-key"
 daytona_secret="jina-staging-daytona-api-key"
 github_app_id_secret="jina-staging-github-app-id"
 github_app_private_key_secret="jina-staging-github-app-private-key"
@@ -71,6 +72,7 @@ required_staging_values=(
   "${clerk_secret}"
   "${graph_token_secret}"
   "${graph_internal_token_secret}"
+  "${autumn_secret}"
   "${daytona_secret}"
   "${github_app_id_secret}"
   "${github_app_private_key_secret}"
@@ -126,6 +128,7 @@ for secret_name in \
   "${clerk_secret}" \
   "${graph_token_secret}" \
   "${graph_internal_token_secret}" \
+  "${autumn_secret}" \
   "${daytona_secret}" \
   "${github_app_id_secret}" \
   "${github_app_private_key_secret}" \
@@ -171,7 +174,7 @@ gcloud run jobs execute "${product_migration_job}" \
   --wait
 
 api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=false~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~TRIGGER_API_URL=https://api.trigger.dev~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=20000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
-api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,TRIGGER_SECRET_KEY=${trigger_secret}:latest,JINA_PRODUCT_DATABASE_URL=${product_database_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest"
+api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,TRIGGER_SECRET_KEY=${trigger_secret}:latest,JINA_PRODUCT_DATABASE_URL=${product_database_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
 gcloud run deploy "${api_service}" \
   --project="${project}" \
   --region="${region}" \

@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { formatTime, humanize, shortId } from "../../lib/format.ts";
+import { newestContextBuild } from "../../lib/context-builds.ts";
 import { operationsApiUrl, tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import { usePoll } from "../../lib/poll.ts";
-import type { ContextBuildListResponse, ContextBuildSummary, ContextRelease } from "../../lib/types.ts";
+import type { ContextBuildListResponse, ContextRelease } from "../../lib/types.ts";
 import { useTenant } from "../../dashboard/providers.tsx";
 import { BuildCheckpoints } from "./build-checkpoints.tsx";
 import { ContextBrowser } from "./context-browser.tsx";
@@ -81,13 +82,13 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
   const [repository = "", ref = ""] = scopeKey.split("\0");
   const release = releases.find((candidate) => candidate.repository === repository && candidate.ref === ref);
   const scopeReleases = releases.filter((candidate) => candidate.repository === repository && candidate.ref === ref);
-  const build = preferredBuild(
+  const build = newestContextBuild(
     builds.filter(
       (candidate) =>
         candidate.repository === repository && candidate.ref === ref && candidate.buildKind !== "causal_graph"
     )
   );
-  const causalGraphBuild = preferredBuild(
+  const causalGraphBuild = newestContextBuild(
     builds.filter(
       (candidate) =>
         candidate.repository === repository && candidate.ref === ref && candidate.buildKind === "causal_graph"
@@ -200,11 +201,4 @@ function ReleaseFact({
       </strong>
     </div>
   );
-}
-
-function preferredBuild(builds: readonly ContextBuildSummary[]): ContextBuildSummary | undefined {
-  return [...builds].sort((left, right) => {
-    const priority = (status: ContextBuildSummary["status"]) => (status === "active" ? 0 : status === "failed" ? 1 : 2);
-    return priority(left.status) - priority(right.status) || right.updatedAt.localeCompare(left.updatedAt);
-  })[0];
 }
