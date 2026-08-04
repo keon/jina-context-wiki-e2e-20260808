@@ -237,7 +237,11 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
         <>
           {view === "wiki" && release ? <ReleaseSummary release={release} /> : null}
           {activeBuild ? (
-            <BuildCheckpoints build={activeBuild} release={view === "wiki" ? release : undefined} />
+            <BuildCheckpoints
+              build={activeBuild}
+              tenantId={selected.tenantId}
+              release={view === "wiki" ? release : undefined}
+            />
           ) : null}
 
           {view === "wiki" && release ? (

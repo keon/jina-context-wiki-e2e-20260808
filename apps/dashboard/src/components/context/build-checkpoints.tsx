@@ -1,5 +1,6 @@
 "use client";
 
+import { contextBuildProgressUrl } from "../../dashboard/lib/context.ts";
 import { contextFailureText } from "../../lib/context-failures.ts";
 import { formatTime, humanize, shortId } from "../../lib/format.ts";
 import { usePoll } from "../../lib/poll.ts";
@@ -7,13 +8,15 @@ import type { ContextBuildProgressResponse, ContextBuildSummary, ContextRelease 
 
 export function BuildCheckpoints({
   build,
+  tenantId,
   release
 }: {
   readonly build: ContextBuildSummary;
+  readonly tenantId: string;
   readonly release?: ContextRelease;
 }) {
   const progress = usePoll<ContextBuildProgressResponse>(
-    `/api/context/builds/${encodeURIComponent(build.id)}/progress`,
+    contextBuildProgressUrl({ tenantId }, build.id),
     5_000
   );
   const current = progress.data?.buildId === build.id ? progress.data : undefined;
