@@ -2767,31 +2767,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     try {
       return await promoteContextBoardFollowup(tenantId, completedBuildTaskId);
     } catch (error) {
-      logger.warn("deferred Context build promotion will retry on a later worker claim", {
+      logger.warn("deferred Context build promotion did not commit and requires reconciliation", {
         event: "context.build_followup_promotion_failed",
         tenantId,
         completedBuildTaskId,
         ...errorLogFields(error)
       });
       return false;
-    }
-  }
-
-  async function promotePendingContextBoardFollowups(tenantIds: readonly string[]): Promise<void> {
-    const permitted = new Set(tenantIds);
-    const candidates = intakeState.board.tasks.filter(
-      (task) =>
-        task.type === contextBoardTaskTypes.build &&
-        isTerminalTaskStatus(task.status) &&
-        permitted.has(String(task.metadata.tenantId)) &&
-        latestContextBoardFollowup(intakeState.board, task.id) !== undefined
-    );
-    let promoted = 0;
-    for (const build of candidates) {
-      if (await tryPromoteContextBoardFollowup(requiredString(build.metadata.tenantId, "tenantId"), build.id)) {
-        promoted += 1;
-        if (promoted >= 8) break;
-      }
     }
   }
 
@@ -3239,6 +3221,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
   }
 
+  async function verifyLegacyWorkerClaimRelease(workerRelease: WorkerReleaseGuard | undefined): Promise<void> {
+    if (!workerRelease) return;
+    try {
+      if (config.stateStore?.verifyWorkerRelease) {
+        await config.stateStore.verifyWorkerRelease(workerRelease);
+      } else {
+        await mutate(async () => undefined, undefined, workerRelease);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === "WorkerReleaseRejectedError") {
+        throw new ApiError(409, "worker_release_rejected", "worker release identity is not active");
+      }
+      throw error;
+    }
+  }
+
   async function claimWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const workerId = requiredString(body.workerId, "workerId");
@@ -3310,9 +3308,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
       return;
     }
+    await verifyLegacyWorkerClaimRelease(claimRelease);
     const claimTenantIds = tenantId === "*" ? [...(await config.sharedIdentityResolver!.listTenantIds())] : [tenantId];
-    await reload();
-    await promotePendingContextBoardFollowups(claimTenantIds);
     await reload();
     const claimNow = nowIso();
     const hasCandidate = intakeState.board.outbox.some((message) => {
@@ -3325,20 +3322,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
     });
     if (!hasCandidate) {
-      if (workerRelease) {
-        try {
-          if (config.stateStore?.verifyWorkerRelease) {
-            await config.stateStore.verifyWorkerRelease(claimRelease!);
-          } else {
-            await mutate(async () => undefined, undefined, claimRelease);
-          }
-        } catch (error) {
-          if (error instanceof Error && error.name === "WorkerReleaseRejectedError") {
-            throw new ApiError(409, "worker_release_rejected", "worker release identity is not active");
-          }
-          throw error;
-        }
-      }
       json(response, 204, {});
       return;
     }
