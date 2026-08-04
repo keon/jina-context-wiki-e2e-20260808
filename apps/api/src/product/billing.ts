@@ -60,7 +60,7 @@ import {
  */
 
 /** The overage-credit top-up product id (see autumn.config.ts). */
-export const OVERAGE_TOPUP_PRODUCT_ID = "overage_credits";
+const OVERAGE_TOPUP_PRODUCT_ID = "overage_credits";
 /** Default overage-credit pack when the dashboard doesn't specify one: 10,000 credits ($100). */
 export const DEFAULT_TOPUP_CREDITS = 10_000;
 /** Bounds on a user-chosen top-up amount ($1 = 100 credits): $5 floor, $10,000 ceiling. Keeps a fat-
@@ -147,7 +147,7 @@ export interface BillingStorePort {
 }
 
 /** The real store port, binding to store.ts. */
-export const realBillingStore: BillingStorePort = {
+const realBillingStore: BillingStorePort = {
   getRunBillingContext,
   getDispatchBillingContext,
   upsertReviewRunBilling,
@@ -191,14 +191,14 @@ export type AccessDecision = {
  *  - "ok":             live data present.
  * `configured` stays true only for "ok" (backward compatibility).
  */
-export type BillingStatus = "ok" | "unavailable" | "not_configured";
+type BillingStatus = "ok" | "unavailable" | "not_configured";
 
 /**
  * Current-cycle credit breakdown surfaced to the dashboard, derived from the Autumn balance the overview
  * already fetches. `used` = the balance's usage field, else granted - remaining. All null when the
  * balance is unavailable or the fields are absent (never fabricated).
  */
-export type BillingCycle = {
+type BillingCycle = {
   granted: number | null;
   remaining: number | null;
   used: number | null;

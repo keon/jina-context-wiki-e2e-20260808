@@ -2,7 +2,7 @@ import type { BillingService } from "./billing.js";
 import { ApiError } from "./errors.js";
 import { createInstallationAccessToken } from "./github-app.js";
 import type { WebhookResponse } from "./github.js";
-import { githubJson, type GithubPullRequest } from "./pr-trigger.js";
+import { githubJson, type GithubPullRequest } from "./github-client.js";
 import { REVIEW_TASK_ID } from "./review-task-routing.js";
 import type { TriggerClient, TriggerOptions } from "./trigger.js";
 

@@ -46,10 +46,9 @@ export type OpenAiModelPrice = {
   cached_per_token: string;
 };
 
-// platformModelDefaults + PlatformModelDefaults now live in store.ts (the routing coverage decision needs
-// them, and store.ts cannot import this module — it would be circular). Re-exported for existing callers.
+// platformModelDefaults lives in store.ts (the routing coverage decision needs it, and store.ts cannot
+// import this module without creating a cycle). Re-exported for existing callers.
 export { platformModelDefaults } from "./store.js";
-export type { PlatformModelDefaults } from "./store.js";
 
 /** Tokens-per-million multiplier: OpenRouter prices are USD per token; the UI shows USD per 1M tokens. */
 const PER_MILLION_POWER = 6;

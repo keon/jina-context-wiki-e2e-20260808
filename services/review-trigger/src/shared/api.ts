@@ -68,52 +68,6 @@ export async function postInternal<TResponse = JsonValue>(
   }
 }
 
-export async function getInternal<TResponse = JsonValue>(path: string): Promise<TResponse> {
-  const apiBaseUrl = requiredEnv("API_BASE_URL").replace(/\/$/, "");
-  const internalToken = requiredEnv("INTERNAL_API_TOKEN");
-  const startedAt = Date.now();
-
-  try {
-    const response = await fetch(`${apiBaseUrl}${path}`, {
-      method: "GET",
-      headers: {
-        "authorization": `Bearer ${internalToken}`,
-      },
-    });
-
-    const text = await response.text();
-    const durationMs = Date.now() - startedAt;
-    const parsed = parseJsonOrText(text);
-    if (!response.ok) {
-      logger.warn("internal_api_get_failed", internalApiLogPayload({
-        path,
-        status: response.status,
-        durationMs,
-        response: parsed,
-      }));
-      throw new InternalApiError(path, response.status, safeLogPreview(parsed), parsed);
-    }
-
-    logger.info("internal_api_get_completed", internalApiLogPayload({
-      path,
-      status: response.status,
-      durationMs,
-      response: parsed,
-    }));
-    return parsed as TResponse;
-  } catch (error) {
-    if (error instanceof InternalApiError) {
-      throw error;
-    }
-    logger.warn("internal_api_get_failed", internalApiLogPayload({
-      path,
-      durationMs: Date.now() - startedAt,
-      error,
-    }));
-    throw error;
-  }
-}
-
 export function internalApiLogPayload(input: {
   path: string;
   status?: number;

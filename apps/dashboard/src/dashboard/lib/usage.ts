@@ -12,15 +12,15 @@
 
 import { CREDITS_PER_USD, creditsToUsd, formatCredits, numberOrNull } from "./billing";
 
-export { creditsToUsd, formatCredits, CREDITS_PER_USD };
+export { creditsToUsd, formatCredits };
 
-export type UsageStatus = "ok" | "unavailable" | "not_configured";
+type UsageStatus = "ok" | "unavailable" | "not_configured";
 
 /** Selectable look-back windows for the period selector. */
 export const USAGE_PERIODS = [7, 30, 90] as const;
 export const DEFAULT_USAGE_PERIOD = 30;
 
-export type UsageTotals = {
+type UsageTotals = {
   runs: number | null;
   completed_runs: number | null;
   infra_credits: number | null;
@@ -31,7 +31,7 @@ export type UsageTotals = {
   harness_runs: number | null;
 };
 
-export type UsageDaily = {
+type UsageDaily = {
   date: string | null;
   credits: number;
   runs: number;

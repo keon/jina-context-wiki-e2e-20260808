@@ -1,17 +1,25 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "ignore": [".github/workflows/**", "apps/api/src/product/**", "apps/dashboard/src/dashboard/**"],
   "ignoreBinaries": ["codex"],
   "workspaces": {
     ".": {
-      "entry": ["scripts/context-production-preflight.mjs"],
-      "ignoreDependencies": ["pg"]
+      "entry": [
+        "autumn.config.ts",
+        "evals/review/run-isolated-review.mjs",
+        "scripts/context-production-preflight.mjs",
+        "services/review-trigger/trigger.config.ts",
+        "services/review-trigger/src/trigger/*.ts",
+        "services/review-trigger/src/review/codex-review.ts"
+      ],
+      "ignoreDependencies": ["pg", "@daytona/sdk", "@trigger.dev/build", "@trigger.dev/sdk"]
     },
     "apps/api": {
       "entry": [
         "src/dev-server.ts",
         "src/product/index.ts",
         "src/product/migrate.ts",
+        "src/product/migrate-all.ts",
+        "src/product/database-cutover.ts",
         "src/product/backfill-internal-users.ts",
         "src/product/rollback-tenant-installation.ts",
         "src/product/sync-github-webhook.ts",

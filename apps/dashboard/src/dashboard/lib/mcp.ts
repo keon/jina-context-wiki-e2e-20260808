@@ -1,7 +1,7 @@
 import type { ReviewEvent } from "./types";
 
-export type ReviewMcpServer = { server: string; tools: string[] };
-export type ReviewMcpUsageEvent = {
+type ReviewMcpServer = { server: string; tools: string[] };
+type ReviewMcpUsageEvent = {
   id: string;
   stage: string;
   server: string;

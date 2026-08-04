@@ -2,7 +2,7 @@ import type pg from "pg";
 
 export type InstallationTenantTransitionClient = Pick<pg.PoolClient, "query">;
 
-export class InstallationTenantRollbackConflictError extends Error {
+class InstallationTenantRollbackConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InstallationTenantRollbackConflictError";

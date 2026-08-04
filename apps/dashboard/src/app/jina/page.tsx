@@ -1,1 +1,1 @@
-export { default } from "@dashboard/jina/page";
+export { default, metadata } from "@dashboard/jina/page";

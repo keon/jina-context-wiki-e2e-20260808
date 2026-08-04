@@ -75,7 +75,7 @@ export type GraphQueryResult = {
   notes: string[];
 };
 
-export type GraphRepository = {
+type GraphRepository = {
   name: string;
   defaultBranch: string;
   graphId?: string;
@@ -98,7 +98,7 @@ export type TenantWorkOverview = {
   events: Array<Record<string, unknown>>;
 };
 
-export type GraphRepositoryAccess = { name: string; defaultBranch: string };
+type GraphRepositoryAccess = { name: string; defaultBranch: string };
 
 /** A knowledge document as the context page lists it. */
 /** A build in flight, and the pages it has finished so far. */
@@ -176,7 +176,7 @@ export type ContextDocumentSummary = {
   createdAt: string;
 };
 
-export type ContextDocumentCitation = {
+type ContextDocumentCitation = {
   sourceType?: string;
   sourceId?: string;
   repository?: string;

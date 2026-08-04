@@ -14,15 +14,15 @@ import {
 } from "./workflow.js";
 import { errorMessage } from "../shared/utils.js";
 
-export type ReviewProgressStatus = "Queued" | "In progress" | "Completed" | "Skipped" | "Blocked";
-export type ReviewFindingsStatus =
+type ReviewProgressStatus = "Queued" | "In progress" | "Completed" | "Skipped" | "Blocked";
+type ReviewFindingsStatus =
   | "Pending"
   | "Issues found"
   | "No issues found"
   | "Unavailable"
   | "Insufficient credits";
 
-export type ReviewProgressNotice = {
+type ReviewProgressNotice = {
   kind: "provider_failure";
   category: "quota" | "authentication" | "model" | "availability";
   provider: "codex" | "byok" | "unknown";
@@ -157,7 +157,7 @@ export function reviewProgressUpdateForStageResults(input: {
   };
 }
 
-export async function upsertReviewProgressComment(input: {
+async function upsertReviewProgressComment(input: {
   token: string;
   repository: GitHubRepository;
   pullRequestNumber: number;

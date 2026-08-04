@@ -1048,7 +1048,7 @@ const PROVIDER_KEY_COLUMNS: Record<NativeProvider, { key: string; at: string }> 
 
 // Codex harness (BYOH) status surfaced to the dashboard. NEVER carries the auth.json blob or any
 // part of it — only whether one is configured and when it was connected.
-export type CodexHarnessIntegration = {
+type CodexHarnessIntegration = {
   configured: boolean;
   connected_at?: string;
   reconnect_required?: boolean;
@@ -1601,38 +1601,6 @@ export async function listTenantGithubConnections(tenantId: string): Promise<Ten
   );
 }
 
-/** Repository names installed for one tenant. Used to fence server-side graph access. */
-export async function listTenantRepositoryNames(tenantId: string): Promise<string[]> {
-  if (!databaseConfigured()) return [];
-  const rows = await query<{ owner: string; name: string }>(
-    `select owner, name
-       from repositories
-      where tenant_id = $1
-      order by lower(owner), lower(name)`,
-    [tenantId],
-  );
-  return rows.map((row) => `${row.owner}/${row.name}`);
-}
-
-/** Repositories with at least one persisted review request for this tenant. */
-export async function listTenantReviewedRepositoryNames(tenantId: string): Promise<string[]> {
-  if (!databaseConfigured()) return [];
-  const rows = await query<{ owner: string; name: string }>(
-    `select repo.owner, repo.name
-       from repositories repo
-      where repo.tenant_id = $1
-        and exists (
-          select 1
-            from review_runs run
-           where run.tenant_id = $1
-             and run.repository_id = repo.id
-        )
-      order by lower(repo.owner), lower(repo.name)`,
-    [tenantId],
-  );
-  return rows.map((row) => `${row.owner}/${row.name}`);
-}
-
 /** The viewer's role on a tenant, or undefined when they are not a member. Basis for requireTenantAccess. */
 export async function getTenantMembershipRole(
   githubUserId: number,
@@ -1808,28 +1776,6 @@ export async function isGithubInstallationRecorded(githubInstallationId: number)
     [githubInstallationId],
   );
   return row?.recorded === true;
-}
-
-/** Tenant-scoped OpenRouter integration status for the dashboard (never the full key). */
-export async function getTenantOpenRouterIntegration(tenantId: string): Promise<OpenRouterIntegration> {
-  if (!databaseConfigured()) {
-    return { configured: false };
-  }
-  const row = await queryOne<{
-    openrouter_api_key: string | null;
-    openrouter_key_source: string | null;
-    openrouter_key_label: string | null;
-    openrouter_connected_at: Date | string | null;
-  }>(
-    `select openrouter_api_key, openrouter_key_source, openrouter_key_label, openrouter_connected_at
-       from tenant_integrations where tenant_id = $1`,
-    [tenantId],
-  );
-  return openRouterInfo(decryptKey(row?.openrouter_api_key), {
-    source: row?.openrouter_key_source ?? null,
-    label: row?.openrouter_key_label ?? null,
-    connectedAt: row?.openrouter_connected_at ?? null,
-  });
 }
 
 export type SaveTenantOpenRouterInput = {
@@ -2244,7 +2190,7 @@ export type ModelSettings = {
 
 export type ReasoningEffort = "low" | "medium" | "high";
 export type FallbackPolicy = "fail_notify" | "managed";
-export const DEFAULT_FALLBACK_POLICY: FallbackPolicy = "fail_notify";
+const DEFAULT_FALLBACK_POLICY: FallbackPolicy = "fail_notify";
 
 export const EMPTY_MODEL_SETTINGS: ModelSettings = {
   planner_model: null,
@@ -2686,7 +2632,7 @@ type ModelSettingsRow = {
  *  Legacy values: 'openai'/'openrouter' collapse to 'byok'; the retired 'auto' (and null/unknown)
  *  collapse to the managed default. */
 export type ModelProvider = "codex" | "byok" | "managed";
-export const DEFAULT_MODEL_PROVIDER: ModelProvider = "managed";
+const DEFAULT_MODEL_PROVIDER: ModelProvider = "managed";
 
 /** Coerce a stored/submitted provider value to a valid ModelProvider, defaulting to 'managed'. */
 export function normalizeModelProvider(raw: unknown): ModelProvider {
@@ -2705,7 +2651,7 @@ export function normalizeModelProvider(raw: unknown): ModelProvider {
 /** When Jina reviews a PR. 'every_commit' reviews on open + every push; 'first_commit' reviews on
  *  open/reopen/ready only; 'manual_only' requires an @usejina PR comment. */
 export type ReviewTriggerMode = "every_commit" | "first_commit" | "manual_only";
-export const DEFAULT_REVIEW_TRIGGER_MODE: ReviewTriggerMode = "every_commit";
+const DEFAULT_REVIEW_TRIGGER_MODE: ReviewTriggerMode = "every_commit";
 
 /** Coerce an arbitrary stored/submitted value to a valid mode, defaulting to 'every_commit'. */
 export function normalizeReviewTriggerMode(raw: unknown): ReviewTriggerMode {
@@ -3186,11 +3132,11 @@ export async function getTenantMemberStats(tenantId: string): Promise<TenantMemb
 
 /* ------------------------------------------------------- tenant usage summary --- */
 
-export type UsageDailyPoint = { date: string; credits: number; runs: number };
+type UsageDailyPoint = { date: string; credits: number; runs: number };
 // One row PER PULL REQUEST (not per review_run): a PR re-reviewed on each push has its per-commit runs
 // rolled up here. infra_credits/ai_credits are summed across those runs; review_count is how many; the
 // status/key_source/review_run_id reflect the most recent run for that PR.
-export type UsageRecentRun = {
+type UsageRecentRun = {
   review_run_id: string;
   repo_full_name: string;
   pr_number: number | null;
@@ -3430,7 +3376,7 @@ export type DispatchBillingContext = {
  */
 /** "login (org|personal)" for the Autumn customer, or undefined when the login is the unbackfilled
  *  placeholder — better nameless than named "unknown (personal)". */
-export function composeAutumnCustomerName(login: string | null | undefined, accountType: string | null | undefined): string | undefined {
+function composeAutumnCustomerName(login: string | null | undefined, accountType: string | null | undefined): string | undefined {
   if (!login || login === "unknown") {
     return undefined;
   }

@@ -60,7 +60,7 @@ export type CustomerSummary = {
 };
 
 /** Auto top-up (auto-reload) configuration for one feature, applied per customer at runtime. */
-export type AutoTopupInput = {
+type AutoTopupInput = {
   featureId: string;
   enabled: boolean;
   // Balance level that triggers a top-up, and how many units to purchase each time. Ignored by Autumn

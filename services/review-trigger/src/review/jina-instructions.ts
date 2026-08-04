@@ -40,7 +40,7 @@ export type JinaRuntimeConfigChange = {
   appliesToCurrentReview: false;
 };
 
-export const DEFAULT_JINA_RUNTIME_CONFIG: JinaRuntimeConfig = {
+const DEFAULT_JINA_RUNTIME_CONFIG: JinaRuntimeConfig = {
   depth: 2,
 };
 

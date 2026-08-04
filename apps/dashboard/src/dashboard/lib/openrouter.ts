@@ -8,7 +8,7 @@
  * the API (e.g. "0.15", "10.000000") and must be formatted for display rather
  * than parsed to floats for math. Either field may be null when unpriced.
  */
-export type ModelPricing = {
+type ModelPricing = {
   prompt_per_1m: string | null;
   completion_per_1m: string | null;
 };

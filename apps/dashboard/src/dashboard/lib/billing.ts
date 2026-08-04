@@ -16,16 +16,16 @@
 // $1 = 100 Jina Credits (see docs/BILLING_OPENROUTER_AUTUMN.md "Credit math").
 export const CREDITS_PER_USD = 100;
 
-export type BillingStatus = "ok" | "unavailable" | "not_configured";
+type BillingStatus = "ok" | "unavailable" | "not_configured";
 
 /** Member counts for the org: total seats, and how many run their own harness. */
-export type BillingMembers = {
+type BillingMembers = {
   total: number | null;
   with_harness: number | null;
 };
 
 /** The current billing cycle's included-credit accounting. */
-export type BillingCycle = {
+type BillingCycle = {
   granted: number | null;
   remaining: number | null;
   used: number | null;
@@ -39,7 +39,7 @@ export type BillingLimits = {
 };
 
 /** One row of the billing-activity feed (a Stripe invoice / charge). */
-export type BillingActivity = {
+type BillingActivity = {
   date: string | null;
   amount: number | null;
   status: string | null;

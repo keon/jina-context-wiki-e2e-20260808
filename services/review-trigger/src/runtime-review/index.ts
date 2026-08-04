@@ -33,15 +33,13 @@ import {
 
 // The resolved repository config is the loop termination condition. The caps
 // below are load-bearing against runaway work inside each permitted round.
-export const DEFAULT_INVESTIGATION_ROUNDS = 2;
-/** Backwards-compatible export for callers that need the default, not the resolved per-run depth. */
-export const INVESTIGATION_ROUNDS = DEFAULT_INVESTIGATION_ROUNDS;
+export const INVESTIGATION_ROUNDS = 2;
 export const MAX_PARALLEL_INVESTIGATIONS = 10;
 export const MAX_AREAS_PER_REPLAN = 10;
 
 type RiskLevel = "high" | "medium" | "low";
 type ConfidenceLevel = "high" | "medium" | "low";
-export type RuntimeReviewIssueSeverity = "P0" | "P1" | "P2" | "P3";
+type RuntimeReviewIssueSeverity = "P0" | "P1" | "P2" | "P3";
 
 export type RuntimeReviewInput = {
   repository: GitHubRepository;
@@ -69,7 +67,7 @@ export type RuntimeReviewPlan = {
   scopeRationale?: string;
 };
 
-export type RuntimeReviewPrThreadItem = {
+type RuntimeReviewPrThreadItem = {
   source: "issue_comment" | "review_comment" | "review_body" | "supplied_history";
   author?: string;
   body: string;
@@ -133,7 +131,7 @@ export type RuntimeReviewPrContext = {
 /** Retained for result-shape compatibility: the standalone intent stage is gone
  *  (the planner absorbs intent inference), so `RuntimeReviewResult.intent` is
  *  never set by new runs but old persisted results still carry it. */
-export type RuntimeReviewIntent = {
+type RuntimeReviewIntent = {
   markdown: string;
   metadata: {
     generatedAt: string;
@@ -216,7 +214,7 @@ export type RuntimeReviewFinding = {
 
 /** Reviewer adjudication metadata. Raw investigation findings remain unchanged;
  *  this shape records proof for publication-only dismissals. */
-export type RuntimeReviewComment = {
+type RuntimeReviewComment = {
   title: string;
   body: string;
   evidence: string[];
@@ -224,7 +222,7 @@ export type RuntimeReviewComment = {
   relatedFiles?: string[];
 };
 
-export type RuntimeReviewDismissedCandidate = {
+type RuntimeReviewDismissedCandidate = {
   hypothesis: string;
   whyDismissed: string;
   evidence: string[];
@@ -255,7 +253,7 @@ export type RuntimeReviewAreaResult = {
 
 /** Result-shape-compatible wrapper retained for the dashboard's raw investigation
  *  view. Publication-only adjudication lives on `RuntimeReviewPublication`. */
-export type RuntimeFinalReviewArtifact = {
+type RuntimeFinalReviewArtifact = {
   summary: string;
   acceptedIssues: RuntimeReviewFinding[];
   comments: RuntimeReviewComment[];
@@ -303,7 +301,7 @@ export type RuntimeReviewResult = {
   model_call_summary?: RuntimeModelCallSummary;
 };
 
-export type RuntimeJinaConfigurationArtifact = {
+type RuntimeJinaConfigurationArtifact = {
   appliedConfig: JinaRuntimeConfig;
   configSource: "defaults" | ".jina/config.json";
   configFilePresent: boolean;
@@ -329,7 +327,7 @@ export type RuntimeModelCallSummary = {
   mcpUsageEvents?: RuntimeMcpUsageEvent[];
 };
 
-export type RuntimeMcpUsageEvent = CodexMcpToolCallEvent & { stage: string };
+type RuntimeMcpUsageEvent = CodexMcpToolCallEvent & { stage: string };
 
 export type RuntimeReadinessReview = {
   score: number;
@@ -1118,7 +1116,7 @@ function aggregateRuntimeReviewResult(
   return result;
 }
 
-export function runtimeReviewMarkdown(result: RuntimeReviewResult): string {
+function runtimeReviewMarkdown(result: RuntimeReviewResult): string {
   const findings = result.findings;
   const reviewComments = result.comments ?? [];
   const taskCount = result.areas.reduce((sum, area) => sum + area.tasks.length, 0);

@@ -50,7 +50,7 @@ export type ContextKnowledgeSummary = {
 
 export type ContextKnowledgeCitation = { revisionId: string; ordinal: number; claim: string; anchor: ContextEvidenceAnchor };
 
-export type ContextQueryCitation = {
+type ContextQueryCitation = {
   id: string;
   title: string;
   excerpt: string;

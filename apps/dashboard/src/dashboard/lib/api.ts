@@ -30,11 +30,6 @@ export function safeHref(url: string | undefined | null): string | undefined {
   return undefined;
 }
 
-export function loginUrl(): string {
-  const params = new URLSearchParams({ return_to: window.location.href });
-  return apiUrl("/auth/github/login", params);
-}
-
 export function reviewRunsPath(tenantId?: string | null): string {
   return tenantId
     ? `/dashboard/tenants/${encodeURIComponent(tenantId)}/review-runs`
@@ -43,42 +38,6 @@ export function reviewRunsPath(tenantId?: string | null): string {
 
 export function reviewRunPath(reviewRunId: string, tenantId?: string | null): string {
   return `${reviewRunsPath(tenantId)}/${encodeURIComponent(reviewRunId)}`;
-}
-
-/** Create an empty Jina organization. GitHub installations are connected separately afterward. */
-export async function createJinaOrganization(name: string): Promise<ViewerTenant> {
-  const response = await fetch(apiUrl("/dashboard/tenants"), {
-    method: "POST",
-    credentials: "include",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: name.trim() }),
-  });
-  const body = (await response.json().catch(() => ({}))) as {
-    tenant?: unknown;
-    error?: string;
-  };
-  if (!response.ok) {
-    throw new Error(body.error || "Could not create organization");
-  }
-  return normalizeCreatedJinaOrganization(body.tenant);
-}
-
-/** Rename a Jina organization without changing its stable tenant identity. */
-export async function updateJinaOrganization(tenantId: string, name: string): Promise<ViewerTenant> {
-  const response = await fetch(apiUrl(`/dashboard/tenants/${encodeURIComponent(tenantId)}`), {
-    method: "PATCH",
-    credentials: "include",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: name.trim() }),
-  });
-  const body = (await response.json().catch(() => ({}))) as {
-    tenant?: unknown;
-    error?: string;
-  };
-  if (!response.ok) {
-    throw new Error(body.error || "Could not update organization");
-  }
-  return normalizeJinaOrganization(body.tenant);
 }
 
 export function normalizeCreatedJinaOrganization(raw: unknown): ViewerTenant {
@@ -133,11 +92,6 @@ export async function getScenarioLineageRuns(
   }
   const payload = (await response.json()) as { review_runs?: ReviewRun[] };
   return payload.review_runs ?? [];
-}
-
-export async function logout(onLoggedOut: () => void): Promise<void> {
-  await fetch(apiUrl("/auth/logout"), { method: "POST", credentials: "include" });
-  onLoggedOut();
 }
 
 export function parseInstallationResult(search: string): InstallationResult | null {
