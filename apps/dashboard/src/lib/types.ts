@@ -56,7 +56,7 @@ export interface TaskTypeDependency {
   readonly conditions?: readonly string[];
 }
 
-export interface TaskTypeTrigger {
+interface TaskTypeTrigger {
   readonly source: string;
   readonly description: string;
   readonly conditions?: readonly string[];
@@ -113,7 +113,7 @@ export interface ContextCatalogDocument {
   readonly citations: readonly ContextSourceCitation[];
 }
 
-export interface ContextTreeNode {
+interface ContextTreeNode {
   readonly id: string;
   readonly documentId: string;
   readonly parentId?: string;

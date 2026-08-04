@@ -45,7 +45,6 @@ const postgresStateStore = await readFile("packages/db/src/postgres-json-state-s
 const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
 const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
 const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
-const stagingDatabaseCutover = await readFile("scripts/cutover-staging-database-v2.sh", "utf8");
 
 async function withFakeGcloud(source, callback) {
   const directory = await mkdtemp(join(tmpdir(), "jina-deploy-gcloud-"));
@@ -76,7 +75,6 @@ test("production deployment shell is syntactically valid", async () => {
 
 test("staging uses one v2 database connection and one migration job", async () => {
   await execFileAsync("bash", ["-n", "scripts/deploy-staging.sh"]);
-  await execFileAsync("bash", ["-n", "scripts/cutover-staging-database-v2.sh"]);
   assert.match(stagingDeployment, /JINA_PRODUCT_DATABASE_MODE=shared/);
   assert.match(stagingDeployment, /migration_job="jina-v2-migrate-staging"/);
   assert.match(stagingDeployment, /--args=dist\/product\/migrate-all\.js,--install-roles/);
@@ -92,9 +90,6 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--max-instances=5/);
   assert.match(stagingDeployment, /deploy-staging-causal-graph\.sh/);
   for (const topic of LEGACY_TOPICS) assert.doesNotMatch(stagingDeployment, new RegExp(topic));
-  assert.match(stagingDatabaseCutover, /for _attempt in \$\(seq 1 180\)/);
-  assert.match(stagingDatabaseCutover, /jina-v1-staging-db-password/);
-  assert.match(stagingDatabaseCutover, /gcloud run jobs delete "\$\{job\}"/);
 });
 
 test("production compute, images, artifacts, and shared database are co-located in us-east1", () => {

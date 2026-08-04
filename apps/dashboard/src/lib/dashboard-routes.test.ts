@@ -18,7 +18,6 @@ test("the dashboard retains the complete customer route inventory", () => {
     "/reviews/[reviewRunId]/scenarios/[scenarioId]",
     "/runs",
     "/signin",
-    "/settings",
     "/usage"
   ]);
 });

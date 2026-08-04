@@ -1,11 +1,20 @@
 "use client";
 
 import { humanize } from "../../lib/format.ts";
-import { workflowSteps } from "../../lib/workflow-trees.ts";
-import type { TaskTypeDefinition } from "../../lib/types.ts";
+import type { TaskTypeDefinition, TaskTypeDependency } from "../../lib/types.ts";
 import { TaskTypeGlyph } from "./task-type-glyph.tsx";
 
 /** Read-only side inspector describing a task type's trigger, steps, and configuration. */
+
+function workflowSteps(definition: TaskTypeDefinition): readonly string[] {
+  const dependencyLabel = (dependency: TaskTypeDependency) =>
+    dependency.taskType.replace(/[._-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+  return [
+    ...(definition.dependsOn ?? []).map((dependency) => `Wait for ${dependencyLabel(dependency)}`),
+    definition.description || definition.type,
+    ...(definition.requiredBy ?? []).map((dependent) => `Unlock ${dependencyLabel(dependent)}`)
+  ];
+}
 
 export function TaskTypeInspector({ definition }: { readonly definition: TaskTypeDefinition | null }) {
   if (!definition) {

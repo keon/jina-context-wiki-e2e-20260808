@@ -20,8 +20,7 @@ type NavKey =
   | "billing"
   | "usage"
   | "history"
-  | "tasks"
-  | "settings";
+  | "tasks";
 
 type NavItem = { key: NavKey; label: string; href: string; icon: () => ReactNode };
 
@@ -83,7 +82,6 @@ const SECTION_TITLE: Record<NavKey, string> = {
   billing: "Billing",
   history: "Run History",
   tasks: "Tasks",
-  settings: "Settings",
 };
 
 function sectionForPath(pathname: string | null): NavKey {
@@ -100,7 +98,6 @@ function sectionForPath(pathname: string | null): NavKey {
   if (path.startsWith("/billing")) return "billing";
   if (path.startsWith("/history")) return "history";
   if (path.startsWith("/tasks")) return "tasks";
-  if (path.startsWith("/settings")) return "settings";
   return "reviews"; // "/", "/runs", and "/reviews/..." details
 }
 

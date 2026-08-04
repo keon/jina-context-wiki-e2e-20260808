@@ -18,6 +18,13 @@ staging deploy installs the Board-recorded 15-minute billing retry schedule and 
 OpenTelemetry sidecars, including the causal worker's release-gated sidecar. Production continues to use the
 coordinated `cloudbuild.yaml` path below.
 
+Before a staging deploy, run `scripts/check-staging-readiness.sh`. It verifies the
+staging-only GitHub configuration, Cloud SQL runtime state, migration job, secrets,
+services, domain mappings, dashboard projects, and causal-worker sidecar contract.
+The v2 database transition is complete: routine staging deploys use the unified
+`jina-v2-migrate-staging` job, and the retired one-time cutover job and legacy database
+credentials must remain absent.
+
 Cloud Build validates, builds, and deploys one coordinated release to
 `jina-v2/us-east1`. API, worker, dashboard, and admin images are built from the same
 exact source revision, receive the same unique Cloud Build release identity, and are
