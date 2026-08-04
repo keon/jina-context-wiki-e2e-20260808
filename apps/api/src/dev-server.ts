@@ -98,6 +98,8 @@ const contextArtifactStore = process.env.CONTEXT_GCS_BUCKET
     ? new FileContextArtifactStore(process.env.CONTEXT_ARTIFACT_DIRECTORY?.trim() || ".jina/context-artifacts")
     : undefined;
 
+const productApiRequestHandler = await loadProductApiRequestHandler();
+
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
   ...(process.env.JINA_TENANT_ID ? { tenantId: process.env.JINA_TENANT_ID } : {}),
@@ -123,7 +125,8 @@ const server = createApiServer({
   ...(process.env.JINA_CONTEXT_PRINCIPAL_ID ? { contextApiPrincipalId: process.env.JINA_CONTEXT_PRINCIPAL_ID } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
   mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS"),
-  ...(contextWorkerLeaseMs === undefined ? {} : { contextWorkerLeaseMs })
+  ...(contextWorkerLeaseMs === undefined ? {} : { contextWorkerLeaseMs }),
+  ...(productApiRequestHandler ? { productApiRequestHandler } : {})
 });
 
 const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
@@ -220,4 +223,18 @@ function booleanEnvironment(name: string, fallback: boolean): boolean {
   if (raw === "true") return true;
   if (raw === "false") return false;
   throw new Error(`${name} must be true or false`);
+}
+
+async function loadProductApiRequestHandler() {
+  if (!booleanEnvironment("JINA_PRODUCT_API_ENABLED", false)) return undefined;
+  // Keep the product compiler boundary independent while the absorbed code is
+  // progressively refactored onto the V2 shared kernel.
+  const productModulePath = "./product/index.js";
+  const product = (await import(productModulePath)) as {
+    createProductApiRequestHandler: () => (
+      request: import("node:http").IncomingMessage,
+      response: import("node:http").ServerResponse
+    ) => void | Promise<void>;
+  };
+  return product.createProductApiRequestHandler();
 }

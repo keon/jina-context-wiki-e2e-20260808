@@ -1,4 +1,4 @@
-export interface DocSection {
+interface DocSection {
   heading: string;
   body?: string[];
   steps?: string[];

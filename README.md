@@ -15,9 +15,10 @@ pnpm dev
 
 `pnpm dev` starts the API on port 4000 and dashboard on port 3000.
 `pnpm --filter @jina/admin dev` starts the tenant-wide administration app on port 3100.
-Start the review API on port 8080 in a second terminal with
-`npm --prefix platform/v1/api run dev`; the dashboard uses it for the product
-routes and the port-4000 API for the operational routes.
+The same API process serves product/review routes, Context, causal graph, and MCP.
+Set `JINA_PRODUCT_API_ENABLED=true` plus the product credentials to exercise the
+review, integration, and billing routes locally. Apply their schema with
+`pnpm --filter @jina/api build && pnpm --filter @jina/api migrate:product`.
 Development uses in-memory stores unless PostgreSQL configuration is supplied. Production
 requires PostgreSQL, `INTERNAL_API_TOKEN`, `CONTEXT_API_TOKEN`, and either fixed or
 shared-database tenancy configuration.
@@ -129,14 +130,13 @@ production uses the API-key path and never copies a developer session.
 ## Repository layout
 
 ```text
-apps/api/             webhooks, board API, context API, MCP, leases
+apps/api/             product/review API, webhooks, billing, Board, Context, MCP
+apps/api/product-migrations/ original Jina product schema
 apps/admin/           tenant-wide context health UI
 apps/dashboard/       single customer dashboard, operations, and Context workspace
 apps/worker/          review and context-stage workers
 apps/workflows/       local review CLI and deterministic simulation
-platform/v1/api/      product API, GitHub auth/webhooks, billing, review state
 platform/v1/trigger/  Trigger.dev review orchestration and Daytona runtime
-platform/v1/migrations/ original Jina product schema
 platform/v1/evals/    review evaluation datasets and tools
 packages/board/       generic tasks, dependencies, commands, reducer
 packages/context-engine/ evidence, derived context, releases, retrieval

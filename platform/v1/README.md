@@ -15,12 +15,12 @@ Jina is a multi-tenant GitHub App code review service. It listens for pull reque
 
 | Path | Purpose |
 | --- | --- |
-| `api/` | Webhooks, dashboard APIs, auth, persistence, and Trigger.dev dispatch. |
 | `trigger/` | Trigger.dev tasks for PR review, installation backfill, scheduled scans, Daytona orchestration, and GitHub output. |
-| `dashboard/` | Next.js dashboard for reviews, findings, historical scenario detail, and integrations. |
-| `migrations/` | Postgres schema migrations. |
 | `evals/` | Offline evaluation tooling. |
 | `docs/` | Architecture and deployment docs. |
+
+The product API, its 29 migrations, and the customer dashboard now live at
+`apps/api`, `apps/api/product-migrations`, and `apps/dashboard`.
 
 ## Local Setup
 
@@ -69,17 +69,14 @@ http://localhost:8080/auth/github/callback
 Apply database migrations when `DATABASE_URL` is configured:
 
 ```bash
-cd api
-npm install
-npm run migrate
+pnpm --filter @jina/api build
+pnpm --filter @jina/api migrate:product
 ```
 
 Run the API:
 
 ```bash
-cd api
-npm install
-npm run dev
+JINA_PRODUCT_API_ENABLED=true pnpm --filter @jina/api dev
 ```
 
 Run Trigger.dev tasks locally:
@@ -93,13 +90,11 @@ npm run dev
 Run the dashboard:
 
 ```bash
-cd dashboard
-npm install
-cp .env.example .env.local
-npm run dev
+pnpm --filter @jina/dashboard dev
 ```
 
-The dashboard runs on `http://localhost:3000` by default. Set `NEXT_PUBLIC_API_BASE_URL` in `dashboard/.env.local` when the API is not on `http://localhost:8080`.
+The dashboard runs on `http://localhost:3000` by default and proxies all backend
+requests through `/api` to the unified service.
 
 To enable the dashboard's **Graph** page, configure `JINA_GRAPH_API_URL` and
 `JINA_GRAPH_API_TOKEN` on the API service. The browser calls only this repo's
@@ -124,10 +119,9 @@ configuration. Context attachment defaults on. Set
 API:
 
 ```bash
-cd api
-npm run typecheck
-npm test
-npm run build
+pnpm --filter @jina/api typecheck
+pnpm --filter @jina/api test
+pnpm --filter @jina/api build
 ```
 
 Trigger workers:

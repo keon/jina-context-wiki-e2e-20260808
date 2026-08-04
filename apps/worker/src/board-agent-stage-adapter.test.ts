@@ -382,8 +382,8 @@ test("Daytona worker configuration requires one immutable selector and a Secret 
 
 test("execution profiles are fetched without retaining decrypted credentials and strictly bounded", async () => {
   const environment = {
-    JINA_V1_API_URL: "https://api.usejina.test",
-    JINA_V1_INTERNAL_API_TOKEN: "internal-test-token"
+    JINA_API_URL: "https://api.usejina.test",
+    JINA_PRODUCT_INTERNAL_API_TOKEN: "internal-test-token"
   };
   const attempt = {
     commitSha: "a".repeat(40),
@@ -537,8 +537,8 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
     CONTEXT_DAYTONA_MODEL_SECRET_ENV: "OPENAI_API_KEY",
     CONTEXT_DAYTONA_MODEL_DOMAINS: "api.openai.com",
     CONTEXT_CODEX_MODEL: "openai/gpt-5.6-terra",
-    JINA_V1_API_URL: "https://api.usejina.test",
-    JINA_V1_INTERNAL_API_TOKEN: "internal-test-token"
+    JINA_API_URL: "https://api.usejina.test",
+    JINA_PRODUCT_INTERNAL_API_TOKEN: "internal-test-token"
   };
   const executions: (BoardAgentExecutionConfiguration | undefined)[] = [];
   const runnerFactory = (

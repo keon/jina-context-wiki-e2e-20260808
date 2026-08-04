@@ -1,12 +1,13 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { getPool } from "./db.js";
 
 loadDotEnv(resolve(process.cwd(), "../.env"));
 loadDotEnv(resolve(process.cwd(), ".env"));
 
-const migrationsDir = resolve(process.cwd(), "../migrations");
+const migrationsDir = fileURLToPath(new URL("../../product-migrations/", import.meta.url));
 const pool = getPool();
 
 // A session-scoped advisory lock serializes concurrent migrators (two CI deploys, or a CI deploy racing

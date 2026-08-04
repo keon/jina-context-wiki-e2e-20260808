@@ -36,7 +36,8 @@ delete it, change its production webhook, or transfer `app.usejina.com` during s
   replanning, validation, deduplication, and GitHub review publication.
 - OpenRouter capture/usage accounting, native OpenAI routing, Codex subscription harness,
   managed/BYOK billing policy, Autumn checkout, and every migration through `0028`
-  (29 SQL files, including the two retained `0001` migrations).
+  (29 SQL files under `apps/api/product-migrations`, including the two retained
+  `0001` migrations).
 - Historical scenario storage/read compatibility and offline evaluation datasets. Retired
   scenario-generation tasks remain retired exactly as they were upstream; the dashboard
   continues to render existing historical records.
@@ -47,17 +48,13 @@ delete it, change its production webhook, or transfer `app.usejina.com` during s
 that originated in the first dashboard now live directly under `src/dashboard`; they are
 not mirrored or compiled from `platform/v1`. Route wrappers remain intentionally thin,
 and `apps/dashboard/src/lib/dashboard-routes.test.ts` locks the complete customer and
-operations route inventory. The `platform/v1` tree contains backend compatibility
-services only.
+operations route inventory. The `platform/v1` tree retains only the Trigger.dev review
+runtime, evaluation fixtures, and historical documentation. The product API is compiled
+and deployed inside `apps/api`.
 
-Deployment workflows live at:
-
-- `.github/workflows/deploy-v1-api.yml`
-- `.github/workflows/deploy-v1-trigger.yml`
-- `.github/workflows/validate-v1-platform.yml`
-
-They run the vendored API and Trigger packages from their monorepo paths. The dashboard
-is built only from `apps/dashboard`.
+Validation lives in `.github/workflows/validate-platform.yml`; the retained Trigger.dev
+runtime deploys through `.github/workflows/deploy-v1-trigger.yml`. The staging API and
+workers deploy together through `scripts/deploy-staging-v2.sh` from one image revision.
 
 ## Staging topology
 
@@ -66,8 +63,7 @@ Staging must be isolated before any webhook or customer traffic is admitted:
 | Resource           | Required staging target                                                                                                                   |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | GitHub environment | `omxyz/jina` environment `Staging`, branch-restricted to `staging`                                                                        |
-| Main API           | V2 Cloud Run `jina-api-staging` at `https://api.staging.usejina.com`                                                                      |
-| Legacy V1 API      | Cloud Run `jina-code-review-api-staging` at `https://legacy-api.staging.usejina.com` until V1 is absorbed into V2                         |
+| Unified API        | Cloud Run `jina-api-staging` at `https://api.staging.usejina.com`; product, review, Context, causal graph, and MCP routes                 |
 | MCP                | V2's `/mcp` surface at `https://mcp.staging.usejina.com/mcp`                                                                              |
 | Product database   | PostgreSQL 16 `jina-db-staging` in `jina-staging-20260802`, database `jina_staging`, staging-only logins and encryption key               |
 | Context stack      | `jina-api-staging`, `jina-context-worker-staging`, `jina-task-worker-staging`, migration job, registry, and bucket in the staging project |
@@ -119,7 +115,7 @@ Provisioned platform resources:
 - Dedicated operations tenant `ba699695-dc9f-431e-a89c-4dc98220f53e`, shared by the
   staging dashboard and v2 API configuration. The deployment script rejects labels and
   malformed identifiers in this database identity boundary.
-- Healthy Cloud Run `jina-code-review-api-staging`, `jina-api-staging`,
+- Healthy unified Cloud Run `jina-api-staging`, plus
   `jina-context-worker-staging`, `jina-task-worker-staging`, and
   `jina-causal-graph-worker` services. The
   dashboard proxy reaches the empty staging Board through the bound operations
@@ -151,10 +147,8 @@ Repository automation:
 
 - `scripts/check-staging-readiness.sh` reports every missing GitHub, GCP, Cloud Run, and
   Vercel prerequisite without reading secret values.
-- `scripts/deploy-staging-v2.sh` applies the v2 schema/roles and deploys only
+- `scripts/deploy-staging-v2.sh` applies both schema sets and deploys only
   staging-suffixed API and worker services from immutable `staging` image tags.
-- `.github/workflows/deploy-v1-api.yml` supports the first isolated staging service
-  bootstrap and retains the canary/rollback path for every subsequent revision.
 
 Billing enforcement remains `off`; no Autumn production credential is mounted.
 Billing read/empty-state routes are accepted, while checkout/top-up writes remain

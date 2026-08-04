@@ -802,7 +802,7 @@ test("production Board agents are Daytona-only and do not receive the host model
   assert.match(deployment, /CONTEXT_DAYTONA_(?:SNAPSHOT|IMAGE)=/);
   assert.match(
     deployment,
-    /--set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_V1_INTERNAL_API_TOKEN=\$\{v1_internal_token_secret\}:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=/
+    /--set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=\$\{product_internal_token_secret\}:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=/
   );
 
   const workerDeployment =
@@ -1009,14 +1009,14 @@ test("deployment rejects a model credential in place of a Daytona Secret name", 
   );
 });
 
-test("deployment validates and preflights the V1 internal token Secret", async () => {
+test("deployment validates and preflights the product internal token Secret", async () => {
   assert.match(
     deployment,
-    /validate_secret_name \\\n  "JINA_V1_INTERNAL_API_TOKEN_SECRET" \\\n  "\$\{v1_internal_token_secret\}"/
+    /validate_secret_name \\\n  "JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET" \\\n  "\$\{product_internal_token_secret\}"/
   );
   assert.match(
     deployment,
-    /for secret_spec in[\s\S]+?"\$\{v1_internal_token_secret\}:latest"[\s\S]+?require_secret "\$\{secret_spec\}"/
+    /for secret_spec in[\s\S]+?"\$\{product_internal_token_secret\}:latest"[\s\S]+?require_secret "\$\{secret_spec\}"/
   );
 
   await assert.rejects(
@@ -1028,12 +1028,12 @@ test("deployment validates and preflights the V1 internal token Secret", async (
         CLOUD_BUILD_ID: "quality-build",
         JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
         JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret",
-        JINA_V1_INTERNAL_API_TOKEN_SECRET: "not/a/secret"
+        JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET: "not/a/secret"
       }
     }),
     (error) => {
       assert.equal(error.code, 2);
-      assert.match(error.stderr, /JINA_V1_INTERNAL_API_TOKEN_SECRET is not a valid Secret Manager secret name/);
+      assert.match(error.stderr, /JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET is not a valid Secret Manager secret name/);
       assert.doesNotMatch(error.stderr, /gcloud/);
       return true;
     }

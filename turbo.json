@@ -10,7 +10,6 @@
         "CLERK_SIGN_IN_URL",
         "CLERK_SIGN_UP_URL",
         "JINA_API_URL",
-        "JINA_LEGACY_API_URL",
         "JINA_TENANT_ID",
         "JINA_WEB_AUTH_PASSWORD",
         "JINA_WEB_AUTH_USERNAME",

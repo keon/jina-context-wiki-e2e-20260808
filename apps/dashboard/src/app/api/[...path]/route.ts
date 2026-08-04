@@ -1,7 +1,9 @@
+import { auth } from "@clerk/nextjs/server";
 import type { NextRequest } from "next/server";
 import {
   dashboardWebAuthorization,
   isAllowedDashboardApiRequest,
+  isProductDashboardApiRequest,
   resolveDashboardPrincipal
 } from "../../../server/proxy-policy.ts";
 
@@ -20,6 +22,7 @@ const STRIPPED_REQUEST_HEADERS = new Set([
   "host",
   "connection",
   "authorization",
+  "cookie",
   "x-jina-web-authorization",
   "content-length",
   "accept-encoding",
@@ -35,6 +38,7 @@ async function proxy(request: NextRequest): Promise<Response> {
   const internalApiToken = process.env.INTERNAL_API_TOKEN?.trim();
   const tenantId = process.env.JINA_TENANT_ID?.trim();
   const { pathname, search } = request.nextUrl;
+  const productApiRequest = isProductDashboardApiRequest(request.method, pathname);
   if (!isAllowedDashboardApiRequest(request.method, pathname, Boolean(internalApiToken))) {
     return Response.json({ error: "not found" }, { status: 404 });
   }
@@ -43,25 +47,35 @@ async function proxy(request: NextRequest): Promise<Response> {
   for (const [name, value] of request.headers) {
     if (!STRIPPED_REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
   }
-  const principal = resolveDashboardPrincipal({
-    iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),
-    authorizationHeader: dashboardWebAuthorization(
-      request.headers.get("authorization"),
-      request.headers.get("x-jina-web-authorization")
-    ),
-    webAuthUsername: process.env.JINA_WEB_AUTH_USERNAME,
-    webAuthPassword: process.env.JINA_WEB_AUTH_PASSWORD,
-    webPrincipal: process.env.JINA_WEB_PRINCIPAL_ID
-  });
-  if (internalApiToken && !principal) {
-    // The internal token authorizes as a tenant-admin service principal; never
-    // attach it to a request that lacks an authenticated deployment boundary.
-    return Response.json({ error: "unauthenticated" }, { status: 401 });
-  }
-  if (internalApiToken) {
-    headers.set("authorization", `Bearer ${internalApiToken}`);
-    headers.set("x-jina-principal-id", principal!);
-    if (tenantId) headers.set("x-jina-tenant-id", tenantId);
+  if (productApiRequest) {
+    const { isAuthenticated, getToken } = await auth();
+    if (!isAuthenticated) return Response.json({ error: "unauthenticated" }, { status: 401 });
+    const token = await getToken();
+    if (!token) return Response.json({ error: "unauthenticated" }, { status: 401 });
+    headers.set("authorization", `Bearer ${token}`);
+    const openRouterCookie = request.cookies.get("jina_openrouter_pkce");
+    if (openRouterCookie) headers.set("cookie", `${openRouterCookie.name}=${openRouterCookie.value}`);
+  } else {
+    const principal = resolveDashboardPrincipal({
+      iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),
+      authorizationHeader: dashboardWebAuthorization(
+        request.headers.get("authorization"),
+        request.headers.get("x-jina-web-authorization")
+      ),
+      webAuthUsername: process.env.JINA_WEB_AUTH_USERNAME,
+      webAuthPassword: process.env.JINA_WEB_AUTH_PASSWORD,
+      webPrincipal: process.env.JINA_WEB_PRINCIPAL_ID
+    });
+    if (internalApiToken && !principal) {
+      // The internal token authorizes as a tenant-admin service principal; never
+      // attach it to a request that lacks an authenticated deployment boundary.
+      return Response.json({ error: "unauthenticated" }, { status: 401 });
+    }
+    if (internalApiToken) {
+      headers.set("authorization", `Bearer ${internalApiToken}`);
+      headers.set("x-jina-principal-id", principal!);
+      if (tenantId) headers.set("x-jina-tenant-id", tenantId);
+    }
   }
 
   const upstreamUrl = new URL(`${pathname.slice("/api".length)}${search}`, apiUrl);
@@ -82,7 +96,11 @@ async function proxy(request: NextRequest): Promise<Response> {
   }
   const responseHeaders = new Headers();
   for (const [name, value] of upstream.headers) {
-    if (!STRIPPED_RESPONSE_HEADERS.has(name.toLowerCase())) responseHeaders.set(name, value);
+    if (STRIPPED_RESPONSE_HEADERS.has(name.toLowerCase())) continue;
+    responseHeaders.append(
+      name,
+      productApiRequest && name.toLowerCase() === "set-cookie" ? value.replace(/Path=\/v1\//gi, "Path=/api/v1/") : value
+    );
   }
   return new Response(upstream.status === 304 ? null : upstream.body, {
     status: upstream.status,
@@ -90,4 +108,4 @@ async function proxy(request: NextRequest): Promise<Response> {
   });
 }
 
-export { proxy as GET, proxy as POST };
+export { proxy as GET, proxy as POST, proxy as PUT, proxy as PATCH, proxy as DELETE };

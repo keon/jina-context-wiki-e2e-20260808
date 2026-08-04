@@ -7,9 +7,9 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": "src/product",
+    "outDir": "dist/product",
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/product/**/*.ts"]
 }

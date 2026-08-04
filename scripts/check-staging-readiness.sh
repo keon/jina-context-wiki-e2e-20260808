@@ -143,7 +143,7 @@ require_exact_staging_variable() {
 
 require_exact_staging_variable JINA_DASHBOARD_URL https://app.staging.usejina.com
 require_exact_staging_variable JINA_DASHBOARD_ORIGIN https://app.staging.usejina.com
-require_exact_staging_variable JINA_API_BASE_URL https://legacy-api.staging.usejina.com
+require_exact_staging_variable JINA_API_BASE_URL https://api.staging.usejina.com
 require_exact_staging_variable JINA_GRAPH_API_URL https://api.staging.usejina.com
 require_exact_staging_variable JINA_MCP_URL https://mcp.staging.usejina.com/mcp
 
@@ -183,12 +183,12 @@ fi
 if gcloud iam service-accounts describe \
     "jina-api-staging-runtime@${staging_project}.iam.gserviceaccount.com" \
     --project="${staging_project}" >/dev/null 2>&1; then
-  pass "V1 staging runtime service account exists"
+  pass "Product migration staging service account exists"
 else
-  fail "V1 staging runtime service account is missing"
+  fail "Product migration staging service account is missing"
 fi
 
-v1_secrets=(
+product_secrets=(
   jina-staging-github-webhook-secret
   jina-staging-github-app-private-key
   jina-staging-internal-api-token
@@ -202,29 +202,29 @@ v1_secrets=(
 )
 if [[ "$(jq -r '.variables[]? | select(.name == "JINA_BILLING_ENFORCE") | .value' \
     <<<"${variables_json}")" != "off" ]]; then
-  v1_secrets+=(jina-staging-autumn-secret-key)
+  product_secrets+=(jina-staging-autumn-secret-key)
 fi
-for secret_name in "${v1_secrets[@]}"; do
+for secret_name in "${product_secrets[@]}"; do
   if gcloud secrets versions describe latest --secret="${secret_name}" \
       --project="${staging_project}" >/dev/null 2>&1; then
-    pass "V1 Secret Manager secret ${secret_name} has a latest version"
+    pass "Product Secret Manager secret ${secret_name} has a latest version"
   else
-    fail "V1 Secret Manager secret ${secret_name} is missing a latest version"
+    fail "Product Secret Manager secret ${secret_name} is missing a latest version"
   fi
 done
 
-v2_services=(
+staging_services=(
   jina-api-staging
   jina-context-worker-staging
   jina-task-worker-staging
   jina-causal-graph-worker
 )
-for service_name in "${v2_services[@]}"; do
+for service_name in "${staging_services[@]}"; do
   if gcloud run services describe "${service_name}" --project="${staging_project}" \
       --region="${region}" >/dev/null 2>&1; then
-    pass "V2 Cloud Run service ${service_name} exists"
+    pass "Staging Cloud Run service ${service_name} exists"
   else
-    fail "V2 Cloud Run service ${service_name} is missing"
+    fail "Staging Cloud Run service ${service_name} is missing"
   fi
 done
 
@@ -268,7 +268,6 @@ fi
 staging_domain_mappings=(
   "api.staging.usejina.com:jina-api-staging"
   "mcp.staging.usejina.com:jina-api-staging"
-  "legacy-api.staging.usejina.com:jina-code-review-api-staging"
 )
 for mapping in "${staging_domain_mappings[@]}"; do
   domain_name="${mapping%%:*}"

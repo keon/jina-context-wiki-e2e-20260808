@@ -73,7 +73,8 @@ export function loadConfig(env = process.env): AppConfig {
   const dashboardUrl = dashboardUrlFromEnv(env);
   const dashboardAllowedOrigins = parseDashboardAllowedOrigins(env.DASHBOARD_ORIGIN, dashboardUrl);
   const triggerSecretKey = requiredEnv(env, "TRIGGER_SECRET_KEY");
-  const internalApiToken = requiredEnv(env, "INTERNAL_API_TOKEN");
+  // V2 and review workers can rotate independently during the single-service cutover.
+  const internalApiToken = optionalEnv(env, "JINA_PRODUCT_INTERNAL_API_TOKEN") ?? requiredEnv(env, "INTERNAL_API_TOKEN");
   validateTriggerSecretKey(triggerSecretKey, env);
   validateSecretsEncryptionKey(env);
   return {

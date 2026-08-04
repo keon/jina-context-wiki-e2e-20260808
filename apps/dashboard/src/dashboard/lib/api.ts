@@ -6,7 +6,7 @@ import type {
 import { normalizeViewerTenants, type ViewerTenant } from "./tenants";
 
 export function apiUrl(path: string, params?: URLSearchParams): string {
-  const url = new URL(`/legacy-api${path}`, window.location.origin);
+  const url = new URL(`/api${path}`, window.location.origin);
   if (params) {
     url.search = params.toString();
   }

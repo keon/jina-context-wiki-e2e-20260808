@@ -1,15 +1,14 @@
-name: Validate Platform and Dashboard
+name: Validate API, Review Worker, and Dashboard
 
 on:
   pull_request:
     paths:
-      - platform/v1/api/**
+      - apps/api/**
+      - apps/worker/**
       - platform/v1/trigger/**
-      - platform/v1/migrations/**
       - apps/dashboard/**
       - pnpm-lock.yaml
-      - .github/workflows/deploy-v1-api.yml
-      - .github/workflows/validate-v1-platform.yml
+      - .github/workflows/validate-platform.yml
 
 permissions:
   contents: read
@@ -36,27 +35,18 @@ jobs:
       TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/jina_test
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
-          cache-dependency-path: platform/v1/api/package-lock.json
-      - run: npm --prefix platform/v1/api ci
-      - run: npm --prefix platform/v1/api run typecheck
-      - name: Run API unit tests
-        run: DATABASE_URL= TEST_DATABASE_URL= npm --prefix platform/v1/api test
-      - run: npm --prefix platform/v1/api run migrate
-      - name: Run PostgreSQL compatibility and transition tests
-        working-directory: platform/v1/api
-        run: |
-          set -euo pipefail
-          node --test --import tsx src/dashboard-projection-postgres.test.ts
-          node --test --import tsx src/identity-transition-postgres.test.ts
-          node --test --import tsx src/internal-user-postgres.test.ts
-          node --test --import tsx src/jina-organization-postgres.test.ts
-          node --test --import tsx src/tenant-github-connections-postgres.test.ts
-          node --test --import tsx src/tenant-review-feed-postgres.test.ts
-          npm run identity:backfill -- --dry-run --require-converged
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @jina/api build
+      - run: pnpm --filter @jina/api migrate:product
+      - run: pnpm --filter @jina/api test
+      - run: pnpm --filter @jina/api identity:backfill -- --dry-run --require-converged
 
   trigger:
     runs-on: ubuntu-latest
@@ -86,3 +76,18 @@ jobs:
       - run: pnpm --filter @jina/dashboard typecheck
       - run: pnpm --filter @jina/dashboard test
       - run: pnpm --filter @jina/dashboard build
+
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @jina/worker typecheck
+      - run: pnpm --filter @jina/worker test

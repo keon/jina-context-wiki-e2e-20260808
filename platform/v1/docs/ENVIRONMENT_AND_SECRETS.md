@@ -135,8 +135,8 @@ These values are not saved directly in Daytona as the source of truth. The Trigg
 | `JINA_GRAPH_ACCESS_TOKEN` | Yes | Minted by V2 per review after an exact repository release is found | Daytona Codex access directly to V2 `/mcp`; unrelated to local CodeGraph |
 | Model and timeout vars | No | Copied from Trigger worker env or code defaults | Daytona worker review stages |
 
-V2 Context workers additionally receive `JINA_V1_API_URL` and the secret
-`JINA_V1_INTERNAL_API_TOKEN`. They use these only to resolve a write-once,
+Context workers additionally receive `JINA_PRODUCT_INTERNAL_API_TOKEN`; the product
+routes use the same `JINA_API_URL` as Context and MCP. They use this only to resolve a write-once,
 tenant/build-scoped execution profile. The profile credential is injected into an
 ephemeral private Daytona sandbox and is included in the worker's redaction set; it
 is never stored in Board metadata or Context artifacts.

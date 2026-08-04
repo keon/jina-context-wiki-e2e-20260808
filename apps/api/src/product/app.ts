@@ -154,7 +154,8 @@ export function createApp(config: AppConfig): Hono {
 
   const health = () => ({
     status: "ok",
-    service: "jina-code-review-api",
+    service: "jina-api",
+    component: "product",
     runtime: "typescript",
   });
 

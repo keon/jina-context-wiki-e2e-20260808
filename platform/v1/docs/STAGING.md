@@ -37,11 +37,11 @@ Save these as GitHub Environment variables on `Staging`:
 | --- | --- |
 | `GCP_PROJECT_ID` | `jina-staging-20260802` |
 | `GCP_REGION` | `us-east1` |
-| `CLOUD_RUN_SERVICE` | `jina-code-review-api-staging` |
+| `CLOUD_RUN_SERVICE` | `jina-api-staging` |
 | `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT` | `jina-api-staging-runtime@jina-staging-20260802.iam.gserviceaccount.com` |
 | `CLOUD_SQL_INSTANCE` | `jina-db-staging` |
 | `ARTIFACT_REGISTRY_REPOSITORY` | `jina-code-review-staging` |
-| `JINA_API_BASE_URL` | `https://legacy-api.staging.usejina.com` |
+| `JINA_API_BASE_URL` | `https://api.staging.usejina.com` |
 | `JINA_DASHBOARD_ORIGIN` | `https://app.staging.usejina.com` |
 | `JINA_DASHBOARD_URL` | `https://app.staging.usejina.com` |
 | `JINA_GITHUB_APP_ID` | staging GitHub App id |
@@ -206,9 +206,9 @@ variables) so managed reviews can run.
 
 Create a separate staging GitHub App:
 
-- Webhook URL: `https://legacy-api.staging.usejina.com/webhooks/github`
+- Webhook URL: `https://api.staging.usejina.com/webhooks/github`
 - Webhook secret: value stored in `jina-staging-github-webhook-secret`
-- OAuth callback: `https://legacy-api.staging.usejina.com/auth/github/callback`
+- OAuth callback: `https://api.staging.usejina.com/auth/github/callback`
 - Setup URL: `https://app.staging.usejina.com/integrations`
 - Install it only on staging/test repositories.
 
@@ -228,16 +228,15 @@ scope before opening a PR.
 5. Deploy or verify the companion V2 Context service and its
    `/context/webhooks/github` endpoint.
 6. Push or fast-forward the `staging` branch.
-7. Run `Deploy API` from the `staging` branch with `target_environment=Staging`.
+7. Build the staging images and run `scripts/deploy-staging-v2.sh` from the
+   `staging` branch.
 8. Run `Deploy Trigger` from the `staging` branch with `target_environment=Staging`.
-9. Deploy the dashboard with
-   `NEXT_PUBLIC_API_BASE_URL=https://legacy-api.staging.usejina.com` and
-   `JINA_API_URL=https://api.staging.usejina.com`.
+9. Deploy the dashboard with `JINA_API_URL=https://api.staging.usejina.com`.
 10. Install the staging GitHub App on a test repository and open a PR.
 
 ## Validation
 
-- `GET https://legacy-api.staging.usejina.com/v1/healthz`
+- `GET https://api.staging.usejina.com/v1/healthz`
   returns `status: ok`.
 - Staging GitHub App webhook delivery gets HTTP 200.
 - A test PR creates a Jina comment/check under the staging app identity.

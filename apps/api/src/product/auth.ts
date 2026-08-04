@@ -784,7 +784,7 @@ function ensureGithubAuth(config: AppConfig): void {
 // `path` is the provider-specific callback path (shared by GitHub login and OpenRouter OAuth).
 export function callbackUrlFor(c: Context, config: AppConfig, path: string): string {
   if (config.auth?.mode === "clerk" && path.startsWith("/v1/dashboard/")) {
-    return new URL(`/legacy-api${path}`, config.dashboardUrl).toString();
+    return new URL(`/api${path}`, config.dashboardUrl).toString();
   }
   if (config.apiBaseUrl) {
     return new URL(path, config.apiBaseUrl).toString();

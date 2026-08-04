@@ -69,8 +69,7 @@ context_daytona_model_secret="${JINA_CONTEXT_DAYTONA_MODEL_SECRET:-}"
 context_daytona_model_secret_env="${JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV:-OPENAI_API_KEY}"
 context_daytona_model_domains="${JINA_CONTEXT_DAYTONA_MODEL_DOMAINS:-api.openai.com}"
 context_checkpoint_publication_override_build_ids="${JINA_CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS:-}"
-v1_api_url="${JINA_V1_API_URL:-https://api.usejina.com}"
-v1_internal_token_secret="${JINA_V1_INTERNAL_API_TOKEN_SECRET:-jina-v1-internal-api-token}"
+product_internal_token_secret="${JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET:-jina-v1-internal-api-token}"
 context_reset_mode="${JINA_CONTEXT_RESET_MODE:-disabled}"
 context_reset_confirmation="${JINA_CONFIRM_CONTEXT_RESET:-}"
 context_board_topics="run-context-input-snapshot|run-context-research-plan|run-context-research|run-context-publication-plan|run-context-page-write|run-context-page-audit|run-context-page-repair|run-context-source-challenge|run-context-task-evaluation|run-context-gap-repair|run-context-certification|run-context-publication|run-context-pageindex"
@@ -194,8 +193,8 @@ validate_secret_name \
   "JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET" \
   "${trigger_acceptance_github_app_private_key_secret}"
 validate_secret_name \
-  "JINA_V1_INTERNAL_API_TOKEN_SECRET" \
-  "${v1_internal_token_secret}"
+  "JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET" \
+  "${product_internal_token_secret}"
 if [[ "${trigger_acceptance_github_app_id_secret}" == "jina-github-app-id" ||
       "${trigger_acceptance_github_app_private_key_secret}" == "jina-github-app-private-key" ||
       "${trigger_acceptance_github_app_id_secret}" == "${trigger_acceptance_github_app_private_key_secret}" ]]; then
@@ -642,7 +641,7 @@ context_worker_environment() {
   local claim_mode="$2"
   local target_revision="${3:-}"
   local environment
-  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_V1_API_URL=${v1_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=${context_board_topics}~WORKER_PREFERRED_REPOSITORY=${acceptance_repository}~WORKER_HEARTBEAT_INTERVAL_MS=${context_worker_heartbeat_interval_ms}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GIT_COMMAND_TIMEOUT_MS=300000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex"
+  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=${context_board_topics}~WORKER_PREFERRED_REPOSITORY=${acceptance_repository}~WORKER_HEARTBEAT_INTERVAL_MS=${context_worker_heartbeat_interval_ms}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GIT_COMMAND_TIMEOUT_MS=300000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex"
   if [[ "${claim_mode}" == "enabled" ]]; then
     [[ "${target_revision}" == "${context_candidate_revision}" ]] || {
       echo "Enabled Context worker requires its exact candidate revision" >&2
@@ -1212,7 +1211,7 @@ for secret_spec in \
   "jina-github-webhook-secret:latest" \
   "jina-context-private-checkpoint-key:latest" \
   "jina-internal-api-token:latest" \
-  "${v1_internal_token_secret}:latest" \
+  "${product_internal_token_secret}:latest" \
   "jina-context-api-token:latest" \
   "jina-daytona-api-key:latest" \
   "jina-github-app-id:latest" \
@@ -1393,7 +1392,7 @@ gcloud run deploy jina-context-worker \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(context_worker_environment "${serving_api_url}" "paused")" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_V1_INTERNAL_API_TOKEN=${v1_internal_token_secret}:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --no-traffic \
   --revision-suffix="${drain_suffix}" \
   --quiet
@@ -1534,7 +1533,7 @@ gcloud run deploy jina-context-worker \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="${context_worker_env_vars}" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_V1_INTERNAL_API_TOKEN=${v1_internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   "${deploy_candidate_args[@]}" \
   --quiet
 

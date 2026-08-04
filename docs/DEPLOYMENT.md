@@ -1,15 +1,10 @@
 # Deployment
 
-This repository now also contains the original Jina review product under
-`platform/v1`. Its Cloud Run API and Trigger.dev workers deploy through
-`.github/workflows/deploy-v1-api.yml` and `.github/workflows/deploy-v1-trigger.yml`;
-the merged customer/operations dashboard deploys from `apps/dashboard`. The existing
-Cloud Build release described below remains the v2 Board/Context release.
-
-The two release trains share a commit but retain separate rollout controls until the
-staging consolidation is accepted. See [V1 consolidation and staging release
-plan](V1_CONSOLIDATION.md) for the complete feature gate, staging isolation requirements,
-and production promotion order.
+The original Jina product API is absorbed into `apps/api`; product/review, Board,
+Context, causal graph, and MCP routes ship in one backend image. Trigger.dev review
+workers remain under `platform/v1/trigger` and deploy through
+`.github/workflows/deploy-v1-trigger.yml`. The customer dashboard deploys from
+`apps/dashboard`.
 
 Run `scripts/check-staging-readiness.sh` before a staging release. Build immutable v2
 API/worker images with `cloudbuild.images.yaml` and a tag containing `staging`, then pass
@@ -419,8 +414,8 @@ Secret placeholder, and verifies egress substitution and actual model authentica
 rather than only the binary. A missing snapshot, missing/inaccessible Secret,
 incompatible toolchain, or failed model request fails the release closed.
 
-Production Context workers also require `JINA_V1_API_URL` and
-`JINA_V1_INTERNAL_API_TOKEN` when tenant model routing is enabled. For every build,
+Context workers use the unified `JINA_API_URL` and additionally require
+`JINA_PRODUCT_INTERNAL_API_TOKEN` when tenant model routing is enabled. For every build,
 the worker resolves the write-once profile created by V1 and honors its Context model,
 reasoning effort, credential revision, and fallback policy. Credential/configuration,
 quota, and unknown-model failures are terminal and remain visible on the task board;

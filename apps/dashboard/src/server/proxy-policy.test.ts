@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { dashboardWebAuthorization, isAllowedDashboardApiRequest, resolveDashboardPrincipal } from "./proxy-policy.ts";
+import {
+  dashboardWebAuthorization,
+  isAllowedDashboardApiRequest,
+  isProductDashboardApiRequest,
+  resolveDashboardPrincipal
+} from "./proxy-policy.ts";
 
 test("candidate Cloud Run requests keep invocation and web authorization separate", () => {
   assert.equal(dashboardWebAuthorization("Bearer cloud-run", "Basic dashboard"), "Basic dashboard");
@@ -44,6 +49,22 @@ test("allows dashboard reads, blocks internal and unknown routes", () => {
 test("demo webhook endpoint is local-only", () => {
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/dev/webhooks/github", false), true);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/dev/webhooks/github", true), false);
+});
+
+test("product API routes share /api while preserving their Clerk auth boundary", () => {
+  for (const [method, pathname] of [
+    ["GET", "/api/v1/dashboard/me"],
+    ["POST", "/api/v1/dashboard/session/refresh"],
+    ["PUT", "/api/v1/dashboard/tenants/tenant-1/model-settings"],
+    ["PATCH", "/api/v1/dashboard/tenants/tenant-1"],
+    ["DELETE", "/api/v1/dashboard/tenants/tenant-1/integrations/openrouter"],
+    ["GET", "/api/auth/github/callback"]
+  ] as const) {
+    assert.equal(isProductDashboardApiRequest(method, pathname), true, pathname);
+    assert.equal(isAllowedDashboardApiRequest(method, pathname, true), true, pathname);
+  }
+  assert.equal(isProductDashboardApiRequest("GET", "/api/context/releases"), false);
+  assert.equal(isProductDashboardApiRequest("POST", "/api/internal/reviews/prepare"), false);
 });
 
 test("dashboard principal prefers a validated IAP email", () => {

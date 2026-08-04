@@ -113,6 +113,7 @@ import {
 import { handleContextMcpRequest } from "./mcp.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog } from "./task-type-catalog.js";
+import { isProductApiRoute } from "./product-api-router.js";
 
 const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
 const MAX_CONTEXT_BOARD_ARTIFACT_BYTES = 20 * 1024 * 1024;
@@ -207,6 +208,8 @@ export interface ApiServerConfig {
   readonly contextPhaseCheckpointStore?: ContextPhaseCheckpointStore;
   /** Test/embedding override. Production uses the structured service logger. */
   readonly logger?: Logger;
+  /** Product/review API handler mounted into this server during the V1 cutover. */
+  readonly productApiRequestHandler?: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>;
 }
 
 interface ResolvedRepositoryIdentity {
@@ -687,6 +690,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     };
     response.once("finish", () => settle(false));
     response.once("close", () => settle(true));
+    if (config.productApiRequestHandler && isProductApiRoute(pathname)) {
+      void Promise.resolve(config.productApiRequestHandler(request, response)).catch((error: unknown) => {
+        if (response.destroyed || response.socket?.destroyed) return;
+        requestLogger.error("Product API request failed", {
+          event: "http.product_request.error",
+          method: request.method,
+          path: pathname,
+          ...errorLogFields(error)
+        });
+        json(response, 500, { error: "internal server error" });
+      });
+      return;
+    }
     // Resolved once and passed down. Two calls would mean two lookups, two
     // last-used stamps, and — worse — two reads under different database scopes,
     // since this one runs before any tenant scope is entered and the second would

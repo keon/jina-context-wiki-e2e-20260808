@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "ignore": ["platform/v1/**", ".github/workflows/**"],
+  "ignore": ["platform/v1/**", ".github/workflows/**", "apps/api/src/product/**", "apps/dashboard/src/dashboard/**"],
   "ignoreBinaries": ["codex"],
   "workspaces": {
     ".": {
@@ -8,7 +8,15 @@
       "ignoreDependencies": ["pg"]
     },
     "apps/api": {
-      "entry": ["src/dev-server.ts", "src/**/*.test.ts"]
+      "entry": [
+        "src/dev-server.ts",
+        "src/product/index.ts",
+        "src/product/migrate.ts",
+        "src/product/backfill-internal-users.ts",
+        "src/product/rollback-tenant-installation.ts",
+        "src/product/sync-github-webhook.ts",
+        "src/**/*.test.ts"
+      ]
     },
     "apps/worker": {
       "entry": ["src/server.ts", "src/acceptance.ts", "src/**/*.test.ts"]

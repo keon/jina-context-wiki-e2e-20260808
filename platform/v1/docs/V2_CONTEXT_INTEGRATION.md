@@ -81,7 +81,7 @@ sandbox failures retain the bounded Board retry policy.
 
 ## Deployment order and acceptance
 
-Deploy V2 first, then the V1 API, Trigger tasks, and dashboard. Verify:
+Deploy the unified API first, then Trigger tasks and the dashboard. Verify:
 
 1. V2 rejects an invalid relay signature.
 2. One signed PR delivery creates one Context build and no V2 review task.
