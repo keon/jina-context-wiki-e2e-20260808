@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PostgresBoardContextPublicationRepository } from "./context/board-publication-repository.js";
+import {
+  PostgresBoardContextPublicationRepository,
+  contextPublicationMayAdvanceCurrent
+} from "./context/board-publication-repository.js";
 import type { ContextDatabase } from "./context/database.js";
 
 const TENANT = "tenant-seed";
@@ -106,6 +109,60 @@ test("current release seed lookup cold-starts across the legacy context-v2 artif
   });
 
   assert.equal(seed, undefined);
+});
+
+test("publication may replace only an older exact-scoped legacy cold-start boundary", () => {
+  const current = {
+    refSequence: 7,
+    releaseId: RELEASE_ID,
+    releaseArtifact: releaseArtifact(TENANT, "context-v2")
+  };
+  assert.equal(
+    contextPublicationMayAdvanceCurrent({
+      tenantId: TENANT,
+      repository: REPOSITORY,
+      publicationSequence: 8,
+      current
+    }),
+    true
+  );
+  assert.equal(
+    contextPublicationMayAdvanceCurrent({
+      tenantId: TENANT,
+      repository: REPOSITORY,
+      publicationSequence: 7,
+      current
+    }),
+    false
+  );
+  assert.equal(
+    contextPublicationMayAdvanceCurrent({
+      tenantId: TENANT,
+      repository: REPOSITORY,
+      publicationSequence: 8,
+      current: { ...current, releaseArtifact: releaseArtifact(TENANT) }
+    }),
+    false
+  );
+  assert.equal(
+    contextPublicationMayAdvanceCurrent({
+      tenantId: TENANT,
+      repository: REPOSITORY,
+      publicationSequence: 8,
+      current: { ...current, releaseArtifact: releaseArtifact("other-tenant", "context-v2") }
+    }),
+    false
+  );
+  assert.equal(
+    contextPublicationMayAdvanceCurrent({
+      tenantId: TENANT,
+      repository: REPOSITORY,
+      publicationSequence: 8,
+      current: { ...current, releaseArtifact: releaseArtifact(TENANT) },
+      priorRelease: { releaseId: RELEASE_ID, refSequence: 7 }
+    }),
+    true
+  );
 });
 
 function releaseArtifact(tenantId: string, root = "context") {

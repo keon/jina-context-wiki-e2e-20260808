@@ -157,21 +157,37 @@ export class PostgresBoardContextPublicationRepository
         return recordFromRow(existing);
       }
 
-      const current = await client.query<{ ref_sequence: string; release_id: string; commit_sha: string }>(
-        `select ref_sequence::text,release_id,commit_sha
-         from jina_context.current_context_board_releases
-         where tenant_id=$1 and repository=$2 and ref_name=$3
+      const current = await client.query<{
+        ref_sequence: string;
+        release_id: string;
+        commit_sha: string;
+        release_artifact: unknown;
+      }>(
+        `select current.ref_sequence::text,current.release_id,current.commit_sha,publication.release_artifact
+         from jina_context.current_context_board_releases current
+         join jina_context.context_board_publications publication
+           on publication.tenant_id=current.tenant_id and publication.release_id=current.release_id
+         where current.tenant_id=$1 and current.repository=$2 and current.ref_name=$3
          for update`,
         [input.scope.tenantId, input.scope.repository, input.scope.ref]
       );
       const currentSequence = Number(current.rows[0]?.ref_sequence ?? 0);
       const currentReleaseId = current.rows[0]?.release_id;
-      if (
-        currentSequence > 0 &&
-        (!input.priorRelease ||
-          input.priorRelease.releaseId !== currentReleaseId ||
-          input.priorRelease.refSequence !== currentSequence)
-      ) {
+      if (!contextPublicationMayAdvanceCurrent({
+        tenantId: input.scope.tenantId,
+        repository: input.scope.repository,
+        publicationSequence: input.scope.refSequence,
+        ...(currentSequence > 0 && currentReleaseId
+          ? {
+              current: {
+                refSequence: currentSequence,
+                releaseId: currentReleaseId,
+                releaseArtifact: current.rows[0]!.release_artifact
+              }
+            }
+          : {}),
+        ...(input.priorRelease ? { priorRelease: input.priorRelease } : {})
+      })) {
         throw new BoardContextPublicationError(
           "stale_ref_sequence",
           "publication is not based on the current immutable prior Context release"
@@ -254,6 +270,36 @@ export class PostgresBoardContextPublicationRepository
       client.release();
     }
   }
+}
+
+/** @internal Exported for the exact legacy-boundary transaction policy test. */
+export function contextPublicationMayAdvanceCurrent(input: {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly publicationSequence: number;
+  readonly current?: {
+    readonly refSequence: number;
+    readonly releaseId: string;
+    readonly releaseArtifact: unknown;
+  };
+  readonly priorRelease?: Pick<ContextPriorReleaseSeed, "releaseId" | "refSequence">;
+}): boolean {
+  if (!input.current) return input.priorRelease === undefined;
+  if (
+    input.priorRelease?.releaseId === input.current.releaseId &&
+    input.priorRelease.refSequence === input.current.refSequence
+  ) {
+    return true;
+  }
+  return (
+    input.priorRelease === undefined &&
+    input.current.refSequence < input.publicationSequence &&
+    isLegacyContextV2ReleaseArtifact(input.current.releaseArtifact, {
+      tenantId: input.tenantId,
+      repository: input.repository,
+      releaseId: input.current.releaseId
+    })
+  );
 }
 
 function isLegacyContextV2ReleaseArtifact(
