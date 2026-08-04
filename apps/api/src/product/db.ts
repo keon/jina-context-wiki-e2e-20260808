@@ -1,4 +1,5 @@
 import pg from "pg";
+import type { PoolConfig } from "pg";
 
 const { Pool } = pg;
 
@@ -18,17 +19,47 @@ export function productDatabaseConnectionString(environment: NodeJS.ProcessEnv =
   return legacyUrl || undefined;
 }
 
+/**
+ * Product data now shares the v2 database connection used by Context in staging.
+ * `url` remains the default so production can adopt the cutover independently;
+ * setting `JINA_PRODUCT_DATABASE_MODE=shared` is the explicit, fail-closed switch.
+ */
+export function productDatabaseConfig(environment: NodeJS.ProcessEnv = process.env): PoolConfig | undefined {
+  const mode = environment.JINA_PRODUCT_DATABASE_MODE?.trim() || "url";
+  if (mode === "shared") {
+    const host = environment.INSTANCE_UNIX_SOCKET?.trim() || environment.DB_HOST?.trim();
+    const user = environment.DB_USER?.trim();
+    const password = environment.DB_PASS;
+    const database = environment.DB_NAME?.trim();
+    if (!host || !user || !password || !database) return undefined;
+    return {
+      host,
+      user,
+      password,
+      database,
+      ...(environment.DB_PORT ? { port: Number(environment.DB_PORT) } : {}),
+    };
+  }
+  if (mode !== "url") {
+    throw new Error(`Unsupported JINA_PRODUCT_DATABASE_MODE: ${mode}`);
+  }
+  const connectionString = productDatabaseConnectionString(environment);
+  return connectionString ? { connectionString } : undefined;
+}
+
 export function databaseConfigured(): boolean {
-  return productDatabaseConnectionString() !== undefined;
+  return productDatabaseConfig() !== undefined;
 }
 
 export function getPool(): pg.Pool {
   if (!pool) {
-    const connectionString = productDatabaseConnectionString();
-    if (!connectionString) {
-      throw new Error("JINA_PRODUCT_DATABASE_URL or DATABASE_URL is not set");
+    const config = productDatabaseConfig();
+    if (!config) {
+      throw new Error(
+        "Product database is not configured: set the shared DB_* values or JINA_PRODUCT_DATABASE_URL",
+      );
     }
-    pool = new Pool({ connectionString, max: 5, idleTimeoutMillis: 30_000 });
+    pool = new Pool({ ...config, max: 5, idleTimeoutMillis: 30_000 });
   }
 
   return pool;

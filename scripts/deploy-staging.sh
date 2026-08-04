@@ -19,13 +19,11 @@ worker_image="${gar}/worker:${IMAGE_TAG}"
 api_service="jina-api-staging"
 context_worker_service="jina-context-worker-staging"
 task_worker_service="jina-task-worker-staging"
-migration_job="jina-context-migrate-staging"
-product_migration_job="jina-product-migrate-staging"
+migration_job="jina-v2-migrate-staging"
 api_service_account="jina-api-staging@${project}.iam.gserviceaccount.com"
 context_worker_service_account="jina-context-worker-staging@${project}.iam.gserviceaccount.com"
 task_worker_service_account="jina-task-worker-staging@${project}.iam.gserviceaccount.com"
 migration_service_account="jina-migration-staging@${project}.iam.gserviceaccount.com"
-product_migration_service_account="jina-api-staging-runtime@${project}.iam.gserviceaccount.com"
 
 owner_password_secret="jina-staging-owner-db-password"
 runtime_password_secret="jina-staging-db-password"
@@ -34,7 +32,6 @@ internal_token_secret="${JINA_V2_INTERNAL_TOKEN_SECRET:-jina-v2-staging-internal
 context_token_secret="jina-staging-context-api-token"
 checkpoint_secret="jina-staging-context-private-checkpoint-key"
 product_internal_token_secret="jina-staging-internal-api-token"
-product_database_secret="jina-staging-database-url"
 product_encryption_secret="jina-staging-secrets-encryption-key"
 trigger_secret="jina-staging-trigger-secret-key"
 clerk_secret="jina-staging-clerk-secret-key"
@@ -58,7 +55,6 @@ required_staging_values=(
   "${context_worker_service}"
   "${task_worker_service}"
   "${migration_job}"
-  "${product_migration_job}"
   "${owner_password_secret}"
   "${runtime_password_secret}"
   "${webhook_secret}"
@@ -66,7 +62,6 @@ required_staging_values=(
   "${context_token_secret}"
   "${checkpoint_secret}"
   "${product_internal_token_secret}"
-  "${product_database_secret}"
   "${product_encryption_secret}"
   "${trigger_secret}"
   "${clerk_secret}"
@@ -113,7 +108,6 @@ for service_account in \
   "${migration_service_account}"; do
   gcloud iam service-accounts describe "${service_account}" --project="${project}" >/dev/null
 done
-gcloud iam service-accounts describe "${product_migration_service_account}" --project="${project}" >/dev/null
 for secret_name in \
   "${owner_password_secret}" \
   "${runtime_password_secret}" \
@@ -122,7 +116,6 @@ for secret_name in \
   "${context_token_secret}" \
   "${checkpoint_secret}" \
   "${product_internal_token_secret}" \
-  "${product_database_secret}" \
   "${product_encryption_secret}" \
   "${trigger_secret}" \
   "${clerk_secret}" \
@@ -138,43 +131,40 @@ for secret_name in \
 done
 gcloud storage buckets describe "gs://${artifact_bucket}" --project="${project}" >/dev/null
 
-gcloud run jobs deploy "${migration_job}" \
-  --project="${project}" \
-  --region="${region}" \
-  --image="${api_image}" \
-  --service-account="${migration_service_account}" \
-  --set-cloudsql-instances="${sql_instance}" \
-  --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${owner_user}~CONTEXT_RUNTIME_DB_USER=${runtime_user}" \
-  --set-secrets="DB_PASS=${owner_password_secret}:latest" \
-  --args=node_modules/@jina/db/dist/migrate.js,--install-roles \
-  --tasks=1 \
-  --max-retries=0 \
-  --task-timeout=15m \
-  --quiet
-gcloud run jobs execute "${migration_job}" \
-  --project="${project}" \
-  --region="${region}" \
-  --wait
+if [[ "${JINA_SKIP_STAGING_MIGRATIONS:-false}" == "true" ]]; then
+  deployed_migration_image="$(gcloud run jobs describe "${migration_job}" \
+    --project="${project}" --region="${region}" \
+    --format='value(spec.template.spec.template.spec.containers[0].image)')"
+  latest_migration_execution="$(gcloud run jobs executions list --job="${migration_job}" \
+    --project="${project}" --region="${region}" --limit=1 --format='value(metadata.name)')"
+  latest_migration_status="$(gcloud run jobs executions describe "${latest_migration_execution}" \
+    --project="${project}" --region="${region}" --format='value(status.conditions[0].status)')"
+  if [[ "${deployed_migration_image}" != "${api_image}" || "${latest_migration_status}" != "True" ]]; then
+    printf 'Refusing to skip an unverified staging migration for %s\n' "${api_image}" >&2
+    exit 2
+  fi
+else
+  gcloud run jobs deploy "${migration_job}" \
+    --project="${project}" \
+    --region="${region}" \
+    --image="${api_image}" \
+    --service-account="${migration_service_account}" \
+    --set-cloudsql-instances="${sql_instance}" \
+    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${owner_user}~CONTEXT_RUNTIME_DB_USER=${runtime_user}~JINA_PRODUCT_DATABASE_MODE=shared" \
+    --set-secrets="DB_PASS=${owner_password_secret}:latest" \
+    --args=dist/product/migrate-all.js,--install-roles \
+    --tasks=1 \
+    --max-retries=0 \
+    --task-timeout=15m \
+    --quiet
+  gcloud run jobs execute "${migration_job}" \
+    --project="${project}" \
+    --region="${region}" \
+    --wait
+fi
 
-gcloud run jobs deploy "${product_migration_job}" \
-  --project="${project}" \
-  --region="${region}" \
-  --image="${api_image}" \
-  --service-account="${product_migration_service_account}" \
-  --set-cloudsql-instances="${sql_instance}" \
-  --set-secrets="JINA_PRODUCT_DATABASE_URL=${product_database_secret}:latest" \
-  --args=dist/product/migrate.js \
-  --tasks=1 \
-  --max-retries=0 \
-  --task-timeout=15m \
-  --quiet
-gcloud run jobs execute "${product_migration_job}" \
-  --project="${project}" \
-  --region="${region}" \
-  --wait
-
-api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=false~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~TRIGGER_API_URL=https://api.trigger.dev~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=20000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
-api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,TRIGGER_SECRET_KEY=${trigger_secret}:latest,JINA_PRODUCT_DATABASE_URL=${product_database_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
+api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=false~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~TRIGGER_API_URL=https://api.trigger.dev~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=20000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
+api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,TRIGGER_SECRET_KEY=${trigger_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
 gcloud run deploy "${api_service}" \
   --project="${project}" \
   --region="${region}" \

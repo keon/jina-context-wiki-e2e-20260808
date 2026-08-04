@@ -102,7 +102,6 @@ required_variables=(
   TRIGGER_SECRET_KEY_SECRET_NAME
   OAUTH_CLIENT_SECRET_NAME
   CLERK_SECRET_KEY_SECRET_NAME
-  DATABASE_URL_SECRET_NAME
   ENCRYPTION_KEY_SECRET_NAME
   GRAPH_API_TOKEN_SECRET_NAME
   GRAPH_INTERNAL_TOKEN_SECRET_NAME
@@ -181,11 +180,11 @@ else
 fi
 
 if gcloud iam service-accounts describe \
-    "jina-api-staging-runtime@${staging_project}.iam.gserviceaccount.com" \
+    "jina-migration-staging@${staging_project}.iam.gserviceaccount.com" \
     --project="${staging_project}" >/dev/null 2>&1; then
-  pass "Product migration staging service account exists"
+  pass "Unified v2 migration staging service account exists"
 else
-  fail "Product migration staging service account is missing"
+  fail "Unified v2 migration staging service account is missing"
 fi
 
 product_secrets=(
@@ -195,7 +194,6 @@ product_secrets=(
   jina-staging-trigger-secret-key
   jina-staging-github-oauth-client-secret
   jina-staging-clerk-secret-key
-  jina-staging-database-url
   jina-staging-secrets-encryption-key
   jina-staging-graph-api-token
   jina-staging-graph-internal-token
@@ -209,6 +207,61 @@ for secret_name in "${product_secrets[@]}"; do
     fail "Product Secret Manager secret ${secret_name} is missing a latest version"
   fi
 done
+
+api_service_json="$(gcloud run services describe jina-api-staging \
+  --project="${staging_project}" --region="${region}" --format=json 2>/dev/null || true)"
+if jq -e '
+    . as $service |
+    ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_PRODUCT_DATABASE_MODE" and .value == "shared")] | length == 1) and
+    ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_PRODUCT_DATABASE_URL")] | length == 0)
+  ' <<<"${api_service_json}" >/dev/null; then
+  pass "Staging product data uses the shared v2 database connection"
+else
+  fail "Staging product data must use shared v2 DB_* credentials without JINA_PRODUCT_DATABASE_URL"
+fi
+
+database_users="$(gcloud sql users list --instance=jina-db-staging \
+  --project="${staging_project}" --format='value(name)' 2>/dev/null || true)"
+if grep -Fxq jina_v2_staging_app <<<"${database_users}" &&
+    ! grep -Fxq jina_v1_staging_app <<<"${database_users}"; then
+  pass "Cloud SQL has the v2 runtime user and no legacy v1 runtime user"
+else
+  fail "Cloud SQL runtime users have not completed the v2 cutover"
+fi
+
+if gcloud run jobs describe jina-v2-migrate-staging --project="${staging_project}" \
+    --region="${region}" >/dev/null 2>&1; then
+  pass "Unified v2 staging migration job exists"
+else
+  fail "Unified v2 staging migration job is missing"
+fi
+
+for legacy_job in \
+  jina-product-migrate-staging \
+  jina-context-migrate-staging \
+  jina-context-role-bootstrap-staging; do
+  if gcloud run jobs describe "${legacy_job}" --project="${staging_project}" \
+      --region="${region}" >/dev/null 2>&1; then
+    fail "Legacy staging migration job ${legacy_job} still exists"
+  else
+    pass "Legacy staging migration job ${legacy_job} is absent"
+  fi
+done
+for legacy_secret in jina-staging-database-url jina-v1-staging-db-password; do
+  if gcloud secrets describe "${legacy_secret}" --project="${staging_project}" >/dev/null 2>&1; then
+    fail "Legacy staging database secret ${legacy_secret} still exists"
+  else
+    pass "Legacy staging database secret ${legacy_secret} is absent"
+  fi
+done
+if gcloud run jobs describe jina-v2-db-cutover-staging --project="${staging_project}" \
+    --region="${region}" >/dev/null 2>&1; then
+  fail "One-time staging database cutover job still exists"
+else
+  pass "One-time staging database cutover job is absent"
+fi
 
 staging_services=(
   jina-api-staging

@@ -39,6 +39,7 @@ const postgresStateStore = await readFile("packages/db/src/postgres-json-state-s
 const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
 const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
 const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
+const stagingDatabaseCutover = await readFile("scripts/cutover-staging-database-v2.sh", "utf8");
 
 async function withFakeGcloud(source, callback) {
   const directory = await mkdtemp(join(tmpdir(), "jina-deploy-gcloud-"));
@@ -67,11 +68,18 @@ test("production deployment shell is syntactically valid", async () => {
   await execFileAsync(process.execPath, ["--check", "scripts/context-production-trigger-e2e.mjs"]);
 });
 
-test("staging keeps the product database URL isolated from the Context database", async () => {
+test("staging uses one v2 database connection and one migration job", async () => {
   await execFileAsync("bash", ["-n", "scripts/deploy-staging.sh"]);
-  assert.match(stagingDeployment, /JINA_PRODUCT_DATABASE_URL=\$\{product_database_secret\}:latest/);
-  assert.doesNotMatch(stagingDeployment, /(?:^|[,\"])(?:DATABASE_URL)=\$\{product_database_secret\}:latest/m);
+  await execFileAsync("bash", ["-n", "scripts/cutover-staging-database-v2.sh"]);
+  assert.match(stagingDeployment, /JINA_PRODUCT_DATABASE_MODE=shared/);
+  assert.match(stagingDeployment, /migration_job="jina-v2-migrate-staging"/);
+  assert.match(stagingDeployment, /--args=dist\/product\/migrate-all\.js,--install-roles/);
+  assert.doesNotMatch(stagingDeployment, /JINA_PRODUCT_DATABASE_URL|jina-staging-database-url/);
+  assert.doesNotMatch(stagingDeployment, /jina-product-migrate-staging|jina-context-migrate-staging/);
   assert.match(stagingDeployment, /services update-traffic "\$\{api_service\}"[\s\S]+?--to-latest/);
+  assert.match(stagingDatabaseCutover, /for _attempt in \$\(seq 1 180\)/);
+  assert.match(stagingDatabaseCutover, /jina-v1-staging-db-password/);
+  assert.match(stagingDatabaseCutover, /gcloud run jobs delete "\$\{job\}"/);
 });
 
 test("production compute, images, artifacts, and shared database are co-located in us-east1", () => {

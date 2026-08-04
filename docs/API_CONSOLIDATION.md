@@ -23,12 +23,15 @@ deployment configuration.
 - `services/review-trigger` contains the Trigger.dev review orchestration and
   Daytona runtime.
 - `apps/api/product-migrations` contains the product schema migrations. Context
-  schema migrations remain in `packages/db`.
+  schema definitions remain in `packages/db`; one v2 migration job applies both
+  sets against the same database before the API is deployed.
 
 There is no deployable legacy API or dashboard package and no `/v1/dashboard`
 route surface. The compatibility boundary is internal: the dashboard/review
-handler and Context handler are composed behind the same listener while their
-database credentials and worker credentials remain independently scoped.
+handler and Context handler are composed behind the same listener and use the
+same v2 runtime database identity. Context still activates narrowly scoped
+capability roles per transaction, and worker credentials remain independently
+scoped.
 
 ## Request routing
 

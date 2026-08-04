@@ -10,6 +10,8 @@
     "dev": "pnpm build && JINA_ENABLE_DEV_ENDPOINTS=true JINA_SIMULATE_RUNS=true node dist/dev-server.js",
     "start": "node dist/dev-server.js",
     "migrate:product": "node dist/product/migrate.js",
+    "migrate:all": "node dist/product/migrate-all.js --install-roles",
+    "database:cutover": "node dist/product/database-cutover.js",
     "identity:backfill": "node dist/product/backfill-internal-users.js",
     "tenant-installation:rollback": "node dist/product/rollback-tenant-installation.js",
     "sync:webhook": "node dist/product/sync-github-webhook.js"
