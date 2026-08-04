@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { apiUrl, safeHref } from "../lib/api";
 import { Badge } from "../components/ui";
 import { formatDate } from "../lib/presentation";
@@ -52,45 +53,37 @@ export default function BillingPage() {
 
   if (billing === undefined) {
     return (
-      <section className="panel">
-        <div className="form">
-          <p className="cell-meta">Loading billing…</p>
-        </div>
-      </section>
+      <BillingFrame selected={selected}>
+        <BillingState title="Loading billing" detail="Checking your plan, balances, and spending controls." />
+      </BillingFrame>
     );
   }
 
   if (billing.status === "not_configured") {
     return (
-      <section className="panel">
-        <div className="panel__head">
-          <span className="panel__title">Billing</span>
-        </div>
-        <div className="form">
-          <p className="form__lead">Billing isn&rsquo;t set up for this account yet.</p>
-          <p className="cell-meta">
-            Contact Jina to activate a plan.
-          </p>
-        </div>
-      </section>
+      <BillingFrame selected={selected}>
+        <BillingState
+          title="Billing is not configured"
+          detail="Contact Jina to activate billing for this workspace. Nothing has been charged."
+        />
+      </BillingFrame>
     );
   }
 
   if (billing.status === "unavailable") {
     return (
-      <section className="panel">
-        <div className="panel__head">
-          <span className="panel__title">Billing</span>
-        </div>
-        <div className="notice notice--bad">
-          Billing is temporarily unavailable &mdash; your plan and balances will reappear shortly.
-        </div>
-      </section>
+      <BillingFrame selected={selected}>
+        <BillingState
+          title="Billing is temporarily unavailable"
+          detail="Your plan and balances have not changed. Retry when the billing service is reachable."
+          action={<button type="button" className="btn btn--sm" onClick={reload}>Retry</button>}
+        />
+      </BillingFrame>
     );
   }
 
   return (
-    <div className="billing-page">
+    <BillingFrame selected={selected}>
       <PlanHero billing={billing} selected={selected} writable={writable} isCurrentTenant={isCurrentTenant} />
       <BillingDetails billing={billing} selected={selected} isOrg={isOrg} />
       <AutoReviewLimit
@@ -102,7 +95,38 @@ export default function BillingPage() {
       />
       <AutoReload selected={selected} writable={writable} isCurrentTenant={isCurrentTenant} />
       <BillingActivity billing={billing} />
+    </BillingFrame>
+  );
+}
+
+function BillingFrame({ selected, children }: { selected: SelectedTenant | null; children: ReactNode }) {
+  return (
+    <div className="billing-v2">
+      <header className="route-intro">
+        <div>
+          <h1>Billing</h1>
+          <p>Manage your plan, credit balance, and automatic review spending.</p>
+        </div>
+        {selected ? <span className="route-intro__scope">{selected.login}</span> : null}
+      </header>
+      <nav className="billing-v2__tabs" aria-label="Usage and billing">
+        <Link href="/usage">Review usage</Link>
+        <span aria-current="page">Billing and limits</span>
+      </nav>
+      {children}
     </div>
+  );
+}
+
+function BillingState({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) {
+  return (
+    <section className="billing-v2__state" role="status">
+      <div>
+        <strong>{title}</strong>
+        <p>{detail}</p>
+      </div>
+      {action}
+    </section>
   );
 }
 
@@ -154,8 +178,8 @@ function PlanHero({
   };
 
   return (
-    <section className="panel">
-      <div className="plan-hero">
+    <section className="billing-v2__plan">
+      <div className="billing-v2__plan-head">
         <div className="plan-hero__lead">
           <span className="plan-hero__kicker">Current plan</span>
           {currentPlan ? (
@@ -176,7 +200,7 @@ function PlanHero({
           </p>
         </div>
         {writable ? (
-          <button type="button" className="btn btn--primary" onClick={() => setChoosing((prev) => !prev)}>
+          <button type="button" className="btn btn--sm" onClick={() => setChoosing((prev) => !prev)}>
             {choosing ? "Cancel" : currentPlan ? "Change plan" : "Choose a plan"}
           </button>
         ) : null}
@@ -185,11 +209,11 @@ function PlanHero({
       {!writable ? (
         <p className="tenant-gate-note">Managed by org admins.</p>
       ) : choosing ? (
-        <div className="plan-chooser">
+        <div className="billing-v2__plans">
           {BILLING_PLANS.map((plan) => {
             const isCurrent = billing.plan_id === plan.id;
             return (
-              <div className={`plan-card${isCurrent ? " plan-card--current" : ""}`} key={plan.id}>
+              <div className={`billing-v2__plan-option${isCurrent ? " billing-v2__plan-option--current" : ""}`} key={plan.id}>
                 <div className="plan-card__head">
                   <span className="plan-card__name">{plan.name}</span>
                   {isCurrent ? <Badge tone="ok">Current</Badge> : null}
@@ -201,7 +225,7 @@ function PlanHero({
                 <div className="plan-card__credits">{formatCredits(plan.credits)} credits included</div>
                 <button
                   type="button"
-                  className="btn btn--primary btn--block"
+                  className="btn btn--sm"
                   onClick={() => void subscribe(plan.id)}
                   disabled={busyPlan !== null || isCurrent}
                 >
@@ -237,17 +261,20 @@ function BillingDetails({
       : "—";
 
   return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">Billing details</span>
+    <section className="billing-v2__section">
+      <div className="billing-v2__section-head">
+        <div>
+          <h2>Balance</h2>
+          <p>Credits available to this workspace.</p>
+        </div>
         {selected ? (
           <span className="cell-meta">
             Account: {selected.login} · {selected.type === "Organization" ? "Organization" : "Personal"}
           </span>
         ) : null}
       </div>
-      <div className="summary-bar">
-        <div className="metric">
+      <div className="billing-v2__metrics">
+        <div className="billing-v2__metric">
           <span className="metric__label">Included credits left</span>
           <span className="metric__value">{includedValue}</span>
           {cycle.next_reset_at ? (
@@ -256,13 +283,13 @@ function BillingDetails({
             <span className="metric__sub">this cycle</span>
           )}
         </div>
-        <div className="metric">
+        <div className="billing-v2__metric">
           <span className="metric__label">Extra balance</span>
           <span className="metric__value">{formatCredits(billing.credits_balance)}</span>
           <span className="metric__sub">{creditsToUsd(billing.credits_balance)} at $1 = 100 credits</span>
         </div>
         {isOrg ? (
-          <div className="metric">
+          <div className="billing-v2__metric">
             <span className="metric__label">Members</span>
             <span className="metric__value">
               {members.total ?? "—"}
@@ -275,11 +302,11 @@ function BillingDetails({
       </div>
 
       {isOrg ? (
-        <p className="cell-meta">
+        <p className="billing-v2__note">
           Balances shown are for {selected?.login}.
         </p>
       ) : (
-        <p className="cell-meta">Personal account.</p>
+        <p className="billing-v2__note">Personal account.</p>
       )}
     </section>
   );
@@ -362,14 +389,14 @@ function AutoReviewLimit({
         : null;
 
   return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">Auto-review limit</span>
+    <section className="billing-v2__section">
+      <div className="billing-v2__section-head">
+        <div>
+          <h2>Auto-review limit</h2>
+          <p>Pause automatic reviews after a credit threshold. Manual reviews are unaffected.</p>
+        </div>
       </div>
-      <div className="form">
-        <p className="form__lead">
-          Auto-reviews pause at this limit for the rest of the cycle. Manual reviews are unaffected.
-        </p>
+      <div className="billing-v2__setting">
         {!writable ? (
           <p className="tenant-gate-note">Managed by org admins.</p>
         ) : null}
@@ -407,7 +434,7 @@ function AutoReviewLimit({
 
         {usedLabel ? <p className="cell-meta">{usedLabel}</p> : null}
 
-        <div className="form__foot">
+        <div className="billing-v2__actions">
           <span className={status?.kind === "error" ? "error-text" : "cell-meta"}>
             {status?.kind === "error" ? status.message : status?.kind === "saved" ? "Saved" : ""}
           </span>
@@ -478,20 +505,14 @@ function AutoReload({
   };
 
   return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">Auto-reload</span>
-        <span className="panel__actions">
-          <Badge>Coming soon</Badge>
-        </span>
+    <section className="billing-v2__section">
+      <div className="billing-v2__section-head">
+        <div>
+          <h2>Add balance</h2>
+          <p>Purchase additional credits for reviews beyond the included plan balance.</p>
+        </div>
       </div>
-      <div className="form">
-        <label className="toggle-row toggle-row--disabled">
-          <input type="checkbox" className="toggle-row__input" checked={false} disabled readOnly />
-          <span className="toggle-row__label">Auto top-up when the balance runs low</span>
-        </label>
-        <p className="cell-meta">Coming soon.</p>
-
+      <div className="billing-v2__setting">
         <div className="topup">
           <label className="form-field topup__amount">
             <span className="form-field__label">Top-up amount</span>
@@ -528,7 +549,7 @@ function AutoReload({
           ) : null}
         </div>
 
-        <div className="form__foot">
+        <div className="billing-v2__actions">
           <span className={message ? "error-text" : "cell-meta"}>
             {message ?? (credits !== null ? `You'll be charged ${creditsToUsd(credits)} for ${formatCredits(credits)} credits.` : "")}
           </span>
@@ -551,9 +572,12 @@ function AutoReload({
 function BillingActivity({ billing }: { billing: Billing }) {
   const rows = billing.billing_activity;
   return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">Billing activity</span>
+    <section className="billing-v2__section">
+      <div className="billing-v2__section-head">
+        <div>
+          <h2>Billing activity</h2>
+          <p>Recent invoices and account balance changes.</p>
+        </div>
         {rows.length > 0 ? <span className="panel__count">{rows.length}</span> : null}
       </div>
       {rows.length === 0 ? (

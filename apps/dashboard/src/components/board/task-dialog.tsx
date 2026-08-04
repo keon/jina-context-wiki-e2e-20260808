@@ -1,45 +1,52 @@
 "use client";
 
-import { Fragment, useEffect, useRef } from "react";
+import { Fragment, useEffect, useMemo, useRef } from "react";
 import { taskRelationships } from "../../lib/board.ts";
 import { eventLabel, formatTime, formatValue, humanize, shortId } from "../../lib/format.ts";
 import type { BoardEvent, BoardState, BoardTask } from "../../lib/types.ts";
 
-function SummaryItem({
-  label,
-  value,
-  valueClass
-}: {
-  readonly label: string;
-  readonly value: string;
-  readonly valueClass?: string;
-}) {
-  return (
-    <div className="summary-item">
-      <span className="label">{label}</span>
-      <span className={valueClass ?? "value"}>{value}</span>
-    </div>
-  );
+interface TaskFact {
+  label: string;
+  value: string;
+  status?: BoardTask["status"];
 }
 
-function Summary({ task }: { readonly task: BoardTask }) {
-  const workspace = typeof task.metadata?.workspaceLabel === "string" ? task.metadata.workspaceLabel : "–";
-  const author = typeof task.metadata?.authorLogin === "string" ? `@${task.metadata.authorLogin}` : "–";
+function taskFacts(task: BoardTask): TaskFact[] {
+  const workspace = typeof task.metadata?.workspaceLabel === "string" ? task.metadata.workspaceLabel : "—";
+  const author = typeof task.metadata?.authorLogin === "string" ? `@${task.metadata.authorLogin}` : "—";
+  return [
+    { label: "Status", value: humanize(task.status), status: task.status },
+    { label: "Assignee", value: humanize(task.assigneeRole) },
+    { label: "Attempt", value: String(task.attempt) },
+    { label: "Epoch", value: task.epoch === undefined ? "—" : String(task.epoch) },
+    { label: "Workspace", value: workspace },
+    { label: "PR author", value: author },
+    { label: "Created", value: formatTime(task.createdAt) },
+    { label: "Updated", value: formatTime(task.updatedAt) }
+  ];
+}
+
+function Overview({ task }: { readonly task: BoardTask }) {
+  const summary = typeof task.metadata?.summary === "string" ? task.metadata.summary : null;
   return (
-    <section className="summary-grid">
-      <SummaryItem label="Status" value={humanize(task.status)} valueClass={`status status-${task.status}`} />
-      <SummaryItem label="Assignee" value={humanize(task.assigneeRole)} />
-      <SummaryItem label="Attempt" value={String(task.attempt)} />
-      <SummaryItem label="Epoch" value={String(task.epoch ?? "–")} />
-      <SummaryItem label="Workspace" value={workspace} />
-      <SummaryItem label="PR author" value={author} />
-      <SummaryItem label="Created" value={formatTime(task.createdAt)} />
-      <SummaryItem label="Updated" value={formatTime(task.updatedAt)} />
+    <section className="task-detail__section" aria-labelledby="task-overview-title">
+      <h3 id="task-overview-title">Overview</h3>
+      {summary ? <p className="task-detail__summary">{summary}</p> : null}
+      <dl className="task-detail__facts">
+        {taskFacts(task).map((fact) => (
+          <div className="task-detail__fact" key={fact.label}>
+            <dt>{fact.label}</dt>
+            <dd className={fact.status ? `task-detail__status task-detail__status--${fact.status}` : undefined}>
+              {fact.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </section>
   );
 }
 
-function RelationshipSection({
+function Relationships({
   task,
   board,
   onOpenTask
@@ -50,45 +57,54 @@ function RelationshipSection({
 }) {
   const relationships = taskRelationships(task, board);
   return (
-    <section className="section">
-      <h3>Dependencies &amp; relationships</h3>
-      <div className="relationship-list">
-        {relationships.length === 0 ? <p className="empty-detail">No task relationships.</p> : null}
-        {relationships.map((relationship, index) => {
-          const related = board.tasks.find((item) => item.id === relationship.taskId);
-          return (
-            <button
-              type="button"
-              className="relationship"
-              data-task-id={relationship.taskId}
-              key={`${index}-${relationship.direction}-${relationship.taskId}`}
-              onClick={() => onOpenTask(relationship.taskId)}
-            >
-              <span className="relation-direction">{relationship.direction}</span>
-              <span className="relation-title">{related ? related.title : shortId(relationship.taskId)}</span>
-              <span className="relation-type">
-                {relationship.relationship + (relationship.required ? " · required" : "")}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+    <section className="task-detail__section" aria-labelledby="task-relationships-title">
+      <h3 id="task-relationships-title">Relationships</h3>
+      {relationships.length === 0 ? (
+        <p className="task-detail__empty">No task relationships.</p>
+      ) : (
+        <div className="task-detail__relationships">
+          {relationships.map((relationship, index) => {
+            const related = board.tasks.find((item) => item.id === relationship.taskId);
+            return (
+              <button
+                type="button"
+                className="task-detail__relationship"
+                key={`${index}-${relationship.direction}-${relationship.taskId}`}
+                onClick={() => onOpenTask(relationship.taskId)}
+              >
+                <span className="task-detail__relationship-copy">
+                  <small>{humanize(relationship.direction)}</small>
+                  <strong>{related ? related.title : shortId(relationship.taskId)}</strong>
+                </span>
+                <span className="task-detail__relationship-meta">
+                  {humanize(relationship.relationship)}
+                  {relationship.required ? " · Required" : ""}
+                </span>
+                <span aria-hidden="true">›</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }
 
-function MetadataSection({ task }: { readonly task: BoardTask }) {
+function TechnicalDetails({ task }: { readonly task: BoardTask }) {
   const entries: (readonly [string, unknown])[] = [
     ["Task ID", task.id],
-    ["Dedupe key", task.dedupeKey],
-    ["Required", String(task.required)],
-    ["Dispatch topic", task.dispatchTopic || "–"]
+    ["Dedupe key", task.dedupeKey || "—"],
+    ["Required", task.required === undefined ? "—" : task.required],
+    ["Dispatch topic", task.dispatchTopic || "—"],
+    ...Object.entries(task.metadata ?? {})
+      .filter(([key]) => key !== "summary")
+      .sort((left, right) => left[0].localeCompare(right[0]))
   ];
-  entries.push(...Object.entries(task.metadata ?? {}).sort((left, right) => left[0].localeCompare(right[0])));
+
   return (
-    <section className="section">
-      <h3>Metadata</h3>
-      <dl className="metadata">
+    <details className="task-detail__technical">
+      <summary>Technical details</summary>
+      <dl>
         {entries.map(([label, value], index) => (
           <Fragment key={`${index}-${label}`}>
             <dt>{humanize(label)}</dt>
@@ -104,28 +120,32 @@ function MetadataSection({ task }: { readonly task: BoardTask }) {
           </Fragment>
         ))}
       </dl>
-    </section>
+    </details>
   );
 }
 
-function ActivitySection({ task, events }: { readonly task: BoardTask; readonly events: readonly BoardEvent[] }) {
-  const taskEvents = events
-    .filter((event) => event.taskId === task.id)
-    .slice()
-    .reverse();
+function Activity({ task, events }: { readonly task: BoardTask; readonly events: readonly BoardEvent[] }) {
+  const taskEvents = useMemo(
+    () =>
+      events
+        .filter((event) => event.taskId === task.id)
+        .slice()
+        .reverse(),
+    [events, task.id]
+  );
   return (
-    <section className="section">
-      <h3>Comments &amp; activity</h3>
-      <div className="timeline">
-        {taskEvents.length === 0 ? <p className="empty-detail">No comments or activity recorded.</p> : null}
+    <section className="task-detail__section" aria-labelledby="task-activity-title">
+      <h3 id="task-activity-title">Activity</h3>
+      {taskEvents.length === 0 ? <p className="task-detail__empty">No activity recorded.</p> : null}
+      <div className="task-detail__timeline">
         {taskEvents.map((event) => (
-          <article className="event" key={event.id}>
-            <div className="event-top">
-              <span className="event-type">{eventLabel(event)}</span>
-              <time className="event-time">{formatTime(event.at)}</time>
+          <article className="task-detail__event" key={event.id}>
+            <div>
+              <strong>{eventLabel(event)}</strong>
+              <time>{formatTime(event.at)}</time>
             </div>
             {event.payload && Object.keys(event.payload).length > 0 ? (
-              <pre className="event-payload">{JSON.stringify(event.payload, null, 2)}</pre>
+              <pre>{JSON.stringify(event.payload, null, 2)}</pre>
             ) : null}
           </article>
         ))}
@@ -149,25 +169,18 @@ export function TaskDialog({
 }) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
 
-  // The dialog opens non-modally, and the stylesheet keys the inspector
-  // layout off body.has-task-inspector while a task is selected.
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
-    if (task) {
-      document.body.classList.add("has-task-inspector");
-      if (!dialog.open) dialog.show();
-    } else {
-      if (dialog.open) dialog.close();
-      document.body.classList.remove("has-task-inspector");
-    }
+    if (task && !dialog.open) dialog.showModal();
+    if (!task && dialog.open) dialog.close();
   }, [task]);
-  useEffect(() => () => document.body.classList.remove("has-task-inspector"), []);
 
   return (
     <dialog
       id="task-dialog"
-      aria-labelledby="detail-title"
+      className="task-detail"
+      aria-labelledby="task-detail-title"
       ref={dialogRef}
       onCancel={(event) => {
         event.preventDefault();
@@ -177,26 +190,24 @@ export function TaskDialog({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <header className="detail-header">
+      <header className="task-detail__header">
         <div>
-          <p className="eyebrow" id="detail-eyebrow">
-            {task ? `${humanize(task.type)} · ${shortId(task.id)}` : "Task details"}
-          </p>
-          <h2 className="detail-title" id="detail-title">
-            {task ? task.title : ""}
-          </h2>
+          <p>{task ? `${humanize(task.type)} · ${shortId(task.id)}` : "Task details"}</p>
+          <h2 id="task-detail-title">{task?.title ?? ""}</h2>
         </div>
-        <button type="button" className="close" id="close-detail" aria-label="Close task details" onClick={onClose}>
-          ×
+        <button type="button" className="task-detail__close" aria-label="Close task details" onClick={onClose}>
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="m4 4 8 8m0-8-8 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
         </button>
       </header>
-      <div className="detail-body" id="detail-body">
+      <div className="task-detail__body">
         {task ? (
           <>
-            <Summary task={task} />
-            <RelationshipSection task={task} board={board} onOpenTask={onOpenTask} />
-            <MetadataSection task={task} />
-            <ActivitySection task={task} events={events} />
+            <Overview task={task} />
+            <Relationships task={task} board={board} onOpenTask={onOpenTask} />
+            <TechnicalDetails task={task} />
+            <Activity task={task} events={events} />
           </>
         ) : null}
       </div>

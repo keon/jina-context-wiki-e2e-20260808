@@ -9,9 +9,32 @@ import { EMPTY_BOARD_FILTERS, filterBoardTasks, partitionBoardTasks, uniqueValue
 import { usePoll } from "../../lib/poll.ts";
 import { tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import type { BoardState, OverviewResponse } from "../../lib/types.ts";
-import { useTenant } from "../../dashboard/providers.tsx";
+import { useDashboard, useTenant } from "../../dashboard/providers.tsx";
 
 const EMPTY_BOARD: BoardState = { tasks: [], dependencies: [] };
+const LOCAL_REVIEW_BOARD: BoardState = {
+  tasks: [
+    {
+      id: "local-runtime-cross-cart-promo-probe",
+      type: "runtime-review-probe",
+      title: "Cross-cart promo checkout probe",
+      status: "done",
+      assigneeRole: "review-agent",
+      attempt: 1,
+      epoch: 1,
+      createdAt: "2026-06-22T14:02:00.000Z",
+      updatedAt: "2026-06-22T14:03:00.000Z",
+      metadata: {
+        repository: "local/review-work-fixture",
+        workspaceLabel: "Personal workspace",
+        authorLogin: "local-dev",
+        reviewRunId: "local-review-work-fixture",
+        summary: "The promo-code branch reaches payment session creation before ownership validation."
+      }
+    }
+  ],
+  dependencies: []
+};
 
 /** Reads the task selected via the URL hash: `#task=<encodeURIComponent id>`. */
 function taskIdFromHash(): string | null {
@@ -27,10 +50,12 @@ function taskIdFromHash(): string | null {
 
 export default function BoardPage() {
   const { selected } = useTenant();
-  const { data } = usePoll<OverviewResponse>(
-    selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "",
+  const { data: dashboardData } = useDashboard();
+  const { data } = usePoll<OverviewResponse>(selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "");
+  const hasLocalReviewFixture = dashboardData?.review_runs.some(
+    (run) => run.review_run_id === "local-review-work-fixture"
   );
-  const board = data?.board ?? EMPTY_BOARD;
+  const board = data?.board ?? (hasLocalReviewFixture ? LOCAL_REVIEW_BOARD : EMPTY_BOARD);
   const events = data?.events ?? [];
 
   const [filters, setFilters] = useState<BoardFilters>(EMPTY_BOARD_FILTERS);

@@ -1,4 +1,4 @@
-import type { DashboardResponse, ReviewEvent, ReviewRun, ViewerResponse } from "./types";
+import type { DashboardResponse, ReviewEvent, ReviewIssue, ReviewRun, ViewerResponse } from "./types";
 
 const LOCAL_REVIEW_RUN_ID = "local-review-work-fixture";
 
@@ -16,8 +16,11 @@ export function localDashboardFixtureEnabled(): boolean {
     return false;
   }
   const localHost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+  const fixtureRoute = ["/reviews", "/issues", "/board"].some((route) =>
+    window.location.pathname.startsWith(route),
+  );
   return (
-    (localHost && window.location.pathname.startsWith("/reviews")) ||
+    (localHost && fixtureRoute) ||
     window.location.pathname.includes(LOCAL_REVIEW_RUN_ID) ||
     window.localStorage.getItem("jina-dashboard-local-fixture") === "1"
   );
@@ -44,10 +47,15 @@ export function mergeLocalDashboardFixture(data: DashboardResponse | null): Dash
     return base;
   }
   const reviewRuns = [LOCAL_REVIEW_RUN, ...base.review_runs.filter((run) => run.review_run_id !== LOCAL_REVIEW_RUN_ID)];
+  const issues = [
+    ...LOCAL_ISSUES,
+    ...base.issues.filter((issue) => !LOCAL_ISSUES.some((fixtureIssue) => fixtureIssue.id === issue.id)),
+  ];
   return {
     ...base,
     generated_at: base.generated_at || generatedAt,
     review_runs: reviewRuns,
+    issues,
     projects: [
       LOCAL_PROJECT,
       ...base.projects.filter((project) => project.full_name !== LOCAL_PROJECT.full_name),
@@ -75,6 +83,39 @@ const LOCAL_PROJECT = {
   name: "review-work-fixture",
   source: "observed" as const,
 };
+
+const LOCAL_ISSUES: ReviewIssue[] = [
+  {
+    id: "local-static-checkout-owner",
+    review_run_id: LOCAL_REVIEW_RUN_ID,
+    fingerprint: "local-static-checkout-owner",
+    file_path: "src/api/checkout.ts",
+    line_number: 42,
+    severity: "high",
+    category: "auth",
+    body: "Checkout session can be created before ownership is verified.",
+    created_at: "2026-06-22T14:01:00.000Z",
+    repository: LOCAL_PROJECT.full_name,
+    pull_request: 101,
+    pull_request_title: "Local dashboard review work fixture",
+    pull_request_url: "https://github.com/local/review-work-fixture/pull/101",
+  },
+  {
+    id: "local-runtime-checkout-owner",
+    review_run_id: LOCAL_REVIEW_RUN_ID,
+    fingerprint: "local-runtime-checkout-owner",
+    file_path: "src/api/checkout.ts",
+    line_number: 42,
+    severity: "high",
+    category: "auth",
+    body: "Cross-cart checkout succeeds when a promo code is supplied.",
+    created_at: "2026-06-22T14:03:00.000Z",
+    repository: LOCAL_PROJECT.full_name,
+    pull_request: 101,
+    pull_request_title: "Local dashboard review work fixture",
+    pull_request_url: "https://github.com/local/review-work-fixture/pull/101",
+  },
+];
 
 const eventBase = Date.parse("2026-06-22T14:00:00.000Z");
 

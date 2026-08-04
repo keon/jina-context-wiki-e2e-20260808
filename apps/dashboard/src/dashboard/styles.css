@@ -345,12 +345,17 @@ button.nav__item:hover {
 .user {
   display: flex;
   align-items: center;
+  width: 100%;
   min-height: 40px;
   gap: 10px;
   margin-top: 4px;
   padding: 6px 8px;
+  border: 0;
   border-radius: 8px;
+  background: transparent;
   color: var(--ink-muted);
+  cursor: pointer;
+  text-align: left;
 }
 
 .user:hover {
@@ -359,9 +364,31 @@ button.nav__item:hover {
 }
 
 .user__avatar {
-  width: 24px;
-  height: 24px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
   border-radius: 50%;
+  background: var(--ink-strong);
+  color: var(--canvas);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.user__copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+
+.user__copy small {
+  overflow: hidden;
+  color: var(--ink-subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .user__name {
@@ -393,28 +420,86 @@ button.nav__item:hover {
 }
 
 .user-menu__popover {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 4px);
-  left: 0;
-  padding: 6px;
+  position: fixed;
+  z-index: 70;
+  bottom: 56px;
+  left: 8px;
+  width: 244px;
+  padding: 8px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
+  border-radius: 14px;
+  background: var(--surface-raised);
   box-shadow: var(--shadow-lg);
 }
 
-.user-menu__action {
-  width: 100%;
-  padding: 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  text-align: left;
+.user-menu__identity {
+  padding: 10px 10px 12px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
 }
 
-.user-menu__action:hover {
+.user-menu__identity strong {
+  font-size: 13px;
+  font-weight: 450;
+}
+
+.user-menu__workspace {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.user-menu__workspace > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.user-menu__workspace strong {
+  color: var(--ink-strong);
+  font-weight: 500;
+}
+
+.user-menu__workspace small {
+  color: var(--ink-subtle);
+  font-size: 12px;
+}
+
+.user-menu__section {
+  display: grid;
+  gap: 2px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.user-menu__action {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  gap: 10px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.user-menu__action:hover,
+.user-menu__action--active {
   background: var(--surface-hover);
+  color: var(--ink-strong);
+}
+
+.app--sidebar-collapsed .user-menu__popover {
+  bottom: 8px;
+  left: 60px;
+  width: 270px;
 }
 
 .app--sidebar-collapsed .nav__item,
@@ -434,6 +519,11 @@ button.nav__item:hover {
 .app--sidebar-collapsed .sidebar__shortcut,
 .app--sidebar-collapsed .nav__chevron,
 .app--sidebar-collapsed .user__name {
+  display: none;
+}
+
+.app--sidebar-collapsed .user__copy,
+.app--sidebar-collapsed .user > .nav__chevron {
   display: none;
 }
 
@@ -802,11 +892,11 @@ button.nav__item:hover {
 .page-placeholder {
   display: grid;
   place-items: center;
-  min-height: 320px;
-  padding: 48px 24px;
-  border: 1px dashed var(--line);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.018);
+  min-height: 240px;
+  padding: 40px 24px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--ink-subtle);
   text-align: center;
 }
@@ -2223,10 +2313,10 @@ button.nav__item:hover {
 }
 
 .context-repository-bar {
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
+  align-items: flex-end;
+  padding: 0 0 20px;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
 }
 
 .context-repository-bar__identity,
@@ -2234,6 +2324,34 @@ button.nav__item:hover {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.context-repository-bar__identity {
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.context-repository-bar__identity h1 {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: 24px;
+  font-weight: 520;
+  letter-spacing: -0.035em;
+}
+
+.context-repository-bar__identity p {
+  margin: 5px 0 0;
+  color: var(--ink-subtle);
+  font-size: 12px;
+}
+
+.context-repository-bar__actions select {
+  min-width: 180px;
+  max-width: 300px;
+}
+
+.context-page__empty {
+  min-height: 220px;
 }
 
 .context-repository-bar__mark {
@@ -2541,12 +2659,18 @@ button.nav__item:hover {
 
 .codex-modal__dialog,
 .command__dialog {
+  position: relative;
+  z-index: 1;
   width: min(600px, 100%);
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 12px;
   background: var(--surface);
   box-shadow: var(--shadow-lg);
+}
+
+.codex-modal__backdrop {
+  z-index: 0;
 }
 
 .codex-modal__head,
@@ -2837,6 +2961,22 @@ button.nav__item:hover {
   .app--sidebar-collapsed .nav__chevron,
   .app--sidebar-collapsed .user__name {
     display: initial;
+  }
+
+  .app--sidebar-collapsed .user__copy {
+    display: grid;
+  }
+
+  .app--sidebar-collapsed .user > .nav__chevron {
+    display: block;
+  }
+
+  .user-menu__popover,
+  .app--sidebar-collapsed .user-menu__popover {
+    right: auto;
+    bottom: 56px;
+    left: 8px;
+    width: min(264px, calc(100vw - 56px));
   }
 
   .app--sidebar-collapsed [data-label]::after {
@@ -3284,11 +3424,15 @@ button.nav__item:hover {
   color: var(--ink-subtle);
   font-size: 13px;
   white-space: nowrap;
+}
+
+a.usage-breakdown__tab {
   cursor: pointer;
 }
 
 .usage-breakdown__tab--active {
   color: var(--ink-strong);
+  cursor: default;
 }
 
 .usage-breakdown__tab--active::after {
@@ -3555,6 +3699,235 @@ button.nav__item:hover {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/* Billing v2 ------------------------------------------------------------- */
+.billing-v2 {
+  display: grid;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+}
+
+.billing-v2 > .route-intro {
+  margin-bottom: 8px;
+}
+
+.billing-v2__tabs {
+  display: flex;
+  min-height: 48px;
+  gap: 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.billing-v2__tabs a,
+.billing-v2__tabs span {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-subtle);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.billing-v2__tabs a:hover,
+.billing-v2__tabs span[aria-current="page"] {
+  color: var(--ink-strong);
+}
+
+.billing-v2__tabs span[aria-current="page"]::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  background: var(--ink-strong);
+  content: "";
+}
+
+.billing-v2__state,
+.billing-v2__plan,
+.billing-v2__section {
+  border-bottom: 1px solid var(--line);
+}
+
+.billing-v2__state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 140px;
+  gap: 24px;
+  padding: 28px 0;
+}
+
+.billing-v2__state strong,
+.billing-v2__section-head h2 {
+  color: var(--ink-strong);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.billing-v2__state p,
+.billing-v2__section-head p {
+  margin: 5px 0 0;
+  color: var(--ink-subtle);
+  font-size: 12px;
+}
+
+.billing-v2__plan,
+.billing-v2__section {
+  padding: 24px 0;
+}
+
+.billing-v2__plan-head,
+.billing-v2__section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.billing-v2__plan .plan-hero__lead {
+  display: grid;
+  gap: 5px;
+}
+
+.billing-v2__plan .plan-hero__name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.billing-v2__plans {
+  margin-top: 22px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.billing-v2__plan-option {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 110px minmax(170px, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  min-height: 76px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.billing-v2__plan-option:last-child {
+  border-bottom: 0;
+}
+
+.billing-v2__plan-option .plan-card__head,
+.billing-v2__plan-option .plan-card__price,
+.billing-v2__plan-option .plan-card__credits {
+  margin: 0;
+}
+
+.billing-v2__plan-option .plan-card__price {
+  font-size: 20px;
+}
+
+.billing-v2__plan-option--current {
+  color: var(--ink-strong);
+}
+
+.billing-v2__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 20px;
+  border-top: 1px solid var(--line-subtle);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.billing-v2__metric {
+  display: grid;
+  min-width: 0;
+  min-height: 110px;
+  align-content: center;
+  gap: 8px;
+  padding: 18px 20px;
+  border-right: 1px solid var(--line-subtle);
+}
+
+.billing-v2__metric:first-child {
+  padding-left: 0;
+}
+
+.billing-v2__metric:last-child {
+  border-right: 0;
+}
+
+.billing-v2__metric .metric__value {
+  color: var(--ink-strong);
+  font-size: 22px;
+  font-weight: 450;
+}
+
+.billing-v2__note {
+  margin: 12px 0 0;
+  color: var(--ink-subtle);
+  font-size: 11px;
+}
+
+.billing-v2__setting {
+  display: grid;
+  max-width: 760px;
+  gap: 18px;
+  margin-top: 20px;
+}
+
+.billing-v2__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.billing-v2 .limit-field,
+.billing-v2 .topup {
+  max-width: 560px;
+}
+
+.billing-v2 .activity-list,
+.billing-v2 .empty--compact {
+  margin-top: 18px;
+}
+
+@media (max-width: 700px) {
+  .billing-v2__state,
+  .billing-v2__plan-head,
+  .billing-v2__section-head,
+  .billing-v2__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .billing-v2__plan-option {
+    grid-template-columns: 1fr auto;
+    gap: 8px 16px;
+    padding: 16px 0;
+  }
+
+  .billing-v2__plan-option .plan-card__credits {
+    grid-column: 1 / -1;
+  }
+
+  .billing-v2__metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .billing-v2__metric,
+  .billing-v2__metric:first-child {
+    min-height: 90px;
+    padding: 16px 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+
+  .billing-v2__metric:last-child {
+    border-bottom: 0;
   }
 }
 
@@ -4438,22 +4811,23 @@ button.nav__item:hover {
 
 .model-fallbacks {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   border-top: 1px solid var(--line-subtle);
 }
 
 .model-fallbacks label {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 190px;
+  grid-template-columns: minmax(220px, 0.75fr) minmax(260px, 1fr);
   align-items: center;
   gap: 16px;
   min-height: 82px;
   padding: 14px 0;
-  border-right: 1px solid var(--line-subtle);
+  border-right: 0;
+  border-bottom: 1px solid var(--line-subtle);
 }
 
 .model-fallbacks label:last-child {
-  border-right: 0;
+  border-bottom: 0;
 }
 
 .model-catalog-search {

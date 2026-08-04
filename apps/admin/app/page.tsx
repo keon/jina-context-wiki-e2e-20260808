@@ -2,7 +2,6 @@ import Link from "next/link";
 import { contextFailureText } from "../lib/context-failures";
 import {
   getContextMetrics,
-  JinaApiError,
   listAllReleases,
   listContextBuildProgress,
   listContextBuilds,
@@ -70,11 +69,9 @@ export default async function ContextAdminPage({
         <span className="admin-scope-badge">All context</span>
       </header>
       {loadFailures.length > 0 ? (
-        <div className="error-state">
+        <div className="error-state" role="status">
           <p>Some Context data is temporarily unavailable. Available sections remain live.</p>
-          <p>
-            <code>{loadFailures.join(" · ")}</code>
-          </p>
+          <p>Unavailable sections: {loadFailures.join(", ")}.</p>
         </div>
       ) : null}
       <div className="stat-row">
@@ -413,9 +410,8 @@ const EMPTY_METRICS: AdminContextMetrics = {
 async function loadSection<T>(load: () => Promise<T>, fallback: T, label: string, failures: string[]): Promise<T> {
   try {
     return await load();
-  } catch (error) {
-    const message = error instanceof JinaApiError ? error.message : "unexpected error";
-    failures.push(`${label}: ${message}`);
+  } catch {
+    failures.push(label);
     return fallback;
   }
 }

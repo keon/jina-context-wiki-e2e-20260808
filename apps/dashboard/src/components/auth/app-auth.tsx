@@ -1,11 +1,6 @@
 "use client";
 
-import {
-  ClerkProvider,
-  SignIn,
-  UserButton,
-  useAuth,
-} from "@clerk/nextjs";
+import { ClerkProvider, SignIn, useClerk, useAuth, useUser } from "@clerk/nextjs";
 import type { ReactNode } from "react";
 
 /**
@@ -40,7 +35,7 @@ export function AppSignIn() {
           colorInput: "#191919",
           colorInputForeground: "#ffffff",
           colorBorder: "rgba(255, 255, 255, 0.12)",
-          borderRadius: "8px",
+          borderRadius: "8px"
         },
         elements: {
           rootBox: "auth-clerk-root",
@@ -50,25 +45,25 @@ export function AppSignIn() {
           footer: "auth-clerk-footer",
           socialButtonsBlockButton: "auth-clerk-social",
           formFieldInput: "auth-clerk-input",
-          formButtonPrimary: "auth-clerk-primary",
-        },
+          formButtonPrimary: "auth-clerk-primary"
+        }
       }}
     />
   );
 }
 
-export function AppAccountButton() {
-  return (
-    <UserButton
-      userProfileMode="modal"
-      userProfileProps={{ additionalOAuthScopes: { github: ["read:org", "repo"] } }}
-      appearance={{
-        elements: {
-          rootBox: "app-account-root",
-          userButtonTrigger: "app-account-trigger",
-          avatarBox: "app-account-avatar",
-        },
-      }}
-    />
-  );
+export function useAppAccount() {
+  const { user, isLoaded } = useUser();
+  const { openUserProfile, signOut } = useClerk();
+  const email = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses[0]?.emailAddress;
+  const displayName = user?.fullName ?? user?.username ?? email ?? "Account";
+
+  return {
+    ready: isLoaded,
+    displayName,
+    email,
+    imageUrl: user?.imageUrl,
+    openProfile: () => openUserProfile({ additionalOAuthScopes: { github: ["read:org", "repo"] } }),
+    signOut: () => signOut({ redirectUrl: "/signin" })
+  };
 }

@@ -12,6 +12,7 @@ export default function IssuesPage() {
 
   return (
     <>
+      <h1 className="sr-only">Issues</h1>
       <Toolbar />
       <Panel title="Issues" count={issues.length}>
         {issues.length === 0 ? (

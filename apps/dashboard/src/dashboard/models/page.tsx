@@ -380,7 +380,7 @@ function SaveIndicator({ state }: { state: SaveState }) {
 
 function ModelsState({ title, detail, action }: { title: string; detail: string; action?: React.ReactNode }) {
   return (
-    <section className="models-v2-state">
+    <section className="models-v2-state" role="status">
       <span className="models-v2-state__icon" aria-hidden="true">◇</span>
       <strong>{title}</strong>
       <p>{detail}</p>

@@ -51,7 +51,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
     >
       <aside className="admin-sidebar" aria-label="Admin navigation">
         <div className="admin-sidebar__top">
-          <Link className="admin-project" href="#overview" onClick={navigate}>
+          <Link className="admin-project" href="#overview" aria-label="Jina Admin overview" onClick={navigate}>
             <span className="admin-project__mark">J</span>
             <span className="admin-project__copy">
               <strong>Jina Admin</strong>
@@ -80,6 +80,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
           type="button"
           className="admin-nav__item admin-search"
           data-label="Search"
+          aria-label="Search"
           onClick={() => setSearchOpen(true)}
         >
           <SearchIcon />
@@ -96,6 +97,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
                 className="admin-nav__item"
                 href={item.href}
                 data-label={item.label}
+                aria-label={item.label}
                 onClick={navigate}
               >
                 <Icon />

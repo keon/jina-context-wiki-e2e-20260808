@@ -670,7 +670,8 @@ export default function ContextPage() {
 
   if (!selected) {
     return (
-      <div className="page-placeholder">
+      <div className="page-placeholder context-page__empty" role="status">
+        <h1 className="sr-only">Context Wiki</h1>
         <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
         <strong>No workspace selected</strong>
         <p>Select a workspace from the sidebar to explore its repository context.</p>
@@ -687,15 +688,14 @@ export default function ContextPage() {
     <div className="context-page">
       <header className="context-repository-bar">
         <div className="context-repository-bar__identity">
-          <span className="context-repository-bar__mark" aria-hidden="true">
-            <BookIcon />
-          </span>
           <div>
-            <span>Repository context</span>
-            <strong>{repositoryFilter || "Choose a repository"}</strong>
+            <h1>Context Wiki</h1>
+            <p>Browse grounded repository documentation and verified source citations.</p>
           </div>
           {activeRepository ? (
-            <code>{activeRelease?.ref ?? documents[0]?.ref ?? activeRepository.defaultBranch}</code>
+            <span className="route-intro__scope">
+              {repositoryFilter} · {activeRelease?.ref ?? documents[0]?.ref ?? activeRepository.defaultBranch}
+            </span>
           ) : null}
         </div>
         <div className="context-repository-bar__actions">
@@ -955,26 +955,26 @@ export default function ContextPage() {
       ) : null}
 
       {repositoriesLoading ? (
-        <div className="page-placeholder">
+        <div className="page-placeholder context-page__empty" role="status">
           <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
           <strong>Loading repositories</strong>
           <p>Checking this workspace for published context.</p>
         </div>
       ) : repositories.length === 0 ? (
-        <div className="page-placeholder">
+        <div className="page-placeholder context-page__empty" role="status">
           <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
           <strong>No repositories connected</strong>
           <p>Connect a GitHub organization or repository before building your Context Wiki.</p>
           <ExternalLink className="btn btn--primary btn--sm" href="/integrations">Open integrations</ExternalLink>
         </div>
       ) : !repositoryFilter ? (
-        <div className="page-placeholder">
+        <div className="page-placeholder context-page__empty" role="status">
           <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
           <strong>Choose a repository</strong>
           <p>Select a repository above to browse its Context Wiki.</p>
         </div>
       ) : !loading && !error && documents.length === 0 && !progress ? (
-        <div className="page-placeholder">
+        <div className="page-placeholder context-page__empty" role="status">
           <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
           <strong>No context has been published</strong>
           <p>Build context for {repositoryFilter} to generate grounded Markdown pages and citations.</p>

@@ -85,14 +85,14 @@ export default function UsagePage() {
       <UsageOverview usage={readyUsage} billing={billing} loading={usage === undefined} days={days} />
 
       <section className="usage-breakdown">
-        <div className="usage-breakdown__tabs" role="tablist" aria-label="Usage breakdown">
-          <button type="button" className="usage-breakdown__tab usage-breakdown__tab--active" role="tab" aria-selected="true">
+        <nav className="usage-breakdown__tabs" aria-label="Usage and billing">
+          <span className="usage-breakdown__tab usage-breakdown__tab--active" aria-current="page">
             Review usage
-          </button>
-          <Link href="/billing" className="usage-breakdown__tab" role="tab" aria-selected="false">
+          </span>
+          <Link href="/billing" className="usage-breakdown__tab">
             Billing and limits
           </Link>
-        </div>
+        </nav>
         <div className="usage-capabilities">
           <CapabilityCard
             title="Model usage"
@@ -265,7 +265,6 @@ function CapabilityCard({
     <article className="usage-capability-card">
       <div className="usage-capability-card__head">
         <h2>{title}</h2>
-        <span>›</span>
       </div>
       <div className="usage-capability-card__legend">
         <span><i /> {primary} {primaryLabel}</span>

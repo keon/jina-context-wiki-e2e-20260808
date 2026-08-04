@@ -13,6 +13,7 @@ export default function ReviewsPage() {
 
   return (
     <>
+      <h1 className="sr-only">Reviews</h1>
       <Toolbar />
       <Panel title="Reviews" count={runs.length}>
         {runs.length === 0 ? (

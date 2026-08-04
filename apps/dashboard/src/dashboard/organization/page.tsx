@@ -8,12 +8,13 @@ export default function OrganizationPage() {
   const { selected, ready, tenants } = useTenant();
 
   if (!ready || authLoading) {
-    return <div className="page-placeholder page-placeholder--compact">Loading workspace access…</div>;
+    return <><h1 className="sr-only">Members &amp; Access</h1><div className="page-placeholder page-placeholder--compact" role="status">Loading workspace access…</div></>;
   }
 
   if (!selected) {
     return (
-      <div className="page-placeholder">
+      <div className="page-placeholder" role="status">
+        <h1 className="sr-only">Members &amp; Access</h1>
         <span className="page-placeholder__icon" aria-hidden="true"><AccessIcon /></span>
         <strong>No workspace selected</strong>
         <p>Select a workspace from the sidebar to inspect its access boundary.</p>
@@ -23,6 +24,7 @@ export default function OrganizationPage() {
 
   return (
     <div className="organization-page">
+      <h1 className="sr-only">Members &amp; Access</h1>
       <section className="panel">
         <div className="panel__head">
           <span className="panel__title">Workspace</span>

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { AppAccountButton, useAppAuth } from "../components/auth/app-auth";
+import { useAppAccount, useAppAuth } from "../components/auth/app-auth";
 import { useDashboard, useTenant } from "./providers";
 import { apiUrl, parseInstallationResult } from "./lib/api";
 import { clerkAuthRedirect } from "./lib/auth-navigation";
@@ -65,7 +65,7 @@ const MORE_NAV_ITEMS: NavItem[] = [
   { key: "organization", label: "Members & Access", href: "/organization", icon: OrganizationIcon },
   { key: "billing", label: "Billing", href: "/billing", icon: BillingIcon },
   { key: "history", label: "Run History", href: "/history", icon: HistoryIcon },
-  { key: "tasks", label: "Tasks", href: "/tasks", icon: TaskBoardIcon },
+  { key: "tasks", label: "Tasks", href: "/tasks", icon: TasksIcon },
 ];
 
 const DOCS_URL = process.env.NEXT_PUBLIC_DOCS_URL ?? "https://docs.usejina.com";
@@ -219,6 +219,7 @@ export function Shell({ children }: { children: ReactNode }) {
         authLoading={authLoading}
         section={section}
         collapsed={sidebarCollapsed}
+        commandOpen={commandOpen}
         onToggle={toggleSidebar}
         onOpenSearch={() => {
           setMobileMenuOpen(false);
@@ -294,6 +295,7 @@ function Sidebar({
   authLoading,
   section,
   collapsed,
+  commandOpen,
   onToggle,
   onOpenSearch,
   onNavigate,
@@ -303,13 +305,12 @@ function Sidebar({
   authLoading: boolean;
   section: NavKey;
   collapsed: boolean;
+  commandOpen: boolean;
   onToggle: () => void;
   onOpenSearch: () => void;
   onNavigate: () => void;
   onMobileClose: () => void;
 }) {
-  const [moreOpen, setMoreOpen] = useState(false);
-
   return (
     <aside className="sidebar" aria-label="Application sidebar">
       <div className="sidebar__top">
@@ -331,7 +332,15 @@ function Sidebar({
         </button>
       </div>
 
-      <button type="button" className="nav__item sidebar__search" data-label="Search" onClick={onOpenSearch}>
+      <button
+        type="button"
+        className="nav__item sidebar__search"
+        data-label="Search"
+        aria-label="Search"
+        onClick={() => {
+          onOpenSearch();
+        }}
+      >
         <SearchIcon />
         <span className="nav__label">Search</span>
         <kbd className="sidebar__shortcut">⌘ K</kbd>
@@ -347,6 +356,7 @@ function Sidebar({
               href={item.href}
               onClick={onNavigate}
               data-label={item.label}
+              aria-label={item.label}
               aria-current={item.key === section ? "page" : undefined}
             >
               <Icon />
@@ -357,54 +367,154 @@ function Sidebar({
       </nav>
 
       <div className="sidebar__spacer" />
-
-      <nav className="nav nav--utility" aria-label="Utilities">
-        <a className="nav__item" href={DOCS_URL} target="_blank" rel="noreferrer" data-label="Documentation" onClick={onNavigate}>
-          <JinaGuideIcon />
-          <span className="nav__label">Documentation</span>
-        </a>
-        <div className="sidebar__more-wrap">
-          {moreOpen ? (
-            <div className="sidebar__more-menu" role="menu">
-              <span className="sidebar__menu-label">More</span>
-              {MORE_NAV_ITEMS.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <Link
-                    key={item.key}
-                    className={`nav__item${item.key === section ? " nav__item--active" : ""}`}
-                    href={item.href}
-                    onClick={() => {
-                      setMoreOpen(false);
-                      onNavigate();
-                    }}
-                    role="menuitem"
-                  >
-                    <Icon />
-                    <span className="nav__label">{item.label}</span>
-                  </Link>
-                );
-              })}
-            </div>
-          ) : null}
-          <button
-            type="button"
-            className={`nav__item sidebar__more${MORE_NAV_ITEMS.some((item) => item.key === section) ? " nav__item--active" : ""}`}
-            onClick={() => setMoreOpen((open) => !open)}
-            aria-expanded={moreOpen}
-            data-label="More"
-          >
-            <MoreIcon />
-            <span className="nav__label">More</span>
-            <ChevronIcon />
-          </button>
-        </div>
-      </nav>
-      <div className="user" data-label={viewer?.user?.login ?? "Account"}>
-        <AppAccountButton />
-        <span className="user__name">{viewer?.user?.login ?? (authLoading ? "Loading…" : "Account")}</span>
-      </div>
+      <AccountMenu
+        viewer={viewer}
+        authLoading={authLoading}
+        section={section}
+        collapsed={collapsed}
+        commandOpen={commandOpen}
+        onExpand={onToggle}
+        onNavigate={onNavigate}
+      />
     </aside>
+  );
+}
+
+function AccountMenu({
+  viewer,
+  authLoading,
+  section,
+  collapsed,
+  commandOpen,
+  onExpand,
+  onNavigate,
+}: {
+  viewer: ViewerResponse | null;
+  authLoading: boolean;
+  section: NavKey;
+  collapsed: boolean;
+  commandOpen: boolean;
+  onExpand: () => void;
+  onNavigate: () => void;
+}) {
+  const account = useAppAccount();
+  const { selected } = useTenant();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const accountLabel = account.displayName || viewer?.user?.login || "Account";
+  const workspaceLabel = selected?.login ?? "Jina";
+  const workspaceType = selected?.type === "Organization" ? "Organization" : "Personal workspace";
+  const initial = workspaceLabel.slice(0, 1).toUpperCase();
+
+  useEffect(() => {
+    if (commandOpen) setOpen(false);
+  }, [commandOpen]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className="user-menu" ref={rootRef}>
+      {open ? (
+        <div className="user-menu__popover" role="menu" aria-label="Account menu">
+          <div className="user-menu__identity">
+            <strong>{account.email ?? accountLabel}</strong>
+          </div>
+          <div className="user-menu__workspace">
+            <span className="user__avatar" aria-hidden="true">{initial}</span>
+            <span>
+              <strong>{workspaceLabel}</strong>
+              <small>{workspaceType}</small>
+            </span>
+          </div>
+          <div className="user-menu__section">
+            {MORE_NAV_ITEMS.map((item) => {
+              const Icon = item.icon;
+              return (
+                <Link
+                  key={item.key}
+                  className={`user-menu__action${item.key === section ? " user-menu__action--active" : ""}`}
+                  href={item.href}
+                  role="menuitem"
+                  onClick={() => {
+                    setOpen(false);
+                    onNavigate();
+                  }}
+                >
+                  <Icon />
+                  <span>{item.label}</span>
+                </Link>
+              );
+            })}
+            <button
+              type="button"
+              className="user-menu__action"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                account.openProfile();
+              }}
+            >
+              <AccountIcon />
+              <span>Profile settings</span>
+            </button>
+          </div>
+          <div className="user-menu__section">
+            <a className="user-menu__action" href={DOCS_URL} target="_blank" rel="noreferrer" role="menuitem">
+              <JinaGuideIcon />
+              <span>Developer docs</span>
+            </a>
+          </div>
+          <div className="user-menu__section">
+            <button
+              type="button"
+              className="user-menu__action"
+              role="menuitem"
+              onClick={() => void account.signOut()}
+            >
+              <LogoutIcon />
+              <span>Log out</span>
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <button
+        type="button"
+        className="user"
+        data-label={workspaceLabel}
+        aria-label={`Open account menu for ${accountLabel}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => {
+          if (collapsed) {
+            onExpand();
+            setOpen(true);
+            return;
+          }
+          setOpen((value) => !value);
+        }}
+      >
+        <span className="user__avatar" aria-hidden="true">{initial}</span>
+        <span className="user__copy">
+          <strong className="user__name">{workspaceLabel}</strong>
+          <small>{authLoading || !account.ready ? "Loading…" : workspaceType}</small>
+        </span>
+        <ChevronIcon />
+      </button>
+    </div>
   );
 }
 
@@ -536,12 +646,13 @@ function ReviewsIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path
-        d="M1.5 8h3l2-4.5 3 9 2-4.5h3"
+        d="M2.25 3.25h11.5v8.25H7L3.75 14v-2.5h-1.5z"
         stroke="currentColor"
         strokeWidth="1.3"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+      <path d="m5.25 7.4 1.55 1.5 3.7-3.65" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -549,8 +660,8 @@ function ReviewsIcon() {
 function IssuesIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M8 4.75v3.75M8 11.15v.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M8 1.9 14.25 13H1.75z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M8 5.25v3.5M8 11.25v.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
     </svg>
   );
 }
@@ -558,9 +669,8 @@ function IssuesIcon() {
 function TaskBoardIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="1.75" y="2.25" width="3.25" height="11.5" rx="1" stroke="currentColor" strokeWidth="1.3" />
-      <rect x="6.4" y="2.25" width="3.25" height="7" rx="1" stroke="currentColor" strokeWidth="1.3" />
-      <rect x="11" y="2.25" width="3.25" height="9.25" rx="1" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="2" y="2.25" width="12" height="11.5" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M7.35 2.25v11.5M2 6.6h5.35M7.35 9.35H14" stroke="currentColor" strokeWidth="1.3" />
     </svg>
   );
 }
@@ -568,10 +678,10 @@ function TaskBoardIcon() {
 function GraphIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="3" cy="4" r="1.5" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="13" cy="3" r="1.5" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="8" cy="13" r="1.5" stroke="currentColor" strokeWidth="1.3" />
-      <path d="m4.4 4 7.1-.8M3.8 5.35l3.4 6.3m4.9-7.3-3.3 7.3" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="8" cy="2.75" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="3.25" cy="12.25" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="12.75" cy="12.25" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <path d="m7.25 4.1-3.2 6.8m4.7-6.8 3.2 6.8M4.75 12.25h6.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }
@@ -579,10 +689,7 @@ function GraphIcon() {
 function ContextIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="3" cy="8" r="1.75" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="11.75" cy="3.25" r="1.75" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="12" cy="12.25" r="1.75" stroke="currentColor" strokeWidth="1.3" />
-      <path d="m4.55 7.15 5.65-3.05M4.7 8.8l5.65 2.7M11.8 5v5.5" stroke="currentColor" strokeWidth="1.15" strokeLinecap="round" />
+      <path d="M1.75 3.35c2.15-.7 4.25-.35 6.25 1.05v9.15c-2-1.4-4.1-1.75-6.25-1.05zM14.25 3.35C12.1 2.65 10 3 8 4.4v9.15c2-1.4 4.1-1.75 6.25-1.05z" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -590,10 +697,8 @@ function ContextIcon() {
 function ModelsIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="4" r="2.25" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="4" cy="11.5" r="2.25" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="12" cy="11.5" r="2.25" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M8 6.25v1.5m-1.4 1.9L5.4 9.4m5.2 0-1.2.25" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path d="m8 1.75 5.5 3v6.5l-5.5 3-5.5-3v-6.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="m2.5 4.75 5.5 3 5.5-3M8 7.75v6.5" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -601,8 +706,7 @@ function ModelsIcon() {
 function IntegrationsIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="1.75" y="5.75" width="7" height="4.5" rx="2.25" stroke="currentColor" strokeWidth="1.3" />
-      <rect x="7.25" y="5.75" width="7" height="4.5" rx="2.25" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M5.25 2v3.25m5.5-3.25v3.25M4 5.25h8V7a4 4 0 0 1-8 0zM8 11v3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -610,7 +714,9 @@ function IntegrationsIcon() {
 function OrganizationIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M2.5 14V3.5h7V14M9.5 7h4v7M5 6h2M5 9h2M5 12h2M11.5 9.5v2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="5.5" cy="5" r="2.25" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="11.5" cy="6" r="1.65" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M1.5 13.5c.35-2.65 1.7-3.95 4-3.95s3.65 1.3 4 3.95m.05-3.45c.55-.45 1.25-.7 2.05-.7 1.7 0 2.65.95 2.9 2.9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }
@@ -636,7 +742,7 @@ function BillingIcon() {
 function UsageIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M2 13.5V9m4 4.5v-7m4 7V4m4 9.5V7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path d="M2 13.5h12M3 11l3-3 2.45 2.1 4.35-5.35" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -666,12 +772,19 @@ function CloseIcon() {
   );
 }
 
-function MoreIcon() {
+function AccountIcon() {
   return (
-    <svg className="nav__icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-      <circle cx="3" cy="8" r="1" />
-      <circle cx="8" cy="8" r="1" />
-      <circle cx="13" cy="8" r="1" />
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="5.25" r="2.5" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M3.25 13c.45-2.55 2.05-3.8 4.75-3.8s4.3 1.25 4.75 3.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function LogoutIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M6.25 2.25H3.5A1.25 1.25 0 0 0 2.25 3.5v9A1.25 1.25 0 0 0 3.5 13.75h2.75M9.5 5l3 3-3 3M12.5 8H5.75" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -713,6 +826,14 @@ function HistoryIcon() {
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M3 5.2A5.4 5.4 0 1 1 2.7 10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
       <path d="M3 2v3.5h3.5M8 4.75v3.5l2.25 1.25" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function TasksIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="m2 4.3 1.25 1.25L5.5 3.3M7.25 4.5H14M2 9.8l1.25 1.25L5.5 8.8M7.25 10H14" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

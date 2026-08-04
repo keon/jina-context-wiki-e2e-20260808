@@ -318,7 +318,7 @@ function CompactState({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="integration-state">
+    <div className="integration-state" role="status">
       <span className="integration-mark integration-mark--muted">•••</span>
       <div>
         <strong>{title}</strong>
@@ -375,7 +375,20 @@ function GitHubRow({
             {connected.length > 0 ? "Add organization" : "Connect"}
           </ExternalLink>
         ) : (
-          <button type="button" className="btn btn--sm" disabled={!writable || state !== "loaded"}>Connect</button>
+          <button
+            type="button"
+            className="btn btn--sm"
+            disabled
+            title={
+              !writable
+                ? "Workspace administrators manage GitHub connections."
+                : state !== "loaded"
+                  ? "GitHub connection status is unavailable."
+                  : "Select a workspace with GitHub installation enabled."
+            }
+          >
+            Connect
+          </button>
         )}
       </div>
     </div>
