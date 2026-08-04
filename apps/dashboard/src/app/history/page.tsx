@@ -45,9 +45,7 @@ function FilterSelect({
 
 export default function HistoryPage() {
   const { selected } = useTenant();
-  const { data } = usePoll<OverviewResponse>(
-    selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "",
-  );
+  const { data } = usePoll<OverviewResponse>(selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "");
   const [query, setQuery] = useState("");
   const [type, setType] = useState("");
   const [actor, setActor] = useState("");
@@ -73,14 +71,14 @@ export default function HistoryPage() {
   const selectedEvent = events.find((event) => event.id === effectiveSelectedId) ?? null;
 
   return (
-    <section id="history-page">
+    <section className="run-history-page" id="history-page">
       <header className="page-heading">
         <div>
-          <h1>History</h1>
-          <p>A complete record of task activity.</p>
+          <h1>Run history</h1>
+          <p>Every task event, actor, and repository in one chronological record.</p>
         </div>
       </header>
-      <div className="page-filters history-filters">
+      <div className="history-toolbar">
         <label className="search-control">
           <span aria-hidden="true">⌕</span>
           <input
@@ -126,15 +124,14 @@ export default function HistoryPage() {
           <option value="week">Last 7 days</option>
         </select>
       </div>
-      <div className="history-layout">
-        <section className="history-table" aria-label="Activity history">
-          <div className="history-table-head">
+      <div className="run-history-layout">
+        <section className="run-history-list-panel" aria-label="Activity history">
+          <div className="run-history-table-head" aria-hidden="true">
             <span>Time</span>
             <span>Event</span>
-            <span>Actor</span>
-            <span>Repository</span>
-            <span>Task</span>
-            <span>Evidence / confidence</span>
+            <span>Context</span>
+            <span>Confidence</span>
+            <span />
           </div>
           <HistoryList
             events={events}
@@ -142,6 +139,9 @@ export default function HistoryPage() {
             selectedEventId={effectiveSelectedId}
             onSelect={setSelectedEventId}
           />
+          <footer className="run-history-list-footer">
+            {`${events.length} ${events.length === 1 ? "event" : "events"}`}
+          </footer>
         </section>
         <HistoryInspector event={selectedEvent} tasks={tasks} />
       </div>

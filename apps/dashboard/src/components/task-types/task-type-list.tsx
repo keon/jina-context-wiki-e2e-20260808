@@ -1,8 +1,8 @@
 "use client";
 
 import { humanize, relativeTime } from "../../lib/format.ts";
-import { taskTypeIcon } from "../../lib/workflow-trees.ts";
 import type { BoardTask, TaskTypeDefinition } from "../../lib/types.ts";
+import { TaskTypeGlyph } from "./task-type-glyph.tsx";
 
 /** Task type table rows plus the per-type run metrics derived from board tasks. */
 
@@ -44,21 +44,33 @@ export function TaskTypeList({
           <button
             key={definition.type}
             type="button"
-            className={`type-row${definition.type === selectedType ? " selected" : ""}`}
+            className={`task-type-row${definition.type === selectedType ? " selected" : ""}`}
             data-task-type={definition.type}
+            aria-pressed={definition.type === selectedType}
             onClick={() => onSelect(definition.type)}
           >
-            <div className="type-copy">
-              <span className="type-icon">{taskTypeIcon(definition.type)}</span>
-              <span className="type-copy-text">
-                <span className="type-name">{humanize(definition.type)}</span>
-                <span className="type-description">{definition.description}</span>
+            <div className="task-type-row__identity">
+              <span className="task-type-glyph">
+                <TaskTypeGlyph type={definition.type} kind={definition.kind} />
               </span>
-              <span className="enabled-state">Enabled</span>
+              <span className="task-type-row__copy">
+                <span className="task-type-row__title-line">
+                  <strong>{humanize(definition.type)}</strong>
+                  <span className="enabled-state">Enabled</span>
+                </span>
+                <span className="task-type-row__description">{definition.description}</span>
+              </span>
             </div>
-            <span className="type-metric">{metrics.lastRun}</span>
-            <span className="type-metric">{metrics.successRate}</span>
-            <span className="type-metric type-steps">{`${metrics.steps}  ›`}</span>
+            <span className="task-type-row__metric" data-label="Last run">
+              {metrics.lastRun}
+            </span>
+            <span className="task-type-row__metric" data-label="Success rate">
+              {metrics.successRate}
+            </span>
+            <span className="task-type-row__metric task-type-row__steps" data-label="Steps">
+              <span>{metrics.steps}</span>
+              <span aria-hidden="true">›</span>
+            </span>
           </button>
         );
       })}

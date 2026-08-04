@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { TaskTypeInspector } from "../../components/task-types/task-type-inspector.tsx";
 import { TaskTypeList } from "../../components/task-types/task-type-list.tsx";
-import { WorkflowTreesPanel } from "../../components/task-types/workflow-trees.tsx";
 import { usePoll } from "../../lib/poll.ts";
 import { operationsApiUrl, tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import type { OverviewResponse, TaskTypeDefinition } from "../../lib/types.ts";
@@ -35,14 +34,14 @@ export default function TaskTypesPage() {
   const selectedDefinition = taskTypes.find((definition) => definition.type === effectiveSelectedType) ?? null;
 
   return (
-    <section id="task-types-page">
+    <section className="task-types-page" id="task-types-page">
       <header className="page-heading">
         <div>
           <h1>Task types</h1>
           <p>Reusable workflows for recurring work.</p>
         </div>
       </header>
-      <div className="page-filters task-type-filters">
+      <div className="task-types-toolbar">
         <label className="search-control">
           <span aria-hidden="true">⌕</span>
           <input
@@ -53,10 +52,14 @@ export default function TaskTypesPage() {
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
+        <span>{`${visibleTypes.length} of ${taskTypes.length} task types`}</span>
       </div>
-      <div className="task-type-layout">
-        <section className="task-panel" aria-labelledby="task-types-heading">
-          <header className="type-table-head">
+      <div className="task-types-layout">
+        <section className="task-types-list-panel" aria-labelledby="task-types-heading">
+          <h2 className="sr-only" id="task-types-heading">
+            Task types
+          </h2>
+          <header className="task-types-table-head" aria-hidden="true">
             <span>Task type</span>
             <span>Last run</span>
             <span>Success rate</span>
@@ -68,15 +71,10 @@ export default function TaskTypesPage() {
             selectedType={effectiveSelectedType}
             onSelect={setSelectedType}
           />
-          <footer className="panel-footer">
-            <span className="task-count" id="task-type-count">
-              {`Showing ${visibleTypes.length} of ${taskTypes.length} task types`}
-            </span>
-          </footer>
+          {visibleTypes.length === 0 ? <p className="task-types-empty">No task types match this search.</p> : null}
         </section>
         <TaskTypeInspector definition={selectedDefinition} />
       </div>
-      <WorkflowTreesPanel definitions={taskTypes} />
     </section>
   );
 }
