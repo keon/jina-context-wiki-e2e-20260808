@@ -149,6 +149,7 @@ import {
   retainedPublicationPlanProblems
 } from "./board-publication-plan.js";
 import { parseBoardResearchPlan, parseResearchPlanWithRepair } from "./board-research-plan.js";
+import { parsedContextDependencyResult } from "./context-dependency-result.js";
 import { contextPageArtifactName } from "./context-page-artifact-name.js";
 import { contextPageDispositionArtifact } from "./context-page-disposition.js";
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
@@ -219,6 +220,7 @@ interface ContextBoardDependencyResult {
   readonly result: {
     readonly version: 1;
     readonly outputArtifact: ContextArtifactRef;
+    readonly disposition?: unknown;
   };
 }
 
@@ -6113,13 +6115,10 @@ function parseContextBoardDependencyResults(value: unknown): ContextBoardDepende
       ...(entry.documentPath === undefined
         ? {}
         : { documentPath: requiredString(entry.documentPath, `task dependencyResults[${index}].documentPath`) }),
-      result: {
-        version: 1,
-        outputArtifact: parseArtifactRef(
-          entry.result.outputArtifact,
-          `task dependencyResults[${index}].result.outputArtifact`
-        )
-      }
+      result: parsedContextDependencyResult(
+        entry.result,
+        parseArtifactRef(entry.result.outputArtifact, `task dependencyResults[${index}].result.outputArtifact`)
+      )
     };
   });
 }
