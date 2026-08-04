@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyCommand, createEmptyBoardState, findTask, transitionBoardTask } from "@jina/board";
-import { contextBoardTaskTypes } from "@jina/context-engine";
+import { contextBoardTaskTypes, createContextBoardBuild } from "@jina/context-engine";
 import { parseGitHubWebhook, type GitHubWebhookEvent } from "@jina/github";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
 
@@ -452,6 +452,44 @@ test("a recoverable failed build retains its follow-up until checkpoint repair p
     newer.state.events.find((event) => event.type === "context.build_followup_requested")?.payload?.commitSha,
     "9".repeat(40)
   );
+});
+
+test("a completed newer build retires an older recoverable failure for the same ref", () => {
+  const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-recovery-old");
+  assert.equal(first.outcome, "created");
+  const failedSnapshot = transitionBoardTask(
+    transitionBoardTask(first.state, first.build.snapshotTaskId, "in_progress", NOW),
+    first.build.snapshotTaskId,
+    "failed",
+    LATER
+  );
+  const failed = transitionBoardTask(failedSnapshot, first.build.buildTaskId, "failed", LATER);
+  const newer = createContextBoardBuild(failed, {
+    tenantId: TENANT,
+    repository: "omxyz/jina",
+    ref: "main",
+    refSequence: 2,
+    requestKey: "manual:newer-completed",
+    commitSha: "8".repeat(40),
+    githubInstallationId: INSTALLATION,
+    trigger: "manual",
+    now: LATER
+  });
+  const completed = transitionBoardTask(newer.state, newer.buildTaskId, "done", LATER);
+
+  const admitted = admitContextBoardBuild(completed, {
+    source: "manual",
+    tenantId: TENANT,
+    repository: REPOSITORY,
+    ref: "main",
+    requestKey: "manual:after-completion",
+    commitSha: "9".repeat(40),
+    githubInstallationId: INSTALLATION,
+    now: LATER
+  });
+
+  assert.equal(admitted.outcome, "created");
+  assert.equal(admitted.scope.refSequence, 3);
 });
 
 test("an unrecoverable failed build releases its queued successor instead of deadlocking the repository", () => {

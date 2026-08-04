@@ -15,8 +15,8 @@ import {
 // The PKCE verifier is held in a short-lived HttpOnly cookie between /start and
 // /callback, scoped to the OAuth route so it is not sent with other requests.
 const PKCE_COOKIE_NAME = "jina_openrouter_pkce";
-const OAUTH_COOKIE_PATH = "/v1/dashboard/integrations/openrouter/oauth";
-const CALLBACK_PATH = "/v1/dashboard/integrations/openrouter/oauth/callback";
+const OAUTH_COOKIE_PATH = "/dashboard/integrations/openrouter/oauth";
+const CALLBACK_PATH = "/dashboard/integrations/openrouter/oauth/callback";
 const PKCE_COOKIE_MAX_AGE_SECONDS = 10 * 60;
 
 /** Generate a base64url PKCE code verifier (32 random bytes -> 43 chars, > the RFC minimum). */

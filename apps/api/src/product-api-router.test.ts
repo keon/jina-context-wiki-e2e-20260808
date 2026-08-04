@@ -4,9 +4,8 @@ import { isProductApiRoute } from "./product-api-router.js";
 
 test("routes product, review, billing, auth, and GitHub endpoints to the absorbed API", () => {
   for (const path of [
-    "/v1/healthz",
-    "/v1/dashboard/me",
-    "/v1/dashboard/tenants/tenant-1/review-runs",
+    "/dashboard/me",
+    "/dashboard/tenants/tenant-1/review-runs",
     "/auth/github/callback",
     "/webhooks/github",
     "/internal/reviews/prepare",
@@ -23,7 +22,7 @@ test("routes product, review, billing, auth, and GitHub endpoints to the absorbe
   }
 });
 
-test("keeps Context, causal graph, MCP, worker, and V2 health routes on V2", () => {
+test("keeps Context, causal graph, MCP, worker, and Jina health routes on the Context handler", () => {
   for (const path of [
     "/health",
     "/healthz",
@@ -36,4 +35,9 @@ test("keeps Context, causal graph, MCP, worker, and V2 health routes on V2", () 
   ]) {
     assert.equal(isProductApiRoute(path), false, path);
   }
+});
+
+test("does not retain the retired dashboard or product health route prefixes", () => {
+  assert.equal(isProductApiRoute("/v1/dashboard/me"), false);
+  assert.equal(isProductApiRoute("/v1/healthz"), false);
 });

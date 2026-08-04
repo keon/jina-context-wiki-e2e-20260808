@@ -9,7 +9,7 @@ Dataset files:
 
 Active helper:
 
-- [`run-isolated-review-v1.mjs`](./run-isolated-review-v1.mjs): runs the current consolidated Trigger `review` workflow's runtime implementation locally against one golden-dataset PR.
+- [`run-isolated-review.mjs`](./run-isolated-review.mjs): runs the current consolidated Trigger `review` workflow's runtime implementation locally against one golden-dataset PR.
 
 The removed scenario-generation and scenario-simulation production paths are no longer evaluated here.
 
@@ -19,7 +19,7 @@ Example for Golden Dataset E1 in `manaflow-ai/cmux`:
 
 ```sh
 cd evals
-node run-isolated-review-v1.mjs \
+node run-isolated-review.mjs \
   --repo manaflow-ai/cmux \
   --pr 2467
 ```

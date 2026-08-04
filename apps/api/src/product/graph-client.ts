@@ -251,7 +251,7 @@ const delegatedTokenRenewalMarginMs = 60_000;
 /** Matches the graph service's minimum, so a default never mints an invalid lifetime. */
 const defaultDelegatedTokenTtlMinutes = 15;
 
-/** Only events that can change derived Context cross the V1-to-V2 boundary. */
+/** Only provider events that can change derived Context enter its pipeline. */
 export function shouldRelayGithubContext(event: string, rawBody: string): boolean {
   let payload: Record<string, unknown>;
   try {
@@ -339,9 +339,9 @@ export class GraphApiClient {
   }
 
   /**
-   * Relay the exact provider delivery after V1 has verified it. V2 verifies the
-   * original HMAC again and admits only Context work, so V1 remains the sole
-   * review orchestrator and the relay cannot manufacture GitHub events.
+   * Forward the exact provider delivery from the review handler to Context.
+   * Context verifies the original HMAC again and admits only Context work, so
+   * this internal handoff cannot manufacture GitHub events.
    */
   async relayGithubContext(headers: Headers, rawBody: string): Promise<void> {
     if (!this.config) return;
@@ -477,7 +477,7 @@ export class GraphApiClient {
             principalId: tenantPrincipal(tenantId),
             name: `jina-api delegated reader (${tenantId})`,
             // Every scope this client actually uses. A tenant principal is an
-            // administrator, so V2 permits `context:build`; without it an explicit
+            // administrator, so Context permits `context:build`; without it an explicit
             // dashboard build would 403 on /context/build.
             scopes: ["context:read", "context:query", "context:build"],
             expiresInMinutes: ttlMinutes,
@@ -700,7 +700,7 @@ export class GraphApiClient {
     return result;
   }
 
-  /** Cancels a tenant-admin-selected build through V2's internal operator endpoint. */
+  /** Cancels a tenant-admin-selected build through Context's internal operator endpoint. */
   async cancelContextBuild(
     context: RequestContext,
     buildId: string,

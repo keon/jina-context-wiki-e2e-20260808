@@ -94,7 +94,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         setError(null);
         return;
       }
-      const response = await fetch(apiUrl("/v1/dashboard/me"), {
+      const response = await fetch(apiUrl("/dashboard/me"), {
         cache: "no-store",
         credentials: "include",
         signal: controller.signal,
@@ -236,7 +236,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const refreshAccess = async () => {
       controller?.abort();
       controller = new AbortController();
-      const response = await fetch(apiUrl("/v1/dashboard/session/refresh"), {
+      const response = await fetch(apiUrl("/dashboard/session/refresh"), {
         method: "POST",
         cache: "no-store",
         credentials: "include",
@@ -397,7 +397,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const response = await fetch(apiUrl("/v1/dashboard/tenants"), {
+        const response = await fetch(apiUrl("/dashboard/tenants"), {
           cache: "no-store",
           credentials: "include",
           signal: controller.signal,

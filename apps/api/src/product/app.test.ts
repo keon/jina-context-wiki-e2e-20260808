@@ -54,7 +54,7 @@ function testConfig(overrides: { dashboardAllowedOrigins?: AppConfig["dashboardA
 
 test("POST topup rejects a present Origin not in the dashboard allowlist with 403", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/billing/topup", {
+  const res = await app.request("/dashboard/billing/topup", {
     method: "POST",
     headers: { origin: "https://evil.example" },
   });
@@ -64,14 +64,14 @@ test("POST topup rejects a present Origin not in the dashboard allowlist with 40
 
 test("POST topup allows an absent Origin header (non-browser clients)", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/billing/topup", { method: "POST" });
+  const res = await app.request("/dashboard/billing/topup", { method: "POST" });
   // Passes the origin guard; falls through to the not-configured branch (no session / no Autumn secret).
   assert.equal(res.status, 409);
 });
 
 test("POST topup allows an Origin in the dashboard allowlist", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/billing/topup", {
+  const res = await app.request("/dashboard/billing/topup", {
     method: "POST",
     headers: { origin: "https://dash.example" },
   });
@@ -81,7 +81,7 @@ test("POST topup allows an Origin in the dashboard allowlist", async () => {
 
 test("POST topup does not reject any Origin under a wildcard allowlist (dev/non-credentialed mode)", async () => {
   const app = createApp(testConfig({ dashboardAllowedOrigins: "*" }));
-  const res = await app.request("/v1/dashboard/billing/topup", {
+  const res = await app.request("/dashboard/billing/topup", {
     method: "POST",
     headers: { origin: "https://anything.example" },
   });
@@ -92,7 +92,7 @@ test("POST topup does not reject any Origin under a wildcard allowlist (dev/non-
 
 const JSON_HEADERS = { "content-type": "application/json" };
 
-test("V1 no longer exposes an MCP proxy because review sandboxes connect directly to V2", async () => {
+test("Jina does not expose an MCP proxy because review sandboxes connect directly to Context", async () => {
   const app = createApp(testConfig());
   const response = await app.request("/mcp", {
     method: "POST",
@@ -216,10 +216,10 @@ test("parseReviewGraphMcpAccessBody requires review-specific scope", () => {
   }), /pull_request_number/);
 });
 
-// POST /v1/dashboard/integrations — writes the OpenRouter/provider keys. Origin + JSON content-type guards.
+// POST /dashboard/integrations — writes the OpenRouter/provider keys. Origin + JSON content-type guards.
 test("POST integrations rejects a present Origin not in the allowlist with 403", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations", {
+  const res = await app.request("/dashboard/integrations", {
     method: "POST",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
     body: "{}",
@@ -230,7 +230,7 @@ test("POST integrations rejects a present Origin not in the allowlist with 403",
 
 test("POST integrations allows an allowlisted Origin (falls through to the no-session response)", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations", {
+  const res = await app.request("/dashboard/integrations", {
     method: "POST",
     headers: { origin: "https://dash.example", ...JSON_HEADERS },
     body: "{}",
@@ -241,14 +241,14 @@ test("POST integrations allows an allowlisted Origin (falls through to the no-se
 
 test("POST integrations allows an absent Origin header (non-browser clients)", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations", { method: "POST", headers: JSON_HEADERS, body: "{}" });
+  const res = await app.request("/dashboard/integrations", { method: "POST", headers: JSON_HEADERS, body: "{}" });
   assert.notEqual(res.status, 403);
   assert.notEqual(res.status, 415);
 });
 
 test("POST integrations rejects a non-JSON content type with 415 (closes the text/plain simple-request vector)", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations", {
+  const res = await app.request("/dashboard/integrations", {
     method: "POST",
     headers: { origin: "https://dash.example", "content-type": "text/plain" },
     body: "{}",
@@ -258,27 +258,27 @@ test("POST integrations rejects a non-JSON content type with 415 (closes the tex
 
 test("POST integrations rejects a missing content type with 415", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations", { method: "POST", body: "{}" });
+  const res = await app.request("/dashboard/integrations", { method: "POST", body: "{}" });
   assert.equal(res.status, 415);
 });
 
 test("POST Codex connection telemetry applies the dashboard origin and JSON guards", async () => {
   const app = createApp(testConfig());
-  const crossSite = await app.request("/v1/dashboard/integrations/codex/events", {
+  const crossSite = await app.request("/dashboard/integrations/codex/events", {
     method: "POST",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
     body: JSON.stringify({ event: "flow_started", flow_id: "flow_12345678" }),
   });
   assert.equal(crossSite.status, 403);
 
-  const wrongType = await app.request("/v1/dashboard/integrations/codex/events", {
+  const wrongType = await app.request("/dashboard/integrations/codex/events", {
     method: "POST",
     headers: { origin: "https://dash.example", "content-type": "text/plain" },
     body: "{}",
   });
   assert.equal(wrongType.status, 415);
 
-  const anonymous = await app.request("/v1/dashboard/integrations/codex/events", {
+  const anonymous = await app.request("/dashboard/integrations/codex/events", {
     method: "POST",
     headers: { origin: "https://dash.example", ...JSON_HEADERS },
     body: JSON.stringify({ event: "flow_started", flow_id: "flow_12345678" }),
@@ -286,11 +286,11 @@ test("POST Codex connection telemetry applies the dashboard origin and JSON guar
   assert.equal(anonymous.status, 204);
 });
 
-// GET /v1/dashboard/integrations — status shape. No session (auth disabled) -> empty integrations,
+// GET /dashboard/integrations — status shape. No session (auth disabled) -> empty integrations,
 // which must include the codex_harness status object alongside openrouter.
 test("GET integrations returns the codex_harness status object alongside openrouter", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations", { method: "GET" });
+  const res = await app.request("/dashboard/integrations", { method: "GET" });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), {
     openrouter: { configured: false },
@@ -301,10 +301,10 @@ test("GET integrations returns the codex_harness status object alongside openrou
   });
 });
 
-// PUT /v1/dashboard/model-settings — writes per-tenant model selection. Origin + JSON content-type guards.
+// PUT /dashboard/model-settings — writes per-tenant model selection. Origin + JSON content-type guards.
 test("PUT model-settings rejects a present Origin not in the allowlist with 403", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/model-settings", {
+  const res = await app.request("/dashboard/model-settings", {
     method: "PUT",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
     body: "{}",
@@ -314,7 +314,7 @@ test("PUT model-settings rejects a present Origin not in the allowlist with 403"
 
 test("PUT model-settings allows an allowlisted Origin (falls through to the auth-required response)", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/model-settings", {
+  const res = await app.request("/dashboard/model-settings", {
     method: "PUT",
     headers: { origin: "https://dash.example", ...JSON_HEADERS },
     body: "{}",
@@ -325,14 +325,14 @@ test("PUT model-settings allows an allowlisted Origin (falls through to the auth
 
 test("PUT model-settings allows an absent Origin header", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/model-settings", { method: "PUT", headers: JSON_HEADERS, body: "{}" });
+  const res = await app.request("/dashboard/model-settings", { method: "PUT", headers: JSON_HEADERS, body: "{}" });
   assert.notEqual(res.status, 403);
   assert.notEqual(res.status, 415);
 });
 
 test("PUT model-settings rejects a non-JSON content type with 415", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/model-settings", {
+  const res = await app.request("/dashboard/model-settings", {
     method: "PUT",
     headers: { origin: "https://dash.example", "content-type": "text/plain" },
     body: "{}",
@@ -340,10 +340,10 @@ test("PUT model-settings rejects a non-JSON content type with 415", async () => 
   assert.equal(res.status, 415);
 });
 
-// POST /v1/dashboard/integrations/openrouter/oauth/start — starts the OAuth flow (no body -> origin guard only).
+// POST /dashboard/integrations/openrouter/oauth/start — starts the OAuth flow (no body -> origin guard only).
 test("POST oauth/start rejects a present Origin not in the allowlist with 403", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations/openrouter/oauth/start", {
+  const res = await app.request("/dashboard/integrations/openrouter/oauth/start", {
     method: "POST",
     headers: { origin: "https://evil.example" },
   });
@@ -352,7 +352,7 @@ test("POST oauth/start rejects a present Origin not in the allowlist with 403", 
 
 test("POST oauth/start allows an allowlisted Origin (falls through to the auth-required response)", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations/openrouter/oauth/start", {
+  const res = await app.request("/dashboard/integrations/openrouter/oauth/start", {
     method: "POST",
     headers: { origin: "https://dash.example" },
   });
@@ -361,13 +361,13 @@ test("POST oauth/start allows an allowlisted Origin (falls through to the auth-r
 
 test("POST oauth/start allows an absent Origin header", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/integrations/openrouter/oauth/start", { method: "POST" });
+  const res = await app.request("/dashboard/integrations/openrouter/oauth/start", { method: "POST" });
   assert.notEqual(res.status, 403);
 });
 
 test("POST session refresh rejects a cross-site Origin before refreshing GitHub access", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/session/refresh", {
+  const res = await app.request("/dashboard/session/refresh", {
     method: "POST",
     headers: { origin: "https://evil.example" },
   });
@@ -376,7 +376,7 @@ test("POST session refresh rejects a cross-site Origin before refreshing GitHub 
 
 test("POST session refresh allows the dashboard Origin without requiring a request body", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/session/refresh", {
+  const res = await app.request("/dashboard/session/refresh", {
     method: "POST",
     headers: { origin: "https://dash.example" },
   });
@@ -430,7 +430,7 @@ test("an in-flight access refresh cannot recreate a session after logout", async
   }) as typeof fetch;
   await saveSession(session);
   try {
-    const refresh = app.request("/v1/dashboard/session/refresh", {
+    const refresh = app.request("/dashboard/session/refresh", {
       method: "POST",
       headers: { origin: "https://dash.example", cookie },
     });
@@ -445,7 +445,7 @@ test("an in-flight access refresh cannot recreate a session after logout", async
     assert.equal(refreshResponse.status, 200);
     assert.equal((await refreshResponse.json()).authenticated, false);
     assert.equal(await getSession(session.id), undefined);
-    const meResponse = await app.request("/v1/dashboard/me", {
+    const meResponse = await app.request("/dashboard/me", {
       headers: { cookie },
     });
     assert.equal((await meResponse.json()).authenticated, false);
@@ -458,21 +458,21 @@ test("an in-flight access refresh cannot recreate a session after logout", async
 
 test("POST graph query applies dashboard origin and JSON guards before authentication", async () => {
   const app = createApp(testConfig());
-  const crossOrigin = await app.request("/v1/dashboard/tenants/tenant-a/graph/query", {
+  const crossOrigin = await app.request("/dashboard/tenants/tenant-a/graph/query", {
     method: "POST",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
     body: JSON.stringify({ graph_id: "graph-1", repository: "omxyz/a", query: "What depends on auth?" }),
   });
   assert.equal(crossOrigin.status, 403);
 
-  const wrongContentType = await app.request("/v1/dashboard/tenants/tenant-a/graph/query", {
+  const wrongContentType = await app.request("/dashboard/tenants/tenant-a/graph/query", {
     method: "POST",
     headers: { origin: "https://dash.example", "content-type": "text/plain" },
     body: "{}",
   });
   assert.equal(wrongContentType.status, 415);
 
-  const noSession = await app.request("/v1/dashboard/tenants/tenant-a/graph/query", {
+  const noSession = await app.request("/dashboard/tenants/tenant-a/graph/query", {
     method: "POST",
     headers: { origin: "https://dash.example", ...JSON_HEADERS },
     body: JSON.stringify({ graph_id: "graph-1", repository: "omxyz/a", query: "What depends on auth?" }),
@@ -482,7 +482,7 @@ test("POST graph query applies dashboard origin and JSON guards before authentic
 
 test("POST graph indexing applies dashboard origin and JSON guards before authentication", async () => {
   const app = createApp(testConfig());
-  const path = "/v1/dashboard/tenants/tenant-a/graphs/index";
+  const path = "/dashboard/tenants/tenant-a/graphs/index";
   const crossOrigin = await app.request(path, {
     method: "POST",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
@@ -507,21 +507,21 @@ test("POST graph indexing applies dashboard origin and JSON guards before authen
 
 test("POST tenant creation applies dashboard origin and JSON guards before authentication", async () => {
   const app = createApp(testConfig());
-  const crossOrigin = await app.request("/v1/dashboard/tenants", {
+  const crossOrigin = await app.request("/dashboard/tenants", {
     method: "POST",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
     body: JSON.stringify({ name: "Acme" }),
   });
   assert.equal(crossOrigin.status, 403);
 
-  const wrongContentType = await app.request("/v1/dashboard/tenants", {
+  const wrongContentType = await app.request("/dashboard/tenants", {
     method: "POST",
     headers: { origin: "https://dash.example", "content-type": "text/plain" },
     body: "{}",
   });
   assert.equal(wrongContentType.status, 415);
 
-  const noSession = await app.request("/v1/dashboard/tenants", {
+  const noSession = await app.request("/dashboard/tenants", {
     method: "POST",
     headers: { origin: "https://dash.example", ...JSON_HEADERS },
     body: JSON.stringify({ name: "Acme" }),
@@ -531,7 +531,7 @@ test("POST tenant creation applies dashboard origin and JSON guards before authe
 
 test("PATCH organization settings applies dashboard origin and JSON guards before authentication", async () => {
   const app = createApp(testConfig());
-  const path = "/v1/dashboard/tenants/00000000-0000-4000-8000-000000000001";
+  const path = "/dashboard/tenants/00000000-0000-4000-8000-000000000001";
   const crossOrigin = await app.request(path, {
     method: "PATCH",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
@@ -594,10 +594,10 @@ test("tenant-scoped review routes require an authenticated tenant member", async
   const tenantId = "00000000-0000-4000-8000-000000000001";
   const runId = "00000000-0000-4000-8000-000000000002";
   const paths = [
-    `/v1/dashboard/tenants/${tenantId}/review-runs`,
-    `/v1/dashboard/tenants/${tenantId}/review-runs/${runId}`,
-    `/v1/dashboard/tenants/${tenantId}/review-runs/${runId}/scenario-lineage/scenario-1`,
-    `/v1/dashboard/tenants/${tenantId}/context/repositories`,
+    `/dashboard/tenants/${tenantId}/review-runs`,
+    `/dashboard/tenants/${tenantId}/review-runs/${runId}`,
+    `/dashboard/tenants/${tenantId}/review-runs/${runId}/scenario-lineage/scenario-1`,
+    `/dashboard/tenants/${tenantId}/context/repositories`,
   ];
   for (const path of paths) {
     const response = await app.request(path);
@@ -631,17 +631,17 @@ test("authenticated legacy review routes fail closed without a personal Jina ten
   const cookie = `${config.auth.sessionCookieName}=${session.id}`;
   await saveSession(session);
   try {
-    const list = await app.request("/v1/dashboard/review-runs", { headers: { cookie } });
+    const list = await app.request("/dashboard/review-runs", { headers: { cookie } });
     assert.equal(list.status, 200);
     assert.deepEqual((await list.json()).review_runs, []);
 
-    const detail = await app.request("/v1/dashboard/review-runs/run-from-another-tenant", {
+    const detail = await app.request("/dashboard/review-runs/run-from-another-tenant", {
       headers: { cookie },
     });
     assert.equal(detail.status, 404);
 
     const lineage = await app.request(
-      "/v1/dashboard/review-runs/run-from-another-tenant/scenario-lineage/scenario-1",
+      "/dashboard/review-runs/run-from-another-tenant/scenario-lineage/scenario-1",
       { headers: { cookie } },
     );
     assert.equal(lineage.status, 200);
@@ -655,7 +655,7 @@ test("authenticated legacy review routes fail closed without a personal Jina ten
 
 test("POST tenant integrations rejects a present Origin not in the allowlist with 403", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/tenants/tenant-1/integrations", {
+  const res = await app.request("/dashboard/tenants/tenant-1/integrations", {
     method: "POST",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
     body: "{}",
@@ -666,7 +666,7 @@ test("POST tenant integrations rejects a present Origin not in the allowlist wit
 
 test("PUT tenant model-settings rejects a non-JSON content type with 415", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/tenants/tenant-1/model-settings", {
+  const res = await app.request("/dashboard/tenants/tenant-1/model-settings", {
     method: "PUT",
     headers: { origin: "https://dash.example", "content-type": "text/plain" },
     body: "{}",
@@ -677,7 +677,7 @@ test("PUT tenant model-settings rejects a non-JSON content type with 415", async
 test("POST Context build cancellation rejects cross-site requests before authentication", async () => {
   const app = createApp(testConfig());
   const response = await app.request(
-    "/v1/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
+    "/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
     {
       method: "POST",
       headers: { origin: "https://evil.example", ...JSON_HEADERS },
@@ -691,7 +691,7 @@ test("POST Context build cancellation rejects cross-site requests before authent
 test("POST Context build cancellation requires JSON before authentication", async () => {
   const app = createApp(testConfig());
   const response = await app.request(
-    "/v1/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
+    "/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
     {
       method: "POST",
       headers: { origin: "https://dash.example", "content-type": "text/plain" },
@@ -704,7 +704,7 @@ test("POST Context build cancellation requires JSON before authentication", asyn
 test("POST Context build cancellation requires an authenticated tenant admin", async () => {
   const app = createApp(testConfig());
   const response = await app.request(
-    "/v1/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
+    "/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
     {
       method: "POST",
       headers: { origin: "https://dash.example", ...JSON_HEADERS },
@@ -717,7 +717,7 @@ test("POST Context build cancellation requires an authenticated tenant admin", a
 
 test("POST tenant GitHub installation rejects cross-site requests before authentication", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/tenants/tenant-1/github/installations", {
+  const res = await app.request("/dashboard/tenants/tenant-1/github/installations", {
     method: "POST",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
     body: JSON.stringify({ installation_id: 42 }),
@@ -728,7 +728,7 @@ test("POST tenant GitHub installation rejects cross-site requests before authent
 
 test("POST tenant GitHub installation requires JSON before authentication", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/v1/dashboard/tenants/tenant-1/github/installations", {
+  const res = await app.request("/dashboard/tenants/tenant-1/github/installations", {
     method: "POST",
     headers: { origin: "https://dash.example", "content-type": "text/plain" },
     body: "{}",

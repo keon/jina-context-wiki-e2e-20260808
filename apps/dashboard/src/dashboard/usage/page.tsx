@@ -24,8 +24,8 @@ import { type SelectedTenant } from "../lib/tenants";
 
 function tenantScopedUrl(selected: SelectedTenant | null, suffix: string, params?: URLSearchParams): string {
   const path = selected
-    ? `/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}${suffix}`
-    : `/v1/dashboard${suffix}`;
+    ? `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}${suffix}`
+    : `/dashboard${suffix}`;
   return apiUrl(path, params);
 }
 

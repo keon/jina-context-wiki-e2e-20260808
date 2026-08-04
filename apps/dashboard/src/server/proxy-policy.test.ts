@@ -53,11 +53,11 @@ test("demo webhook endpoint is local-only", () => {
 
 test("product API routes share /api while preserving their Clerk auth boundary", () => {
   for (const [method, pathname] of [
-    ["GET", "/api/v1/dashboard/me"],
-    ["POST", "/api/v1/dashboard/session/refresh"],
-    ["PUT", "/api/v1/dashboard/tenants/tenant-1/model-settings"],
-    ["PATCH", "/api/v1/dashboard/tenants/tenant-1"],
-    ["DELETE", "/api/v1/dashboard/tenants/tenant-1/integrations/openrouter"],
+    ["GET", "/api/dashboard/me"],
+    ["POST", "/api/dashboard/session/refresh"],
+    ["PUT", "/api/dashboard/tenants/tenant-1/model-settings"],
+    ["PATCH", "/api/dashboard/tenants/tenant-1"],
+    ["DELETE", "/api/dashboard/tenants/tenant-1/integrations/openrouter"],
     ["GET", "/api/auth/github/callback"]
   ] as const) {
     assert.equal(isProductDashboardApiRequest(method, pathname), true, pathname);
@@ -65,6 +65,8 @@ test("product API routes share /api while preserving their Clerk auth boundary",
   }
   assert.equal(isProductDashboardApiRequest("GET", "/api/context/releases"), false);
   assert.equal(isProductDashboardApiRequest("POST", "/api/internal/reviews/prepare"), false);
+  assert.equal(isProductDashboardApiRequest("GET", "/api/v1/dashboard/me"), false);
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/v1/dashboard/me", true), false);
 });
 
 test("dashboard principal prefers a validated IAP email", () => {

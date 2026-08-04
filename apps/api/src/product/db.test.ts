@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { productDatabaseConnectionString } from "./db.js";
 
-test("the absorbed product database uses its namespaced URL instead of V2 DATABASE_URL", () => {
+test("the absorbed product database uses its namespaced URL instead of the Context database URL", () => {
   assert.equal(
     productDatabaseConnectionString({
       JINA_PRODUCT_DATABASE_URL: "postgresql://product.example/jina_product",

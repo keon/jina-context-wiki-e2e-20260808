@@ -228,7 +228,7 @@ function booleanEnvironment(name: string, fallback: boolean): boolean {
 async function loadProductApiRequestHandler() {
   if (!booleanEnvironment("JINA_PRODUCT_API_ENABLED", false)) return undefined;
   // Keep the product compiler boundary independent while the absorbed code is
-  // progressively refactored onto the V2 shared kernel.
+  // progressively refactored onto the shared kernel.
   const productModulePath = "./product/index.js";
   const product = (await import(productModulePath)) as {
     createProductApiRequestHandler: () => (

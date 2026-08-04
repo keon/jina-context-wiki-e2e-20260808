@@ -39,8 +39,8 @@ const DEFAULT_HISTORY_MARKDOWN = [
 
 function usage() {
   return `Usage:
-  node evals/run-isolated-review-v1.mjs --repo owner/repo --pr 1234
-  node evals/run-isolated-review-v1.mjs --repo owner/repo --rank E1
+  node evals/run-isolated-review.mjs --repo owner/repo --pr 1234
+  node evals/run-isolated-review.mjs --repo owner/repo --rank E1
 
 Options:
   --repo owner/repo       Repository slug from Golden Dataset 1. Required when rank is ambiguous.

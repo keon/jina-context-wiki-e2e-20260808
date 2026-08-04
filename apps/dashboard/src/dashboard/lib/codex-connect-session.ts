@@ -42,7 +42,7 @@ export function clearCodexDeviceFlow(flowId?: string): void {
 
 /** Fire-and-forget, privacy-safe telemetry. The API independently re-validates every field. */
 export function reportCodexConnectEvent(event: CodexConnectTelemetryEvent): void {
-  void fetch(apiUrl("/v1/dashboard/integrations/codex/events"), {
+  void fetch(apiUrl("/dashboard/integrations/codex/events"), {
     method: "POST",
     credentials: "include",
     keepalive: true,

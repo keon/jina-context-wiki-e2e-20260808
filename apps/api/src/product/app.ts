@@ -124,7 +124,7 @@ export function createApp(config: AppConfig): Hono {
       });
 
   app.onError((error, c) => jsonError(c, error));
-  app.use("/v1/dashboard/*", dashboardCors);
+  app.use("/dashboard/*", dashboardCors);
   app.use("/auth/*", dashboardCors);
 
   // FINDING 1 (credentialed CSRF): every credentialed, state-changing dashboard route must reject a
@@ -152,23 +152,13 @@ export function createApp(config: AppConfig): Hono {
     return next();
   };
 
-  const health = () => ({
-    status: "ok",
-    service: "jina-api",
-    component: "product",
-    runtime: "typescript",
-  });
-
-  app.get("/healthz", (c) => c.json(health()));
-  app.get("/v1/healthz", (c) => c.json(health()));
-
   app.get("/auth/github/login", (c) => githubLogin(c, config));
   app.get("/auth/github/callback", (c) => githubCallback(c, config));
   app.post("/auth/logout", (c) => logout(c, config));
 
-  app.get("/v1/dashboard/me", (c) => me(c, config));
-  app.post("/v1/dashboard/session/refresh", requireDashboardOrigin, (c) => refreshMe(c, config));
-  app.get("/v1/dashboard/review-runs", async (c) => {
+  app.get("/dashboard/me", (c) => me(c, config));
+  app.post("/dashboard/session/refresh", requireDashboardOrigin, (c) => refreshMe(c, config));
+  app.get("/dashboard/review-runs", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = session ? await getTenantIdForUser(session.user.id, session.userId) : undefined;
     const project = c.req.query("project")?.trim();
@@ -220,7 +210,7 @@ export function createApp(config: AppConfig): Hono {
     });
   });
 
-  app.get("/v1/dashboard/review-runs/:reviewRunId/scenario-lineage/:lineageKey", async (c) => {
+  app.get("/dashboard/review-runs/:reviewRunId/scenario-lineage/:lineageKey", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = session ? await getTenantIdForUser(session.user.id, session.userId) : undefined;
     if (session && !tenantId) {
@@ -236,7 +226,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ review_runs: records });
   });
 
-  app.get("/v1/dashboard/review-runs/:reviewRunId", async (c) => {
+  app.get("/dashboard/review-runs/:reviewRunId", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = session ? await getTenantIdForUser(session.user.id, session.userId) : undefined;
     if (session && !tenantId) {
@@ -253,10 +243,10 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ review_run: record });
   });
 
-  // Additive tenant-scoped review endpoints. Current dashboards use these routes so the selected
-  // Jina tenant is the workspace boundary. The legacy routes above remain for rolling deploys and
-  // local fixtures; authenticated calls to them are restricted to the viewer's personal Jina tenant.
-  app.get("/v1/dashboard/tenants/:tenantId/review-runs", async (c) => {
+  // Tenant-scoped review endpoints use the selected Jina organization as the
+  // workspace boundary. The viewer-scoped forms above serve personal accounts
+  // and local fixtures only.
+  app.get("/dashboard/tenants/:tenantId/review-runs", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -294,7 +284,7 @@ export function createApp(config: AppConfig): Hono {
     });
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/review-runs/:reviewRunId/scenario-lineage/:lineageKey", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/review-runs/:reviewRunId/scenario-lineage/:lineageKey", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -307,7 +297,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ review_runs: records });
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/review-runs/:reviewRunId", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/review-runs/:reviewRunId", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -329,7 +319,7 @@ export function createApp(config: AppConfig): Hono {
     codex_harness_model: null,
   };
 
-  app.get("/v1/dashboard/integrations", async (c) => {
+  app.get("/dashboard/integrations", async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json(emptyIntegrations);
@@ -338,7 +328,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/v1/dashboard/integrations/codex/events",
+    "/dashboard/integrations/codex/events",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -355,7 +345,7 @@ export function createApp(config: AppConfig): Hono {
     },
   );
 
-  app.post("/v1/dashboard/integrations", requireDashboardOrigin, requireJsonContentType, async (c) => {
+  app.post("/dashboard/integrations", requireDashboardOrigin, requireJsonContentType, async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json(emptyIntegrations);
@@ -420,16 +410,16 @@ export function createApp(config: AppConfig): Hono {
     return c.json(await getUserIntegrations(session.user.id));
   });
 
-  app.post("/v1/dashboard/integrations/openrouter/oauth/start", requireDashboardOrigin, (c) =>
+  app.post("/dashboard/integrations/openrouter/oauth/start", requireDashboardOrigin, (c) =>
     startOpenRouterOAuth(c, config),
   );
-  app.get("/v1/dashboard/integrations/openrouter/oauth/callback", (c) => openRouterOAuthCallback(c, config));
+  app.get("/dashboard/integrations/openrouter/oauth/callback", (c) => openRouterOAuthCallback(c, config));
 
-  app.get("/v1/dashboard/model-settings", (c) => getModelSettings(c, config));
-  app.put("/v1/dashboard/model-settings", requireDashboardOrigin, requireJsonContentType, (c) =>
+  app.get("/dashboard/model-settings", (c) => getModelSettings(c, config));
+  app.put("/dashboard/model-settings", requireDashboardOrigin, requireJsonContentType, (c) =>
     putModelSettings(c, config),
   );
-  app.get("/v1/dashboard/models", (c) => getModels(c));
+  app.get("/dashboard/models", (c) => getModels(c));
 
   const unconfiguredBilling = {
     configured: false,
@@ -445,7 +435,7 @@ export function createApp(config: AppConfig): Hono {
 
   // Billing overview: 'not_configured' when Autumn is unset or the viewer genuinely has no tenant;
   // 'unavailable' when the tenant lookup itself fails (outage) or Autumn errors; 'ok' with live data.
-  app.get("/v1/dashboard/billing", async (c) => {
+  app.get("/dashboard/billing", async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json(unconfiguredBilling);
@@ -471,7 +461,7 @@ export function createApp(config: AppConfig): Hono {
   // Overage-credit top-up checkout. 200 { url } or 409 { error } when billing is not configured.
   // The shared requireDashboardOrigin guard (FINDING 1) fronts this credentialed POST; it takes no
   // body, so no content-type guard is needed.
-  app.post("/v1/dashboard/billing/topup", requireDashboardOrigin, async (c) => {
+  app.post("/dashboard/billing/topup", requireDashboardOrigin, async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session || !billing.billingConfigured()) {
       return c.json({ error: "billing is not configured" }, 409);
@@ -517,7 +507,7 @@ export function createApp(config: AppConfig): Hono {
   // an 'admin' may WRITE. State-changing routes additionally carry the shared CSRF guards.
 
   // The set of tenants the viewer belongs to (personal first), for the tenant switcher.
-  app.get("/v1/dashboard/tenants", async (c) => {
+  app.get("/dashboard/tenants", async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json({ tenants: [] });
@@ -526,7 +516,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/v1/dashboard/tenants",
+    "/dashboard/tenants",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -549,7 +539,7 @@ export function createApp(config: AppConfig): Hono {
   );
 
   app.patch(
-    "/v1/dashboard/tenants/:tenantId",
+    "/dashboard/tenants/:tenantId",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -571,7 +561,7 @@ export function createApp(config: AppConfig): Hono {
     },
   );
 
-  app.get("/v1/dashboard/tenants/:tenantId/graphs", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/graphs", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -599,7 +589,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/v1/dashboard/tenants/:tenantId/graphs/index",
+    "/dashboard/tenants/:tenantId/graphs/index",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -617,7 +607,7 @@ export function createApp(config: AppConfig): Hono {
         snapshotFirst: !fullHistory,
         requestKey: `dashboard:${tenantId}:${randomUUID()}`,
         metadata: {
-          source: "jina-v1-dashboard",
+          source: "jina-dashboard",
           indexMode: fullHistory ? "full-history" : "snapshot-first",
           historyLimit,
           senderGithubUserId: session!.user.id,
@@ -630,7 +620,7 @@ export function createApp(config: AppConfig): Hono {
   // The context plane: knowledge documents, browsable as a tree. `logicalId` is
   // `kind:repository:subject`, so the client can build the folder structure
   // without a second round trip per level.
-  app.get("/v1/dashboard/tenants/:tenantId/context/repositories", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/context/repositories", async (c) => {
     const startedAt = Date.now();
     const session = await requireDashboardSession(c, config);
     const sessionMs = Date.now() - startedAt;
@@ -655,7 +645,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ repositories: context.repositories });
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/context/documents", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/context/documents", async (c) => {
     const startedAt = Date.now();
     const session = await requireDashboardSession(c, config);
     const sessionMs = Date.now() - startedAt;
@@ -693,7 +683,7 @@ export function createApp(config: AppConfig): Hono {
 
   // Polled by the context page while a build runs, so the wiki can be watched
   // appearing instead of waiting on a spinner for ninety minutes.
-  app.get("/v1/dashboard/tenants/:tenantId/context/builds/:buildId/progress", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/context/builds/:buildId/progress", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -703,7 +693,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/v1/dashboard/tenants/:tenantId/context/builds/:buildId/cancel",
+    "/dashboard/tenants/:tenantId/context/builds/:buildId/cancel",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -716,7 +706,7 @@ export function createApp(config: AppConfig): Hono {
     },
   );
 
-  app.get("/v1/dashboard/tenants/:tenantId/context/builds", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/context/builds", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -725,7 +715,7 @@ export function createApp(config: AppConfig): Hono {
     });
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/context/documents/:documentId", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/context/documents/:documentId", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -746,7 +736,7 @@ export function createApp(config: AppConfig): Hono {
   // Triggering a build from the context page. Same operation the indexing route
   // performs; named for what it does rather than for the old graph framing.
   app.post(
-    "/v1/dashboard/tenants/:tenantId/context/build",
+    "/dashboard/tenants/:tenantId/context/build",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -765,7 +755,7 @@ export function createApp(config: AppConfig): Hono {
           snapshotFirst: !fullHistory,
           requestKey: `dashboard:${tenantId}:${randomUUID()}`,
           metadata: {
-            source: "jina-v1-dashboard",
+            source: "jina-dashboard",
             indexMode: fullHistory ? "full-history" : "snapshot-first",
             historyLimit,
             senderGithubUserId: session!.user.id,
@@ -777,21 +767,21 @@ export function createApp(config: AppConfig): Hono {
     },
   );
 
-  app.get("/v1/dashboard/tenants/:tenantId/work-overview", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/work-overview", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
     return c.json(await graphs.getWorkOverview(await tenantGraphContext(tenantId)));
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/operations/task-types", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/task-types", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
     return c.json(await graphs.listTaskTypes(await tenantGraphContext(tenantId)));
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/operations/causal-graph", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/causal-graph", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -805,7 +795,7 @@ export function createApp(config: AppConfig): Hono {
     );
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/operations/context/releases", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/context/releases", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -818,7 +808,7 @@ export function createApp(config: AppConfig): Hono {
     );
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/operations/context/list", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/context/list", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -832,7 +822,7 @@ export function createApp(config: AppConfig): Hono {
     );
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/operations/context/read", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/context/read", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -848,7 +838,7 @@ export function createApp(config: AppConfig): Hono {
     );
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/operations/context/diff", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/context/diff", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -865,7 +855,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/v1/dashboard/tenants/:tenantId/operations/context/search",
+    "/dashboard/tenants/:tenantId/operations/context/search",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -890,7 +880,7 @@ export function createApp(config: AppConfig): Hono {
     },
   );
 
-  app.get("/v1/dashboard/tenants/:tenantId/graphs/:graphId", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/graphs/:graphId", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -900,7 +890,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/v1/dashboard/tenants/:tenantId/graph/query",
+    "/dashboard/tenants/:tenantId/graph/query",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -923,14 +913,14 @@ export function createApp(config: AppConfig): Hono {
   );
 
   // Tenant OpenRouter integration: member read, admin write. Same shape/validation as the legacy route.
-  app.get("/v1/dashboard/tenants/:tenantId/integrations", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/integrations", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
     return c.json(await getTenantIntegrations(tenantId));
   });
 
-  app.get("/v1/dashboard/tenants/:tenantId/github/installations", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/github/installations", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -938,7 +928,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/v1/dashboard/tenants/:tenantId/github/installations",
+    "/dashboard/tenants/:tenantId/github/installations",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -1012,7 +1002,7 @@ export function createApp(config: AppConfig): Hono {
   );
 
   app.post(
-    "/v1/dashboard/tenants/:tenantId/integrations",
+    "/dashboard/tenants/:tenantId/integrations",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -1050,7 +1040,7 @@ export function createApp(config: AppConfig): Hono {
   );
 
   // Tenant model settings keyed directly by tenant id: member read, admin write (same catalog validation).
-  app.get("/v1/dashboard/tenants/:tenantId/model-settings", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/model-settings", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -1058,7 +1048,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.put(
-    "/v1/dashboard/tenants/:tenantId/model-settings",
+    "/dashboard/tenants/:tenantId/model-settings",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -1076,7 +1066,7 @@ export function createApp(config: AppConfig): Hono {
 
   // Tenant review-trigger mode: member read, admin write. Reviews every update, the initial PR only,
   // or only an explicit @usejina command in a PR comment.
-  app.get("/v1/dashboard/tenants/:tenantId/review-trigger", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/review-trigger", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -1084,7 +1074,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.put(
-    "/v1/dashboard/tenants/:tenantId/review-trigger",
+    "/dashboard/tenants/:tenantId/review-trigger",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -1099,7 +1089,7 @@ export function createApp(config: AppConfig): Hono {
 
   // Tenant model-provider selection: member read, admin write. Chooses which credential the tenant's
   // runs use (managed / company OpenAI key / company OpenRouter key), decoupled from the per-stage model.
-  app.get("/v1/dashboard/tenants/:tenantId/model-provider", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/model-provider", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -1107,7 +1097,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.put(
-    "/v1/dashboard/tenants/:tenantId/model-provider",
+    "/dashboard/tenants/:tenantId/model-provider",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -1123,7 +1113,7 @@ export function createApp(config: AppConfig): Hono {
   // Tenant billing: member read (overview), admin top-up. Reuses billing.overview/topupUrl keyed by the
   // tenant uuid (the Autumn customer id). Enriched with member counts and the auto-review cap (both pure
   // store reads) alongside the Autumn-derived overview (cycle + billing_activity live inside overview()).
-  app.get("/v1/dashboard/tenants/:tenantId/billing", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/billing", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -1144,7 +1134,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   // Tenant usage summary over a trailing window (member read). days validated to {7,30,90} (default 30).
-  app.get("/v1/dashboard/tenants/:tenantId/usage", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/usage", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -1154,7 +1144,7 @@ export function createApp(config: AppConfig): Hono {
 
   // Set the tenant's auto-review credit cap (admin write). Validated body { enabled, limit_credits }.
   app.put(
-    "/v1/dashboard/tenants/:tenantId/billing/limits",
+    "/dashboard/tenants/:tenantId/billing/limits",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -1175,7 +1165,7 @@ export function createApp(config: AppConfig): Hono {
 
   // Subscribe the tenant to a plan (admin write). Returns an Autumn checkout url, mirroring topup.
   app.post(
-    "/v1/dashboard/tenants/:tenantId/billing/subscribe",
+    "/dashboard/tenants/:tenantId/billing/subscribe",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -1205,7 +1195,7 @@ export function createApp(config: AppConfig): Hono {
 
   // Configure per-customer auto-reload (auto top-up) wired to Autumn (admin write).
   app.put(
-    "/v1/dashboard/tenants/:tenantId/billing/auto-reload",
+    "/dashboard/tenants/:tenantId/billing/auto-reload",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -1237,7 +1227,7 @@ export function createApp(config: AppConfig): Hono {
   // no tenant is selected (single/zero-tenant viewers with the switcher hidden). They resolve the
   // viewer's PERSONAL tenant and delegate to the same logic as the tenant-scoped routes above —
   // the viewer is implicitly admin of their own personal tenant, so no membership check is needed.
-  app.get("/v1/dashboard/usage", async (c) => {
+  app.get("/dashboard/usage", async (c) => {
     const session = await requireDashboardSession(c, config);
     const days = parseUsageDays(c.req.query("days"));
     const tenantId = session
@@ -1263,7 +1253,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json(await getTenantUsageSummary(tenantId, days));
   });
 
-  app.get("/v1/dashboard/review-trigger", async (c) => {
+  app.get("/dashboard/review-trigger", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = session ? await ensurePersonalTenantId(session.user.id, session.user.login) : undefined;
     if (!tenantId) {
@@ -1272,7 +1262,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ mode: await getTenantReviewTriggerMode(tenantId) });
   });
 
-  app.put("/v1/dashboard/review-trigger", requireDashboardOrigin, requireJsonContentType, async (c) => {
+  app.put("/dashboard/review-trigger", requireDashboardOrigin, requireJsonContentType, async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json({ error: "authentication required" }, 401);
@@ -1286,7 +1276,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ mode: await getTenantReviewTriggerMode(tenantId) });
   });
 
-  app.get("/v1/dashboard/model-provider", async (c) => {
+  app.get("/dashboard/model-provider", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = session ? await ensurePersonalTenantId(session.user.id, session.user.login) : undefined;
     if (!tenantId) {
@@ -1295,7 +1285,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ provider: await getTenantModelProvider(tenantId) });
   });
 
-  app.put("/v1/dashboard/model-provider", requireDashboardOrigin, requireJsonContentType, async (c) => {
+  app.put("/dashboard/model-provider", requireDashboardOrigin, requireJsonContentType, async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json({ error: "authentication required" }, 401);
@@ -1309,7 +1299,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ provider: await getTenantModelProvider(tenantId) });
   });
 
-  app.put("/v1/dashboard/billing/limits", requireDashboardOrigin, requireJsonContentType, async (c) => {
+  app.put("/dashboard/billing/limits", requireDashboardOrigin, requireJsonContentType, async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json({ error: "authentication required" }, 401);
@@ -1329,7 +1319,7 @@ export function createApp(config: AppConfig): Hono {
     });
   });
 
-  app.post("/v1/dashboard/billing/subscribe", requireDashboardOrigin, requireJsonContentType, async (c) => {
+  app.post("/dashboard/billing/subscribe", requireDashboardOrigin, requireJsonContentType, async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json({ error: "authentication required" }, 401);
@@ -1363,7 +1353,7 @@ export function createApp(config: AppConfig): Hono {
     }
   });
 
-  app.put("/v1/dashboard/billing/auto-reload", requireDashboardOrigin, requireJsonContentType, async (c) => {
+  app.put("/dashboard/billing/auto-reload", requireDashboardOrigin, requireJsonContentType, async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {
       return c.json({ error: "authentication required" }, 401);
@@ -1392,7 +1382,7 @@ export function createApp(config: AppConfig): Hono {
     }
   });
 
-  app.post("/v1/dashboard/tenants/:tenantId/billing/topup", requireDashboardOrigin, async (c) => {
+  app.post("/dashboard/tenants/:tenantId/billing/topup", requireDashboardOrigin, async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: true });
@@ -1433,8 +1423,8 @@ export function createApp(config: AppConfig): Hono {
         error: error instanceof Error ? error.message : String(error),
       });
       // The review was already admitted. Preserve a non-2xx GitHub delivery so
-      // operators can redeliver Context, while accurately identifying V2 as the
-      // failed dependency instead of reporting a V1 server regression.
+      // operators can redeliver Context while accurately identifying the
+      // Context admission stage as the failed dependency.
       throw new ApiError(424, "Context event relay failed");
     }
 

@@ -37,8 +37,8 @@ export function loginUrl(): string {
 
 export function reviewRunsPath(tenantId?: string | null): string {
   return tenantId
-    ? `/v1/dashboard/tenants/${encodeURIComponent(tenantId)}/review-runs`
-    : "/v1/dashboard/review-runs";
+    ? `/dashboard/tenants/${encodeURIComponent(tenantId)}/review-runs`
+    : "/dashboard/review-runs";
 }
 
 export function reviewRunPath(reviewRunId: string, tenantId?: string | null): string {
@@ -47,7 +47,7 @@ export function reviewRunPath(reviewRunId: string, tenantId?: string | null): st
 
 /** Create an empty Jina organization. GitHub installations are connected separately afterward. */
 export async function createJinaOrganization(name: string): Promise<ViewerTenant> {
-  const response = await fetch(apiUrl("/v1/dashboard/tenants"), {
+  const response = await fetch(apiUrl("/dashboard/tenants"), {
     method: "POST",
     credentials: "include",
     headers: { "content-type": "application/json" },
@@ -65,7 +65,7 @@ export async function createJinaOrganization(name: string): Promise<ViewerTenant
 
 /** Rename a Jina organization without changing its stable tenant identity. */
 export async function updateJinaOrganization(tenantId: string, name: string): Promise<ViewerTenant> {
-  const response = await fetch(apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(tenantId)}`), {
+  const response = await fetch(apiUrl(`/dashboard/tenants/${encodeURIComponent(tenantId)}`), {
     method: "PATCH",
     credentials: "include",
     headers: { "content-type": "application/json" },

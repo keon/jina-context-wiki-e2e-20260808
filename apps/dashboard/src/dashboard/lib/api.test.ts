@@ -11,17 +11,17 @@ import {
 test("review paths use the selected tenant and encode every identifier", () => {
   assert.equal(
     reviewRunsPath("tenant/id"),
-    "/v1/dashboard/tenants/tenant%2Fid/review-runs",
+    "/dashboard/tenants/tenant%2Fid/review-runs",
   );
   assert.equal(
     reviewRunPath("run/id", "tenant/id"),
-    "/v1/dashboard/tenants/tenant%2Fid/review-runs/run%2Fid",
+    "/dashboard/tenants/tenant%2Fid/review-runs/run%2Fid",
   );
 });
 
 test("review paths retain the legacy endpoint only for auth-disabled compatibility", () => {
-  assert.equal(reviewRunsPath(null), "/v1/dashboard/review-runs");
-  assert.equal(reviewRunPath("run-id", null), "/v1/dashboard/review-runs/run-id");
+  assert.equal(reviewRunsPath(null), "/dashboard/review-runs");
+  assert.equal(reviewRunPath("run-id", null), "/dashboard/review-runs/run-id");
 });
 
 test("created Jina organizations use the authoritative tenant response", () => {

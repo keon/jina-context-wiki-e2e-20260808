@@ -217,8 +217,8 @@ type ModelProvider = "codex" | "byok" | "managed";
 
 function modelProviderUrl(selected: SelectedTenant | null): string {
   return selected
-    ? apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/model-provider`)
-    : apiUrl("/v1/dashboard/model-provider");
+    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/model-provider`)
+    : apiUrl("/dashboard/model-provider");
 }
 
 function normalizeProvider(raw: unknown): ModelProvider {
@@ -231,8 +231,8 @@ function normalizeProvider(raw: unknown): ModelProvider {
 
 function routerIntegrationsUrl(selected: SelectedTenant | null): string {
   return selected
-    ? apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`)
-    : apiUrl("/v1/dashboard/integrations");
+    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`)
+    : apiUrl("/dashboard/integrations");
 }
 
 // Only the keys the worker actually ROUTES to are BYOK credentials: the OpenRouter key (any vendor) and
@@ -352,7 +352,7 @@ function RoutingStateProvider({ children }: { children: ReactNode }) {
     // The Codex harness is PERSONAL — it is NOT tenant-scoped, so it rides the viewer's own (legacy)
     // integrations payload regardless of the selected tenant. The tenant-scoped route above does not
     // return codex_harness, so reading it there always showed "Not connected".
-    fetch(apiUrl("/v1/dashboard/integrations"), { credentials: "include", cache: "no-store" })
+    fetch(apiUrl("/dashboard/integrations"), { credentials: "include", cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data: Record<string, unknown> | null) => {
         if (!isCurrentTenant(reqTenant)) return;
@@ -602,8 +602,8 @@ function normalizeReviewTriggerMode(value: unknown): ReviewTriggerMode {
 /** Review-trigger endpoint for the active tenant, or the legacy viewer-scoped route. */
 function reviewTriggerUrl(selected: SelectedTenant | null): string {
   return selected
-    ? apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/review-trigger`)
-    : apiUrl("/v1/dashboard/review-trigger");
+    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/review-trigger`)
+    : apiUrl("/dashboard/review-trigger");
 }
 
 const TRIGGER_OPTIONS: Array<{ value: ReviewTriggerMode; title: string; desc: string }> = [
@@ -785,8 +785,8 @@ type RowStatus = { state: "saving" } | { state: "saved" } | { state: "error"; me
 /** Model-settings endpoint for the active tenant, or the legacy viewer-scoped route. */
 function modelSettingsUrl(selected: SelectedTenant | null): string {
   return selected
-    ? apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/model-settings`)
-    : apiUrl("/v1/dashboard/model-settings");
+    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/model-settings`)
+    : apiUrl("/dashboard/model-settings");
 }
 
 /** The models a Codex harness can run, as catalog ids (openai/ + the subscription model names). Derived
@@ -880,7 +880,7 @@ function ReviewDefaultsSection() {
 
   // The model catalog is global (not tenant-scoped) — load it once.
   useEffect(() => {
-    fetch(apiUrl("/v1/dashboard/models"), { credentials: "include", cache: "no-store" })
+    fetch(apiUrl("/dashboard/models"), { credentials: "include", cache: "no-store" })
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         const models =
@@ -1433,7 +1433,7 @@ function CodexCard({
     const existing = selected?.tenantId ? loadCodexDeviceFlow(selected.tenantId) : null;
     if (existing) clearCodexDeviceFlow(existing.flowId);
     try {
-      const response = await fetch(apiUrl("/v1/dashboard/integrations"), {
+      const response = await fetch(apiUrl("/dashboard/integrations"), {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -1469,7 +1469,7 @@ function CodexCard({
     setError(null);
     setMessage(null);
     try {
-      const response = await fetch(apiUrl("/v1/dashboard/integrations"), {
+      const response = await fetch(apiUrl("/dashboard/integrations"), {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -1755,7 +1755,7 @@ function CodexManualFallback({
  * by Cloudflare's TLS-fingerprint challenge. On mount it fetches a user_code directly from OpenAI,
  * shows the numbered steps + a copy button, polls the token endpoint at the returned interval, then
  * (on approval) exchanges the code for tokens, assembles auth.json, and POSTs ONLY that blob to our
- * existing encrypted /v1/dashboard/integrations endpoint. No token material touches our server until
+ * existing encrypted /dashboard/integrations endpoint. No token material touches our server until
  * the final assembled auth.json.
  */
 type DeviceFlowState =
@@ -1948,7 +1948,7 @@ function CodexDeviceFlow({ onConnected }: { onConnected: (info: CodexHarnessInfo
           return;
         }
         report(flow, { event: "credential_save_started", stage: "save", attempt });
-        const saved = await fetch(apiUrl("/v1/dashboard/integrations"), {
+        const saved = await fetch(apiUrl("/dashboard/integrations"), {
           method: "POST",
           credentials: "include",
           headers: { "content-type": "application/json" },
@@ -2164,7 +2164,7 @@ function AvailableModelsSection() {
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    fetch(apiUrl("/v1/dashboard/models"), { credentials: "include", cache: "no-store" })
+    fetch(apiUrl("/dashboard/models"), { credentials: "include", cache: "no-store" })
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         const models =

@@ -87,10 +87,10 @@ from any scope.
 
 Expiry is required and bounded. Revocation takes effect immediately.
 
-### V1 review credentials
+### Review credentials
 
 `POST /internal/context/review-access` requires the internal credential plus the shared
-tenant UUID, repository, and V1 review-run ID. It re-resolves the repository inside that
+tenant UUID, repository, and review-run ID. It re-resolves the repository inside that
 tenant, binds a run-and-repository principal to exactly that repository, and mints
 `context:query` plus `context:read` for 180 minutes by default (5–360 allowed). The response
 is `Cache-Control: no-store` and includes the direct `/mcp` path. Reusing a review-run ID

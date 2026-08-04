@@ -256,7 +256,6 @@ retry_health() {
   done
 }
 retry_health "${api_url}/health"
-retry_health "${api_url}/v1/healthz"
 
 internal_token="$(gcloud secrets versions access latest \
   --secret="${internal_token_secret}" --project="${project}")"
@@ -275,5 +274,5 @@ for attempt in $(seq 1 20); do
   sleep 3
 done
 
-printf 'V2 staging deployed successfully\n'
+printf 'Jina staging deployed successfully\n'
 printf 'API: %s\n' "${api_url}"

@@ -2,14 +2,14 @@
 
 The original Jina product API is absorbed into `apps/api`; product/review, Board,
 Context, causal graph, and MCP routes ship in one backend image. Trigger.dev review
-workers remain under `platform/v1/trigger` and deploy through
-`.github/workflows/deploy-v1-trigger.yml`. The customer dashboard deploys from
+workers remain under `services/review-trigger` and deploy through
+`.github/workflows/deploy-review-trigger.yml`. The customer dashboard deploys from
 `apps/dashboard`.
 
 Run `scripts/check-staging-readiness.sh` before a staging release. Build immutable v2
 API/worker images with `cloudbuild.images.yaml` and a tag containing `staging`, then pass
 that tag and the UUID-valued `JINA_CONTEXT_TENANT_ID` to
-`scripts/deploy-staging-v2.sh`. The script is fail-closed on any resource, service
+`scripts/deploy-staging.sh`. The script is fail-closed on any resource, service
 account, secret, database, tenant, bucket, URL, or image tag that is not explicitly
 staging-scoped. Production continues to use the coordinated `cloudbuild.yaml` path below.
 
@@ -416,20 +416,21 @@ incompatible toolchain, or failed model request fails the release closed.
 
 Context workers use the unified `JINA_API_URL` and additionally require
 `JINA_PRODUCT_INTERNAL_API_TOKEN` when tenant model routing is enabled. For every build,
-the worker resolves the write-once profile created by V1 and honors its Context model,
+the worker resolves the write-once profile created by the unified API and honors its Context model,
 reasoning effort, credential revision, and fallback policy. Credential/configuration,
 quota, and unknown-model failures are terminal and remain visible on the task board;
 only transient provider/sandbox failures consume bounded automatic retries.
-Production stores the latter as `jina-v1-internal-api-token` in the V2 project
-because V1 and V2 intentionally use different service-internal tokens. Rotate this
-mirror whenever V1's `jina-internal-api-token` rotates; only the Context worker
+Production currently stores the latter under the historical
+`jina-v1-internal-api-token` secret name. Review and Context workers intentionally
+use different service-internal tokens. Rotate this mirror whenever the review
+internal token rotates; only the Context worker
 service account receives accessor permission.
 
 `CONTEXT_DAYTONA_MODEL_SECRET` is the Jina-managed fallback's Daytona organization
 Secret name, never its credential value. Tenant BYOK or Codex credentials arrive
-through the authenticated V1 execution-profile endpoint, are added to redaction, and
+through the authenticated execution-profile endpoint, are added to redaction, and
 are injected only into the build's private ephemeral sandbox. They are not mounted as
-static Cloud Run configuration or persisted by V2. The sandbox receives only the exact
+static Cloud Run configuration or persisted by the Context service. The sandbox receives only the exact
 repository archive and declared stage inputs and may reach only the selected
 model-provider domain.
 

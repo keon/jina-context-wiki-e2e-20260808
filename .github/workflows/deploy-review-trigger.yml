@@ -1,4 +1,6 @@
-name: Deploy Trigger
+name: Deploy Review Trigger
+
+# Staging deployments are intentionally dispatched only from the staging ref.
 
 on:
   push:
@@ -6,8 +8,8 @@ on:
       - main
       - staging
     paths:
-      - trigger/**
-      - .github/workflows/deploy-trigger.yml
+      - services/review-trigger/**
+      - .github/workflows/deploy-review-trigger.yml
   workflow_dispatch:
     inputs:
       target_environment:
@@ -23,7 +25,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-trigger-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
+  group: deploy-review-trigger-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
   cancel-in-progress: true
 
 jobs:
@@ -32,12 +34,14 @@ jobs:
     environment: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
     defaults:
       run:
-        working-directory: trigger
+        working-directory: services/review-trigger
     env:
       DEPLOY_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
-      # Staging reads only the JINA_* inputs; the generic (production) fallbacks
-      # are intentionally ignored for staging deploys so staging can never pick
-      # up a production credential or endpoint.
+      # Staging secret values use an explicit STAGING_JINA_* namespace. Repository-
+      # level JINA_* and generic secrets belong to production and are deliberately
+      # unreachable from a staging deploy. Staging variables remain environment-
+      # scoped JINA_* values and never use generic fallbacks.
+      STAGING_JINA_TRIGGER_ACCESS_TOKEN_VALUE: ${{ secrets.STAGING_JINA_TRIGGER_ACCESS_TOKEN }}
       JINA_TRIGGER_ACCESS_TOKEN_VALUE: ${{ secrets.JINA_TRIGGER_ACCESS_TOKEN }}
       GENERIC_TRIGGER_ACCESS_TOKEN_VALUE: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
       JINA_TRIGGER_API_URL_VALUE: ${{ vars.JINA_TRIGGER_API_URL }}
@@ -49,19 +53,25 @@ jobs:
       JINA_DASHBOARD_URL_VALUE: ${{ vars.JINA_DASHBOARD_URL }}
       GENERIC_DASHBOARD_URL_VALUE: ${{ vars.DASHBOARD_URL }}
       JINA_GITHUB_APP_ID_VALUE: ${{ vars.JINA_GITHUB_APP_ID }}
+      STAGING_JINA_GITHUB_APP_PRIVATE_KEY_VALUE: ${{ secrets.STAGING_JINA_GITHUB_APP_PRIVATE_KEY }}
       JINA_GITHUB_APP_PRIVATE_KEY_VALUE: ${{ secrets.JINA_GITHUB_APP_PRIVATE_KEY }}
       GENERIC_GITHUB_APP_PRIVATE_KEY_VALUE: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+      STAGING_JINA_GITHUB_CLONE_TOKEN_VALUE: ${{ secrets.STAGING_JINA_GITHUB_CLONE_TOKEN }}
       JINA_GITHUB_CLONE_TOKEN_VALUE: ${{ secrets.JINA_GITHUB_CLONE_TOKEN }}
       GENERIC_GITHUB_CLONE_TOKEN_VALUE: ${{ secrets.GITHUB_CLONE_TOKEN }}
+      STAGING_JINA_INTERNAL_API_TOKEN_VALUE: ${{ secrets.STAGING_JINA_INTERNAL_API_TOKEN }}
       JINA_INTERNAL_API_TOKEN_VALUE: ${{ secrets.JINA_INTERNAL_API_TOKEN }}
       GENERIC_INTERNAL_API_TOKEN_VALUE: ${{ secrets.INTERNAL_API_TOKEN }}
+      STAGING_JINA_DAYTONA_API_KEY_VALUE: ${{ secrets.STAGING_JINA_DAYTONA_API_KEY }}
       JINA_DAYTONA_API_KEY_VALUE: ${{ secrets.JINA_DAYTONA_API_KEY }}
       GENERIC_DAYTONA_API_KEY_VALUE: ${{ secrets.DAYTONA_API_KEY }}
+      STAGING_JINA_OPENROUTER_API_KEY_VALUE: ${{ secrets.STAGING_JINA_OPENROUTER_API_KEY }}
       JINA_OPENROUTER_API_KEY_VALUE: ${{ secrets.JINA_OPENROUTER_API_KEY }}
       GENERIC_OPENROUTER_API_KEY_VALUE: ${{ secrets.OPENROUTER_API_KEY }}
       # Optional: managed OpenAI key that enables the capture proxy's native route
       # for openai/* reviews. Sourced from the same JINA_OPENAI_API_KEY secret used
       # elsewhere, mirroring how OPENROUTER_API_KEY is resolved.
+      STAGING_JINA_OPENAI_API_KEY_VALUE: ${{ secrets.STAGING_JINA_OPENAI_API_KEY }}
       JINA_OPENAI_API_KEY_VALUE: ${{ secrets.JINA_OPENAI_API_KEY }}
       GENERIC_OPENAI_API_KEY_VALUE: ${{ secrets.OPENAI_API_KEY }}
       JINA_OPENROUTER_APP_URL_VALUE: ${{ vars.JINA_OPENROUTER_APP_URL }}
@@ -134,6 +144,21 @@ jobs:
             fi
             printf -v "$output_name" '%s' "$value"
           }
+          resolve_secret() {
+            output_name="$1"
+            staging_name="$2"
+            production_name="$3"
+            generic_name="${4:-}"
+            if [ "$DEPLOY_ENVIRONMENT" = "Staging" ]; then
+              value="${!staging_name:-}"
+            else
+              value="${!production_name:-}"
+              if [ -z "$value" ] && [ -n "$generic_name" ]; then
+                value="${!generic_name:-}"
+              fi
+            fi
+            printf -v "$output_name" '%s' "$value"
+          }
           case "$DEPLOY_ENVIRONMENT" in
             Production)
               if [ "$GITHUB_REF_NAME" != "main" ]; then
@@ -152,18 +177,18 @@ jobs:
               exit 1
               ;;
           esac
-          resolve TRIGGER_ACCESS_TOKEN JINA_TRIGGER_ACCESS_TOKEN_VALUE GENERIC_TRIGGER_ACCESS_TOKEN_VALUE
+          resolve_secret TRIGGER_ACCESS_TOKEN STAGING_JINA_TRIGGER_ACCESS_TOKEN_VALUE JINA_TRIGGER_ACCESS_TOKEN_VALUE GENERIC_TRIGGER_ACCESS_TOKEN_VALUE
           resolve TRIGGER_API_URL JINA_TRIGGER_API_URL_VALUE GENERIC_TRIGGER_API_URL_VALUE https://api.trigger.dev
           resolve TRIGGER_PROJECT_REF JINA_TRIGGER_PROJECT_REF_VALUE GENERIC_TRIGGER_PROJECT_REF_VALUE
           resolve API_BASE_URL JINA_API_BASE_URL_VALUE GENERIC_API_BASE_URL_VALUE
           resolve DASHBOARD_URL JINA_DASHBOARD_URL_VALUE GENERIC_DASHBOARD_URL_VALUE
           resolve GITHUB_APP_ID JINA_GITHUB_APP_ID_VALUE
-          resolve GITHUB_APP_PRIVATE_KEY JINA_GITHUB_APP_PRIVATE_KEY_VALUE GENERIC_GITHUB_APP_PRIVATE_KEY_VALUE
-          resolve GITHUB_CLONE_TOKEN JINA_GITHUB_CLONE_TOKEN_VALUE GENERIC_GITHUB_CLONE_TOKEN_VALUE
-          resolve INTERNAL_API_TOKEN JINA_INTERNAL_API_TOKEN_VALUE GENERIC_INTERNAL_API_TOKEN_VALUE
-          resolve DAYTONA_API_KEY JINA_DAYTONA_API_KEY_VALUE GENERIC_DAYTONA_API_KEY_VALUE
-          resolve OPENROUTER_API_KEY JINA_OPENROUTER_API_KEY_VALUE GENERIC_OPENROUTER_API_KEY_VALUE
-          resolve OPENAI_API_KEY JINA_OPENAI_API_KEY_VALUE GENERIC_OPENAI_API_KEY_VALUE
+          resolve_secret GITHUB_APP_PRIVATE_KEY STAGING_JINA_GITHUB_APP_PRIVATE_KEY_VALUE JINA_GITHUB_APP_PRIVATE_KEY_VALUE GENERIC_GITHUB_APP_PRIVATE_KEY_VALUE
+          resolve_secret GITHUB_CLONE_TOKEN STAGING_JINA_GITHUB_CLONE_TOKEN_VALUE JINA_GITHUB_CLONE_TOKEN_VALUE GENERIC_GITHUB_CLONE_TOKEN_VALUE
+          resolve_secret INTERNAL_API_TOKEN STAGING_JINA_INTERNAL_API_TOKEN_VALUE JINA_INTERNAL_API_TOKEN_VALUE GENERIC_INTERNAL_API_TOKEN_VALUE
+          resolve_secret DAYTONA_API_KEY STAGING_JINA_DAYTONA_API_KEY_VALUE JINA_DAYTONA_API_KEY_VALUE GENERIC_DAYTONA_API_KEY_VALUE
+          resolve_secret OPENROUTER_API_KEY STAGING_JINA_OPENROUTER_API_KEY_VALUE JINA_OPENROUTER_API_KEY_VALUE GENERIC_OPENROUTER_API_KEY_VALUE
+          resolve_secret OPENAI_API_KEY STAGING_JINA_OPENAI_API_KEY_VALUE JINA_OPENAI_API_KEY_VALUE GENERIC_OPENAI_API_KEY_VALUE
           resolve OPENROUTER_APP_URL JINA_OPENROUTER_APP_URL_VALUE GENERIC_OPENROUTER_APP_URL_VALUE
           resolve OPENROUTER_APP_TITLE JINA_OPENROUTER_APP_TITLE_VALUE GENERIC_OPENROUTER_APP_TITLE_VALUE
           resolve CODEGRAPH_TIMEOUT_MS JINA_CODEGRAPH_TIMEOUT_MS_VALUE GENERIC_CODEGRAPH_TIMEOUT_MS_VALUE
@@ -204,6 +229,9 @@ jobs:
           # deploy fails in CI, not per-review.
           if [ -z "${OPENROUTER_API_KEY:-}" ]; then missing+=("OPENROUTER_API_KEY"); fi
           if [ "$DEPLOY_ENVIRONMENT" = "Staging" ]; then
+            if [ "$TRIGGER_PROJECT_REF" = "proj_gmesnthgwwqledarlfip" ]; then
+              missing+=("TRIGGER_PROJECT_REF uses the production Trigger.dev project")
+            fi
             staging_values=(
               API_BASE_URL
               DASHBOARD_URL
@@ -217,7 +245,7 @@ jobs:
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "Missing required Trigger deployment configuration:" >&2
             if [ "$DEPLOY_ENVIRONMENT" = "Staging" ]; then
-              echo "Staging deploys only read JINA_* GitHub Environment values; generic production fallbacks are ignored." >&2
+              echo "Staging deploys only read JINA_* environment variables and STAGING_JINA_* environment secrets; repository-level production fallbacks are ignored." >&2
             fi
             printf '  - %s\n' "${missing[@]}" >&2
             exit 1
@@ -276,7 +304,7 @@ jobs:
         with:
           node-version: "20.x"
           cache: npm
-          cache-dependency-path: trigger/package-lock.json
+          cache-dependency-path: services/review-trigger/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -285,4 +313,9 @@ jobs:
         run: npm run typecheck
 
       - name: Deploy Trigger.dev
-        run: npm run deploy
+        run: |
+          if [ "$DEPLOY_ENVIRONMENT" = "Staging" ]; then
+            npm run deploy -- --env staging
+          else
+            npm run deploy -- --env prod
+          fi

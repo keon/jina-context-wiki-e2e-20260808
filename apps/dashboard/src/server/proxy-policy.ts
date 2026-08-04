@@ -26,12 +26,11 @@ export function isAllowedDashboardApiRequest(
   return allowedRead || allowedLocalDemo || allowedContextSearch;
 }
 
-/** Routes that authenticate with the signed-in Clerk user, not the V2 service token. */
+/** Routes that authenticate with the signed-in Clerk user, not the Context service token. */
 export function isProductDashboardApiRequest(method: string | undefined, pathname: string): boolean {
   if (!method || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return false;
   return (
-    pathname === "/api/v1/healthz" ||
-    pathname.startsWith("/api/v1/dashboard/") ||
+    pathname.startsWith("/api/dashboard/") ||
     pathname === "/api/auth/github/login" ||
     pathname === "/api/auth/github/callback" ||
     pathname === "/api/auth/logout"

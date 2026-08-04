@@ -23,8 +23,8 @@ import { isTenantWritable, type SelectedTenant } from "../lib/tenants";
 /** Billing endpoints for the active tenant, or the legacy viewer-scoped routes. */
 function billingUrl(selected: SelectedTenant | null, suffix = ""): string {
   return selected
-    ? apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/billing${suffix}`)
-    : apiUrl(`/v1/dashboard/billing${suffix}`);
+    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/billing${suffix}`)
+    : apiUrl(`/dashboard/billing${suffix}`);
 }
 
 export default function BillingPage() {

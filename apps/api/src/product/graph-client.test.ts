@@ -323,7 +323,7 @@ test("a dashboard index builds the repository's default branch", async () => {
   const result = await client.buildDashboardGraph(CONTEXT, {
     repository: "omxyz/a",
     requestKey: "dashboard-key",
-    metadata: { source: "jina-v1-dashboard" },
+    metadata: { source: "jina-dashboard" },
   });
 
   assert.deepEqual(urls, ["https://graph.example/context/build"]);
@@ -382,7 +382,7 @@ test("recent Context builds are tenant-scoped again before reaching the dashboar
   assert.deepEqual(result.map((build) => build.id), ["cb_failed"]);
 });
 
-test("Context build progress preserves the exact V2 stage, checkpoint, and budget contract", async () => {
+test("Context build progress preserves the exact Context stage, checkpoint, and budget contract", async () => {
   const progress = {
     buildId: "cb_active",
     repository: "omxyz/a",
@@ -540,7 +540,7 @@ test("availability reports an absent or unauthorized repository as unavailable",
   );
 });
 
-test("V1 relays the exact signed GitHub delivery to the Context-only V2 endpoint", async () => {
+test("Jina relays the exact signed GitHub delivery to the Context-only endpoint", async () => {
   let forwarded: { url: string; init?: RequestInit } | undefined;
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     forwarded = { url: String(input), init };
@@ -565,7 +565,7 @@ test("V1 relays the exact signed GitHub delivery to the Context-only V2 endpoint
   assert.equal(sent.get("x-hub-signature-256"), "sha256=signed");
 });
 
-test("V1 relays only new commits, pull requests, and issues to Context", async () => {
+test("Jina relays only new commits, pull requests, and issues to Context", async () => {
   const cases: Array<[string, Record<string, unknown>, boolean]> = [
     ["push", { ref: "refs/heads/main", after: "1".repeat(40), deleted: false }, true],
     ["push", { ref: "refs/tags/v1", after: "1".repeat(40), deleted: false }, false],
@@ -588,7 +588,7 @@ test("V1 relays only new commits, pull requests, and issues to Context", async (
   assert.equal(shouldRelayGithubContext("push", "not-json"), false);
 });
 
-test("an irrelevant GitHub event does not call V2", async () => {
+test("an irrelevant GitHub event does not call Context", async () => {
   let calls = 0;
   const fetchImpl = (async () => {
     calls += 1;
@@ -604,7 +604,7 @@ test("an irrelevant GitHub event does not call V2", async () => {
   assert.equal(calls, 0);
 });
 
-test("review access returns a direct V2 MCP credential bound to the tenant and repository", async () => {
+test("review access returns a direct MCP credential bound to the tenant and repository", async () => {
   let sentHeaders: Headers | undefined;
   const { fetchImpl, urls, bodies } = recording(async (_input, init) => {
     sentHeaders = new Headers(init?.headers);
@@ -631,7 +631,7 @@ test("review access returns a direct V2 MCP credential bound to the tenant and r
   });
 });
 
-test("dashboard Context maps the current V2 release catalog and reads the exact release", async () => {
+test("dashboard Context maps the current Context release catalog and reads the exact release", async () => {
   const { fetchImpl, urls } = recording(async (input) => {
     const url = String(input);
     if (url.endsWith("/context/releases")) {

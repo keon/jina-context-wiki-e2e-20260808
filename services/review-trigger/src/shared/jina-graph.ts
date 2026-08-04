@@ -28,8 +28,8 @@ type ContextGraphMcpAccessResponse = {
 type ContextGraphMcpAccessRequester = <TResponse>(path: string, body: unknown) => Promise<TResponse>;
 
 /**
- * Request one short-lived, repository-scoped V2 Context MCP credential through
- * the original Jina API. The API checks release availability; V2 returns the
+ * Request one short-lived, repository-scoped Context MCP credential through
+ * the Jina API. The API checks release availability and returns the
  * direct MCP URL and a narrow token. Context is enabled by default;
  * the environment variable is retained only as an explicit emergency kill
  * switch. Local CodeGraph indexing is a separate facility and is unaffected.

@@ -10,7 +10,7 @@ Jina runs in `jina-v2/us-east1` and connects to the original PostgreSQL database
 - Workers receive the resolved tenant with each task and never receive a database
   credential.
 
-V1, V2, and the shared database are co-located in `us-east1`. Keep the serving services
+The unified API, its workers, and the shared database are co-located in `us-east1`. Keep the serving services
 and database in the same region; do not introduce another identity cache or database
 replica without measured need.
 

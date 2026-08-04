@@ -204,7 +204,7 @@ test(
            case when $1::bigint is not null and r.github_repo_id = $1::bigint then 0 else 1 end,
            r.created_at desc
          limit 1`,
-        [seed + 300, seed + 200, "ACME-TRANSITION", "V2-COMPAT"],
+        [seed + 300, seed + 200, "ACME-TRANSITION", "CONTEXT-COMPAT"],
       );
       assert.deepEqual(v2Repository.rows[0], {
         tenant_id: team.rows[0]!.id,

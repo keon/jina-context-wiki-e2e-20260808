@@ -103,7 +103,7 @@ export function Shell({ children }: { children: ReactNode }) {
       return;
     }
     const controller = new AbortController();
-    fetch(apiUrl("/v1/dashboard/integrations"), {
+    fetch(apiUrl("/dashboard/integrations"), {
       cache: "no-store",
       credentials: "include",
       signal: controller.signal,

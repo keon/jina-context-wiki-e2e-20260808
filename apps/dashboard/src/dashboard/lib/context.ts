@@ -6,7 +6,7 @@ export function contextDocumentsUrl(
   selected: SelectedTenant,
   repository?: string,
 ): string {
-  const base = `/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/documents`;
+  const base = `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/documents`;
   return apiUrl(
     repository ? `${base}?repository=${encodeURIComponent(repository)}` : base,
   );
@@ -14,7 +14,7 @@ export function contextDocumentsUrl(
 
 export function contextRepositoriesUrl(selected: SelectedTenant): string {
   return apiUrl(
-    `/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/repositories`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/repositories`,
   );
 }
 
@@ -25,13 +25,13 @@ export function contextDocumentUrl(
   documentId: string,
 ): string {
   return apiUrl(
-    `/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/documents/${encodeURIComponent(documentId)}?repository=${encodeURIComponent(repository)}&releaseId=${encodeURIComponent(releaseId)}`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/documents/${encodeURIComponent(documentId)}?repository=${encodeURIComponent(repository)}&releaseId=${encodeURIComponent(releaseId)}`,
   );
 }
 
 export function contextBuildUrl(selected: SelectedTenant): string {
   return apiUrl(
-    `/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/build`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/build`,
   );
 }
 
@@ -40,7 +40,7 @@ export function contextBuildProgressUrl(
   buildId: string,
 ): string {
   return apiUrl(
-    `/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/builds/${encodeURIComponent(buildId)}/progress`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/builds/${encodeURIComponent(buildId)}/progress`,
   );
 }
 
@@ -49,13 +49,13 @@ export function contextBuildCancelUrl(
   buildId: string,
 ): string {
   return apiUrl(
-    `/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/builds/${encodeURIComponent(buildId)}/cancel`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/builds/${encodeURIComponent(buildId)}/cancel`,
   );
 }
 
 export function contextBuildsUrl(selected: SelectedTenant): string {
   return apiUrl(
-    `/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/builds`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/builds`,
   );
 }
 

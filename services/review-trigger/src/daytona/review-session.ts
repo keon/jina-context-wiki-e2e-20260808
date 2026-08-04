@@ -520,7 +520,7 @@ export function daytonaWorkerEnv(input: {
     RUNTIME_MENTAL_TRACE_MODEL: runtimeMentalTraceModel(),
     CODEX_REVIEW_TIMEOUT_MS: process.env.CODEX_REVIEW_TIMEOUT_MS || "600000",
     CODEGRAPH_TIMEOUT_MS: process.env.CODEGRAPH_TIMEOUT_MS || "120000",
-    // Owner-controlled Codex state. V2 Context MCP config and harness auth.json are
+    // Owner-controlled Codex state. Context MCP config and harness auth.json are
     // provisioned here, never inside the customer-controlled checkout.
     CODEX_HOME: "/home/daytona/jina-review-worker/codex-home",
   };

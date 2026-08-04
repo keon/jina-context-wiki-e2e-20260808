@@ -231,17 +231,17 @@ done
 if gcloud iam service-accounts describe \
     "jina-causal-worker-staging@${staging_project}.iam.gserviceaccount.com" \
     --project="${staging_project}" >/dev/null 2>&1; then
-  pass "V2 causal graph staging service account exists"
+  pass "Causal graph staging service account exists"
 else
-  fail "V2 causal graph staging service account is missing"
+  fail "Causal graph staging service account is missing"
 fi
 
 if gcloud secrets versions describe latest \
     --secret=jina-staging-causal-graph-worker-release-credential \
     --project="${staging_project}" >/dev/null 2>&1; then
-  pass "V2 causal graph staging release credential exists"
+  pass "Causal graph staging release credential exists"
 else
-  fail "V2 causal graph staging release credential is missing"
+  fail "Causal graph staging release credential is missing"
 fi
 
 if command -v vercel >/dev/null 2>&1 && vercel project inspect jina-staging-dashboard \

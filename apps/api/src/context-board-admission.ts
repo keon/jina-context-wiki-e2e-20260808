@@ -411,7 +411,7 @@ function oldestActiveRepositoryBuild(state: BoardState, scope: Pick<ContextBuild
 
 function newestRecoverableRepositoryBuild(
   state: BoardState,
-  scope: Pick<ContextBuildScope, "tenantId" | "repository">,
+  scope: Pick<ContextBuildScope, "tenantId" | "repository" | "ref">,
   now: string
 ) {
   return state.tasks
@@ -421,6 +421,17 @@ function newestRecoverableRepositoryBuild(
         task.status === "failed" &&
         task.metadata.tenantId === scope.tenantId &&
         task.metadata.repository === scope.repository &&
+        task.metadata.ref === scope.ref &&
+        !state.tasks.some(
+          (candidate) =>
+            candidate.type === contextBoardTaskTypes.build &&
+            candidate.status === "done" &&
+            candidate.metadata.tenantId === scope.tenantId &&
+            candidate.metadata.repository === scope.repository &&
+            candidate.metadata.ref === scope.ref &&
+            requiredRefSequence(candidate.metadata.refSequence) >
+              requiredRefSequence(task.metadata.refSequence)
+        ) &&
         contextBuildHasOperatorRecovery(state, task, now)
     )
     .sort(

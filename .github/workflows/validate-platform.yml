@@ -5,7 +5,7 @@ on:
     paths:
       - apps/api/**
       - apps/worker/**
-      - platform/v1/trigger/**
+      - services/review-trigger/**
       - apps/dashboard/**
       - pnpm-lock.yaml
       - .github/workflows/validate-platform.yml
@@ -56,10 +56,10 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: platform/v1/trigger/package-lock.json
-      - run: npm --prefix platform/v1/trigger ci
-      - run: npm --prefix platform/v1/trigger run typecheck
-      - run: npm --prefix platform/v1/trigger test
+          cache-dependency-path: services/review-trigger/package-lock.json
+      - run: npm --prefix services/review-trigger ci
+      - run: npm --prefix services/review-trigger run typecheck
+      - run: npm --prefix services/review-trigger test
 
   dashboard:
     runs-on: ubuntu-latest

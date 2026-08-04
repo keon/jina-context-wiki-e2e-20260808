@@ -27,7 +27,7 @@ test("defaults installation backfill dispatch to the backfill task", () => {
   assert.equal(config.trigger.backfillTaskId, "github-installation-backfill");
 });
 
-test("uses the dedicated product token when V2 and review workers have separate credentials", () => {
+test("uses the dedicated product token when Context and review workers have separate credentials", () => {
   const config = loadConfig(baseEnv({
     NODE_ENV: "development",
     INTERNAL_API_TOKEN: "v2-token",

@@ -99,7 +99,11 @@ async function proxy(request: NextRequest): Promise<Response> {
     if (STRIPPED_RESPONSE_HEADERS.has(name.toLowerCase())) continue;
     responseHeaders.append(
       name,
-      productApiRequest && name.toLowerCase() === "set-cookie" ? value.replace(/Path=\/v1\//gi, "Path=/api/v1/") : value
+      productApiRequest && name.toLowerCase() === "set-cookie"
+        ? value.replace(/Path=\/dashboard(?:\/|;)/gi, (match) =>
+            match.endsWith(";") ? "Path=/api/dashboard;" : "Path=/api/dashboard/"
+          )
+        : value
     );
   }
   return new Response(upstream.status === 304 ? null : upstream.body, {

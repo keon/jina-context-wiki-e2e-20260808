@@ -41,16 +41,16 @@ function mergeIntegrations(data: unknown): Integrations {
 /** Integrations endpoint for the active tenant, or the legacy viewer-scoped route. */
 function integrationsUrl(selected: SelectedTenant | null): string {
   return selected
-    ? apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`)
-    : apiUrl("/v1/dashboard/integrations");
+    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`)
+    : apiUrl("/dashboard/integrations");
 }
 
 function githubConnectionsUrl(selected: SelectedTenant): string {
-  return apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/github/installations`);
+  return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/github/installations`);
 }
 
 async function connectGithubInstallation(tenantId: string, installationId: number): Promise<Response> {
-  const url = apiUrl(`/v1/dashboard/tenants/${encodeURIComponent(tenantId)}/github/installations`);
+  const url = apiUrl(`/dashboard/tenants/${encodeURIComponent(tenantId)}/github/installations`);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const response = await fetch(url, {
       method: "POST",
@@ -246,10 +246,10 @@ function OpenRouterCard({
       // re-checks the viewer is an admin of it before returning the redirect).
       const startUrl = selected
         ? apiUrl(
-            "/v1/dashboard/integrations/openrouter/oauth/start",
+            "/dashboard/integrations/openrouter/oauth/start",
             new URLSearchParams({ tenant_id: selected.tenantId }),
           )
-        : apiUrl("/v1/dashboard/integrations/openrouter/oauth/start");
+        : apiUrl("/dashboard/integrations/openrouter/oauth/start");
       const response = await fetch(startUrl, {
         method: "POST",
         credentials: "include",

@@ -208,7 +208,7 @@ export interface ApiServerConfig {
   readonly contextPhaseCheckpointStore?: ContextPhaseCheckpointStore;
   /** Test/embedding override. Production uses the structured service logger. */
   readonly logger?: Logger;
-  /** Product/review API handler mounted into this server during the V1 cutover. */
+  /** Dashboard and review API handler mounted into the single Jina server. */
   readonly productApiRequestHandler?: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>;
 }
 
@@ -2440,11 +2440,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   /**
-   * Accept a GitHub delivery relayed by the original Jina API and admit only
-   * Context work. The original raw body and signature are verified again here,
-   * so the relay gains no authority to manufacture provider events. Unlike the
-   * general webhook route this never creates a V2 review task: V1 remains the
-   * sole review orchestrator while V2 owns Context derivation.
+   * Admit Context work from the same signed GitHub delivery already processed
+   * by the review handler. The original raw body and signature are verified
+   * again so this internal handoff cannot manufacture provider events. This
+   * route never creates review work; it only admits Context derivation.
    */
   async function acceptSignedContextWebhook(request: IncomingMessage, response: ServerResponse): Promise<void> {
     await acceptSignedGitHubWebhook(request, response, acceptParsedContextWebhook);
@@ -2870,10 +2869,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   /**
-   * Gives one V1 review run direct, least-privilege access to one repository's
-   * published Context. The caller is the trusted V1 API, but the credential
-   * handed to its sandbox is a different, short-lived bearer that cannot build,
-   * administer, or read a second repository.
+   * Gives one review run direct, least-privilege access to one repository's
+   * published Context. The credential handed to its sandbox is a distinct,
+   * short-lived bearer that cannot build, administer, or read a second
+   * repository.
    */
   async function mintReviewAccess(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const tenantId = tokenRequestTenantId(request);
@@ -2902,7 +2901,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const { secret, token } = await storeIssuedApiToken({
       tenantId,
       principalId,
-      name: `V1 review ${reviewRunId.slice(0, 80)}`,
+      name: `Review ${reviewRunId.slice(0, 80)}`,
       scopes: CONTEXT_CREDENTIAL_SCOPES,
       expiresInMinutes
     });

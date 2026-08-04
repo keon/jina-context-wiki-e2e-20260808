@@ -136,8 +136,8 @@ apps/admin/           tenant-wide context health UI
 apps/dashboard/       single customer dashboard, operations, and Context workspace
 apps/worker/          review and context-stage workers
 apps/workflows/       local review CLI and deterministic simulation
-platform/v1/trigger/  Trigger.dev review orchestration and Daytona runtime
-platform/v1/evals/    review evaluation datasets and tools
+services/review-trigger/  Trigger.dev review orchestration and Daytona runtime
+evals/review/    review evaluation datasets and tools
 packages/board/       generic tasks, dependencies, commands, reducer
 packages/context-engine/ evidence, derived context, releases, retrieval
 packages/db/          PostgreSQL stores, context adapters, migrations
@@ -150,7 +150,7 @@ packages/observability/ structured logging, traces, live metrics
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [V1 consolidation and feature inventory](docs/V1_CONSOLIDATION.md)
+- [Unified API architecture](docs/API_CONSOLIDATION.md)
 - [Agentic context derivation](docs/AGENTIC_DERIVATION.md)
 - [Context quality benchmark](docs/CONTEXT_QUALITY_BENCHMARK.md)
 - [Daytona Board-stage acceptance](docs/CONTEXT_DAYTONA_BOARD_STAGE_ACCEPTANCE.md)

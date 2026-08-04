@@ -441,7 +441,7 @@ export async function resolveIntegrations(
   });
 }
 
-/** Return the write-once provider/model profile used by one V2 Context build. */
+/** Return the write-once provider/model profile used by one Context build. */
 export async function resolveContextExecutionProfile(c: Context, config: AppConfig): Promise<Response> {
   authorizeInternal(c, config);
   const body = await readJson(c);

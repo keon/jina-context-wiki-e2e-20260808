@@ -2,8 +2,7 @@
 export function isProductApiRoute(pathname: string): boolean {
   return (
     pathname === "/webhooks/github" ||
-    pathname === "/v1/healthz" ||
-    pathname.startsWith("/v1/dashboard/") ||
+    pathname.startsWith("/dashboard/") ||
     pathname.startsWith("/auth/") ||
     pathname === "/internal/reviews/prepare" ||
     pathname.startsWith("/internal/reviews/") ||

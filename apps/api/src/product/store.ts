@@ -2406,7 +2406,7 @@ export type ContextExecutionProfile = {
 };
 
 /**
- * Resolve and persist a write-once Context execution profile for one V2 build.
+ * Resolve and persist a write-once Context execution profile for one Context build.
  * The profile is stable across worker retries and contains an encrypted copy of
  * the exact credential revision selected at build start.
  */

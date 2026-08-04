@@ -38,7 +38,7 @@ const workerServer = await readFile("apps/worker/src/server.ts", "utf8");
 const postgresStateStore = await readFile("packages/db/src/postgres-json-state-store.ts", "utf8");
 const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
 const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
-const stagingDeployment = await readFile("scripts/deploy-staging-v2.sh", "utf8");
+const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
 
 async function withFakeGcloud(source, callback) {
   const directory = await mkdtemp(join(tmpdir(), "jina-deploy-gcloud-"));
@@ -67,8 +67,8 @@ test("production deployment shell is syntactically valid", async () => {
   await execFileAsync(process.execPath, ["--check", "scripts/context-production-trigger-e2e.mjs"]);
 });
 
-test("staging keeps the absorbed product database URL isolated from the V2 database", async () => {
-  await execFileAsync("bash", ["-n", "scripts/deploy-staging-v2.sh"]);
+test("staging keeps the product database URL isolated from the Context database", async () => {
+  await execFileAsync("bash", ["-n", "scripts/deploy-staging.sh"]);
   assert.match(stagingDeployment, /JINA_PRODUCT_DATABASE_URL=\$\{product_database_secret\}:latest/);
   assert.doesNotMatch(stagingDeployment, /(?:^|[,\"])(?:DATABASE_URL)=\$\{product_database_secret\}:latest/m);
   assert.match(stagingDeployment, /services update-traffic "\$\{api_service\}"[\s\S]+?--to-latest/);

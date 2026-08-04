@@ -317,7 +317,7 @@ export type RuntimeJinaConfigurationArtifact = {
 export type RuntimeModelCallSummary = {
   attempted: number;
   succeeded: number;
-  /** Model-backed stages that were expected to use V2 Context MCP. */
+  /** Model-backed stages that were expected to use Context MCP. */
   contextGraphStagesExpected?: number;
   /** Expected stages where Codex emitted at least one search_context call event. */
   contextGraphStagesObserved?: number;

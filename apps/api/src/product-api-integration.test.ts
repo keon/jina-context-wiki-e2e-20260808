@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createApiServer } from "./server.js";
 
-test("the V2 listener serves absorbed product routes without entering V2 auth", async () => {
+test("the Jina listener serves absorbed product routes without entering Context auth", async () => {
   const seen: string[] = [];
   const server = createApiServer({
     productApiRequestHandler(request, response) {
@@ -17,10 +17,10 @@ test("the V2 listener serves absorbed product routes without entering V2 auth", 
   const address = server.address();
   assert.ok(address && typeof address === "object");
   try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/v1/healthz`);
+    const response = await fetch(`http://127.0.0.1:${address.port}/dashboard/me`);
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { status: "ok", component: "product" });
-    assert.deepEqual(seen, ["/v1/healthz"]);
+    assert.deepEqual(seen, ["/dashboard/me"]);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }

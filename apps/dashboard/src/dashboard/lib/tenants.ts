@@ -8,7 +8,7 @@
 export type TenantType = "User" | "Organization";
 export type TenantRole = "admin" | "member";
 
-/** A tenant the viewer belongs to, as returned by GET /v1/dashboard/tenants. */
+/** A tenant the viewer belongs to, as returned by GET /dashboard/tenants. */
 export type ViewerTenant = {
   tenant_id: string;
   login: string;

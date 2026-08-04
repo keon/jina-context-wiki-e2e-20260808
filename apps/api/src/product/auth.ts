@@ -783,7 +783,7 @@ function ensureGithubAuth(config: AppConfig): void {
 // when API_BASE_URL is unconfigured (local dev), where forwarded headers are not in play.
 // `path` is the provider-specific callback path (shared by GitHub login and OpenRouter OAuth).
 export function callbackUrlFor(c: Context, config: AppConfig, path: string): string {
-  if (config.auth?.mode === "clerk" && path.startsWith("/v1/dashboard/")) {
+  if (config.auth?.mode === "clerk" && path.startsWith("/dashboard/")) {
     return new URL(`/api${path}`, config.dashboardUrl).toString();
   }
   if (config.apiBaseUrl) {
