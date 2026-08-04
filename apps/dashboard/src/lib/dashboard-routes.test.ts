@@ -11,7 +11,6 @@ test("the dashboard retains the complete customer route inventory", () => {
     "/integrations",
     "/issues",
     "/issues/[id]",
-    "/jina",
     "/models",
     "/organization",
     "/reviews",

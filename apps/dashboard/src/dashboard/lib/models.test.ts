@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { type CatalogModel } from "./openrouter";
 import {
+  FALLBACK_STAGE_DEFAULTS,
   formatContextLength,
   formatPer1mPrice,
   modelConnectionNotice,
@@ -15,6 +16,15 @@ import {
   shouldFlipHoverCard,
   truncateCatalog,
 } from "./models";
+
+test("fallback stage defaults always name the concrete runtime models", () => {
+  assert.deepEqual(FALLBACK_STAGE_DEFAULTS, {
+    planner: "openai/gpt-5.6-sol",
+    investigation: "openai/gpt-5.6-luna",
+    review: "openai/gpt-5.6-luna",
+    context: "openai/gpt-5.6-terra",
+  });
+});
 
 const CATALOG: CatalogModel[] = [
   { id: "openai/gpt-5.5", name: "OpenAI: GPT-5.5" },

@@ -19,6 +19,7 @@ export function IssueGraphBrowser({
   const [status, setStatus] = useState<"loading" | "ready" | "missing" | "error">("loading");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState("");
+  const [reloadVersion, setReloadVersion] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -29,11 +30,14 @@ export function IssueGraphBrowser({
       signal: controller.signal
     })
       .then(async (response) => {
-        if (response.status === 404) {
-          setStatus("missing");
+        if (!response.ok) {
+          // The graph service may report an unpublished release as 404, 409,
+          // or a compatibility 5xx depending on its deployed revision. Those
+          // are all empty-content states; only an auth failure is a real page
+          // error for this signed-in dashboard.
+          setStatus(response.status === 401 || response.status === 403 ? "error" : "missing");
           return;
         }
-        if (!response.ok) throw new Error(`request failed with ${response.status}`);
         const value = (await response.json()) as IssueGraphResponse;
         if (value.release.repository !== repository || value.release.ref !== ref) {
           throw new Error("causal graph response escaped the selected scope");
@@ -45,7 +49,7 @@ export function IssueGraphBrowser({
         if (!(error instanceof DOMException && error.name === "AbortError")) setStatus("error");
       });
     return () => controller.abort();
-  }, [repository, ref, build?.updatedAt, apiBasePath]);
+  }, [repository, ref, build?.updatedAt, apiBasePath, reloadVersion]);
 
   const issues = useMemo(() => {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -79,7 +83,16 @@ export function IssueGraphBrowser({
       </header>
 
       {status === "loading" ? <p className="context-panel-empty">Loading the current issue release…</p> : null}
-      {status === "error" ? <p className="context-alert danger">The causal graph could not be loaded.</p> : null}
+      {status === "error" ? (
+        <div className="page-placeholder page-placeholder--embedded">
+          <span className="page-placeholder__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="7" cy="8" r="2.25" stroke="currentColor" strokeWidth="1.5" /><circle cx="17" cy="16" r="2.25" stroke="currentColor" strokeWidth="1.5" /><path d="m8.8 9.4 6.4 5.2" stroke="currentColor" strokeWidth="1.5" /></svg>
+          </span>
+          <strong>Causal graph unavailable</strong>
+          <p>The published graph could not be reached. Nothing has been changed.</p>
+          <button type="button" className="btn btn--sm" onClick={() => setReloadVersion((version) => version + 1)}>Retry</button>
+        </div>
+      ) : null}
       {status === "missing" ? (
         <p className="context-panel-empty">
           {build?.status === "active"

@@ -88,17 +88,19 @@ export default function ReviewRunPage({ params }: { params: Promise<{ reviewRunI
         actions={<RunActions run={run} work={work} />}
       />
 
-      <ChangeSummary work={work} />
-      {detailError ? <div className="notice notice--bad">{detailError}</div> : null}
-      <RuntimeIntent review={work.runtimeReview} />
-      <RuntimeTasks review={work.runtimeReview} />
-      <IssuesSection findings={work.findings} />
-      <ReviewAppendix run={run} work={work} />
+      <div className="review-detail-surface">
+        <ChangeSummary work={work} />
+        {detailError ? <div className="notice notice--bad">{detailError}</div> : null}
+        <RuntimeIntent review={work.runtimeReview} />
+        <RuntimeTasks review={work.runtimeReview} />
+        <IssuesSection findings={work.findings} />
+        <ReviewAppendix run={run} work={work} />
 
-      {work.hasScenarioHistory ? <HistoricalReviewSummary run={run} /> : null}
-      {work.hasScenarioHistory ? <Scenarios run={run} /> : null}
+        {work.hasScenarioHistory ? <HistoricalReviewSummary run={run} /> : null}
+        {work.hasScenarioHistory ? <Scenarios run={run} /> : null}
 
-      <CodexOutput run={run} />
+        <CodexOutput run={run} />
+      </div>
     </article>
   );
 }

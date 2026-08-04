@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { Badge, BackLink, DetailHeader, ExternalLink, Section } from "./ui";
+import { Badge, BackLink, DetailHeader, ExternalLink } from "./ui";
 import { useDashboard } from "../providers";
 import { formatDate } from "../lib/presentation";
 import { issueLocation, issueTitle, severityTone } from "../lib/issues";
@@ -77,13 +77,12 @@ export function IssueDetail({ id }: { id: string }) {
         }
       />
 
-      <Section title="Details">
-        <pre className="code-block">{issue.body}</pre>
-      </Section>
-
-      <section className="section">
-        <div className="section__title">Context</div>
-        <dl className="dl">
+      <section className="detail-surface issue-detail-surface">
+        <div className="detail-surface__head">
+          <h2>Issue details</h2>
+        </div>
+        <div className="issue-detail__body">{issue.body}</div>
+        <dl className="issue-detail__meta">
           <Item label="Repository" value={issue.repository ?? "—"} />
           <Item
             label="Pull request"
@@ -129,9 +128,9 @@ export function IssueDetail({ id }: { id: string }) {
 
 function Item({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <>
+    <div className="issue-meta-row">
       <dt>{label}</dt>
       <dd>{value}</dd>
-    </>
+    </div>
   );
 }

@@ -954,14 +954,26 @@ export default function ContextPage() {
         </section>
       ) : null}
 
-      {!repositoriesLoading && repositories.length === 0 ? (
+      {repositoriesLoading ? (
+        <div className="page-placeholder">
+          <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
+          <strong>Loading repositories</strong>
+          <p>Checking this workspace for published context.</p>
+        </div>
+      ) : repositories.length === 0 ? (
         <div className="page-placeholder">
           <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
           <strong>No repositories connected</strong>
           <p>Connect a GitHub organization or repository before building your Context Wiki.</p>
           <ExternalLink className="btn btn--primary btn--sm" href="/integrations">Open integrations</ExternalLink>
         </div>
-      ) : repositoryFilter && !loading && !error && documents.length === 0 && !progress ? (
+      ) : !repositoryFilter ? (
+        <div className="page-placeholder">
+          <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
+          <strong>Choose a repository</strong>
+          <p>Select a repository above to browse its Context Wiki.</p>
+        </div>
+      ) : !loading && !error && documents.length === 0 && !progress ? (
         <div className="page-placeholder">
           <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
           <strong>No context has been published</strong>
@@ -1034,9 +1046,6 @@ export default function ContextPage() {
           {detail && !detailLoading ? <DocumentPanel document={detail} /> : null}
         </div>
 
-        <aside className="context-browser__outline">
-          {detail ? <DocumentOutline document={detail} /> : null}
-        </aside>
       </section>
       )}
     </div>
@@ -1245,48 +1254,6 @@ function MermaidDiagram({ code }: { code: string }) {
   );
 }
 
-function DocumentOutline({ document }: { document: DocumentDetail }) {
-  const headings = markdownHeadings(document.bodyMarkdown);
-  return (
-    <div className="context-outline">
-      <span className="context-outline__title">On this page</span>
-      <nav>
-        <a href="#document-overview">Overview</a>
-        {headings.map((heading) => (
-          <a
-            key={`${heading.id}-${heading.level}`}
-            href={`#${heading.id}`}
-            data-level={heading.level}
-          >
-            {heading.title}
-          </a>
-        ))}
-        {document.citations.length ? <a href="#sources">Sources</a> : null}
-      </nav>
-      <dl>
-        <div>
-          <dt>Updated</dt>
-          <dd>{formatRelativeDate(document.createdAt)}</dd>
-        </div>
-        <div>
-          <dt>Commit</dt>
-          <dd>
-            <code>
-              {document.scope?.commitSha?.slice(0, 7) ??
-                document.commitSha?.slice(0, 7) ??
-                "—"}
-            </code>
-          </dd>
-        </div>
-        <div>
-          <dt>Sources</dt>
-          <dd>{document.citations.length}</dd>
-        </div>
-      </dl>
-    </div>
-  );
-}
-
 function DocumentSkeleton() {
   return (
     <div className="context-document-skeleton" aria-label="Loading document">
@@ -1309,23 +1276,6 @@ function findDocumentNode(
     if (child) return child;
   }
   return undefined;
-}
-
-function markdownHeadings(markdown: string): Array<{
-  level: number;
-  title: string;
-  id: string;
-}> {
-  const headings: Array<{ level: number; title: string; id: string }> = [];
-  for (const match of markdown.matchAll(/^(#{1,4})\s+(.+?)\s*#*$/gm)) {
-    const title = match[2]!.replace(/[`*_~[\]]/g, "").trim();
-    headings.push({
-      level: match[1]!.length,
-      title,
-      id: slugify(title),
-    });
-  }
-  return headings;
 }
 
 function headingId(children: ReactNode): string {

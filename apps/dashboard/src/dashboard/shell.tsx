@@ -21,7 +21,6 @@ type NavKey =
   | "usage"
   | "history"
   | "tasks"
-  | "jina"
   | "settings";
 
 type NavItem = { key: NavKey; label: string; href: string; icon: () => ReactNode };
@@ -67,7 +66,6 @@ const MORE_NAV_ITEMS: NavItem[] = [
   { key: "billing", label: "Billing", href: "/billing", icon: BillingIcon },
   { key: "history", label: "Run History", href: "/history", icon: HistoryIcon },
   { key: "tasks", label: "Tasks", href: "/tasks", icon: TaskBoardIcon },
-  { key: "jina", label: "Jina Status", href: "/jina", icon: JinaIcon },
 ];
 
 const DOCS_URL = process.env.NEXT_PUBLIC_DOCS_URL ?? "https://docs.usejina.com";
@@ -85,7 +83,6 @@ const SECTION_TITLE: Record<NavKey, string> = {
   billing: "Billing",
   history: "Run History",
   tasks: "Tasks",
-  jina: "Jina Status",
   settings: "Settings",
 };
 
@@ -103,7 +100,6 @@ function sectionForPath(pathname: string | null): NavKey {
   if (path.startsWith("/billing")) return "billing";
   if (path.startsWith("/history")) return "history";
   if (path.startsWith("/tasks")) return "tasks";
-  if (path.startsWith("/jina")) return "jina";
   if (path.startsWith("/settings")) return "settings";
   return "reviews"; // "/", "/runs", and "/reviews/..." details
 }
@@ -403,15 +399,6 @@ function Sidebar({
             <ChevronIcon />
           </button>
         </div>
-        <Link
-          className={`nav__item${section === "settings" ? " nav__item--active" : ""}`}
-          href="/settings"
-          data-label="Settings"
-          onClick={onNavigate}
-        >
-          <SettingsIcon />
-          <span className="nav__label">Settings</span>
-        </Link>
       </nav>
       <div className="user" data-label={viewer?.user?.login ?? "Account"}>
         <AppAccountButton />
@@ -492,7 +479,7 @@ function WorkspaceSwitcher() {
 function CommandPalette({ section, onClose }: { section: NavKey; onClose: () => void }) {
   const [query, setQuery] = useState("");
   const items = useMemo(
-    () => [...PRIMARY_NAV_ITEMS, ...MORE_NAV_ITEMS, { key: "settings" as const, label: "Settings", href: "/settings", icon: SettingsIcon }],
+    () => [...PRIMARY_NAV_ITEMS, ...MORE_NAV_ITEMS],
     [],
   );
   const visible = items.filter((item) => item.label.toLowerCase().includes(query.trim().toLowerCase()));
@@ -637,20 +624,6 @@ function JinaGuideIcon() {
   );
 }
 
-function SettingsIcon() {
-  return (
-    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="8" r="2.25" stroke="currentColor" strokeWidth="1.3" />
-      <path
-        d="M8 1.75v1.5M8 12.75v1.5M14.25 8h-1.5M3.25 8h-1.5M12.42 3.58l-1.06 1.06M4.64 11.36l-1.06 1.06M12.42 12.42l-1.06-1.06M4.64 4.64 3.58 3.58"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
 function BillingIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -740,15 +713,6 @@ function HistoryIcon() {
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M3 5.2A5.4 5.4 0 1 1 2.7 10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
       <path d="M3 2v3.5h3.5M8 4.75v3.5l2.25 1.25" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function JinaIcon() {
-  return (
-    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M4 2.25h8v7.5a4 4 0 0 1-8 0z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-      <path d="M6.25 5.5h.1M9.65 5.5h.1M6.25 8.25c.7.7 2.8.7 3.5 0" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }

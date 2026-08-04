@@ -1,9 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CodexConnection } from "../components/codex-connection";
 import { Badge } from "../components/ui";
 import { apiUrl } from "../lib/api";
-import { formatContextLength, modelPriceLabel, shortModelName } from "../lib/models";
+import { normalizeCodexHarnessInfo, type CodexHarnessInfo } from "../lib/codex-harness";
+import {
+  FALLBACK_STAGE_DEFAULTS,
+  formatContextLength,
+  modelPriceLabel,
+  normalizeStageDefaults,
+  shortModelName,
+  type StageDefaults,
+} from "../lib/models";
 import {
   filterModels,
   normalizeModelSettings,
@@ -28,15 +37,16 @@ const PROVIDERS: Array<{ value: ModelProvider; title: string; description: strin
 
 const STAGES: Array<{
   modelKey: "planner_model" | "investigation_model" | "review_model" | "context_model";
+  defaultKey: keyof StageDefaults;
   effortKey: "planner_effort" | "investigation_effort" | "review_effort" | "context_effort";
   title: string;
   description: string;
   defaultEffort: ReasoningEffort;
 }> = [
-  { modelKey: "planner_model", effortKey: "planner_effort", title: "Planning", description: "Maps the review into focused investigation areas.", defaultEffort: "medium" },
-  { modelKey: "investigation_model", effortKey: "investigation_effort", title: "Investigation", description: "Runs the agents that inspect code and evidence.", defaultEffort: "medium" },
-  { modelKey: "review_model", effortKey: "review_effort", title: "Final review", description: "Writes the published review and inline findings.", defaultEffort: "medium" },
-  { modelKey: "context_model", effortKey: "context_effort", title: "Context generation", description: "Builds and refreshes repository context.", defaultEffort: "low" },
+  { modelKey: "planner_model", defaultKey: "planner", effortKey: "planner_effort", title: "Planning", description: "Maps the review into focused investigation areas.", defaultEffort: "medium" },
+  { modelKey: "investigation_model", defaultKey: "investigation", effortKey: "investigation_effort", title: "Investigation", description: "Runs the agents that inspect code and evidence.", defaultEffort: "medium" },
+  { modelKey: "review_model", defaultKey: "review", effortKey: "review_effort", title: "Final review", description: "Writes the published review and inline findings.", defaultEffort: "medium" },
+  { modelKey: "context_model", defaultKey: "context", effortKey: "context_effort", title: "Context generation", description: "Builds and refreshes repository context.", defaultEffort: "low" },
 ];
 
 const TRIGGERS: Array<{ value: ReviewTriggerMode; title: string; description: string }> = [
@@ -89,6 +99,9 @@ export default function ModelsPage() {
   const [settings, setSettings] = useState<ModelSettings>(() => normalizeModelSettings(null));
   const [trigger, setTrigger] = useState<ReviewTriggerMode>("every_commit");
   const [catalog, setCatalog] = useState<CatalogModel[]>([]);
+  const [defaults, setDefaults] = useState<StageDefaults>({ ...FALLBACK_STAGE_DEFAULTS });
+  const [harness, setHarness] = useState<CodexHarnessInfo>({ configured: false });
+  const [codexOpenRequest, setCodexOpenRequest] = useState(0);
   const [query, setQuery] = useState("");
   const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
   const clearStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -107,11 +120,12 @@ export default function ModelsPage() {
       .then(([providerData, settingsData, catalogData, triggerData]) => {
         if (controller.signal.aborted || !isCurrentTenant(requestTenantId)) return;
         const providerRecord = providerData as { provider?: unknown };
-        const catalogRecord = catalogData as { models?: unknown };
+        const catalogRecord = catalogData as { models?: unknown; defaults?: unknown };
         const triggerRecord = triggerData as { mode?: unknown };
         setProvider(normalizeProvider(providerRecord?.provider));
         setSettings(normalizeModelSettings(settingsData));
         setCatalog(Array.isArray(catalogRecord?.models) ? (catalogRecord.models as CatalogModel[]) : []);
+        setDefaults(normalizeStageDefaults(catalogRecord?.defaults) ?? { ...FALLBACK_STAGE_DEFAULTS });
         setTrigger(normalizeTrigger(triggerRecord?.mode));
         setPageState("ready");
       })
@@ -124,6 +138,28 @@ export default function ModelsPage() {
   useEffect(() => () => {
     if (clearStatusTimer.current) clearTimeout(clearStatusTimer.current);
   }, []);
+
+  useEffect(() => {
+    const requestTenantId = selected?.tenantId ?? null;
+    const controller = new AbortController();
+    fetch(apiUrl("/dashboard/integrations"), {
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then((response) => (response.ok ? response.json() : undefined))
+      .then((data: Record<string, unknown> | undefined) => {
+        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
+          setHarness(normalizeCodexHarnessInfo(data?.codex_harness));
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
+          setHarness({ configured: false });
+        }
+      });
+    return () => controller.abort();
+  }, [selected, isCurrentTenant]);
 
   const markSaving = () => {
     if (clearStatusTimer.current) clearTimeout(clearStatusTimer.current);
@@ -218,6 +254,11 @@ export default function ModelsPage() {
   const visibleModels = useMemo(() => filterModels(catalog, query, 24), [catalog, query]);
   const saving = saveState.kind === "saving";
 
+  const selectProvider = (next: ModelProvider) => {
+    if (next === "codex") setCodexOpenRequest((request) => request + 1);
+    void saveProvider(next);
+  };
+
   return (
     <div className="models-v2">
       <header className="route-intro">
@@ -244,12 +285,15 @@ export default function ModelsPage() {
             <div className="model-provider-grid" role="radiogroup" aria-label="Model provider">
               {PROVIDERS.map((option) => (
                 <label key={option.value} className={`model-provider-card${provider === option.value ? " model-provider-card--active" : ""}`}>
-                  <input type="radio" name="model-provider" checked={provider === option.value} disabled={!writable || saving} onChange={() => void saveProvider(option.value)} />
+                  <input type="radio" name="model-provider" checked={provider === option.value} disabled={!writable || saving} onChange={() => selectProvider(option.value)} />
                   <span className="integration-mark">{option.mark}</span>
                   <span><strong>{option.title}</strong><small>{option.description}</small></span>
                 </label>
               ))}
             </div>
+            {provider === "codex" ? (
+              <CodexConnection info={harness} onChanged={setHarness} openRequest={codexOpenRequest} />
+            ) : null}
             {provider === "byok" ? <a className="model-v2-panel__link" href="/integrations">Manage provider keys →</a> : null}
           </section>
 
@@ -261,6 +305,7 @@ export default function ModelsPage() {
                   key={stage.modelKey}
                   stage={stage}
                   catalog={catalog}
+                  defaults={defaults}
                   settings={settings}
                   disabled={!writable || saving}
                   onChange={(next) => void saveSettings(next)}
@@ -347,22 +392,29 @@ function ModelsState({ title, detail, action }: { title: string; detail: string;
 function ModelSettingRow({
   stage,
   catalog,
+  defaults,
   settings,
   disabled,
   onChange,
 }: {
   stage: (typeof STAGES)[number];
   catalog: CatalogModel[];
+  defaults: StageDefaults;
   settings: ModelSettings;
   disabled: boolean;
   onChange: (next: ModelSettings) => void;
 }) {
   const effort = settings[stage.effortKey] ?? stage.defaultEffort;
+  const defaultSlug = defaults[stage.defaultKey] ?? FALLBACK_STAGE_DEFAULTS[stage.defaultKey];
+  const defaultModel = catalog.find((model) => model.id === defaultSlug);
+  const defaultLabel = defaultModel
+    ? `Default — ${shortModelName(defaultModel)} · ${defaultSlug}`
+    : `Default — ${defaultSlug}`;
   return (
     <div className="model-setting-row">
       <div><strong>{stage.title}</strong><small>{stage.description}</small></div>
       <select value={settings[stage.modelKey] ?? ""} disabled={disabled} onChange={(event) => onChange({ ...settings, [stage.modelKey]: event.target.value || null })}>
-        <option value="">Jina default</option>
+        <option value="">{defaultLabel}</option>
         {catalog.map((model) => <option value={model.id} key={model.id}>{shortModelName(model)} · {model.id}</option>)}
       </select>
       <div className="model-effort" role="group" aria-label={`${stage.title} reasoning effort`}>

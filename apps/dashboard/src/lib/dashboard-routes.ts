@@ -6,7 +6,6 @@ export const PRODUCT_DASHBOARD_ROUTES = [
   "/integrations",
   "/issues",
   "/issues/[id]",
-  "/jina",
   "/models",
   "/organization",
   "/reviews",

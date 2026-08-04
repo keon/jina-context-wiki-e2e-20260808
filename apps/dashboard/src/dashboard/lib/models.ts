@@ -188,7 +188,7 @@ export function modelPriceLabel(model: CatalogModel): string | null {
 }
 
 /* ============================================================ *
- *  Honest per-stage "Jina default" labels                      *
+ *  Concrete per-stage runtime defaults                         *
  * ============================================================ */
 
 /** True platform-default slugs per review stage, as returned by the API. */
@@ -199,10 +199,20 @@ export type StageDefaults = {
   context: string | null;
 };
 
+/** Concrete code fallbacks used by the review runtime when an API build does
+ * not return its environment-derived defaults. The picker must always name the
+ * model that will run; a vague product label is not a model configuration. */
+export const FALLBACK_STAGE_DEFAULTS: Readonly<Record<keyof StageDefaults, string>> = {
+  planner: "openai/gpt-5.6-sol",
+  investigation: "openai/gpt-5.6-luna",
+  review: "openai/gpt-5.6-luna",
+  context: "openai/gpt-5.6-terra",
+};
+
 /**
  * Coerce the API's `defaults` object into StageDefaults, or null when it's
- * absent/empty (old API builds) so the UI falls back to the plain "Jina
- * default" label.
+ * absent/empty (old API builds) so the UI can fall back to the runtime's
+ * concrete code defaults.
  */
 export function normalizeStageDefaults(raw: unknown): StageDefaults | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
