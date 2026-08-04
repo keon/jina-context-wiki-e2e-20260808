@@ -151,7 +151,7 @@ import {
 import { parseBoardResearchPlan, parseResearchPlanWithRepair } from "./board-research-plan.js";
 import { parsedContextDependencyResult } from "./context-dependency-result.js";
 import { contextPageArtifactName } from "./context-page-artifact-name.js";
-import { contextPageDispositionArtifact } from "./context-page-disposition.js";
+import { contextPagePublicationDisposition } from "./context-page-disposition.js";
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
@@ -1358,14 +1358,23 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   if (!boardPageIndexClient) throw new Error("self-hosted PageIndex client is not configured");
   const publicationPlanArtifact = work.task.metadata.planArtifact;
   const publicationPlan = parsePublicationPlanArtifact(await readContextBoardArtifact(work, publicationPlanArtifact));
-  const pageArtifacts = work.task.metadata.dependencyResults
-    .filter((dependency) => dependency.taskType === "build-context-page")
-    .flatMap((dependency) => {
-      const artifact = contextPageDispositionArtifact(dependency.result);
-      return artifact === undefined
-        ? []
-        : [parseArtifactRef(artifact, `${dependency.taskId} disposition pageArtifact`)];
-    });
+  const pageArtifacts: ContextArtifactRef[] = [];
+  const omittedPages: { readonly path: string; readonly reasonCode: string }[] = [];
+  for (const dependency of work.task.metadata.dependencyResults.filter(
+    (candidate) => candidate.taskType === "build-context-page"
+  )) {
+    const disposition = contextPagePublicationDisposition(dependency.result);
+    if (disposition.status === "omitted") {
+      omittedPages.push({
+        path: requiredString(dependency.documentPath, `${dependency.taskId} documentPath`),
+        reasonCode: disposition.reasonCode
+      });
+    } else {
+      pageArtifacts.push(
+        parseArtifactRef(disposition.pageArtifact, `${dependency.taskId} disposition pageArtifact`)
+      );
+    }
+  }
   const priorContext = await loadPriorContext(work);
   for (const plannedPage of publicationPlan.plan.pages.filter((page) => (page.change ?? "add") === "retain")) {
     const priorPage = priorContext?.pages.find((page) => page.documentPath === plannedPage.path);
@@ -1412,7 +1421,8 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
         verdict: "certified",
         publicSnapshotDigest,
         publicationPlanArtifact,
-        pageArtifacts
+        pageArtifacts,
+        omittedPages
       }),
       "utf8"
     )

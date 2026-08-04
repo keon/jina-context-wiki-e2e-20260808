@@ -133,6 +133,34 @@ test("publication validates the complete page set and never commits a partially 
   );
 });
 
+test("publication accepts an explicitly dispositioned unsupported new page", async () => {
+  const architecture = {
+    documentPath: "architecture.md",
+    title: "Architecture",
+    bodyMarkdown: "# Architecture\n\nThe API [returns a stable greeting](src/index.ts#L1-L1).\n"
+  };
+  await withFixture(
+    async ({ service, transaction, request }) => {
+      await service.publish(request);
+      assert.deepEqual(transaction.commits[0]?.pages.map((page) => page.documentPath), ["architecture.md"]);
+    },
+    {
+      pages: [architecture],
+      plannedPages: [
+        architecture,
+        {
+          documentPath: "legacy-administrator-deletion.md",
+          title: "Legacy Administrator Deletion",
+          bodyMarkdown: "# Legacy Administrator Deletion\n"
+        }
+      ],
+      omittedPages: [
+        { path: "legacy-administrator-deletion.md", reasonCode: "unsupported_core_claims" }
+      ]
+    }
+  );
+});
+
 test("a delayed older ref sequence cannot advance the current release", async () => {
   await withFixture(async ({ service, transaction, request }) => {
     transaction.frontiers.set(scopeKey(request.scope), request.scope.refSequence + 1);
@@ -215,6 +243,12 @@ interface FixtureOptions {
     readonly title: string;
     readonly bodyMarkdown: string;
   }[];
+  readonly plannedPages?: readonly {
+    readonly documentPath: string;
+    readonly title: string;
+    readonly bodyMarkdown: string;
+  }[];
+  readonly omittedPages?: readonly { readonly path: string; readonly reasonCode: string }[];
 }
 
 async function withFixture(
@@ -267,7 +301,7 @@ async function withFixture(
     const plan = await putJson(artifacts, scope, "publication-plan", "plan.json", {
       version: 1,
       plan: {
-        pages: pages.map((page) => ({ path: page.documentPath, change: "add" })),
+        pages: (options.plannedPages ?? pages).map((page) => ({ path: page.documentPath, change: "add" })),
         retiredPages: []
       }
     });
@@ -296,6 +330,7 @@ async function withFixture(
       publicSnapshotDigest,
       publicationPlanArtifact: plan,
       pageArtifacts: pageRefs,
+      omittedPages: options.omittedPages ?? [],
       sourceChallengeArtifact: pageRefs[0],
       taskEvaluationArtifact: pageRefs[0]
     });
