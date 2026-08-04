@@ -51,6 +51,7 @@ export * from "./query/retrievers/hierarchy.js";
 export * from "./query/retrievers/structural.js";
 
 export * from "./workflow/board.js";
+export * from "./workflow/context-workflow.js";
 export * from "./workflow/incremental.js";
 export * from "./derive/verbosity.js";
 export * from "./derive/markdown-document.js";

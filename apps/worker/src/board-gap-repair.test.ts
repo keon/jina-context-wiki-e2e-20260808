@@ -159,7 +159,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   const artifacts = new Map<string, { ref: ArtifactRef; content: Buffer }>();
   const addArtifact = (name: string, value: unknown): ArtifactRef => {
     const content = Buffer.from(JSON.stringify(value), "utf8");
-    const key = `context-v2/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/${name}.json`;
+    const key = `context/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/${name}.json`;
     const ref = {
       uri: `file:///${key}`,
       key,
@@ -478,7 +478,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
       uploadedKinds.push(String(body.kind));
       const content = Buffer.from(String(body.contentBase64), "base64");
       uploadedDraft = JSON.parse(content.toString("utf8")) as Record<string, unknown>;
-      const key = `context-v2/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/${String(body.kind)}/task_gap_repair-attempt-${String(body.attempt)}-${String(body.name)}`;
+      const key = `context/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/${String(body.kind)}/task_gap_repair-attempt-${String(body.attempt)}-${String(body.name)}`;
       const ref: ArtifactRef = {
         uri: `file:///${key}`,
         key,

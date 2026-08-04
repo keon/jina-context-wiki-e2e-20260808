@@ -256,11 +256,11 @@ async function inspectSchemaDatabase(database, reset, beforeMigration) {
   if (mode === "disabled") {
     const views = await contextViews(database);
     if (beforeMigration) {
-      assertNoUnexpected(tables, current, "current Context v2 schema");
-      assertNoUnexpected(views, CURRENT_CONTEXT_VIEWS, "current Context v2 views");
+      assertNoUnexpected(tables, current, "current Context schema");
+      assertNoUnexpected(views, CURRENT_CONTEXT_VIEWS, "current Context views");
     } else {
-      assertExactSet(tables, current, "current Context v2 schema");
-      assertExactSet(views, CURRENT_CONTEXT_VIEWS, "current Context v2 views");
+      assertExactSet(tables, current, "current Context schema");
+      assertExactSet(views, CURRENT_CONTEXT_VIEWS, "current Context views");
     }
   } else {
     assertExactSet(tables, legacy, "one-time legacy Context schema");
@@ -843,8 +843,8 @@ async function resetLegacySchema(pool, reset) {
     // instead of silently deleting data outside the three audited legacy tables.
     await client.query(`drop table ${LEGACY_CONTEXT_TABLES.map((table) => `jina_context.${table}`).join(",")}`);
 
-    assertExactSet(await contextTables(client), current, "reset Context v2 schema");
-    assertExactSet(await contextViews(client), CURRENT_CONTEXT_VIEWS, "reset Context v2 views");
+    assertExactSet(await contextTables(client), current, "reset Context schema");
+    assertExactSet(await contextViews(client), CURRENT_CONTEXT_VIEWS, "reset Context views");
     const preservedAfter = await preservedDigests(client);
     if (JSON.stringify(preservedAfter) !== JSON.stringify(preservedBefore)) {
       throw new Error("Context reset changed preserved identity or control-plane rows");

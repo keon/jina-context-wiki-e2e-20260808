@@ -514,7 +514,7 @@ function exhaustedGateFixture(input: { readonly tenantId: string; readonly repos
   });
   const artifact = (name: string): ContextArtifactRef => {
     const key =
-      `context-v2/tenants/${input.tenantId}/repositories/${input.repository}/` +
+      `context/tenants/${input.tenantId}/repositories/${input.repository}/` +
       `builds/${created.buildTaskId}/${name}.json`;
     return {
       uri: `gs://context-test/${key}`,
@@ -626,7 +626,7 @@ function exhaustedPagesFixture(input: {
   });
   const artifact = (name: string): ContextArtifactRef => {
     const key =
-      `context-v2/tenants/${input.tenantId}/repositories/${input.repository}/` +
+      `context/tenants/${input.tenantId}/repositories/${input.repository}/` +
       `builds/${created.buildTaskId}/${name}.json`;
     return {
       uri: `gs://context-test/${key}`,

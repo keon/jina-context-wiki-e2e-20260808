@@ -463,7 +463,7 @@ async function serveOperation(url, configuration, state) {
             ? {
                 prompt: "private worker instructions",
                 artifactUri: "gs://private-context-bucket/checkpoints/task.json",
-                artifactPath: "context-v2/tenants/t1/repositories/acme/context/builds/task_abc/output.json",
+                artifactPath: "context/tenants/t1/repositories/acme/context/builds/task_abc/output.json",
                 diagnostic: "Error: private failure\n    at worker (/srv/private-worker.js:1:2)",
                 rawEvidence: { providerPayload: "private provider body" }
               }

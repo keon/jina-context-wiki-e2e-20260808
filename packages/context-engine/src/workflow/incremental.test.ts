@@ -128,7 +128,7 @@ test("prior seed parser rejects a cross-tenant release artifact key", () => {
         publicSnapshotDigest: release.publicSnapshotDigest,
         releaseArtifact: {
           ...release.certificationArtifact,
-          key: "context-v2/tenants/other/repositories/acme/sample/builds/task_prior/context-release/cr_prior.json"
+          key: "context/tenants/other/repositories/acme/sample/builds/task_prior/context-release/cr_prior.json"
         }
       }),
     /outside its immutable repository release scope/
@@ -160,7 +160,7 @@ function priorRelease(): CertifiedContextReleaseArtifactV1 {
   }));
   const artifact = {
     uri: "file:///prior.json",
-    key: "context-v2/tenants/tenant-a/repositories/acme/sample/builds/task_prior/context-release/cr_prior.json",
+    key: "context/tenants/tenant-a/repositories/acme/sample/builds/task_prior/context-release/cr_prior.json",
     contentType: "application/json",
     bytes: 1,
     sha256: "a".repeat(64)

@@ -1121,19 +1121,13 @@ test("tenant administrators can extend a provider-failed task after its build de
         : task
     )
   };
-  board = appendEvent(
-    board,
-    "context.build_execution_lease_started",
-    expiredAt,
-    failed.buildId,
-    {
-      messageId: failed.oldLease.messageId,
-      taskId: failed.plannerId,
-      attempt: failed.oldLease.attempt,
-      leaseId: failed.oldLease.leaseId,
-      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
-    }
-  );
+  board = appendEvent(board, "context.build_execution_lease_started", expiredAt, failed.buildId, {
+    messageId: failed.oldLease.messageId,
+    taskId: failed.plannerId,
+    attempt: failed.oldLease.attempt,
+    leaseId: failed.oldLease.leaseId,
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  });
   const stateStore = mutableStateStore({
     intakeState: { board, pullRequests: [] },
     devDeliverySequence: 0
@@ -1897,7 +1891,7 @@ test("terminal context exhaustion commits worker receipts before failing the bui
   let board = setTaskStatus(gate.state, page.pageRepairTaskId, "done");
   const retainedPageArtifact: ContextArtifactRef = {
     uri: "gs://context-test/retained-page.json",
-    key: `context-v2/tenants/${tenantId}/repositories/${repository}/builds/${page.buildId}/retained-page.json`,
+    key: `context/tenants/${tenantId}/repositories/${repository}/builds/${page.buildId}/retained-page.json`,
     contentType: "application/json",
     bytes: 1,
     sha256: "a".repeat(64)
@@ -3299,7 +3293,7 @@ function terminalExhaustionGraph(
     now: NOW
   });
   const scopedArtifact = (name: string): ContextArtifactRef => {
-    const key = `context-v2/tenants/${tenantId}/repositories/${repository}/builds/${created.buildTaskId}/${name}.json`;
+    const key = `context/tenants/${tenantId}/repositories/${repository}/builds/${created.buildTaskId}/${name}.json`;
     return {
       uri: `gs://context-test/${key}`,
       key,
@@ -4119,7 +4113,7 @@ function devHeaders(tenantId: string, principalId: string) {
 function artifactRef(name: string): ContextArtifactRef {
   return {
     uri: `file:///tmp/${name}.json`,
-    key: `context-v2/tenants/tenant-retry/repositories/omxyz/jina/builds/retry-http-root/${name}.json`,
+    key: `context/tenants/tenant-retry/repositories/omxyz/jina/builds/retry-http-root/${name}.json`,
     contentType: "application/json",
     bytes: 1,
     sha256: "b".repeat(64),

@@ -251,7 +251,7 @@ the contract-equivalent filesystem store locally.
 Artifacts are create-only under:
 
 ```text
-context-v2/tenants/<tenant>/repositories/<repository>/builds/<build>/<kind>/<name>
+context/tenants/<tenant>/repositories/<repository>/builds/<build>/<kind>/<name>
 ```
 
 If a process or sandbox fails:

@@ -743,7 +743,7 @@ function publicationWork(taskId: string): Record<string, unknown> {
 function artifact(kind: string): Record<string, unknown> {
   return {
     uri: `gs://context-artifacts/${kind}.json`,
-    key: `context-v2/tenants/tenant-completion-timeout/repositories/acme/large-repository/builds/cb_completion_timeout/${kind}.json`,
+    key: `context/tenants/tenant-completion-timeout/repositories/acme/large-repository/builds/cb_completion_timeout/${kind}.json`,
     contentType: "application/json",
     bytes: 123,
     sha256: "b".repeat(64),

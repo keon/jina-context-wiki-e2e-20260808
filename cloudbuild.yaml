@@ -197,7 +197,7 @@ substitutions:
   # Production Context acceptance runs after cutover as an ordinary observable
   # build; an operator may still select "full" for an exceptional blocking gate.
   _JINA_DEPLOYMENT_ACCEPTANCE_MODE: mechanical
-  # Normal releases accept only the current schema. The first Context v2
+  # Normal releases accept only the current schema. The first Context
   # production transition must override both values explicitly:
   #   _JINA_CONTEXT_RESET_MODE=legacy-once
   #   _JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context

@@ -206,7 +206,7 @@ test("board PageIndex worker uploads exact tree bytes, attaches under its lease,
       const content = Buffer.from(String(body.contentBase64), "base64");
       uploadedTree = {
         uri: "gs://context-artifacts/pageindex-tree.json",
-        key: `context-v2/tenants/tenant-board/repositories/acme/sample/builds/task_build/pageindex-tree/task_pageindex-attempt-1-${String(body.name)}`,
+        key: `context/tenants/tenant-board/repositories/acme/sample/builds/task_build/pageindex-tree/task_pageindex-attempt-1-${String(body.name)}`,
         contentType: "application/json",
         bytes: content.byteLength,
         sha256: createHash("sha256").update(content).digest("hex"),
@@ -297,8 +297,8 @@ test("board PageIndex worker uploads exact tree bytes, attaches under its lease,
 
 function artifact(kind: string, name: string, digestCharacter: string) {
   return {
-    uri: `file:///context-v2/${name}`,
-    key: `context-v2/tenants/tenant-board/repositories/acme%2Fsample/builds/task_build/${kind}/${name}`,
+    uri: `file:///context/${name}`,
+    key: `context/tenants/tenant-board/repositories/acme%2Fsample/builds/task_build/${kind}/${name}`,
     contentType: "application/json",
     bytes: 128,
     sha256: digestCharacter.repeat(64)
@@ -382,7 +382,7 @@ function pageIndexRelease(): CertifiedContextReleaseArtifactV1 {
 
 function scopedArtifact(kind: string, name: string, digestCharacter: string): ContextArtifactRef {
   const key = [
-    "context-v2",
+    "context",
     "tenants",
     "tenant-board",
     "repositories",
