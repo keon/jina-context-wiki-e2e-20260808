@@ -60,7 +60,15 @@ export default async function ContextAdminPage({
   }
 
   return (
-    <main>
+    <main id="overview" className="admin-main">
+      <header className="admin-page-heading">
+        <div>
+          <span className="admin-eyebrow">Repository context</span>
+          <h1>Context operations</h1>
+          <p>Monitor immutable releases, resumable builds, index health, and agent-derived context.</p>
+        </div>
+        <span className="admin-scope-badge">All context</span>
+      </header>
       {loadFailures.length > 0 ? (
         <div className="error-state">
           <p>Some Context data is temporarily unavailable. Available sections remain live.</p>
@@ -80,71 +88,81 @@ export default async function ContextAdminPage({
         <Stat label="Hierarchy nodes" value={metrics.hierarchyNodeCount} />
       </div>
 
-      {repositories.length > 1 || repository ? (
-        <nav className="repo-filter" aria-label="Filter by repository">
-          <Link href="/" className={repository ? "" : "active"}>
-            All repositories
-          </Link>
-          {repositories.map((candidate) => (
-            <Link
-              key={candidate}
-              href={`/?repository=${encodeURIComponent(candidate)}`}
-              className={candidate === repository ? "active" : ""}
-            >
-              {candidate}
-            </Link>
-          ))}
-        </nav>
-      ) : null}
-
-      {visible.length === 0 ? (
-        <div className="empty-state">
-          <p>No context releases have been published{repository ? ` for ${repository}` : ""}.</p>
-          <p>
-            Verified pages remain private, resumable checkpoints until the complete catalog passes citation,
-            maintenance-task, and certification gates and publishes atomically.
-          </p>
+      <section id="releases" className="context-admin-section admin-data-section">
+        <div className="admin-section-heading">
+          <div>
+            <h2>Published releases</h2>
+            <p className="muted">Immutable repository context available to agents and operators.</p>
+          </div>
+          {repositories.length > 1 || repository ? (
+            <nav className="repo-filter" aria-label="Filter by repository">
+              <Link href="/" className={repository ? "" : "active"}>
+                All repositories
+              </Link>
+              {repositories.map((candidate) => (
+                <Link
+                  key={candidate}
+                  href={`/?repository=${encodeURIComponent(candidate)}`}
+                  className={candidate === repository ? "active" : ""}
+                >
+                  {candidate}
+                </Link>
+              ))}
+            </nav>
+          ) : null}
         </div>
-      ) : (
-        <table className="context-table">
-          <thead>
-            <tr>
-              <th>Repository</th>
-              <th>Ref</th>
-              <th>Commit</th>
-              <th>Published</th>
-              <th>Publication</th>
-              <th>Context</th>
-              <th>Release ID</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visible.map((release) => (
-              <tr key={release.id}>
-                <td>
-                  <Link href={`/?repository=${encodeURIComponent(release.repository)}`}>{release.repository}</Link>
-                </td>
-                <td>
-                  <code>{shortRef(release.ref)}</code>
-                </td>
-                <td>
-                  <code>{release.commitSha.slice(0, 10)}</code>
-                </td>
-                <td title={release.publishedAt ?? release.createdAt}>
-                  {formatTimestamp(release.publishedAt ?? release.createdAt)}
-                </td>
-                <td>{release.completeness}</td>
-                <td>{release.contextStatus}</td>
-                <td className="summary-cell">
-                  <code>{release.id}</code>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
 
-      <section className="context-admin-section">
+        {visible.length === 0 ? (
+          <div className="empty-state">
+            <p>No context releases have been published{repository ? ` for ${repository}` : ""}.</p>
+            <p>
+              Verified pages remain private, resumable checkpoints until the complete catalog passes citation,
+              maintenance-task, and certification gates and publishes atomically.
+            </p>
+          </div>
+        ) : (
+          <div className="table-scroll">
+            <table className="context-table">
+              <thead>
+                <tr>
+                  <th>Repository</th>
+                  <th>Ref</th>
+                  <th>Commit</th>
+                  <th>Published</th>
+                  <th>Publication</th>
+                  <th>Context</th>
+                  <th>Release ID</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((release) => (
+                  <tr key={release.id}>
+                    <td>
+                      <Link href={`/?repository=${encodeURIComponent(release.repository)}`}>{release.repository}</Link>
+                    </td>
+                    <td>
+                      <code>{shortRef(release.ref)}</code>
+                    </td>
+                    <td>
+                      <code>{release.commitSha.slice(0, 10)}</code>
+                    </td>
+                    <td title={release.publishedAt ?? release.createdAt}>
+                      {formatTimestamp(release.publishedAt ?? release.createdAt)}
+                    </td>
+                    <td>{release.completeness}</td>
+                    <td>{release.contextStatus}</td>
+                    <td className="summary-cell">
+                      <code>{release.id}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section id="builds" className="context-admin-section admin-data-section">
         <h2>Build and checkpoint state</h2>
         <p className="muted">
           {visibleBuilds.length} recent builds. Checkpoint counts are shown for the {buildProgress.length} most recent
@@ -296,7 +314,7 @@ export default async function ContextAdminPage({
         )}
       </section>
 
-      <section className="context-admin-section">
+      <section id="health" className="context-admin-section admin-data-section">
         <h2>Context index health</h2>
         <p className="muted">
           {metrics.fragmentCount} lexical fragments and {metrics.hierarchyNodeCount} hierarchy nodes. Dense embeddings
@@ -334,7 +352,7 @@ export default async function ContextAdminPage({
         )}
       </section>
 
-      <section className="context-admin-section">
+      <section id="documents" className="context-admin-section admin-data-section">
         <h2>Agent-derived context</h2>
         <p className="muted">
           {documents.length} current documents across{" "}

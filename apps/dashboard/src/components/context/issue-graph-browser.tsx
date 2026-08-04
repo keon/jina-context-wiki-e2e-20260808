@@ -87,7 +87,15 @@ export function IssueGraphBrowser({
             : "No causal graph has been published for this repository ref yet."}
         </p>
       ) : null}
-      {graph ? (
+      {graph && graph.issues.length === 0 ? (
+        <div className="page-placeholder page-placeholder--embedded">
+          <span className="page-placeholder__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="7" cy="8" r="2.25" stroke="currentColor" strokeWidth="1.5" /><circle cx="17" cy="16" r="2.25" stroke="currentColor" strokeWidth="1.5" /><path d="m8.8 9.4 6.4 5.2" stroke="currentColor" strokeWidth="1.5" /></svg>
+          </span>
+          <strong>No issues or causal links</strong>
+          <p>The published graph contains no commit-derived issues for this repository ref.</p>
+        </div>
+      ) : graph ? (
         <>
           <div className="issue-graph-summary">
             <p>{graph.summary}</p>

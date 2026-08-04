@@ -1,26 +1,28 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { apiUrl } from "../lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Badge } from "../components/ui";
-import { useDashboard, useTenant, useTenantFence } from "../providers";
-import { formatDate } from "../lib/presentation";
-import { openRouterSourceLabel, parseOpenRouterCallbackParam } from "../lib/openrouter";
-import { isTenantWritable, type SelectedTenant } from "../lib/tenants";
+import { apiUrl } from "../lib/api";
 import {
   githubInstallationUrl,
   normalizeGithubConnections,
   parseGithubInstallationCallback,
   type GithubConnection,
 } from "../lib/github-installation";
+import { openRouterSourceLabel, parseOpenRouterCallbackParam } from "../lib/openrouter";
+import { formatDate } from "../lib/presentation";
+import { isTenantWritable, type SelectedTenant } from "../lib/tenants";
+import { useDashboard, useTenant, useTenantFence } from "../providers";
 
+type LoadState = "loading" | "loaded" | "unavailable";
 type KeyInfo = { configured: boolean; last4?: string; connected_at?: string };
-type OpenRouterInfo = KeyInfo & { source?: string; label?: string };
+type OpenRouterInfo = KeyInfo & { source?: string };
 type Integrations = {
   openrouter: OpenRouterInfo;
   openai: KeyInfo;
   anthropic: KeyInfo;
 };
+type ProviderField = "openrouter_api_key" | "openai_api_key" | "anthropic_api_key";
 
 const EMPTY_INTEGRATIONS: Integrations = {
   openrouter: { configured: false },
@@ -28,7 +30,42 @@ const EMPTY_INTEGRATIONS: Integrations = {
   anthropic: { configured: false },
 };
 
-/** Merge a raw API payload onto the empty baseline, tolerating missing fields. */
+const PROVIDERS: Array<{
+  id: keyof Integrations;
+  name: string;
+  mark: string;
+  description: string;
+  field: ProviderField;
+  placeholder: string;
+  oauth?: boolean;
+}> = [
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    mark: "OR",
+    description: "Use one key for models from multiple providers.",
+    field: "openrouter_api_key",
+    placeholder: "sk-or-…",
+    oauth: true,
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    mark: "AI",
+    description: "Run reviews with models billed to your OpenAI account.",
+    field: "openai_api_key",
+    placeholder: "sk-…",
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    mark: "AN",
+    description: "Use Claude models through your own provider key.",
+    field: "anthropic_api_key",
+    placeholder: "sk-ant-…",
+  },
+];
+
 function mergeIntegrations(data: unknown): Integrations {
   const record = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
   return {
@@ -38,7 +75,6 @@ function mergeIntegrations(data: unknown): Integrations {
   };
 }
 
-/** Integrations endpoint for the active tenant, or the legacy viewer-scoped route. */
 function integrationsUrl(selected: SelectedTenant | null): string {
   return selected
     ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`)
@@ -68,15 +104,95 @@ export default function IntegrationsPage() {
   const { viewer } = useDashboard();
   const { selected, tenants, selectTenant } = useTenant();
   const isCurrentTenant = useTenantFence();
-  const installUrl =
-    selected && isTenantWritable(selected)
-      ? githubInstallationUrl(viewer?.github_app?.install_url, selected)
-      : undefined;
-  const [status, setStatus] = useState<Integrations>(EMPTY_INTEGRATIONS);
-  const [githubConnections, setGithubConnections] = useState<GithubConnection[]>([]);
-  const [githubConnectionsVersion, setGithubConnectionsVersion] = useState(0);
-  const [installationMessage, setInstallationMessage] = useState<string | null>(null);
+  const [providers, setProviders] = useState<Integrations>(EMPTY_INTEGRATIONS);
+  const [providerState, setProviderState] = useState<LoadState>("loading");
+  const [providerVersion, setProviderVersion] = useState(0);
+  const [connections, setConnections] = useState<GithubConnection[]>([]);
+  const [connectionState, setConnectionState] = useState<LoadState>("loading");
+  const [connectionVersion, setConnectionVersion] = useState(0);
+  const [pageMessage, setPageMessage] = useState<string | null>(null);
   const completingInstallation = useRef<string | null>(null);
+
+  const writable = isTenantWritable(selected);
+  const installUrl =
+    selected && writable ? githubInstallationUrl(viewer?.github_app?.install_url, selected) : undefined;
+
+  const reloadProviders = useCallback(() => setProviderVersion((version) => version + 1), []);
+
+  useEffect(() => {
+    const requestTenantId = selected?.tenantId ?? null;
+    const controller = new AbortController();
+    setProviderState("loading");
+    setProviders(EMPTY_INTEGRATIONS);
+    fetch(integrationsUrl(selected), {
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Integrations returned ${response.status}`);
+        return mergeIntegrations(await response.json());
+      })
+      .then((next) => {
+        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
+          setProviders(next);
+          setProviderState("loaded");
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) setProviderState("unavailable");
+      });
+    return () => controller.abort();
+  }, [selected, providerVersion, isCurrentTenant]);
+
+  useEffect(() => {
+    if (!selected) {
+      setConnections([]);
+      setConnectionState("loaded");
+      return;
+    }
+    const requestTenantId = selected.tenantId;
+    const controller = new AbortController();
+    setConnectionState("loading");
+    fetch(githubConnectionsUrl(selected), {
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`GitHub installations returned ${response.status}`);
+        return normalizeGithubConnections(await response.json());
+      })
+      .then((next) => {
+        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
+          setConnections(next);
+          setConnectionState("loaded");
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
+          setConnections([]);
+          setConnectionState("unavailable");
+        }
+      });
+    return () => controller.abort();
+  }, [selected, connectionVersion, isCurrentTenant]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const openRouterResult = parseOpenRouterCallbackParam(window.location.search);
+    if (openRouterResult) {
+      setPageMessage(
+        openRouterResult === "connected"
+          ? "OpenRouter connected."
+          : "OpenRouter could not be connected. Try again.",
+      );
+      if (openRouterResult === "connected") reloadProviders();
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.delete("openrouter");
+      window.history.replaceState({}, "", nextUrl.pathname + nextUrl.search + nextUrl.hash);
+    }
+  }, [reloadProviders]);
 
   useEffect(() => {
     if (!viewer || typeof window === "undefined") return;
@@ -87,8 +203,8 @@ export default function IntegrationsPage() {
     const completionKey = `${callback.tenantId}:${callback.installationId}`;
     if (completingInstallation.current === completionKey) return;
     completingInstallation.current = completionKey;
-    setInstallationMessage("Connecting GitHub repositories…");
-    connectGithubInstallation(callback.tenantId, callback.installationId)
+    setPageMessage("Connecting GitHub repositories…");
+    void connectGithubInstallation(callback.tenantId, callback.installationId)
       .then(async (response) => {
         if (!response.ok) {
           const body = (await response.json().catch(() => ({}))) as { error?: string };
@@ -96,537 +212,329 @@ export default function IntegrationsPage() {
         }
         const body = (await response.json()) as { repositories?: number };
         selectTenant(callback.tenantId);
-        setInstallationMessage(
+        setPageMessage(
           `GitHub connected${typeof body.repositories === "number" ? ` · ${body.repositories} repositories` : ""}.`,
         );
-        setGithubConnectionsVersion((version) => version + 1);
+        setConnectionVersion((version) => version + 1);
       })
       .catch((error: unknown) => {
-        setInstallationMessage(error instanceof Error ? error.message : "Could not connect the GitHub installation");
+        setPageMessage(error instanceof Error ? error.message : "Could not connect the GitHub installation");
       })
       .finally(() => {
-        const url = new URL(window.location.href);
-        url.searchParams.delete("installation_id");
-        url.searchParams.delete("setup_action");
-        url.searchParams.delete("state");
-        window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.delete("installation_id");
+        nextUrl.searchParams.delete("setup_action");
+        nextUrl.searchParams.delete("state");
+        window.history.replaceState({}, "", nextUrl.pathname + nextUrl.search + nextUrl.hash);
       });
   }, [viewer, tenants, selectTenant]);
 
-  useEffect(() => {
-    if (!selected) {
-      setGithubConnections([]);
-      return;
-    }
-    const requestTenantId = selected.tenantId;
-    const controller = new AbortController();
-    fetch(githubConnectionsUrl(selected), {
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`GitHub installations returned ${response.status}`);
-        return normalizeGithubConnections(await response.json());
-      })
-      .then((connections) => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
-          setGithubConnections(connections);
-        }
-      })
-      .catch(() => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
-          setGithubConnections([]);
-        }
-      });
-    return () => controller.abort();
-  }, [selected, githubConnectionsVersion, isCurrentTenant]);
-
-  // Re-load whenever the selected tenant changes (each tenant has its own key).
-  useEffect(() => {
-    const requestTenantId = selected?.tenantId ?? null;
-    let cancelled = false;
-    setStatus(EMPTY_INTEGRATIONS);
-    fetch(integrationsUrl(selected), { credentials: "include", cache: "no-store" })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data) => data && !cancelled && isCurrentTenant(requestTenantId) && setStatus(mergeIntegrations(data)))
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [selected, isCurrentTenant]);
-
   return (
-    <>
-      {selected ? (
-        <GithubOrganizationsCard
-          selected={selected}
-          connections={githubConnections}
-          installUrl={installUrl}
-          message={installationMessage}
-        />
+    <div className="integrations-v2">
+      <header className="route-intro">
+        <div>
+          <h1>Integrations</h1>
+          <p>Connect source control and model providers to this workspace.</p>
+        </div>
+        {selected ? <span className="route-intro__scope">{selected.login}</span> : null}
+      </header>
+
+      {pageMessage ? (
+        <div className="inline-status" role="status">
+          <span>{pageMessage}</span>
+          <button type="button" onClick={() => setPageMessage(null)} aria-label="Dismiss message">×</button>
+        </div>
       ) : null}
-      <OpenRouterCard info={status.openrouter} selected={selected} onChanged={setStatus} />
-      <ProviderKeyCard
-        title="OpenAI"
-        fieldName="openai_api_key"
-        placeholder="sk-…"
-        info={status.openai}
-        selected={selected}
-        onChanged={setStatus}
-        lead={
-          <>
-            Run OpenAI models on your own key. Billed infra-only.
-          </>
-        }
-      />
-      <ProviderKeyCard
-        title="Anthropic (Claude)"
-        fieldName="anthropic_api_key"
-        placeholder="sk-ant-…"
-        info={status.anthropic}
-        selected={selected}
-        onChanged={setStatus}
-        lead={
-          <>
-            Stored for Claude models.
-          </>
-        }
-      />
-    </>
+
+      <IntegrationGroup title="Source control" description="Repositories and pull requests">
+        <GitHubRow
+          state={connectionState}
+          connections={connections}
+          installUrl={installUrl}
+          writable={writable}
+        />
+      </IntegrationGroup>
+
+      <IntegrationGroup title="Model providers" description="Credentials used to run reviews">
+        {providerState === "loading" ? (
+          <CompactState title="Loading providers" detail="Checking the connections for this workspace." />
+        ) : providerState === "unavailable" ? (
+          <CompactState
+            title="Provider connections are unavailable"
+            detail="Nothing has been disconnected or changed. Try again when the service is reachable."
+            action={<button type="button" className="btn btn--sm" onClick={reloadProviders}>Retry</button>}
+          />
+        ) : (
+          <div className="integration-rows">
+            {PROVIDERS.map((provider) => (
+              <ProviderRow
+                key={provider.id}
+                provider={provider}
+                info={providers[provider.id]}
+                selected={selected}
+                writable={writable}
+                onChanged={(next) => {
+                  setProviders(next);
+                  setProviderState("loaded");
+                }}
+              />
+            ))}
+          </div>
+        )}
+      </IntegrationGroup>
+    </div>
   );
 }
 
-/* ---------- OpenRouter (primary) ---------- */
+function IntegrationGroup({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="integration-group">
+      <div className="integration-group__head">
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
 
-function OpenRouterCard({
+function CompactState({
+  title,
+  detail,
+  action,
+}: {
+  title: string;
+  detail: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="integration-state">
+      <span className="integration-mark integration-mark--muted">•••</span>
+      <div>
+        <strong>{title}</strong>
+        <p>{detail}</p>
+      </div>
+      {action ? <div className="integration-state__action">{action}</div> : null}
+    </div>
+  );
+}
+
+function GitHubRow({
+  state,
+  connections,
+  installUrl,
+  writable,
+}: {
+  state: LoadState;
+  connections: GithubConnection[];
+  installUrl: string | undefined;
+  writable: boolean;
+}) {
+  const connected = connections.filter((connection) => connection.status === "active");
+  const statusLabel =
+    state === "loading"
+      ? "Checking…"
+      : state === "unavailable"
+        ? "Unavailable"
+        : connected.length > 0
+          ? `${connected.length} connected`
+          : "Not connected";
+
+  return (
+    <div className="integration-row integration-row--source">
+      <span className="integration-mark">GH</span>
+      <div className="integration-row__main">
+        <div className="integration-row__titleline">
+          <strong>GitHub</strong>
+          <Badge tone={connected.length > 0 ? "ok" : undefined}>{statusLabel}</Badge>
+        </div>
+        <p>Sync organizations and repositories for pull-request reviews.</p>
+        {connected.length > 0 ? (
+          <div className="integration-row__connections">
+            {connected.map((connection) => (
+              <span key={connection.installationId}>
+                {connection.login} · {connection.repositoryCount.toLocaleString("en-US")} repos
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <div className="integration-row__actions">
+        {installUrl ? (
+          <ExternalLink className="btn btn--primary btn--sm" href={installUrl}>
+            {connected.length > 0 ? "Add organization" : "Connect"}
+          </ExternalLink>
+        ) : (
+          <button type="button" className="btn btn--sm" disabled={!writable || state !== "loaded"}>Connect</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProviderRow({
+  provider,
   info,
   selected,
+  writable,
   onChanged,
 }: {
-  info: OpenRouterInfo;
+  provider: (typeof PROVIDERS)[number];
+  info: KeyInfo | OpenRouterInfo;
   selected: SelectedTenant | null;
+  writable: boolean;
   onChanged: (next: Integrations) => void;
 }) {
-  const [callback, setCallback] = useState<"connected" | "error" | null>(null);
-  const [manualKey, setManualKey] = useState("");
-  const [busy, setBusy] = useState<"connect" | "save" | "disconnect" | null>(null);
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const isCurrentTenant = useTenantFence();
-
-  const writable = isTenantWritable(selected);
-  const isOrg = selected?.type === "Organization";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState<"oauth" | "save" | "disconnect" | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   useEffect(() => {
-    setCallback(null);
-    setManualKey("");
+    setEditing(false);
+    setDraft("");
     setBusy(null);
-    setConfirmDisconnect(false);
     setMessage(null);
-  }, [selected?.tenantId, isCurrentTenant]);
+    setConfirmDisconnect(false);
+  }, [selected?.tenantId]);
 
-  // Read the OAuth callback result on mount, then strip it from the URL so it
-  // doesn't linger (or re-fire on refresh) via history.replaceState.
-  useEffect(() => {
-    const result = parseOpenRouterCallbackParam(window.location.search);
-    if (!result) return;
-    setCallback(result);
-    const url = new URL(window.location.href);
-    url.searchParams.delete("openrouter");
-    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
-  }, []);
-
-  const connect = async () => {
+  const saveKey = async (key: string, mode: "save" | "disconnect") => {
     const requestTenantId = selected?.tenantId ?? null;
-    setBusy("connect");
+    setBusy(mode);
     setMessage(null);
     try {
-      // The OAuth start route is global but accepts a target tenant_id (the API
-      // re-checks the viewer is an admin of it before returning the redirect).
+      const response = await fetch(integrationsUrl(selected), {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ [provider.field]: key }),
+      });
+      if (response.status === 403) throw new Error("Only workspace admins can change this connection.");
+      if (!response.ok) throw new Error("Connection could not be saved.");
+      const next = mergeIntegrations(await response.json());
+      if (!isCurrentTenant(requestTenantId)) return;
+      onChanged(next);
+      setDraft("");
+      setEditing(false);
+      setConfirmDisconnect(false);
+      setMessage(mode === "disconnect" ? "Disconnected." : "Connected.");
+    } catch (error) {
+      if (isCurrentTenant(requestTenantId)) {
+        setMessage(error instanceof Error ? error.message : "Connection could not be saved.");
+      }
+    } finally {
+      if (isCurrentTenant(requestTenantId)) setBusy(null);
+    }
+  };
+
+  const connectOAuth = async () => {
+    const requestTenantId = selected?.tenantId ?? null;
+    setBusy("oauth");
+    setMessage(null);
+    try {
       const startUrl = selected
         ? apiUrl(
             "/dashboard/integrations/openrouter/oauth/start",
             new URLSearchParams({ tenant_id: selected.tenantId }),
           )
         : apiUrl("/dashboard/integrations/openrouter/oauth/start");
-      const response = await fetch(startUrl, {
-        method: "POST",
-        credentials: "include",
-      });
-      if (response.status === 403) throw new Error("Organization admins manage OpenRouter for this account.");
-      if (!response.ok) throw new Error(`Could not start OAuth (${response.status})`);
+      const response = await fetch(startUrl, { method: "POST", credentials: "include" });
+      if (response.status === 403) throw new Error("Only workspace admins can change this connection.");
+      if (!response.ok) throw new Error("OpenRouter could not be opened.");
       const data = (await response.json()) as { url?: string };
       if (!isCurrentTenant(requestTenantId)) return;
-      if (!data.url) throw new Error("OAuth start returned no URL");
+      if (!data.url) throw new Error("OpenRouter returned no connection URL.");
       window.location.href = data.url;
     } catch (error) {
-      if (!isCurrentTenant(requestTenantId)) return;
-      setMessage(error instanceof Error ? error.message : "Could not start OAuth");
-      setBusy(null);
+      if (isCurrentTenant(requestTenantId)) {
+        setMessage(error instanceof Error ? error.message : "OpenRouter could not be opened.");
+        setBusy(null);
+      }
     }
   };
 
-  const postKey = async (key: string, mode: "save" | "disconnect") => {
-    // Capture the tenant this write targets so its response is dropped if the viewer switches tenants
-    // before it resolves — otherwise tenant A's key status would land on tenant B's view (FINDING 3).
-    const requestTenantId = selected?.tenantId ?? null;
-    setBusy(mode);
-    setMessage(null);
-    try {
-      const response = await fetch(integrationsUrl(selected), {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ openrouter_api_key: key }),
-      });
-      if (response.status === 403) throw new Error("Organization admins manage OpenRouter for this account.");
-      if (!response.ok) throw new Error(`Save failed (${response.status})`);
-      const merged = mergeIntegrations(await response.json());
-      if (!isCurrentTenant(requestTenantId)) return;
-      onChanged(merged);
-      setManualKey("");
-      setConfirmDisconnect(false);
-      setCallback(null);
-      setMessage(mode === "disconnect" ? "Disconnected" : "Saved");
-    } catch (error) {
-      if (!isCurrentTenant(requestTenantId)) return;
-      setMessage(error instanceof Error ? error.message : "Save failed");
-    } finally {
-      if (isCurrentTenant(requestTenantId)) setBusy(null);
-    }
-  };
-
-  const sourceLabel = openRouterSourceLabel(info.source);
+  const source = provider.id === "openrouter" ? openRouterSourceLabel((info as OpenRouterInfo).source) : null;
 
   return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">OpenRouter</span>
-        <span className="panel__actions">
-          {info.configured ? <Badge tone="ok">Connected</Badge> : <Badge>Not connected</Badge>}
-        </span>
+    <div className={`integration-row${editing ? " integration-row--editing" : ""}`}>
+      <span className="integration-mark">{provider.mark}</span>
+      <div className="integration-row__main">
+        <div className="integration-row__titleline">
+          <strong>{provider.name}</strong>
+          <Badge tone={info.configured ? "ok" : undefined}>{info.configured ? "Connected" : "Not connected"}</Badge>
+        </div>
+        <p>{provider.description}</p>
+        {info.configured ? (
+          <div className="integration-row__metadata">
+            <span className="cell-mono">••••{info.last4 ?? ""}</span>
+            {source ? <span>{source}</span> : null}
+            {info.connected_at ? <span>Connected {formatDate(info.connected_at)}</span> : null}
+          </div>
+        ) : null}
+        {message ? <span className="integration-row__message" role="status">{message}</span> : null}
       </div>
-      <div className="form">
-        <p className="form__lead">
-          {isOrg ? (
+      <div className="integration-row__actions">
+        {provider.oauth ? (
+          <button type="button" className="btn btn--primary btn--sm" onClick={() => void connectOAuth()} disabled={!writable || busy !== null}>
+            {busy === "oauth" ? "Opening…" : info.configured ? "Reconnect" : "Connect"}
+          </button>
+        ) : (
+          <button type="button" className="btn btn--primary btn--sm" onClick={() => setEditing((value) => !value)} disabled={!writable || busy !== null}>
+            {info.configured ? "Replace key" : "Add key"}
+          </button>
+        )}
+        {provider.oauth ? (
+          <button type="button" className="btn btn--sm btn--ghost" onClick={() => setEditing((value) => !value)} disabled={!writable || busy !== null}>
+            Use API key
+          </button>
+        ) : null}
+        {info.configured ? (
+          confirmDisconnect ? (
             <>
-              Run reviews on <strong>{selected?.login}</strong>&rsquo;s own OpenRouter credits. Billed infra-only.
+              <button type="button" className="btn btn--sm" onClick={() => void saveKey("", "disconnect")} disabled={busy !== null}>
+                {busy === "disconnect" ? "Disconnecting…" : "Confirm"}
+              </button>
+              <button type="button" className="btn btn--sm btn--ghost" onClick={() => setConfirmDisconnect(false)} disabled={busy !== null}>Cancel</button>
             </>
           ) : (
-            <>
-              Run reviews on your own OpenRouter credits. Billed infra-only.
-            </>
-          )}
-        </p>
-
-        {!writable ? (
-          <p className="tenant-gate-note">Managed by org admins.</p>
+            <button type="button" className="btn btn--sm btn--ghost" onClick={() => setConfirmDisconnect(true)} disabled={!writable || busy !== null}>Disconnect</button>
+          )
         ) : null}
+      </div>
 
-        {callback === "connected" ? (
-          <div className="notice notice--ok">
-            <strong>OpenRouter connected</strong>
-          </div>
-        ) : null}
-        {callback === "error" ? (
-          <div className="notice notice--bad">Connecting OpenRouter failed. Please try again.</div>
-        ) : null}
-
-        {info.configured ? (
-          <div className="integration-status">
-            <span className="cell-mono">••••{info.last4 ?? ""}</span>
-            {sourceLabel ? <Badge tone="info">{sourceLabel}</Badge> : null}
-            {info.connected_at ? (
-              <span className="cell-meta">Connected {formatDate(info.connected_at)}</span>
-            ) : null}
-          </div>
-        ) : null}
-
-        <div className="review-stage__actions">
-          <button type="button" className="btn btn--primary" onClick={connect} disabled={busy !== null || !writable}>
-            {busy === "connect" ? "Redirecting…" : info.configured ? "Reconnect OpenRouter" : "Connect OpenRouter"}
+      {editing ? (
+        <div className="integration-row__editor">
+          <label>
+            <span>{provider.name} API key</span>
+            <input
+              className="input"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={provider.placeholder}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              autoFocus
+            />
+          </label>
+          <button type="button" className="btn btn--primary btn--sm" onClick={() => void saveKey(draft.trim(), "save")} disabled={busy !== null || draft.trim().length === 0}>
+            {busy === "save" ? "Saving…" : "Save key"}
           </button>
-          {info.configured ? (
-            confirmDisconnect ? (
-              <>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => void postKey("", "disconnect")}
-                  disabled={busy !== null || !writable}
-                >
-                  {busy === "disconnect" ? "Disconnecting…" : "Are you sure?"}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => setConfirmDisconnect(false)}
-                  disabled={busy !== null}
-                >
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => setConfirmDisconnect(true)}
-                disabled={busy !== null || !writable}
-              >
-                Disconnect
-              </button>
-            )
-          ) : null}
+          <button type="button" className="btn btn--sm btn--ghost" onClick={() => { setEditing(false); setDraft(""); }} disabled={busy !== null}>Cancel</button>
         </div>
-
-        <details className="more-context">
-          <summary className="more-context__summary">
-            <span className="more-context__title">Paste an API key instead</span>
-            <span className="more-context__hint">Advanced — use a manually created OpenRouter key</span>
-          </summary>
-          <div className="more-context__body">
-            <label className="form-field">
-              <span className="form-field__label">OpenRouter API key</span>
-              <input
-                className="input"
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="sk-or-…"
-                value={manualKey}
-                onChange={(event) => setManualKey(event.target.value)}
-              />
-            </label>
-            <div className="form__foot">
-              <span className="cell-meta" />
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={() => void postKey(manualKey.trim(), "save")}
-                disabled={busy !== null || manualKey.trim().length === 0 || !writable}
-              >
-                {busy === "save" ? "Saving…" : "Save key"}
-              </button>
-            </div>
-          </div>
-        </details>
-
-        {message ? <span className="cell-meta">{message}</span> : null}
-      </div>
-    </section>
-  );
-}
-
-/* ---------- BYOK native provider keys (OpenAI / Anthropic) ---------- */
-
-/**
- * A generic paste-your-own-key card for a native BYOK provider. Manual entry only (no OAuth): the key is
- * POSTed under `fieldName` to the same tenant-scoped integrations endpoint the OpenRouter card uses, an
- * empty string disconnects, and the full response (openrouter + openai + anthropic) refreshes the page.
- */
-function ProviderKeyCard({
-  title,
-  fieldName,
-  placeholder,
-  lead,
-  info,
-  selected,
-  onChanged,
-}: {
-  title: string;
-  fieldName: "openai_api_key" | "anthropic_api_key";
-  placeholder: string;
-  lead: ReactNode;
-  info: KeyInfo;
-  selected: SelectedTenant | null;
-  onChanged: (next: Integrations) => void;
-}) {
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState<"save" | "disconnect" | null>(null);
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const isCurrentTenant = useTenantFence();
-  const writable = isTenantWritable(selected);
-
-  useEffect(() => {
-    setDraft("");
-    setBusy(null);
-    setConfirmDisconnect(false);
-    setMessage(null);
-  }, [selected?.tenantId, isCurrentTenant]);
-
-  const postKey = async (key: string, mode: "save" | "disconnect") => {
-    // Fence the response to the tenant this write targeted (see OpenRouterCard/FINDING 3).
-    const requestTenantId = selected?.tenantId ?? null;
-    setBusy(mode);
-    setMessage(null);
-    try {
-      const response = await fetch(integrationsUrl(selected), {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ [fieldName]: key }),
-      });
-      if (response.status === 403) throw new Error(`Organization admins manage ${title} for this account.`);
-      if (!response.ok) throw new Error(`Save failed (${response.status})`);
-      const merged = mergeIntegrations(await response.json());
-      if (!isCurrentTenant(requestTenantId)) return;
-      onChanged(merged);
-      setDraft("");
-      setConfirmDisconnect(false);
-      setMessage(mode === "disconnect" ? "Disconnected" : "Saved");
-    } catch (error) {
-      if (!isCurrentTenant(requestTenantId)) return;
-      setMessage(error instanceof Error ? error.message : "Save failed");
-    } finally {
-      if (isCurrentTenant(requestTenantId)) setBusy(null);
-    }
-  };
-
-  return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">{title}</span>
-        <span className="panel__actions">
-          {info.configured ? <Badge tone="ok">Connected</Badge> : <Badge>Not connected</Badge>}
-        </span>
-      </div>
-      <div className="form">
-        <p className="form__lead">{lead}</p>
-
-        {!writable ? (
-          <p className="tenant-gate-note">Managed by org admins.</p>
-        ) : null}
-
-        {info.configured ? (
-          <div className="integration-status">
-            <span className="cell-mono">••••{info.last4 ?? ""}</span>
-            {info.connected_at ? <span className="cell-meta">Connected {formatDate(info.connected_at)}</span> : null}
-          </div>
-        ) : null}
-
-        <label className="form-field">
-          <span className="form-field__label">{title} API key</span>
-          <input
-            className="input"
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={placeholder}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            disabled={!writable}
-          />
-        </label>
-
-        <div className="review-stage__actions">
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={() => void postKey(draft.trim(), "save")}
-            disabled={busy !== null || draft.trim().length === 0 || !writable}
-          >
-            {busy === "save" ? "Saving…" : info.configured ? "Replace key" : "Save key"}
-          </button>
-          {info.configured ? (
-            confirmDisconnect ? (
-              <>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => void postKey("", "disconnect")}
-                  disabled={busy !== null || !writable}
-                >
-                  {busy === "disconnect" ? "Disconnecting…" : "Are you sure?"}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => setConfirmDisconnect(false)}
-                  disabled={busy !== null}
-                >
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => setConfirmDisconnect(true)}
-                disabled={busy !== null || !writable}
-              >
-                Disconnect
-              </button>
-            )
-          ) : null}
-        </div>
-
-        {message ? <span className="cell-meta">{message}</span> : null}
-      </div>
-    </section>
-  );
-}
-
-function GithubOrganizationsCard({
-  selected,
-  connections,
-  installUrl,
-  message,
-}: {
-  selected: SelectedTenant;
-  connections: GithubConnection[];
-  installUrl: string | undefined;
-  message: string | null;
-}) {
-  const writable = isTenantWritable(selected);
-  return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">GitHub organizations</span>
-        <span className="panel__count">{connections.length}</span>
-        <span className="panel__actions">
-          {installUrl ? (
-            <ExternalLink className="btn btn--primary btn--sm" href={installUrl}>
-              Add GitHub organization
-            </ExternalLink>
-          ) : null}
-        </span>
-      </div>
-      {connections.length > 0 ? (
-        <div className="list">
-          {connections.map((connection) => (
-            <div className="row" key={connection.installationId}>
-              <div className="row__main">
-                <span className="row__title">{connection.login}</span>
-                <span className="row__meta">
-                  Installation {connection.installationId} · {connection.repositoryCount.toLocaleString("en-US")}{" "}
-                  {connection.repositoryCount === 1 ? "repository" : "repositories"}
-                </span>
-              </div>
-              <div className="row__badges">
-                <Badge tone={connection.status === "active" ? "ok" : connection.status === "suspended" ? "warn" : "bad"}>
-                  {connection.status === "active"
-                    ? "Connected"
-                    : connection.status === "suspended"
-                      ? "Suspended"
-                      : "Removed"}
-                </Badge>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="empty empty--compact">No GitHub organizations connected yet.</div>
-      )}
-      <div className="form">
-        <p className="form__lead">
-          Add another GitHub organization to <strong>{selected.login}</strong>. Its repositories, projects,
-          artifacts, and billing stay owned by this Jina organization.
-        </p>
-        {!writable ? <p className="tenant-gate-note">Only organization admins can add GitHub connections.</p> : null}
-        {message ? <span className="cell-meta">{message}</span> : null}
-      </div>
-    </section>
+      ) : null}
+    </div>
   );
 }

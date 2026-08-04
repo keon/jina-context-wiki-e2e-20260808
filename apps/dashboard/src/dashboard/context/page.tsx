@@ -670,7 +670,11 @@ export default function ContextPage() {
 
   if (!selected) {
     return (
-      <p className="context-empty">Select an account to explore its context.</p>
+      <div className="page-placeholder">
+        <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
+        <strong>No workspace selected</strong>
+        <p>Select a workspace from the sidebar to explore its repository context.</p>
+      </div>
     );
   }
 
@@ -950,6 +954,21 @@ export default function ContextPage() {
         </section>
       ) : null}
 
+      {!repositoriesLoading && repositories.length === 0 ? (
+        <div className="page-placeholder">
+          <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
+          <strong>No repositories connected</strong>
+          <p>Connect a GitHub organization or repository before building your Context Wiki.</p>
+          <ExternalLink className="btn btn--primary btn--sm" href="/integrations">Open integrations</ExternalLink>
+        </div>
+      ) : repositoryFilter && !loading && !error && documents.length === 0 && !progress ? (
+        <div className="page-placeholder">
+          <span className="page-placeholder__icon" aria-hidden="true"><BookIcon /></span>
+          <strong>No context has been published</strong>
+          <p>Build context for {repositoryFilter} to generate grounded Markdown pages and citations.</p>
+          <span className="page-placeholder__hint">Use “Build context” above to start the first build.</span>
+        </div>
+      ) : (
       <section className="context-browser">
         <aside className="context-browser__tree">
           <div className="context-tree__header">
@@ -1019,6 +1038,7 @@ export default function ContextPage() {
           {detail ? <DocumentOutline document={detail} /> : null}
         </aside>
       </section>
+      )}
     </div>
   );
 }

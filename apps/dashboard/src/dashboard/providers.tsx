@@ -10,7 +10,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useOrganization } from "@clerk/nextjs";
 import { apiUrl, reviewRunsPath } from "./lib/api";
 import { startCompletionPolling } from "./lib/completion-polling";
 import {
@@ -339,7 +338,6 @@ function writeStoredTenantId(viewerUserId: number | null, tenantId: string): voi
  * inside DashboardProvider.
  */
 export function TenantProvider({ children }: { children: ReactNode }) {
-  const { organization, isLoaded: clerkOrganizationLoaded } = useOrganization();
   const { viewer, authRequired, authLoading, reloadViewer, setTenantScope } = useDashboard();
   const [tenants, setTenants] = useState<ViewerTenant[]>([]);
   // False until a successful fetch. Authenticated review reads stay blocked on failure;
@@ -355,7 +353,6 @@ export function TenantProvider({ children }: { children: ReactNode }) {
 
   const authenticated = Boolean(viewer && !authRequired);
   const viewerUserId = viewer?.user?.id ?? null;
-  const clerkOrganizationId = organization?.id ?? null;
   const legacyReviewMode = Boolean(viewer && (!viewer.auth.enabled || localDashboardFixtureEnabled()));
 
   useEffect(() => {
@@ -455,18 +452,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       polling.stop();
       abortRef.current?.abort();
     };
-  }, [authLoading, authenticated, legacyReviewMode, viewerUserId, clerkOrganizationId, setTenantScope]);
-
-  useEffect(() => {
-    if (!clerkOrganizationLoaded || !loaded || tenants.length === 0) return;
-    const clerkTenant = clerkOrganizationId
-      ? tenants.find((tenant) => tenant.clerk_organization_id === clerkOrganizationId)
-      : tenants.find((tenant) => tenant.type === "User");
-    if (clerkTenant && clerkTenant.tenant_id !== selectedTenantId) {
-      setSelectedTenantId(clerkTenant.tenant_id);
-      writeStoredTenantId(viewerUserId, clerkTenant.tenant_id);
-    }
-  }, [clerkOrganizationId, clerkOrganizationLoaded, loaded, selectedTenantId, tenants, viewerUserId]);
+  }, [authLoading, authenticated, legacyReviewMode, viewerUserId, setTenantScope]);
 
   const selectTenant = useCallback(
     (tenantId: string) => {

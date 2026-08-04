@@ -1,9 +1,18 @@
 "use client";
 
-import { SignIn } from "@clerk/nextjs";
+import { AppSignIn } from "../../components/auth/app-auth.tsx";
 
 export default function SignInPage() {
   return (
-    <SignIn routing="hash" fallbackRedirectUrl="/reviews" signUpFallbackRedirectUrl="/reviews" />
+    <main className="auth-page">
+      <header className="auth-page__header">
+        <span className="auth-page__mark">J</span>
+        <div>
+          <h1>Sign in to Jina</h1>
+          <p>Reviews, context, models, and operations in one workspace.</p>
+        </div>
+      </header>
+      <AppSignIn />
+    </main>
   );
 }

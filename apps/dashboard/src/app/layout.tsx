@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { GeistMono } from "geist/font/mono";
 import { GeistSans } from "geist/font/sans";
+import { AppAuthProvider } from "../components/auth/app-auth.tsx";
 import { UnifiedDashboardShell } from "../components/unified-dashboard-shell.tsx";
-import { ClerkProvider } from "@clerk/nextjs";
 import "../dashboard/theme.css";
 import "../dashboard/styles.css";
 import "./globals.css";
@@ -17,9 +17,9 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
   return (
     <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>
       <body>
-        <ClerkProvider>
+        <AppAuthProvider>
           <UnifiedDashboardShell>{children}</UnifiedDashboardShell>
-        </ClerkProvider>
+        </AppAuthProvider>
       </body>
     </html>
   );

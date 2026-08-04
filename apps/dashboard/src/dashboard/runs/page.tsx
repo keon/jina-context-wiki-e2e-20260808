@@ -1,5 +1,1 @@
-import { redirect } from "next/navigation";
-
-export default function RunsRedirect() {
-  redirect("/reviews");
-}
+export { default } from "../reviews/page";

@@ -98,6 +98,8 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
         candidate.repository === repository && candidate.ref === ref && candidate.buildKind === "causal_graph"
     )
   );
+  const resourcesLoaded = releasesResource.online === true && buildsResource.online === true;
+  const noPublishedContent = Boolean(selected && resourcesLoaded && scopes.length === 0);
 
   return (
     <section id="context-page" className="context-page">
@@ -134,6 +136,25 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
         </label>
       </header>
 
+      {!selected ? (
+        <ContextPlaceholder
+          title="No workspace selected"
+          description="Select a workspace from the sidebar to explore repository context."
+          kind={view}
+        />
+      ) : noPublishedContent ? (
+        <ContextPlaceholder
+          title={view === "causal-graph" ? "No causal graph yet" : "No published context yet"}
+          description={
+            view === "causal-graph"
+              ? "Build repository context to derive commit-backed issues, evidence, and causal links."
+              : "Build repository context to publish grounded documentation and source citations."
+          }
+          kind={view}
+        />
+      ) : (
+        <>
+
       {view === "wiki" && release ? (
         <>
           <ReleaseStrip release={release} />
@@ -141,7 +162,7 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
           <ContextBrowser
             release={release}
             releases={scopeReleases}
-            apiBasePath={operationsApiUrl(selected!.tenantId, "context")}
+            apiBasePath={operationsApiUrl(selected.tenantId, "context")}
           />
         </>
       ) : view === "wiki" ? (
@@ -161,10 +182,52 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
           repository={repository}
           ref={ref}
           build={causalGraphBuild}
-          apiBasePath={operationsApiUrl(selected!.tenantId, "causal-graph")}
+          apiBasePath={operationsApiUrl(selected.tenantId, "causal-graph")}
         />
       ) : null}
+        </>
+      )}
     </section>
+  );
+}
+
+function ContextPlaceholder({
+  title,
+  description,
+  kind,
+}: {
+  readonly title: string;
+  readonly description: string;
+  readonly kind: "wiki" | "causal-graph";
+}) {
+  return (
+    <div className="page-placeholder">
+      <span className="page-placeholder__icon" aria-hidden="true">
+        {kind === "causal-graph" ? <GraphPlaceholderIcon /> : <BookPlaceholderIcon />}
+      </span>
+      <strong>{title}</strong>
+      <p>{description}</p>
+    </div>
+  );
+}
+
+function GraphPlaceholderIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none">
+      <circle cx="6" cy="7" r="2.25" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="18" cy="6" r="2.25" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="14" cy="18" r="2.25" stroke="currentColor" strokeWidth="1.5" />
+      <path d="m8.2 6.8 7.5-.6M7.4 8.8l5.3 7.2m4.6-7.9-2.4 7.7" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function BookPlaceholderIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none">
+      <path d="M3.5 5.5A2.5 2.5 0 0 1 6 3h6v16H6a2.5 2.5 0 0 0-2.5 2V5.5Z" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M20.5 5.5A2.5 2.5 0 0 0 18 3h-6v16h6a2.5 2.5 0 0 1 2.5 2V5.5Z" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
   );
 }
 

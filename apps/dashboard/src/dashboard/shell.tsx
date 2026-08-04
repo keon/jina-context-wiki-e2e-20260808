@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { OrganizationSwitcher, UserButton, useAuth } from "@clerk/nextjs";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
-import { useDashboard } from "./providers";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AppAccountButton, useAppAuth } from "../components/auth/app-auth";
+import { useDashboard, useTenant } from "./providers";
 import { apiUrl, parseInstallationResult } from "./lib/api";
 import { clerkAuthRedirect } from "./lib/auth-navigation";
 import { normalizeCodexHarnessInfo } from "./lib/codex-harness";
@@ -19,6 +19,9 @@ type NavKey =
   | "organization"
   | "billing"
   | "usage"
+  | "history"
+  | "tasks"
+  | "jina"
   | "settings";
 
 type NavItem = { key: NavKey; label: string; href: string; icon: () => ReactNode };
@@ -53,6 +56,20 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
   },
 ];
 
+const PRIMARY_NAV_ITEMS: NavItem[] = [
+  ...NAV_GROUPS[0]!.items,
+  ...NAV_GROUPS[1]!.items,
+  NAV_GROUPS[2]!.items.find((item) => item.key === "usage")!,
+];
+
+const MORE_NAV_ITEMS: NavItem[] = [
+  { key: "organization", label: "Members & Access", href: "/organization", icon: OrganizationIcon },
+  { key: "billing", label: "Billing", href: "/billing", icon: BillingIcon },
+  { key: "history", label: "Run History", href: "/history", icon: HistoryIcon },
+  { key: "tasks", label: "Tasks", href: "/tasks", icon: TaskBoardIcon },
+  { key: "jina", label: "Jina Status", href: "/jina", icon: JinaIcon },
+];
+
 const DOCS_URL = process.env.NEXT_PUBLIC_DOCS_URL ?? "https://docs.usejina.com";
 
 const SECTION_TITLE: Record<NavKey, string> = {
@@ -66,6 +83,9 @@ const SECTION_TITLE: Record<NavKey, string> = {
   organization: "Members & Access",
   usage: "Usage",
   billing: "Billing",
+  history: "Run History",
+  tasks: "Tasks",
+  jina: "Jina Status",
   settings: "Settings",
 };
 
@@ -81,13 +101,16 @@ function sectionForPath(pathname: string | null): NavKey {
   if (path.startsWith("/organization")) return "organization";
   if (path.startsWith("/usage")) return "usage";
   if (path.startsWith("/billing")) return "billing";
+  if (path.startsWith("/history")) return "history";
+  if (path.startsWith("/tasks")) return "tasks";
+  if (path.startsWith("/jina")) return "jina";
   if (path.startsWith("/settings")) return "settings";
   return "reviews"; // "/", "/runs", and "/reviews/..." details
 }
 
 export function Shell({ children }: { children: ReactNode }) {
   const { data, viewer, error, loading, authLoading, reload } = useDashboard();
-  const { isLoaded: clerkLoaded, isSignedIn } = useAuth();
+  const { ready: authReady, signedIn } = useAppAuth();
   const pathname = usePathname();
   const router = useRouter();
   const section = sectionForPath(pathname);
@@ -96,7 +119,11 @@ export function Shell({ children }: { children: ReactNode }) {
     typeof window === "undefined" ? null : parseInstallationResult(window.location.search),
   );
   const [codexReconnectRequired, setCodexReconnectRequired] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const hasDashboardData = Boolean(data);
+  const appAuthEnabled = viewer?.auth.enabled !== false;
 
   // This status is secondary to first paint. Load it once after dashboard data is
   // visible instead of repeating the query on every dashboard refresh.
@@ -135,13 +162,43 @@ export function Shell({ children }: { children: ReactNode }) {
   // is unavailable; using that response to navigate creates a /signin ↔
   // /reviews redirect loop because Clerk already considers the user signed in.
   useEffect(() => {
+    if (authLoading) return;
+    if (!appAuthEnabled) {
+      if (isSignin) router.replace("/reviews");
+      return;
+    }
     const destination = clerkAuthRedirect({
-      isLoaded: clerkLoaded,
-      isSignedIn: Boolean(isSignedIn),
+      isLoaded: authReady,
+      isSignedIn: signedIn,
       isSigninPage: isSignin,
     });
     if (destination) router.replace(destination);
-  }, [clerkLoaded, isSignedIn, isSignin, router]);
+  }, [appAuthEnabled, authLoading, authReady, signedIn, isSignin, router]);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem("jina-sidebar-collapsed");
+    if (stored === "true") setSidebarCollapsed(true);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen((open) => !open);
+      }
+      if (event.key === "Escape") setCommandOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((collapsed) => {
+      const next = !collapsed;
+      window.localStorage.setItem("jina-sidebar-collapsed", String(next));
+      return next;
+    });
+  };
 
   // Dedicated, chrome-less sign-in screen.
   if (isSignin) {
@@ -151,7 +208,7 @@ export function Shell({ children }: { children: ReactNode }) {
   // Resolve the Clerk session before rendering protected application chrome.
   // API authentication state is rendered as data/error state, never as a
   // competing redirect authority.
-  if (!clerkLoaded || !isSignedIn) {
+  if (authLoading || (appAuthEnabled && (!authReady || !signedIn))) {
     return (
       <div className="auth-shell">
         <div className="auth-loading">Loading…</div>
@@ -160,16 +217,48 @@ export function Shell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <div className="app">
-      <Sidebar viewer={viewer} authLoading={authLoading} section={section} />
+    <div className={`app${sidebarCollapsed ? " app--sidebar-collapsed" : ""}${mobileMenuOpen ? " app--mobile-open" : ""}`}>
+      <Sidebar
+        viewer={viewer}
+        authLoading={authLoading}
+        section={section}
+        collapsed={sidebarCollapsed}
+        onToggle={toggleSidebar}
+        onOpenSearch={() => {
+          setMobileMenuOpen(false);
+          setCommandOpen(true);
+        }}
+        onNavigate={() => setMobileMenuOpen(false)}
+        onMobileClose={() => setMobileMenuOpen(false)}
+      />
+
+      {mobileMenuOpen ? (
+        <button
+          type="button"
+          className="sidebar__backdrop"
+          aria-label="Close navigation"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      ) : null}
 
       <div className="content">
         <header className="header">
           <div className="header__inner">
-            <span className="header__title">{SECTION_TITLE[section]}</span>
+            <div className="header__leading">
+              <button
+                type="button"
+                className="header__menu"
+                aria-label="Open navigation"
+                aria-expanded={mobileMenuOpen}
+                onClick={() => setMobileMenuOpen(true)}
+              >
+                <MenuIcon />
+              </button>
+              <span className="header__title">{SECTION_TITLE[section]}</span>
+            </div>
             <div className="header__actions">
-              <span className="header__stamp">
-                {data ? `Updated ${formatRelative(data.generated_at)}` : "Not loaded"}
+              <span className="header__stamp" title={error ?? undefined}>
+                {error ? "Live data unavailable" : data ? `Updated ${formatRelative(data.generated_at)}` : "Not loaded"}
               </span>
               <button type="button" className="btn btn--sm" onClick={reload} disabled={loading}>
                 {loading ? "Refreshing…" : "Refresh"}
@@ -179,12 +268,12 @@ export function Shell({ children }: { children: ReactNode }) {
         </header>
 
         <main className={`main${section === "context" ? " main--context" : ""}`}>
-          {error ? <div className="notice notice--bad">Dashboard API error: {error}</div> : null}
           {installationResult ? <InstallResultNotice result={installationResult} /> : null}
           {codexReconnectRequired ? <CodexReconnectNotice /> : null}
           {children}
         </main>
       </div>
+      {commandOpen ? <CommandPalette section={section} onClose={() => setCommandOpen(false)} /> : null}
     </div>
   );
 }
@@ -208,65 +297,241 @@ function Sidebar({
   viewer,
   authLoading,
   section,
+  collapsed,
+  onToggle,
+  onOpenSearch,
+  onNavigate,
+  onMobileClose,
 }: {
   viewer: ViewerResponse | null;
   authLoading: boolean;
   section: NavKey;
+  collapsed: boolean;
+  onToggle: () => void;
+  onOpenSearch: () => void;
+  onNavigate: () => void;
+  onMobileClose: () => void;
 }) {
+  const [moreOpen, setMoreOpen] = useState(false);
+
   return (
-    <aside className="sidebar">
-      <div className="sidebar__workspace">
-        <OrganizationSwitcher
-          hidePersonal={false}
-          afterCreateOrganizationUrl="/reviews"
-          afterSelectOrganizationUrl="/reviews"
-          afterSelectPersonalUrl="/reviews"
-          organizationProfileMode="modal"
-          createOrganizationMode="modal"
-        />
+    <aside className="sidebar" aria-label="Application sidebar">
+      <div className="sidebar__top">
+        <div className="sidebar__workspace" aria-hidden={collapsed}>
+          <WorkspaceSwitcher />
+        </div>
+        {collapsed ? <span className="sidebar__mark" aria-hidden="true">J</span> : null}
+        <button
+          type="button"
+          className="sidebar__collapse"
+          onClick={onToggle}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          <CollapseIcon collapsed={collapsed} />
+        </button>
+        <button type="button" className="sidebar__mobile-close" onClick={onMobileClose} aria-label="Close navigation">
+          <CloseIcon />
+        </button>
       </div>
 
+      <button type="button" className="nav__item sidebar__search" data-label="Search" onClick={onOpenSearch}>
+        <SearchIcon />
+        <span className="nav__label">Search</span>
+        <kbd className="sidebar__shortcut">⌘ K</kbd>
+      </button>
+
       <nav className="nav" aria-label="Dashboard navigation">
-        {NAV_GROUPS.map((group) => (
-          <div className="nav__group" key={group.label}>
-            <span className="nav__group-label">{group.label}</span>
-            {group.items.map((item) => {
-              const Icon = item.icon;
-              return (
-                <Link
-                  key={item.key}
-                  className={`nav__item${item.key === section ? " nav__item--active" : ""}`}
-                  href={item.href}
-                >
-                  <Icon />
-                  {item.label}
-                </Link>
-              );
-            })}
-          </div>
-        ))}
+        {PRIMARY_NAV_ITEMS.map((item) => {
+          const Icon = item.icon;
+          return (
+            <Link
+              key={item.key}
+              className={`nav__item${item.key === section ? " nav__item--active" : ""}`}
+              href={item.href}
+              onClick={onNavigate}
+              data-label={item.label}
+              aria-current={item.key === section ? "page" : undefined}
+            >
+              <Icon />
+              <span className="nav__label">{item.label}</span>
+            </Link>
+          );
+        })}
       </nav>
 
       <div className="sidebar__spacer" />
 
       <nav className="nav nav--utility" aria-label="Utilities">
-        <a className="nav__item" href={DOCS_URL} target="_blank" rel="noreferrer">
+        <a className="nav__item" href={DOCS_URL} target="_blank" rel="noreferrer" data-label="Documentation" onClick={onNavigate}>
           <JinaGuideIcon />
-          Documentation
+          <span className="nav__label">Documentation</span>
         </a>
-        <Link className={`nav__item${section === "settings" ? " nav__item--active" : ""}`} href="/settings">
+        <div className="sidebar__more-wrap">
+          {moreOpen ? (
+            <div className="sidebar__more-menu" role="menu">
+              <span className="sidebar__menu-label">More</span>
+              {MORE_NAV_ITEMS.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <Link
+                    key={item.key}
+                    className={`nav__item${item.key === section ? " nav__item--active" : ""}`}
+                    href={item.href}
+                    onClick={() => {
+                      setMoreOpen(false);
+                      onNavigate();
+                    }}
+                    role="menuitem"
+                  >
+                    <Icon />
+                    <span className="nav__label">{item.label}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          ) : null}
+          <button
+            type="button"
+            className={`nav__item sidebar__more${MORE_NAV_ITEMS.some((item) => item.key === section) ? " nav__item--active" : ""}`}
+            onClick={() => setMoreOpen((open) => !open)}
+            aria-expanded={moreOpen}
+            data-label="More"
+          >
+            <MoreIcon />
+            <span className="nav__label">More</span>
+            <ChevronIcon />
+          </button>
+        </div>
+        <Link
+          className={`nav__item${section === "settings" ? " nav__item--active" : ""}`}
+          href="/settings"
+          data-label="Settings"
+          onClick={onNavigate}
+        >
           <SettingsIcon />
-          Settings
+          <span className="nav__label">Settings</span>
         </Link>
       </nav>
-      <div className="user clerk-user-menu">
-        <UserButton
-          userProfileMode="modal"
-          userProfileProps={{ additionalOAuthScopes: { github: ["read:org", "repo"] } }}
-        />
+      <div className="user" data-label={viewer?.user?.login ?? "Account"}>
+        <AppAccountButton />
         <span className="user__name">{viewer?.user?.login ?? (authLoading ? "Loading…" : "Account")}</span>
       </div>
     </aside>
+  );
+}
+
+function WorkspaceSwitcher() {
+  const { tenants, selected, selectTenant, ready } = useTenant();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="workspace-switcher" ref={rootRef}>
+      <button
+        type="button"
+        className="workspace-switcher__trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="workspace-switcher__mark" aria-hidden="true">
+          {(selected?.login ?? "J").slice(0, 1).toUpperCase()}
+        </span>
+        <span className="workspace-switcher__copy">
+          <strong>{selected?.login ?? (ready ? "Jina" : "Loading…")}</strong>
+          <small>{selected?.type === "Organization" ? "Organization" : "Personal workspace"}</small>
+        </span>
+        <ChevronIcon />
+      </button>
+      {open ? (
+        <div className="workspace-switcher__menu" role="menu">
+          <span className="sidebar__menu-label">Workspaces</span>
+          {tenants.map((tenant) => (
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-checked={tenant.tenant_id === selected?.tenantId}
+              className={`workspace-switcher__option${tenant.tenant_id === selected?.tenantId ? " workspace-switcher__option--active" : ""}`}
+              key={tenant.tenant_id}
+              onClick={() => {
+                selectTenant(tenant.tenant_id);
+                setOpen(false);
+              }}
+            >
+              <span className="workspace-switcher__mark" aria-hidden="true">{tenant.login.slice(0, 1).toUpperCase()}</span>
+              <span className="workspace-switcher__copy">
+                <strong>{tenant.login}</strong>
+                <small>{tenant.type === "Organization" ? tenant.role : "Personal"}</small>
+              </span>
+              {tenant.tenant_id === selected?.tenantId ? <CheckIcon /> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CommandPalette({ section, onClose }: { section: NavKey; onClose: () => void }) {
+  const [query, setQuery] = useState("");
+  const items = useMemo(
+    () => [...PRIMARY_NAV_ITEMS, ...MORE_NAV_ITEMS, { key: "settings" as const, label: "Settings", href: "/settings", icon: SettingsIcon }],
+    [],
+  );
+  const visible = items.filter((item) => item.label.toLowerCase().includes(query.trim().toLowerCase()));
+
+  return (
+    <div className="command" role="presentation" onMouseDown={onClose}>
+      <section className="command__dialog" role="dialog" aria-modal="true" aria-label="Search Jina" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="command__input-wrap">
+          <SearchIcon />
+          <input
+            autoFocus
+            className="command__input"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search pages and actions"
+            aria-label="Search pages and actions"
+          />
+          <kbd>Esc</kbd>
+        </div>
+        <div className="command__results">
+          <span className="command__group-label">Navigate</span>
+          {visible.length ? visible.map((item) => {
+            const Icon = item.icon;
+            return (
+              <Link
+                key={item.key}
+                className={`command__result${item.key === section ? " command__result--active" : ""}`}
+                href={item.href}
+                onClick={onClose}
+              >
+                <Icon />
+                <span>{item.label}</span>
+                <span className="command__hint">Open</span>
+              </Link>
+            );
+          }) : <div className="command__empty">No results</div>}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -399,6 +664,91 @@ function UsageIcon() {
   return (
     <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M2 13.5V9m4 4.5v-7m4 7V4m4 9.5V7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="7" cy="7" r="4.25" stroke="currentColor" strokeWidth="1.3" />
+      <path d="m10.25 10.25 3 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function MenuIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2.5 4.25h11M2.5 8h11M2.5 11.75h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="m4 4 8 8m0-8-8 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function MoreIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <circle cx="3" cy="8" r="1" />
+      <circle cx="8" cy="8" r="1" />
+      <circle cx="13" cy="8" r="1" />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg className="nav__chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="m6 4 4 4-4 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg className="nav__icon workspace-switcher__check" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="m3.5 8.4 2.8 2.8 6.2-6.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CollapseIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.75" y="2" width="12.5" height="12" rx="2" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.25 2v12" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d={collapsed ? "m8 6 2 2-2 2" : "m10 6-2 2 2 2"}
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function HistoryIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3 5.2A5.4 5.4 0 1 1 2.7 10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path d="M3 2v3.5h3.5M8 4.75v3.5l2.25 1.25" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function JinaIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M4 2.25h8v7.5a4 4 0 0 1-8 0z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M6.25 5.5h.1M9.65 5.5h.1M6.25 8.25c.7.7 2.8.7 3.5 0" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg>
   );
 }
