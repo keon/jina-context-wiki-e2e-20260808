@@ -9,15 +9,24 @@ pg.types.setTypeParser(20, (value) => (value === null ? null : Number(value)));
 
 let pool: pg.Pool | undefined;
 
+export function productDatabaseConnectionString(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+  const productUrl = environment.JINA_PRODUCT_DATABASE_URL?.trim();
+  if (productUrl) {
+    return productUrl;
+  }
+  const legacyUrl = environment.DATABASE_URL?.trim();
+  return legacyUrl || undefined;
+}
+
 export function databaseConfigured(): boolean {
-  return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
+  return productDatabaseConnectionString() !== undefined;
 }
 
 export function getPool(): pg.Pool {
   if (!pool) {
-    const connectionString = process.env.DATABASE_URL;
+    const connectionString = productDatabaseConnectionString();
     if (!connectionString) {
-      throw new Error("DATABASE_URL is not set");
+      throw new Error("JINA_PRODUCT_DATABASE_URL or DATABASE_URL is not set");
     }
     pool = new Pool({ connectionString, max: 5, idleTimeoutMillis: 30_000 });
   }
