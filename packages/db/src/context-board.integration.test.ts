@@ -44,8 +44,6 @@ const CREATED_AT = "2026-07-30T12:00:00.000Z";
 const BUILD_ID = "task_context_build";
 const PUBLICATION_TASK_ID = "task_context_publication";
 const PUBLICATION_MESSAGE_ID = "outbox_context_publication";
-const PAGEINDEX_TASK_ID = "task_context_pageindex";
-const PAGEINDEX_MESSAGE_ID = "outbox_context_pageindex";
 const RUNTIME_LOGIN = "jina_context_runtime_integration";
 const RUNTIME_PASSWORD = "runtime-integration-password";
 const CONTEXT_READ_PATH_INDEXES = [
@@ -1111,14 +1109,6 @@ function pageIndexBoardState(commit: BoardContextPublicationCommit, includeNewer
             id: PUBLICATION_TASK_ID,
             type: "publish-context-release",
             kind: "dispatchable",
-            status: "done",
-            attempt: 1,
-            metadata: boardMetadata(commit)
-          },
-          {
-            id: PAGEINDEX_TASK_ID,
-            type: "index-context-release",
-            kind: "dispatchable",
             status: "in_progress",
             attempt: 1,
             metadata: boardMetadata(commit)
@@ -1142,34 +1132,18 @@ function pageIndexBoardState(commit: BoardContextPublicationCommit, includeNewer
               ]
             : [])
         ],
-        dependencies: [
-          {
-            taskId: PAGEINDEX_TASK_ID,
-            dependsOnTaskId: PUBLICATION_TASK_ID,
-            required: true
-          }
-        ],
-        events: [
-          {
-            taskId: PUBLICATION_TASK_ID,
-            type: "task.completed",
-            payload: {
-              version: 1,
-              releaseId: commit.releaseId,
-              outputArtifact: commit.releaseArtifact
-            }
-          }
-        ],
+        dependencies: [],
+        events: [],
         outbox: [
           {
-            id: PAGEINDEX_MESSAGE_ID,
-            taskId: PAGEINDEX_TASK_ID,
-            topic: "run-context-pageindex",
+            id: PUBLICATION_MESSAGE_ID,
+            taskId: PUBLICATION_TASK_ID,
+            topic: "run-context-publication",
             status: "leased",
             payload: { attempt: 1 },
-            leaseId: "lease-pageindex",
-            writeFenceToken: "fence-pageindex",
-            leaseExpiresAt: "2099-01-01T00:00:00.000Z"
+            leaseId: commit.lease.leaseId,
+            writeFenceToken: commit.lease.writeFenceToken,
+            leaseExpiresAt: commit.lease.leaseExpiresAt
           }
         ]
       }
@@ -1286,18 +1260,20 @@ function pageIndexFixture(publication: Awaited<ReturnType<typeof publicationFixt
     commit: {
       scope,
       lease: {
-        taskId: PAGEINDEX_TASK_ID,
-        messageId: PAGEINDEX_MESSAGE_ID,
+        taskId: PUBLICATION_TASK_ID,
+        messageId: PUBLICATION_MESSAGE_ID,
         attempt: 1,
-        leaseId: "lease-pageindex",
-        writeFenceToken: "fence-pageindex",
-        leaseExpiresAt: "2099-01-01T00:00:00.000Z"
+        leaseId: publication.commit.lease.leaseId,
+        writeFenceToken: publication.commit.lease.writeFenceToken,
+        leaseExpiresAt: publication.commit.lease.leaseExpiresAt
       },
       releaseId: publication.commit.releaseId,
+      releaseArtifactRef: publication.commit.releaseArtifact,
       idempotencyKey: "pageindex:board-persistence:1",
       attachmentInputDigest: boardPageIndexAttachmentInputDigest({
         scope,
         releaseId: publication.commit.releaseId,
+        releaseArtifactRef: publication.commit.releaseArtifact,
         treeArtifactRef,
         treeDigest,
         buildDigest

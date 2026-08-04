@@ -1644,12 +1644,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 });
           const build = contextBoardBuildForPrincipal(prepared.state, principal.tenantId, operatorRetryRoute.buildId);
           const target = findTask(prepared.state, boardTaskId);
-          if (
-            !build ||
-            !target ||
-            target.metadata.contextBuildId !== build.id ||
-            !isContextWorkTaskType(target.type)
-          ) {
+          if (!build || !target || target.metadata.contextBuildId !== build.id || !isContextWorkTaskType(target.type)) {
             throw notFound("build task not found");
           }
           assertContextOperatorRetrySafety(prepared.state, build, target);
@@ -2347,17 +2342,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "POST" && url.pathname === "/internal/context/board/pageindex/attach") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
       const lease = await requireLeasedBoardTask(principal.tenantId, body);
-      if (
-        lease.task.type !== contextBoardTaskTypes.pageIndex &&
-        lease.task.type !== contextWorkflowBoardTaskTypes.publication
-      ) {
+      if (lease.task.type !== contextWorkflowBoardTaskTypes.publication) {
         throw invalidRequest("leased task is not a Context publication task");
       }
       if (!config.contextArtifactStore || !config.contextBoardPageIndexAttachmentTransaction) {
         throw new Error("board Context PageIndex attachment is not configured");
       }
       const treeArtifactRef = parseContextArtifactRef(body.treeArtifact);
+      const releaseArtifactRef = parseContextArtifactRef(body.releaseArtifact);
       assertBoardArtifactScope(lease.task, lease.buildTaskId, treeArtifactRef);
+      assertBoardArtifactScope(lease.task, lease.buildTaskId, releaseArtifactRef);
       if (treeArtifactRef.contentType !== "application/json") {
         throw invalidRequest("PageIndex tree artifact must be JSON");
       }
@@ -2384,6 +2378,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const attachmentInputDigest = boardPageIndexAttachmentInputDigest({
         scope,
         releaseId,
+        releaseArtifactRef,
         treeArtifactRef,
         treeDigest: treeArtifact.metrics.treeDigest,
         buildDigest: treeArtifact.metrics.buildDigest
@@ -2399,6 +2394,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           leaseExpiresAt: requiredString(lease.message.leaseExpiresAt, "PageIndex leaseExpiresAt")
         },
         releaseId,
+        releaseArtifactRef,
         idempotencyKey: `${lease.task.id}:${treeArtifactRef.sha256}`,
         attachmentInputDigest,
         treeArtifactRef,
