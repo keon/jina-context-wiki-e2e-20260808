@@ -1360,7 +1360,7 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   if (!boardPageIndexClient) throw new Error("self-hosted PageIndex client is not configured");
   const publicationPlanArtifact = work.task.metadata.planArtifact;
   const publicationPlan = parsePublicationPlanArtifact(await readContextBoardArtifact(work, publicationPlanArtifact));
-  const pageArtifacts: ContextArtifactRef[] = [];
+  const sourcePageArtifacts: ContextArtifactRef[] = [];
   const omittedPages: { readonly path: string; readonly reasonCode: string }[] = [];
   for (const dependency of work.task.metadata.dependencyResults.filter(
     (candidate) => candidate.taskType === "build-context-page"
@@ -1372,7 +1372,7 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
         reasonCode: disposition.reasonCode
       });
     } else {
-      pageArtifacts.push(
+      sourcePageArtifacts.push(
         parseArtifactRef(disposition.pageArtifact, `${dependency.taskId} disposition pageArtifact`)
       );
     }
@@ -1381,7 +1381,7 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   for (const plannedPage of publicationPlan.plan.pages.filter((page) => (page.change ?? "add") === "retain")) {
     const priorPage = priorContext?.pages.find((page) => page.documentPath === plannedPage.path);
     if (!priorPage) throw new Error(`retained Context page ${plannedPage.path} is absent from the prior release`);
-    pageArtifacts.push(
+    sourcePageArtifacts.push(
       await uploadContextBoardArtifact(work, {
         kind: "context-page",
         name: contextPageArtifactName(plannedPage.path, "retain"),
@@ -1404,7 +1404,7 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
     );
   }
   const loadedPages = await Promise.all(
-    pageArtifacts.map(async (artifact) => ({
+    sourcePageArtifacts.map(async (artifact) => ({
       artifact,
       page: parseContextPageArtifact(await readContextBoardArtifact(work, artifact))
     }))
@@ -1450,7 +1450,7 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
         verdict: "certified",
         publicSnapshotDigest,
         publicationPlanArtifact,
-        pageArtifacts,
+        pageArtifacts: pages.map(({ artifact }) => artifact),
         omittedPages
       }),
       "utf8"
