@@ -59,6 +59,10 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
   const [scopeWasChosen, setScopeWasChosen] = useState(false);
 
   useEffect(() => {
+    // Causal graph scope selection depends on the build projection. Waiting for
+    // its first response avoids briefly selecting the newest Context release
+    // and issuing an expected-but-noisy 404 before a completed graph is known.
+    if (view === "causal-graph" && buildsResource.data === undefined) return;
     const stillExists = scopes.some((scope) => `${scope.repository}\0${scope.ref}` === scopeKey);
     const completedGraphScope =
       view === "causal-graph"
@@ -77,7 +81,7 @@ export function ContextPage({ view = "wiki" }: { readonly view?: "wiki" | "causa
       const first = completedGraphScope ?? scopes[0];
       setScopeKey(first ? `${first.repository}\0${first.ref}` : "");
     }
-  }, [builds, scopeKey, scopeWasChosen, scopes, view]);
+  }, [builds, buildsResource.data, scopeKey, scopeWasChosen, scopes, view]);
 
   const [repository = "", ref = ""] = scopeKey.split("\0");
   const release = releases.find((candidate) => candidate.repository === repository && candidate.ref === ref);

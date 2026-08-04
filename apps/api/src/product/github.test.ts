@@ -6,7 +6,7 @@ import { handleGithubWebhook, verifyGithubSignature } from "./github.js";
 import type { AppConfig } from "./config.js";
 import { ApiError } from "./errors.js";
 import { parseJinaReviewCommand, type ReviewCommandGithub } from "./review-command.js";
-import type { TriggerOptions } from "./trigger.js";
+import type { DispatchOptions } from "./workflow-dispatcher.js";
 import { reviewTaskTriggerControl } from "./review-task-routing.js";
 
 test("verifies GitHub sha256 signatures", () => {
@@ -385,9 +385,9 @@ test("@usejina requires write permission", async () => {
 });
 
 class FakeTrigger {
-  readonly calls: Array<{ taskIdentifier: string; payload: Record<string, unknown>; options: TriggerOptions }> = [];
+  readonly calls: Array<{ taskIdentifier: string; payload: Record<string, unknown>; options: DispatchOptions }> = [];
 
-  async triggerTask(taskIdentifier: string, payload: unknown, options: TriggerOptions) {
+  async triggerTask(taskIdentifier: string, payload: unknown, options: DispatchOptions) {
     this.calls.push({ taskIdentifier, payload: payload as Record<string, unknown>, options });
     return { id: `run-${this.calls.length}` };
   }
@@ -502,11 +502,6 @@ function testConfig(): AppConfig {
       cookieSecure: false,
       cookieSameSite: "Lax",
       sessionTtlSeconds: 3600,
-    },
-    trigger: {
-      apiBaseUrl: "https://api.trigger.dev",
-      secretKey: "tr_dev_test",
-      backfillTaskId: "github-installation-backfill",
     },
     billing: {
       autumnApiUrl: "https://api.useautumn.com/v1",

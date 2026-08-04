@@ -10,8 +10,9 @@ import {
   updateGithubInstallationLifecycle,
   type ReviewTriggerMode,
 } from "./store.js";
-import type { TriggerClient, TriggerOptions } from "./trigger.js";
+import type { DispatchOptions, WorkflowDispatcher } from "./workflow-dispatcher.js";
 import type { AppConfig } from "./config.js";
+import { INSTALLATION_BACKFILL_TASK_ID } from "./installation-board-admission.js";
 
 const pullRequestReviewActions = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
 
@@ -26,7 +27,7 @@ export type WebhookResponse = {
 
 export async function handleGithubWebhook(input: {
   config: AppConfig;
-  trigger: TriggerClient;
+  trigger: WorkflowDispatcher;
   headers: Headers;
   rawBody: string;
   billing?: BillingService;
@@ -126,7 +127,7 @@ export function verifyGithubSignature(secret: string, body: string | Buffer, sig
 
 async function handlePullRequest(input: {
   config: AppConfig;
-  trigger: TriggerClient;
+  trigger: WorkflowDispatcher;
   deliveryId: string;
   payload: JsonObject;
   action?: string;
@@ -235,7 +236,7 @@ async function handlePullRequest(input: {
     trigger: "webhook",
   };
 
-  const options: TriggerOptions = {
+  const options: DispatchOptions = {
     idempotencyKey,
     concurrencyKey,
     tags: [
@@ -259,7 +260,7 @@ async function handlePullRequest(input: {
 
 async function handleInstallationEvent(input: {
   config: AppConfig;
-  trigger: TriggerClient;
+  trigger: WorkflowDispatcher;
   event: "installation" | "installation_repositories";
   deliveryId: string;
   payload: JsonObject;
@@ -307,7 +308,7 @@ async function handleInstallationEvent(input: {
     trigger: "webhook",
   };
 
-  const run = await input.trigger.triggerTask(input.config.trigger.backfillTaskId, triggerPayload, {
+  const run = await input.trigger.triggerTask(INSTALLATION_BACKFILL_TASK_ID, triggerPayload, {
     idempotencyKey,
     concurrencyKey: `installation:${installationId}`,
     tags: [`installation:${installationId}`, "task:backfill"],
@@ -318,7 +319,7 @@ async function handleInstallationEvent(input: {
     accepted: true,
     event: input.event,
     action,
-    task_id: input.config.trigger.backfillTaskId,
+    task_id: INSTALLATION_BACKFILL_TASK_ID,
     run_id: run.id,
   };
 }

@@ -1,7 +1,14 @@
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-await run(process.execPath, ["node_modules/@jina/db/dist/migrate.js", ...process.argv.slice(2)]);
-await run(process.execPath, ["dist/product/migrate.js"]);
+const require = createRequire(import.meta.url);
+const dbMigration = join(dirname(require.resolve("@jina/db")), "migrate.js");
+const productMigration = fileURLToPath(new URL("./migrate.js", import.meta.url));
+
+await run(process.execPath, [dbMigration, ...process.argv.slice(2)]);
+await run(process.execPath, [productMigration]);
 console.log("unified v2 database migrations complete");
 
 function run(command: string, args: string[]): Promise<void> {

@@ -26,11 +26,30 @@ export const CAUSAL_GRAPH_TOPICS = [
   "run-causal-graph-publication"
 ] as const;
 
-export const SUPPORTED_WORKER_TOPICS = ["run-review", ...CONTEXT_BOARD_TOPICS, ...CAUSAL_GRAPH_TOPICS] as const;
+export const REVIEW_BOARD_TOPICS = [
+  "prepare-review",
+  "summary-review",
+  "runtime-review",
+  "finalize-review",
+  "publish-review",
+  "settle-review"
+] as const;
+
+export const CONTROL_BOARD_TOPICS = ["github-installation-backfill", "billing-retry"] as const;
+
+export const SUPPORTED_WORKER_TOPICS = [
+  "run-review",
+  ...REVIEW_BOARD_TOPICS,
+  ...CONTROL_BOARD_TOPICS,
+  ...CONTEXT_BOARD_TOPICS,
+  ...CAUSAL_GRAPH_TOPICS
+] as const;
 
 export type ContextWorkerTopic = (typeof CONTEXT_BOARD_TOPICS)[number];
 export type InternalContextStageTopic = (typeof _INTERNAL_CONTEXT_STAGE_TOPICS)[number];
 export type CausalGraphWorkerTopic = (typeof CAUSAL_GRAPH_TOPICS)[number];
+export type ReviewBoardWorkerTopic = (typeof REVIEW_BOARD_TOPICS)[number];
+export type ControlBoardWorkerTopic = (typeof CONTROL_BOARD_TOPICS)[number];
 export type WorkerTopic = (typeof SUPPORTED_WORKER_TOPICS)[number] | InternalContextStageTopic;
 export type WorkerClaimMode = "enabled" | "paused";
 

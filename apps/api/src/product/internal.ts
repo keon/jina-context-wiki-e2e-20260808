@@ -744,15 +744,6 @@ export async function retryBilling(c: Context, config: AppConfig, billing?: Bill
   return c.json({ ok: true, ...counts });
 }
 
-export async function acceptScheduledScan(c: Context, config: AppConfig): Promise<Response> {
-  authorizeInternal(c, config);
-  const body = await readJson(c);
-
-  console.info("accepted_scheduled_review_scan", { trigger_run_id: body.trigger_run_id });
-
-  return c.json({ ok: true, scheduled_review_candidates: [] });
-}
-
 function toInstallationRepository(value: unknown): InstallationRepository {
   const repo = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
   return {

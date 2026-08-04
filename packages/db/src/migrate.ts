@@ -5,6 +5,7 @@ import { hardenContextRuntimeRole } from "./context/runtime-role.js";
 import { CONTEXT_ROLES_SQL, CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
 import { CONTEXT_PGVECTOR_SCHEMA_SQL, CONTEXT_SCHEMA_SQL } from "./context/schema.js";
 import { JINA_RUNTIME_SCHEMA_SQL } from "./postgres-json-state-store.js";
+import { applyRuntimeMigrations } from "./runtime-migrations.js";
 
 const connectionString = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL;
 const host = process.env.INSTANCE_UNIX_SOCKET ?? process.env.DB_HOST;
@@ -29,6 +30,7 @@ try {
     deploymentGuard = await acquireDeploymentGuard(pool, deploymentLease);
   }
   await applySchema(pool, "jina_runtime.schema", JINA_RUNTIME_SCHEMA_SQL);
+  await applyRuntimeMigrations(pool);
   await applySchema(pool, "jina_context.schema", CONTEXT_SCHEMA_SQL);
   if (process.argv.includes("--install-pgvector")) {
     await applySchema(pool, "jina_context.pgvector", CONTEXT_PGVECTOR_SCHEMA_SQL);

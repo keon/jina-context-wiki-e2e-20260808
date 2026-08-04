@@ -13,7 +13,7 @@ test("routes product, review, billing, auth, and GitHub endpoints to the absorbe
     "/internal/graph/availability",
     "/internal/context/mcp-access",
     "/internal/installations/backfill",
-    "/internal/scheduled-review-scan",
+    "/internal/schedules/billing-retry",
     "/internal/integrations/resolve",
     "/internal/context/execution-profile",
     "/internal/billing/retry"

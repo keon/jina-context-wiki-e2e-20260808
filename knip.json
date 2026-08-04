@@ -3,15 +3,8 @@
   "ignoreBinaries": ["codex"],
   "workspaces": {
     ".": {
-      "entry": [
-        "autumn.config.ts",
-        "evals/review/run-isolated-review.mjs",
-        "scripts/context-production-preflight.mjs",
-        "services/review-trigger/trigger.config.ts",
-        "services/review-trigger/src/trigger/*.ts",
-        "services/review-trigger/src/review/codex-review.ts"
-      ],
-      "ignoreDependencies": ["pg", "@daytona/sdk", "@trigger.dev/build", "@trigger.dev/sdk"]
+      "entry": ["autumn.config.ts", "evals/review/run-isolated-review.mjs", "scripts/context-production-preflight.mjs"],
+      "ignoreDependencies": ["pg"]
     },
     "apps/api": {
       "entry": [
@@ -31,6 +24,9 @@
     },
     "apps/workflows": {
       "entry": ["src/cli/review-pr.ts", "src/simulations/pr-review-trace.ts"]
+    },
+    "packages/review-agent": {
+      "entry": ["src/index.ts", "src/review/codex-review.ts", "src/**/*.test.ts"]
     },
     "packages/db": {
       "entry": [

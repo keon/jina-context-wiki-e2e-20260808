@@ -69,14 +69,6 @@ else
   fail "GitHub Staging GCP_PROJECT_ID must equal ${staging_project}"
 fi
 
-trigger_project="$(jq -r '.variables[]? | select(.name == "JINA_TRIGGER_PROJECT_REF") | .value' \
-  <<<"${variables_json}")"
-if [[ -n "${trigger_project}" && "${trigger_project}" != "proj_gmesnthgwwqledarlfip" ]]; then
-  pass "GitHub Staging uses a non-production Trigger.dev project"
-else
-  fail "GitHub Staging must not use the production Trigger.dev project"
-fi
-
 required_variables=(
   GCP_PROJECT_ID
   GCP_REGION
@@ -91,7 +83,6 @@ required_variables=(
   JINA_GITHUB_OAUTH_CLIENT_ID
   JINA_DASHBOARD_AUTH_MODE
   JINA_CLERK_PUBLISHABLE_KEY
-  JINA_TRIGGER_PROJECT_REF
   JINA_GRAPH_API_URL
   JINA_MCP_URL
   JINA_CONTEXT_TENANT_ID
@@ -99,7 +90,6 @@ required_variables=(
   WEBHOOK_SECRET_NAME
   JINA_GITHUB_APP_PRIVATE_KEY_SECRET_NAME
   INTERNAL_API_TOKEN_SECRET_NAME
-  TRIGGER_SECRET_KEY_SECRET_NAME
   OAUTH_CLIENT_SECRET_NAME
   CLERK_SECRET_KEY_SECRET_NAME
   ENCRYPTION_KEY_SECRET_NAME
@@ -153,7 +143,6 @@ if [[ -n "${context_tenant_id}" && ! "${context_tenant_id}" =~ ^[0-9a-fA-F]{8}-[
 fi
 
 required_environment_secrets=(
-  STAGING_JINA_TRIGGER_ACCESS_TOKEN
   STAGING_JINA_GITHUB_APP_PRIVATE_KEY
   STAGING_JINA_INTERNAL_API_TOKEN
   STAGING_JINA_DAYTONA_API_KEY
@@ -191,7 +180,6 @@ product_secrets=(
   jina-staging-github-webhook-secret
   jina-staging-github-app-private-key
   jina-staging-internal-api-token
-  jina-staging-trigger-secret-key
   jina-staging-github-oauth-client-secret
   jina-staging-clerk-secret-key
   jina-staging-secrets-encryption-key

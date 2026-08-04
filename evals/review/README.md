@@ -9,7 +9,7 @@ Dataset files:
 
 Active helper:
 
-- [`run-isolated-review.mjs`](./run-isolated-review.mjs): runs the current consolidated Trigger `review` workflow's runtime implementation locally against one golden-dataset PR.
+- [`run-isolated-review.mjs`](./run-isolated-review.mjs): runs the current `@jina/review-agent` runtime implementation locally against one golden-dataset PR.
 
 The removed scenario-generation and scenario-simulation production paths are no longer evaluated here.
 
@@ -30,7 +30,7 @@ The default output directory is:
 evals/runs/golden-dataset-1/<repo-safe>/pr-<N>/review-runtime-v1
 ```
 
-The helper does not enqueue Trigger.dev, call the internal API, create Daytona sandboxes, or publish GitHub reviews/comments. It runs a temporary worker copy of `trigger/src/runtime-review/index.ts#runRuntimeReview` locally, applies eval-only checkout/artifact/isolation patches to that copy, and writes runtime review artifacts.
+The helper does not enqueue a Board workflow, call the internal API, create Daytona sandboxes, or publish GitHub reviews/comments. It runs a temporary copy of `packages/review-agent/src/runtime-review/index.ts#runRuntimeReview`, applies eval-only checkout/artifact/isolation patches, and writes runtime review artifacts.
 
 For quick smoke runs, use eval-only caps such as `--max-expectations`, `--area-concurrency`, and `--max-agent-iterations`. Omitting those caps uses production runtime options.
 

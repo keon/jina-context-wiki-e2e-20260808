@@ -13,3 +13,29 @@ export { GcsContextArtifactStore } from "./context/gcs-artifact-store.js";
 export { PostgresBoardContextPublicationRepository } from "./context/board-publication-repository.js";
 export { PostgresBoardPageIndexAttachmentRepository } from "./context/board-pageindex-attachment-repository.js";
 export { PostgresIssueGraphRepository } from "./context/issue-graph-repository.js";
+export { BoardAdmissionConflictError, RelationalBoardRepository } from "./board/repository.js";
+export type {
+  AdmitBoardWorkflowInput,
+  BoardAdmissionDependency,
+  BoardAdmissionResult,
+  BoardAdmissionTask,
+  BoardTaskStatus,
+  BoardWorkflowStatus
+} from "./board/repository.js";
+export { RelationalBoardReleaseRejectedError, RelationalBoardWorkerRepository } from "./board/worker-repository.js";
+export type {
+  ClaimedRelationalBoardTask,
+  ClaimRelationalBoardTaskInput,
+  CompleteRelationalBoardTaskInput,
+  FailRelationalBoardTaskInput,
+  RelationalBoardFenceInput,
+  RelationalBoardDependencyResult,
+  RelationalBoardMutationResult,
+  RetryRelationalBoardTaskInput
+} from "./board/worker-repository.js";
+export {
+  PostgresRelationalBoardWorkerStore,
+  RelationalBoardWorkerReleaseRejectedError,
+  verifyRelationalBoardWorkerRelease
+} from "./board/worker-store.js";
+export type { RelationalBoardWorkerReleaseIdentity, StoredRelationalBoardClaimInput } from "./board/worker-store.js";

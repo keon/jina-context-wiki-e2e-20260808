@@ -5,10 +5,21 @@ export type SelectedTenant = { tenantId: string };
 export function contextDocumentsUrl(
   selected: SelectedTenant,
   repository?: string,
+  ref?: string,
 ): string {
   const base = `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/documents`;
+  const query = new URLSearchParams();
+  if (repository) query.set("repository", repository);
+  if (ref) query.set("ref", ref);
+  return apiUrl(query.size ? `${base}?${query.toString()}` : base);
+}
+
+export function contextReleasesUrl(
+  selected: SelectedTenant,
+  repository: string,
+): string {
   return apiUrl(
-    repository ? `${base}?repository=${encodeURIComponent(repository)}` : base,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/operations/context/releases?repository=${encodeURIComponent(repository)}`,
   );
 }
 

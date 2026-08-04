@@ -11,15 +11,20 @@ runtime_user="${JINA_DB_USER:-jina_v2_staging_app}"
 owner_user="${JINA_MIGRATION_DB_USER:-postgres}"
 context_tenant_id="${JINA_CONTEXT_TENANT_ID:?JINA_CONTEXT_TENANT_ID is required}"
 artifact_bucket="${JINA_CONTEXT_GCS_BUCKET:-jina-staging-20260802-context-artifacts-us-east1}"
+review_artifact_bucket="${JINA_REVIEW_GCS_BUCKET:-jina-staging-20260802-review-artifacts-us-east1}"
 artifact_repository="${JINA_ARTIFACT_REGISTRY_REPOSITORY:-jina-staging}"
 gar="${region}-docker.pkg.dev/${project}/${artifact_repository}"
 api_image="${gar}/api:${IMAGE_TAG}"
 worker_image="${gar}/worker:${IMAGE_TAG}"
+otel_collector_image="us-docker.pkg.dev/cloud-ops-agents-artifacts/google-cloud-opentelemetry-collector/otelcol-google:0.156.0"
+otel_collector_config='{"receivers":{"otlp":{"protocols":{"http":{"endpoint":"0.0.0.0:4318"}}}},"processors":{"memory_limiter":{"check_interval":"1s","limit_mib":128,"spike_limit_mib":32},"batch":{"send_batch_size":256,"timeout":"5s"}},"exporters":{"googlecloud":{}},"extensions":{"health_check":{"endpoint":"0.0.0.0:13133"}},"service":{"extensions":["health_check"],"pipelines":{"traces":{"receivers":["otlp"],"processors":["memory_limiter","batch"],"exporters":["googlecloud"]}}}}'
+otel_endpoint="http://localhost:4318/v1/traces"
 
 api_service="jina-api-staging"
 context_worker_service="jina-context-worker-staging"
 task_worker_service="jina-task-worker-staging"
 migration_job="jina-v2-migrate-staging"
+billing_retry_scheduler_job="jina-billing-retry-staging"
 api_service_account="jina-api-staging@${project}.iam.gserviceaccount.com"
 context_worker_service_account="jina-context-worker-staging@${project}.iam.gserviceaccount.com"
 task_worker_service_account="jina-task-worker-staging@${project}.iam.gserviceaccount.com"
@@ -33,7 +38,6 @@ context_token_secret="jina-staging-context-api-token"
 checkpoint_secret="jina-staging-context-private-checkpoint-key"
 product_internal_token_secret="jina-staging-internal-api-token"
 product_encryption_secret="jina-staging-secrets-encryption-key"
-trigger_secret="jina-staging-trigger-secret-key"
 clerk_secret="jina-staging-clerk-secret-key"
 graph_token_secret="jina-staging-graph-api-token"
 graph_internal_token_secret="jina-staging-graph-internal-token"
@@ -50,11 +54,13 @@ required_staging_values=(
   "${database_name}"
   "${runtime_user}"
   "${artifact_bucket}"
+  "${review_artifact_bucket}"
   "${artifact_repository}"
   "${api_service}"
   "${context_worker_service}"
   "${task_worker_service}"
   "${migration_job}"
+  "${billing_retry_scheduler_job}"
   "${owner_password_secret}"
   "${runtime_password_secret}"
   "${webhook_secret}"
@@ -63,7 +69,6 @@ required_staging_values=(
   "${checkpoint_secret}"
   "${product_internal_token_secret}"
   "${product_encryption_secret}"
-  "${trigger_secret}"
   "${clerk_secret}"
   "${graph_token_secret}"
   "${graph_internal_token_secret}"
@@ -117,7 +122,6 @@ for secret_name in \
   "${checkpoint_secret}" \
   "${product_internal_token_secret}" \
   "${product_encryption_secret}" \
-  "${trigger_secret}" \
   "${clerk_secret}" \
   "${graph_token_secret}" \
   "${graph_internal_token_secret}" \
@@ -130,6 +134,7 @@ for secret_name in \
   gcloud secrets versions describe latest --secret="${secret_name}" --project="${project}" >/dev/null
 done
 gcloud storage buckets describe "gs://${artifact_bucket}" --project="${project}" >/dev/null
+gcloud storage buckets describe "gs://${review_artifact_bucket}" --project="${project}" >/dev/null
 
 if [[ "${JINA_SKIP_STAGING_MIGRATIONS:-false}" == "true" ]]; then
   deployed_migration_image="$(gcloud run jobs describe "${migration_job}" \
@@ -163,25 +168,39 @@ else
     --wait
 fi
 
-api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=false~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~TRIGGER_API_URL=https://api.trigger.dev~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=20000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
-api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,TRIGGER_SECRET_KEY=${trigger_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
-gcloud run deploy "${api_service}" \
+api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=false~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=20000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
+api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
+gcloud --quiet run deploy "${api_service}" \
   --project="${project}" \
   --region="${region}" \
-  --image="${api_image}" \
   --allow-unauthenticated \
   --service-account="${api_service_account}" \
   --set-cloudsql-instances="${sql_instance}" \
   --concurrency=10 \
-  --cpu=1 \
-  --memory=1Gi \
   --timeout=3600 \
-  --liveness-probe="initialDelaySeconds=30,timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/health,httpGet.port=8080" \
   --min-instances=0 \
   --max-instances=2 \
+  --no-traffic \
+  --image="${api_image}" \
+  --port=8080 \
+  --cpu=1 \
+  --memory=1Gi \
+  --liveness-probe="initialDelaySeconds=30,timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/health,httpGet.port=8080" \
   --set-env-vars="${api_env}" \
-  --set-secrets="${api_secrets}" \
-  --quiet
+  --set-secrets="${api_secrets}"
+gcloud --quiet run deploy "${api_service}" \
+  --project="${project}" \
+  --region="${region}" \
+  --no-traffic \
+  --container=otel-collector \
+  --image="${otel_collector_image}" \
+  --port=default \
+  --cpu=0.5 \
+  --memory=256Mi \
+  --args=--config=env:OTELCOL_CONFIG \
+  --set-env-vars="^~^OTELCOL_CONFIG=${otel_collector_config}" \
+  --startup-probe="initialDelaySeconds=0,timeoutSeconds=10,periodSeconds=10,failureThreshold=5,httpGet.path=/,httpGet.port=13133" \
+  --liveness-probe="timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/,httpGet.port=13133"
 # A previous emergency rollback pins traffic to a named revision. Cloud Run
 # preserves that pin across later deploys, so explicitly restore latest-revision
 # routing before any health check can accidentally verify the rollback target.
@@ -200,40 +219,116 @@ if [[ "${api_url}" != https://*staging* ]]; then
   exit 2
 fi
 
+# Cloud Scheduler only admits a durable Board workflow. The task worker owns
+# execution, retries, event history, and trace export for every billing drain.
+gcloud services enable cloudscheduler.googleapis.com --project="${project}" --quiet
+product_internal_token="$(gcloud secrets versions access latest \
+  --secret="${product_internal_token_secret}" --project="${project}")"
+scheduler_headers="Authorization=Bearer ${product_internal_token},Content-Type=application/json"
+if gcloud scheduler jobs describe "${billing_retry_scheduler_job}" \
+    --project="${project}" --location="${region}" >/dev/null 2>&1; then
+  gcloud scheduler jobs update http "${billing_retry_scheduler_job}" \
+    --project="${project}" \
+    --location="${region}" \
+    --schedule="*/15 * * * *" \
+    --time-zone="Etc/UTC" \
+    --uri="https://api.staging.usejina.com/internal/schedules/billing-retry" \
+    --http-method=POST \
+    --update-headers="${scheduler_headers}" \
+    --message-body='{}' \
+    --format=none \
+    --quiet
+else
+  gcloud scheduler jobs create http "${billing_retry_scheduler_job}" \
+    --project="${project}" \
+    --location="${region}" \
+    --schedule="*/15 * * * *" \
+    --time-zone="Etc/UTC" \
+    --uri="https://api.staging.usejina.com/internal/schedules/billing-retry" \
+    --http-method=POST \
+    --headers="${scheduler_headers}" \
+    --message-body='{}' \
+    --format=none \
+    --quiet
+fi
+unset product_internal_token scheduler_headers
+
 context_topics="run-context-input-snapshot|run-context-page-plan|run-context-page-build|run-context-publication"
-context_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${context_topics}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=jina-staging-context-openai~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex~CONTEXT_DAYTONA_SNAPSHOT=jina-context-board-codex-0-145-0-bwrap-v2"
+context_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${context_topics}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=jina-staging-context-openai~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex~CONTEXT_DAYTONA_SNAPSHOT=jina-context-board-codex-0-145-0-bwrap-v2"
 context_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
-gcloud run deploy "${context_worker_service}" \
+gcloud --quiet run deploy "${context_worker_service}" \
   --project="${project}" \
   --region="${region}" \
-  --image="${worker_image}" \
   --no-allow-unauthenticated \
   --service-account="${context_worker_service_account}" \
   --concurrency=1 \
-  --memory=1Gi \
   --timeout=300 \
   --min-instances=1 \
   --max-instances=1 \
+  --no-traffic \
+  --image="${worker_image}" \
+  --port=8080 \
   --no-cpu-throttling \
+  --cpu=1 \
+  --memory=1Gi \
   --set-env-vars="${context_env}" \
-  --set-secrets="${context_secrets}" \
-  --quiet
-
-task_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=run-review~REVIEW_MODEL=gpt-5.6-sol"
-task_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,OPENAI_API_KEY=${openai_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
-gcloud run deploy "${task_worker_service}" \
+  --set-secrets="${context_secrets}"
+gcloud --quiet run deploy "${context_worker_service}" \
   --project="${project}" \
   --region="${region}" \
-  --image="${worker_image}" \
+  --no-traffic \
+  --container=otel-collector \
+  --image="${otel_collector_image}" \
+  --port=default \
+  --cpu=0.5 \
+  --memory=256Mi \
+  --args=--config=env:OTELCOL_CONFIG \
+  --set-env-vars="^~^OTELCOL_CONFIG=${otel_collector_config}" \
+  --startup-probe="initialDelaySeconds=0,timeoutSeconds=10,periodSeconds=10,failureThreshold=5,httpGet.path=/,httpGet.port=13133" \
+  --liveness-probe="timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/,httpGet.port=13133"
+gcloud run services update-traffic "${context_worker_service}" \
+  --project="${project}" \
+  --region="${region}" \
+  --to-latest \
+  --quiet
+
+review_topics="prepare-review|summary-review|runtime-review|finalize-review|publish-review|settle-review|github-installation-backfill|billing-retry"
+task_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~DASHBOARD_URL=https://app.staging.usejina.com~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${review_topics}~JINA_REVIEW_GCS_BUCKET=${review_artifact_bucket}~JINA_GRAPH_MCP_ENABLED=true~DAYTONA_RUN_TIMEOUT_SECONDS=3600~DAYTONA_SETUP_TIMEOUT_SECONDS=300~DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS=120~DAYTONA_SANDBOX_IMAGE=node:22-bookworm~DAYTONA_SANDBOX_CPU=4~DAYTONA_SANDBOX_MEMORY=8~DAYTONA_SANDBOX_DISK=10~REVIEW_CODEX_MODEL=openai/gpt-5.6-luna~REVIEW_CODEX_EFFORT=medium~RUNTIME_PLANNER_MODEL=openai/gpt-5.6-sol~RUNTIME_AGENT_MODEL=openai/gpt-5.6-luna~RUNTIME_MENTAL_TRACE_MODEL=openai/gpt-5.6-luna"
+task_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,OPENAI_API_KEY=${openai_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
+gcloud --quiet run deploy "${task_worker_service}" \
+  --project="${project}" \
+  --region="${region}" \
   --no-allow-unauthenticated \
   --service-account="${task_worker_service_account}" \
   --concurrency=1 \
-  --timeout=300 \
+  --timeout=3600 \
   --min-instances=1 \
   --max-instances=1 \
+  --no-traffic \
+  --image="${worker_image}" \
+  --port=8080 \
   --no-cpu-throttling \
+  --cpu=1 \
+  --memory=1Gi \
   --set-env-vars="${task_env}" \
-  --set-secrets="${task_secrets}" \
+  --set-secrets="${task_secrets}"
+gcloud --quiet run deploy "${task_worker_service}" \
+  --project="${project}" \
+  --region="${region}" \
+  --no-traffic \
+  --container=otel-collector \
+  --image="${otel_collector_image}" \
+  --port=default \
+  --cpu=0.5 \
+  --memory=256Mi \
+  --args=--config=env:OTELCOL_CONFIG \
+  --set-env-vars="^~^OTELCOL_CONFIG=${otel_collector_config}" \
+  --startup-probe="initialDelaySeconds=0,timeoutSeconds=10,periodSeconds=10,failureThreshold=5,httpGet.path=/,httpGet.port=13133" \
+  --liveness-probe="timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/,httpGet.port=13133"
+gcloud run services update-traffic "${task_worker_service}" \
+  --project="${project}" \
+  --region="${region}" \
+  --to-latest \
   --quiet
 
 retry_health() {

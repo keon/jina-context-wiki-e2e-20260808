@@ -60,7 +60,7 @@ export function normalizeCodexHarnessAuthInput(value: unknown): string | undefin
 // names (NOT OpenRouter slugs — own-harness runs never touch OpenRouter). null = the Codex default.
 // The GPT-5.6 family (sol=flagship, terra=balanced, luna=fast) leads the list; the 5.5/5.4 line stays
 // for back-compat and cheaper runs.
-// KEEP IN SYNC with the HARNESS_MODELS Set in trigger/src/runtime-review/index.ts (separate package, no
+// KEEP IN SYNC with the HARNESS_MODELS Set in packages/review-agent/src/runtime-review/index.ts (separate package, no
 // shared import): a drift is caught by that package's harnessModelForStageSlug test, which pins this exact
 // list. A model valid here but missing there is silently downgraded to the pin/subscription default.
 export const HARNESS_MODELS = [

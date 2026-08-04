@@ -631,20 +631,31 @@ test("review access returns a direct MCP credential bound to the tenant and repo
   });
 });
 
-test("dashboard Context maps the current Context release catalog and reads the exact release", async () => {
+test("dashboard Context selects and reads an exact published ref", async () => {
   const { fetchImpl, urls } = recording(async (input) => {
     const url = String(input);
-    if (url.endsWith("/context/releases")) {
+    if (url.includes("/context/releases")) {
       return Response.json({
-        releases: [{
-          id: "release-1",
-          repository: "omxyz/a",
-          ref: "pull/2/head",
-          commitSha: "b".repeat(40),
-          createdAt: "2026-07-31T00:00:00.000Z",
-          publishedAt: "2026-07-31T00:10:00.000Z",
-          contextStatus: "available",
-        }],
+        releases: [
+          {
+            id: "release-main",
+            repository: "omxyz/a",
+            ref: "main",
+            commitSha: "a".repeat(40),
+            createdAt: "2026-07-30T00:00:00.000Z",
+            publishedAt: "2026-07-30T00:10:00.000Z",
+            contextStatus: "available",
+          },
+          {
+            id: "release-1",
+            repository: "omxyz/a",
+            ref: "pull/2/head",
+            commitSha: "b".repeat(40),
+            createdAt: "2026-07-31T00:00:00.000Z",
+            publishedAt: "2026-07-31T00:10:00.000Z",
+            contextStatus: "available",
+          },
+        ],
       });
     }
     if (url.includes("/context/list?")) {
@@ -695,7 +706,7 @@ test("dashboard Context maps the current Context release catalog and reads the e
     return Response.json({ error: "unexpected" }, { status: 500 });
   });
   const client = new GraphApiClient(CONFIG, fetchImpl);
-  const documents = await client.listDocuments(CONTEXT);
+  const documents = await client.listDocuments(CONTEXT, "omxyz/a", "pull/2/head");
   assert.deepEqual(documents, [{
     id: "document-1",
     releaseId: "release-1",
@@ -726,6 +737,7 @@ test("dashboard Context maps the current Context release catalog and reads the e
     endLine: 20,
   });
   assert.ok(urls.some((url) => url.includes("releaseId=release-1")));
+  assert.ok(urls.some((url) => url.includes("repository=omxyz%2Fa")));
 });
 
 test("a board overview is loaded under the original tenant identity", async () => {

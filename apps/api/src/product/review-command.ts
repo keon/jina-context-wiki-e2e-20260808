@@ -4,7 +4,7 @@ import { createInstallationAccessToken } from "./github-app.js";
 import type { WebhookResponse } from "./github.js";
 import { githubJson, type GithubPullRequest } from "./github-client.js";
 import { REVIEW_TASK_ID } from "./review-task-routing.js";
-import type { TriggerClient, TriggerOptions } from "./trigger.js";
+import type { DispatchOptions, WorkflowDispatcher } from "./workflow-dispatcher.js";
 
 const REVIEW_COMMAND = "@usejina";
 const REVIEW_COMMAND_PATTERN = /(^|[^A-Za-z0-9_-])@usejina(?![A-Za-z0-9_-])/i;
@@ -56,7 +56,7 @@ export function parseJinaReviewCommand(body: string): JinaReviewCommand | undefi
 
 export async function handleReviewCommand(input: {
   event: "issue_comment" | "pull_request_review_comment";
-  trigger: TriggerClient;
+  trigger: WorkflowDispatcher;
   deliveryId: string;
   payload: Record<string, unknown>;
   action?: string;
@@ -141,7 +141,7 @@ export async function handleReviewCommand(input: {
   // must not turn one comment into a second review.
   const idempotencyKey = `${REVIEW_TASK_ID}:${installationId}:${repositoryId}:${pullRequestNumber}:${input.event}:${commentId}`;
   const manualCommandTag = `${MANUAL_COMMAND_TAG}:${commentCreatedAtMs}:${input.event}:${commentId}`;
-  const options: TriggerOptions = {
+  const options: DispatchOptions = {
     idempotencyKey,
     concurrencyKey: `${REVIEW_TASK_ID}:${installationId}:${repositoryId}:${pullRequestNumber}:${headSha}`,
     tags: [

@@ -26,6 +26,9 @@ export type CreateReviewRunInput = {
   deliveryId?: string;
   sourceEvent?: string;
   triggerSource?: string;
+  manualCommandTag?: string;
+  reviewInstructions?: string;
+  orchestrationPayload?: Readonly<Record<string, unknown>>;
   installationId?: number;
   account?: { id?: number; login?: string; type?: string };
   repository: {
@@ -47,6 +50,15 @@ export type CreateReviewRunInput = {
     baseRef?: string;
     draft?: boolean;
   };
+};
+
+export type CreatedReviewRun = {
+  id: string;
+  tenantId: string;
+  created: boolean;
+  orchestrator: "trigger" | "board";
+  boardWorkflowId?: string;
+  triggerRunId?: string;
 };
 
 export type InstallationRepository = {
@@ -92,6 +104,14 @@ export async function updateGithubInstallationLifecycle(
 
 /** Persist a review run and all of its parent rows (tenant/installation/repo/PR). Returns the review_run id. */
 export async function createReviewRun(input: CreateReviewRunInput): Promise<string> {
+  const result = await withTransaction((client) => createReviewRunWithClient(client, input));
+  return result.id;
+}
+
+export async function createReviewRunWithClient(
+  client: pg.PoolClient,
+  input: CreateReviewRunInput,
+): Promise<CreatedReviewRun> {
   const githubRepoId = input.repository.githubRepoId;
   const repoOwner = input.repository.owner ?? input.repository.fullName?.split("/")[0];
   const repoName = input.repository.name ?? input.repository.fullName?.split("/")[1];
@@ -99,97 +119,181 @@ export async function createReviewRun(input: CreateReviewRunInput): Promise<stri
     throw new Error("review run is missing repository identity");
   }
 
-  return withTransaction(async (client) => {
-    const tenantId = await resolveTenantId(client, {
-      installationId: input.installationId,
-      accountId: input.account?.id,
-      accountLogin: input.account?.login ?? repoOwner,
-      accountType: input.account?.type ?? "Organization",
-    });
+  const tenantId = await resolveTenantId(client, {
+    installationId: input.installationId,
+    accountId: input.account?.id,
+    accountLogin: input.account?.login ?? repoOwner,
+    accountType: input.account?.type ?? "Organization",
+  });
 
-    let installationRecordId: string | undefined;
-    if (input.installationId) {
-      installationRecordId = await upsertInstallation(client, tenantId, input.installationId, input.account);
-    }
+  let installationRecordId: string | undefined;
+  if (input.installationId) {
+    installationRecordId = await upsertInstallation(client, tenantId, input.installationId, input.account);
+  }
 
-    const repositoryId = await upsertRepository(client, {
+  const repositoryId = await upsertRepository(client, {
+    tenantId,
+    installationRecordId,
+    githubRepoId,
+    owner: repoOwner,
+    name: repoName,
+    defaultBranch: input.repository.defaultBranch,
+    private: input.repository.private,
+  });
+
+  let pullRequestId: string | undefined;
+  if (typeof input.pullRequest.number === "number" && input.pullRequest.headSha) {
+    pullRequestId = await upsertPullRequest(client, {
       tenantId,
-      installationRecordId,
-      githubRepoId,
-      owner: repoOwner,
-      name: repoName,
-      defaultBranch: input.repository.defaultBranch,
-      private: input.repository.private,
+      repositoryId,
+      number: input.pullRequest.number,
+      title: input.pullRequest.title,
+      author: input.pullRequest.author,
+      headSha: input.pullRequest.headSha,
+      baseSha: input.pullRequest.baseSha,
+      headRef: input.pullRequest.headRef,
+      baseRef: input.pullRequest.baseRef,
+      htmlUrl: input.pullRequest.htmlUrl,
+      draft: input.pullRequest.draft,
     });
+  }
 
-    let pullRequestId: string | undefined;
-    if (typeof input.pullRequest.number === "number" && input.pullRequest.headSha) {
-      pullRequestId = await upsertPullRequest(client, {
-        tenantId,
-        repositoryId,
-        number: input.pullRequest.number,
-        title: input.pullRequest.title,
-        author: input.pullRequest.author,
-        headSha: input.pullRequest.headSha,
-        baseSha: input.pullRequest.baseSha,
-        headRef: input.pullRequest.headRef,
-        baseRef: input.pullRequest.baseRef,
-        htmlUrl: input.pullRequest.htmlUrl,
-        draft: input.pullRequest.draft,
-      });
-    }
+  const headSha = input.pullRequest.headSha;
+  if (!headSha) {
+    // head_sha is NOT NULL and is the basis for dedupe; never persist an empty placeholder.
+    throw new Error("review run is missing pull request head_sha");
+  }
 
-    const headSha = input.pullRequest.headSha;
-    if (!headSha) {
-      // head_sha is NOT NULL and is the basis for dedupe; never persist an empty placeholder.
-      throw new Error("review run is missing pull request head_sha");
-    }
+  // Prefer a caller-provided logical idempotency key. Trigger run ids are a
+  // fallback for legacy task shapes, but retryable workflows should pass a key
+  // derived from repository + PR + head so retry attempts reuse the same row.
+  const idempotencyKey =
+    input.idempotencyKey ??
+    input.triggerRunId ??
+    `review:${input.installationId ?? "none"}:${githubRepoId}:${input.pullRequest.number ?? "none"}:${headSha}:code_review`;
 
-    // Prefer a caller-provided logical idempotency key. Trigger run ids are a
-    // fallback for legacy task shapes, but retryable workflows should pass a key
-    // derived from repository + PR + head so retry attempts reuse the same row.
-    const idempotencyKey =
-      input.idempotencyKey ??
-      input.triggerRunId ??
-      `review:${input.installationId ?? "none"}:${githubRepoId}:${input.pullRequest.number ?? "none"}:${headSha}:code_review`;
-
-    const rows = await client.query<{ id: string }>(
-      `insert into review_runs
+  const inserted = await client.query<{ id: string; tenant_id: string }>(
+    `insert into review_runs
          (tenant_id, repository_id, pull_request_id, trigger, status, idempotency_key,
           trigger_run_id, head_sha, delivery_id, source_event, bot_type, bot_status,
-          started_at, created_at, updated_at)
-       values ($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,'code_review','queued', now(), now(), now())
-       on conflict (idempotency_key) do update set updated_at = now()
-       returning id`,
-      [
-        tenantId,
-        repositoryId,
-        pullRequestId ?? null,
-        input.triggerSource ?? "webhook",
-        idempotencyKey,
-        input.triggerRunId ?? null,
-        headSha,
-        input.deliveryId ?? null,
-        input.sourceEvent ?? null,
-      ],
-    );
+          manual_command_tag,review_instructions,started_at, created_at, updated_at)
+       values ($1,$2,$3,$4,'queued',$5,$6,$7,$8,$9,'code_review','queued',$10,$11,now(), now(), now())
+       on conflict (idempotency_key) do nothing
+       returning id,tenant_id`,
+    [
+      tenantId,
+      repositoryId,
+      pullRequestId ?? null,
+      input.triggerSource ?? "webhook",
+      idempotencyKey,
+      input.triggerRunId ?? null,
+      headSha,
+      input.deliveryId ?? null,
+      input.sourceEvent ?? null,
+      input.manualCommandTag ?? null,
+      input.reviewInstructions ?? null,
+    ],
+  );
 
-    const reviewRunId = rows.rows[0]!.id;
+  const created = inserted.rows[0];
+  const existing = created
+    ? undefined
+    : (
+        await client.query<{
+          id: string;
+          tenant_id: string;
+          orchestrator: "trigger" | "board";
+          board_workflow_id: string | null;
+          trigger_run_id: string | null;
+        }>(
+          `select id,tenant_id,orchestrator,board_workflow_id,trigger_run_id
+           from review_runs
+           where idempotency_key=$1
+           for update`,
+          [idempotencyKey],
+        )
+      ).rows[0];
+  if (!created && !existing) {
+    throw new Error("review run idempotency conflict disappeared during admission");
+  }
+
+  const reviewRunId = created?.id ?? existing!.id;
+  if (created) {
     await client.query(
       `insert into review_run_events (review_run_id, status, payload_json, trigger_run_id)
        values ($1, 'queued', $2, $3)`,
       [reviewRunId, jsonOrNull({ trigger_run_id: input.triggerRunId }), input.triggerRunId ?? null],
     );
+  } else {
+    await client.query(
+      `update review_runs
+          set updated_at=now(), trigger_run_id=coalesce(trigger_run_id,$2)
+        where id=$1`,
+      [reviewRunId, input.triggerRunId ?? null],
+    );
+  }
 
-    return reviewRunId;
-  });
+  return {
+    id: reviewRunId,
+    tenantId: created?.tenant_id ?? existing!.tenant_id,
+    created: Boolean(created),
+    orchestrator: existing?.orchestrator ?? "trigger",
+    ...(existing?.board_workflow_id ? { boardWorkflowId: existing.board_workflow_id } : {}),
+    ...((existing?.trigger_run_id ?? input.triggerRunId)
+      ? { triggerRunId: existing?.trigger_run_id ?? input.triggerRunId }
+      : {}),
+  };
+}
+
+export async function listManualReviewRuns(scopeTag: string): Promise<{
+  runs: Array<{ tags: string[]; createdAt: string }>;
+}> {
+  const match = /^manual-pr:([1-9][0-9]*):([1-9][0-9]*):([1-9][0-9]*)$/.exec(scopeTag);
+  if (!match) throw new Error("manual review scope tag is invalid");
+  const rows = await query<{ manual_command_tag: string; created_at: Date | string }>(
+    `select run.manual_command_tag,run.created_at
+     from review_runs run
+     join repositories repository on repository.id=run.repository_id
+     join installations installation on installation.id=repository.installation_id
+     join pull_requests pull_request on pull_request.id=run.pull_request_id
+     where installation.github_installation_id=$1
+       and repository.github_repo_id=$2
+       and pull_request.pr_number=$3
+       and run.manual_command_tag is not null
+     order by run.created_at desc,run.id desc
+     limit 100`,
+    [Number(match[1]), Number(match[2]), Number(match[3])],
+  );
+  return {
+    runs: rows.map((row) => ({
+      tags: [row.manual_command_tag],
+      createdAt: (row.created_at instanceof Date ? row.created_at : new Date(row.created_at)).toISOString(),
+    })),
+  };
+}
+
+export async function bindReviewRunToBoardWithClient(
+  client: pg.PoolClient,
+  input: { reviewRunId: string; tenantId: string; workflowId: string },
+): Promise<void> {
+  const bound = await client.query(
+    `update review_runs
+        set orchestrator='board', board_workflow_id=$3, updated_at=now()
+      where id=$1
+        and tenant_id=$2::uuid
+        and (board_workflow_id is null or board_workflow_id=$3)
+      returning id`,
+    [input.reviewRunId, input.tenantId, input.workflowId],
+  );
+  if (bound.rowCount !== 1) {
+    throw new Error(`review run ${input.reviewRunId} could not be bound to Board workflow ${input.workflowId}`);
+  }
 }
 
 // Statuses that represent a finished run. Once a run reaches one, later non-terminal
 // events (which can arrive out of order on retries) must not revert its status.
 // 'blocked_insufficient_credits' (FINDING 5) is terminal: a prepare-time 402 completes the run
 // here so it never orbits as 'queued'. It bills nothing — its bot_status ('blocked') flows through
-// settleReviewOutcome's not-completed waive branch.
 const TERMINAL_RUN_STATUSES = [
   "completed",
   "completed_superseded",

@@ -1,12 +1,14 @@
-name: Validate API, Review Worker, and Dashboard
+name: Validate API, Review Agent, Worker, and Dashboard
 
 on:
   pull_request:
     paths:
       - apps/api/**
       - apps/worker/**
-      - services/review-trigger/**
       - apps/dashboard/**
+      - packages/db/**
+      - packages/observability/**
+      - packages/review-agent/**
       - pnpm-lock.yaml
       - .github/workflows/validate-platform.yml
 
@@ -48,18 +50,20 @@ jobs:
       - run: pnpm --filter @jina/api test
       - run: pnpm --filter @jina/api identity:backfill -- --dry-run --require-converged
 
-  trigger:
+  review-agent:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
-          cache-dependency-path: services/review-trigger/package-lock.json
-      - run: npm --prefix services/review-trigger ci
-      - run: npm --prefix services/review-trigger run typecheck
-      - run: npm --prefix services/review-trigger test
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @jina/review-agent typecheck
+      - run: pnpm --filter @jina/review-agent test
 
   dashboard:
     runs-on: ubuntu-latest

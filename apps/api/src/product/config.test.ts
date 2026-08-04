@@ -10,22 +10,9 @@ function baseEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     GITHUB_WEBHOOK_SECRET: "github-webhook-secret",
     INTERNAL_API_TOKEN: "internal-token",
-    TRIGGER_SECRET_KEY: "tr_dev_local",
     ...overrides,
   };
 }
-
-test("allows a Trigger.dev development key outside production", () => {
-  const config = loadConfig(baseEnv({ NODE_ENV: "development" }));
-
-  assert.equal(config.trigger.secretKey, "tr_dev_local");
-});
-
-test("defaults installation backfill dispatch to the backfill task", () => {
-  const config = loadConfig(baseEnv({ NODE_ENV: "development" }));
-
-  assert.equal(config.trigger.backfillTaskId, "github-installation-backfill");
-});
 
 test("uses the dedicated product token when Context and review workers have separate credentials", () => {
   const config = loadConfig(baseEnv({
@@ -35,15 +22,6 @@ test("uses the dedicated product token when Context and review workers have sepa
   }));
 
   assert.equal(config.internalApiToken, "product-token");
-});
-
-test("ignores stale installation backfill task overrides", () => {
-  const config = loadConfig(baseEnv({
-    NODE_ENV: "development",
-    TRIGGER_BACKFILL_TASK_ID: "legacy-backfill",
-  }));
-
-  assert.equal(config.trigger.backfillTaskId, "github-installation-backfill");
 });
 
 test("uses DASHBOARD_URL as the default credentialed dashboard origin", () => {
@@ -97,26 +75,11 @@ test("Clerk auth requires both server and browser keys", () => {
   );
 });
 
-test("rejects a Trigger.dev development key in production", () => {
-  assert.throws(
-    () => loadConfig(baseEnv({ NODE_ENV: "production" })),
-    /development key while NODE_ENV=production/,
-  );
-});
-
-test("allows a Trigger.dev production key in production", () => {
-  const config = loadConfig(
-    baseEnv({ NODE_ENV: "production", TRIGGER_SECRET_KEY: "tr_prod_live", SECRETS_ENCRYPTION_KEY: PROD_SECRETS_KEY }),
-  );
-
-  assert.equal(config.trigger.secretKey, "tr_prod_live");
-});
-
 /* ----------------------------------------- SECRETS_ENCRYPTION_KEY (FINDING 4a) --- */
 
 test("requires SECRETS_ENCRYPTION_KEY in production (does not fail open to plaintext)", () => {
   assert.throws(
-    () => loadConfig(baseEnv({ NODE_ENV: "production", TRIGGER_SECRET_KEY: "tr_prod_live" })),
+    () => loadConfig(baseEnv({ NODE_ENV: "production" })),
     /SECRETS_ENCRYPTION_KEY is required when NODE_ENV=production/,
   );
 });
@@ -125,7 +88,7 @@ test("rejects an invalid (non-32-byte) SECRETS_ENCRYPTION_KEY in production", ()
   assert.throws(
     () =>
       loadConfig(
-        baseEnv({ NODE_ENV: "production", TRIGGER_SECRET_KEY: "tr_prod_live", SECRETS_ENCRYPTION_KEY: "too-short" }),
+        baseEnv({ NODE_ENV: "production", SECRETS_ENCRYPTION_KEY: "too-short" }),
       ),
     /must be a base64-encoded 32 bytes/,
   );
@@ -133,9 +96,9 @@ test("rejects an invalid (non-32-byte) SECRETS_ENCRYPTION_KEY in production", ()
 
 test("accepts a valid base64 32-byte SECRETS_ENCRYPTION_KEY in production", () => {
   const config = loadConfig(
-    baseEnv({ NODE_ENV: "production", TRIGGER_SECRET_KEY: "tr_prod_live", SECRETS_ENCRYPTION_KEY: PROD_SECRETS_KEY }),
+    baseEnv({ NODE_ENV: "production", SECRETS_ENCRYPTION_KEY: PROD_SECRETS_KEY }),
   );
-  assert.equal(config.trigger.secretKey, "tr_prod_live");
+  assert.equal(config.auth.mode, "disabled");
 });
 
 test("does not require SECRETS_ENCRYPTION_KEY outside production (dev keeps plaintext fallback)", () => {

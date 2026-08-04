@@ -36,11 +36,6 @@ function testConfig(overrides: { dashboardAllowedOrigins?: AppConfig["dashboardA
       cookieSameSite: "None",
       sessionTtlSeconds: 3600,
     },
-    trigger: {
-      apiBaseUrl: "https://api.trigger.dev",
-      secretKey: "tr_dev_x",
-      backfillTaskId: "github-installation-backfill",
-    },
     billing: {
       autumnApiUrl: "https://api.useautumn.com/v1",
       creditsFeatureId: "jina_credits",

@@ -372,7 +372,7 @@ packages/daytona/          isolated Codex executors
 packages/db/               PostgreSQL stores, roles, GCS artifacts, reset
 packages/github/           signed webhook parsing and trigger policy
 services/pageindex-worker/ pinned self-hosted PageIndex Markdown bridge
-services/review-trigger/   Trigger.dev review orchestration and Daytona review runtime
+packages/review-agent/    portable Daytona review runtime used by Board workers
 ```
 
 `apps/api` owns the only HTTP listener. Product/review, Board, Context, causal graph,

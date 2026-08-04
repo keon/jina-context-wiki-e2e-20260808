@@ -8,6 +8,7 @@ import {
   PostgresContextPhaseCheckpointRepository,
   PostgresJsonStateStore,
   PostgresIssueGraphRepository,
+  PostgresRelationalBoardWorkerStore,
   PostgresSharedIdentityStore,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
@@ -17,12 +18,21 @@ import {
   MemoryContextPhaseCheckpointStore,
   type ContextEngineStore
 } from "@jina/context-engine";
-import { createLogger, errorLogFields } from "@jina/observability";
+import { createLogger, errorLogFields, startOpenTelemetry } from "@jina/observability";
 import { createApiServer } from "./server.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
 const port = Number(process.env.PORT ?? 4000);
+const openTelemetry = startOpenTelemetry({
+  serviceName: "jina-api",
+  ...(process.env.K_REVISION ? { serviceVersion: process.env.K_REVISION } : {}),
+  ...(process.env.JINA_ENVIRONMENT ? { environment: process.env.JINA_ENVIRONMENT } : {}),
+  attributes: {
+    ...(process.env.K_SERVICE ? { "gcp.cloud_run.service": process.env.K_SERVICE } : {}),
+    ...(process.env.K_REVISION ? { "gcp.cloud_run.revision": process.env.K_REVISION } : {})
+  }
+});
 const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 const trustDevIdentityHeaders = booleanEnvironment("JINA_TRUST_DEV_IDENTITY_HEADERS", enableDevEndpoints);
 if (trustDevIdentityHeaders && !enableDevEndpoints) {
@@ -68,6 +78,9 @@ const contextStore = createContextStore(contextDatabase);
 const contextPhaseCheckpointStore = contextDatabase
   ? new PostgresContextPhaseCheckpointRepository(contextDatabase)
   : new MemoryContextPhaseCheckpointStore();
+const relationalBoardWorkerStore = contextDatabase
+  ? new PostgresRelationalBoardWorkerStore(contextDatabase.pool)
+  : undefined;
 const contextBoardPublicationTransaction = contextDatabase
   ? new PostgresBoardContextPublicationRepository(contextDatabase)
   : undefined;
@@ -110,6 +123,7 @@ const server = createApiServer({
   ...(stateStore ? { stateStore } : {}),
   contextStore,
   contextPhaseCheckpointStore,
+  ...(relationalBoardWorkerStore ? { relationalBoardWorkerStore } : {}),
   ...(contextArtifactStore ? { contextArtifactStore } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardPublicationTransaction } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardReleaseSeedStore: contextBoardPublicationTransaction } : {}),
@@ -156,6 +170,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
         logger.error("API shutdown failed", { event: "api.shutdown_failed", ...errorLogFields(error) });
         process.exitCode = 1;
       }
+      void openTelemetry.shutdown();
     });
   });
 }

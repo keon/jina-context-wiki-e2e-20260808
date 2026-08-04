@@ -136,7 +136,7 @@ apps/admin/           tenant-wide context health UI
 apps/dashboard/       single customer dashboard, operations, and Context workspace
 apps/worker/          review and context-stage workers
 apps/workflows/       local review CLI and deterministic simulation
-services/review-trigger/  Trigger.dev review orchestration and Daytona runtime
+packages/review-agent/   portable Daytona review runtime used by Board workers
 evals/review/    review evaluation datasets and tools
 packages/board/       generic tasks, dependencies, commands, reducer
 packages/context-engine/ evidence, derived context, releases, retrieval

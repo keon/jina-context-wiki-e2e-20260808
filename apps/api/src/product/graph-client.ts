@@ -1,5 +1,6 @@
 import { ApiError } from "./errors.js";
 import type { GraphConfig } from "./config.js";
+import type { DashboardWorkOverview } from "./board-dashboard.js";
 import {
   contextGraphDetail,
   contextQueryResult,
@@ -89,14 +90,7 @@ export type GraphListResult = {
   indexingRepositories: string[];
 };
 
-export type TenantWorkOverview = {
-  board: {
-    tasks: Array<Record<string, unknown>>;
-    dependencies: Array<Record<string, unknown>>;
-    outbox: Array<Record<string, unknown>>;
-  };
-  events: Array<Record<string, unknown>>;
-};
+export type TenantWorkOverview = DashboardWorkOverview;
 
 type GraphRepositoryAccess = { name: string; defaultBranch: string };
 
@@ -869,7 +863,11 @@ export class GraphApiClient {
    * page browses: each carries a `logicalId` of the form `kind:repository:subject`,
    * which is what gives the collection a folder shape.
    */
-  async listDocuments(context: RequestContext, repository?: string): Promise<ContextDocumentSummary[]> {
+  async listDocuments(
+    context: RequestContext,
+    repository?: string,
+    ref?: string,
+  ): Promise<ContextDocumentSummary[]> {
     const repositories = normalizedRepositories(context.repositories);
     if (!repositories.length) return [];
     const allowed = new Set(repositories.map((entry) => entry.name.toLowerCase()));
@@ -888,9 +886,12 @@ export class GraphApiClient {
             candidate.repository.toLowerCase() === entry.name.toLowerCase() &&
             candidate.contextStatus !== "unavailable",
         );
-        // Prefer the default-branch head, but do not hide a published PR-scoped
-        // Context release when it is the repository's only available release.
-        const release = candidates.find((candidate) => candidate.ref === entry.defaultBranch) ?? candidates[0];
+        // An explicit ref is a dashboard version selection. Without one, keep
+        // the default branch as the stable landing page while still falling
+        // back to a PR-scoped release when it is the only published context.
+        const release = ref
+          ? candidates.find((candidate) => candidate.ref === ref)
+          : candidates.find((candidate) => candidate.ref === entry.defaultBranch) ?? candidates[0];
         return release ? [release] : [];
       });
     const catalogs = await Promise.all(

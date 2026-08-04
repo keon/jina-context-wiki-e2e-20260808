@@ -122,7 +122,7 @@ test("acceptBackfill persists suspension/deletion without provisioning billing",
   }
 });
 
-test("acceptBackfill propagates an Autumn failure after persisting so Trigger.dev retries", async () => {
+test("acceptBackfill propagates an Autumn failure after persisting so the Board retries", async () => {
   const ctx = internalContext({
     payload: {
       github_installation_id: 147254889,

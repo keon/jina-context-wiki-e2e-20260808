@@ -9,7 +9,7 @@ export function isProductApiRoute(pathname: string): boolean {
     pathname === "/internal/graph/availability" ||
     pathname === "/internal/context/mcp-access" ||
     pathname === "/internal/installations/backfill" ||
-    pathname === "/internal/scheduled-review-scan" ||
+    pathname === "/internal/schedules/billing-retry" ||
     pathname === "/internal/integrations/resolve" ||
     pathname === "/internal/context/execution-profile" ||
     pathname === "/internal/billing/retry"

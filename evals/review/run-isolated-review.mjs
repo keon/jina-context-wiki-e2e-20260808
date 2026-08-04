@@ -3,12 +3,12 @@
  * Run the active review runtime implementation pipeline against one Golden
  * Dataset 1 PR while keeping golden reference issues out of the subprocess.
  *
- * This is the v1 local eval harness for the consolidated Trigger `review`
- * workflow's runtime-review implementation:
+ * This is the local eval harness for the Board review workflow's
+ * @jina/review-agent runtime-review implementation:
  *
  *   intent -> expectation plan -> expectation agents -> reviewer -> readiness
  *
- * It intentionally does not enqueue Trigger.dev, call the internal API, create
+ * It intentionally does not enqueue Board work, call the internal API, create
  * Daytona sandboxes, or publish GitHub reviews/comments. It runs the
  * implementation source locally in a temporary worker copy and writes artifacts
  * under evals/runs.
@@ -16,6 +16,7 @@
 
 import { spawn } from "node:child_process";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -28,10 +29,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(SCRIPT_DIR, "..");
+const EVAL_ROOT = resolve(SCRIPT_DIR, "..");
+const WORKSPACE_ROOT = resolve(SCRIPT_DIR, "../..");
 const DEFAULT_DATASET = join(SCRIPT_DIR, "golden-dataset-1.json");
-const DEFAULT_TMP_EVAL_DIR = join(REPO_ROOT, "tmp", "evals", "review-runtime-v1");
-const DEFAULT_METHOD = "trigger-review-runtime-v1-current-2026-06-29";
+const DEFAULT_TMP_EVAL_DIR = join(EVAL_ROOT, "tmp", "evals", "review-runtime-v1");
+const DEFAULT_METHOD = "review-agent-runtime-v1-current-2026-08-04";
 const DEFAULT_HISTORY_MARKDOWN = [
   "No GitHub PR thread/history context supplied for isolated review-runtime eval.",
   "The subprocess must use only PR metadata, the checked-out repository, diff, and CodeGraph context.",
@@ -70,10 +72,6 @@ Options:
   --author LOGIN         Override PR author.
   --max-expectations N   Eval-only cap on expectation count. Default: production uncapped.
   --area-concurrency N   Eval-only cap on parallel expectation agents. Default: production uncapped.
-  --task-concurrency N   Eval-only cap on parallel tool calls per agent. Default: production uncapped.
-  --max-mental-trace N   Eval-only cap on mental_trace calls per agent. Default: production uncapped.
-  --max-agent-iterations N
-                         Eval-only cap on agent iterations. Default: production uncapped.
   --help                 Show this help.
 
 Isolation:
@@ -114,9 +112,6 @@ function parseArgs(argv) {
     author: "",
     maxExpectations: 0,
     areaConcurrency: 0,
-    taskConcurrency: 0,
-    maxMentalTrace: 0,
-    maxAgentIterations: 0,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -149,9 +144,6 @@ function parseArgs(argv) {
     else if (a === "--author") args.author = argv[++i] || "";
     else if (a === "--max-expectations") args.maxExpectations = numberArg(a, argv[++i]);
     else if (a === "--area-concurrency") args.areaConcurrency = numberArg(a, argv[++i]);
-    else if (a === "--task-concurrency") args.taskConcurrency = numberArg(a, argv[++i]);
-    else if (a === "--max-mental-trace") args.maxMentalTrace = numberArg(a, argv[++i]);
-    else if (a === "--max-agent-iterations") args.maxAgentIterations = numberArg(a, argv[++i]);
     else throw new Error(`Unknown argument: ${a}\n${usage()}`);
   }
 
@@ -370,11 +362,12 @@ function assertSafeOutputRemoval(out) {
   const resolved = resolve(out);
   const protectedPaths = new Set([
     resolve("/"),
-    REPO_ROOT,
+    EVAL_ROOT,
     SCRIPT_DIR,
-    resolve(REPO_ROOT, "trigger"),
-    resolve(REPO_ROOT, "api"),
-    resolve(REPO_ROOT, "dashboard"),
+    WORKSPACE_ROOT,
+    resolve(WORKSPACE_ROOT, "packages", "review-agent"),
+    resolve(WORKSPACE_ROOT, "apps", "api"),
+    resolve(WORKSPACE_ROOT, "apps", "dashboard"),
   ]);
   if (protectedPaths.has(resolved)) throw new Error(`Refusing to remove protected output path: ${resolved}`);
 }
@@ -393,13 +386,13 @@ function buildIsolationReport(args, datasetMatch, reviewInput) {
       ? "parent harness selects target from golden dataset; child review subprocess receives only production PR input"
       : "parent harness selects arbitrary PR; child review subprocess receives only production PR input",
     review_subprocess_cwd: "temporary directory outside evals/",
-    implementation_pipeline: "temporary worker copy of trigger/src/runtime-review/index.ts#runRuntimeReview",
-    trigger_workflow_context: {
-      active_parent_task: "review",
-      covered_stage: "review-runtime",
+    implementation_pipeline: "temporary worker copy of packages/review-agent/src/runtime-review/index.ts#runRuntimeReview",
+    board_workflow_context: {
+      active_workflow: "review",
+      covered_topic: "runtime-review",
       covered_pipeline: "intent -> expectation plan -> expectation agents -> final runtime review",
       omitted_side_effects: [
-        "Trigger.dev enqueue/batch orchestration",
+        "Board admission, leases, retries, and dependency reduction",
         "internal API prepare/event/complete calls",
         "Daytona sandbox creation",
         "GitHub progress comments",
@@ -468,14 +461,15 @@ async function runReviewSubprocess(args, reviewInput, out) {
 }
 
 function writeWorkerSources(workerDir, args) {
-  mkdirSync(join(workerDir, "shared"), { recursive: true });
-  mkdirSync(join(workerDir, "runtime-review"), { recursive: true });
-  writeFileSync(join(workerDir, "shared", "utils.ts"), readFileSync(join(REPO_ROOT, "trigger", "src", "shared", "utils.ts"), "utf8"));
+  const sourceRoot = join(WORKSPACE_ROOT, "packages", "review-agent", "src");
+  for (const directory of ["daytona", "review", "runtime-review", "shared"]) {
+    cpSync(join(sourceRoot, directory), join(workerDir, directory), { recursive: true });
+  }
   writeFileSync(join(workerDir, "runtime-review", "index.ts"), patchedRuntimeReviewSource(args));
 }
 
 function patchedRuntimeReviewSource(args) {
-  const sourcePath = join(REPO_ROOT, "trigger", "src", "runtime-review", "index.ts");
+  const sourcePath = join(WORKSPACE_ROOT, "packages", "review-agent", "src", "runtime-review", "index.ts");
   let source = readFileSync(sourcePath, "utf8");
 
   source = source.replace(
@@ -501,11 +495,11 @@ function patchedRuntimeReviewSource(args) {
 function addEvalBaseShaCheckout(source) {
   source = source.replace(
     `      baseRef: input.baseRef,
-      repoDir,
+      repoDir
     });`,
     `      baseRef: input.baseRef,
       baseSha: (input as RuntimeReviewInput & { baseSha?: string }).baseSha,
-      repoDir,
+      repoDir
     });`,
   );
   source = source.replace(
@@ -518,27 +512,35 @@ function addEvalBaseShaCheckout(source) {
 }): Promise<void> {`,
   );
 
-  const original = `  await runCommand("git", ["fetch", "--no-tags", "origin", \`+refs/heads/\${input.baseRef}:refs/remotes/origin/\${input.baseRef}\`], {
-    cwd: input.repoDir,
-    env: gitEnv,
-    timeoutMs: evalGitTimeoutMs(),
-  });
+  const original = `  await runCommand(
+    "git",
+    ["fetch", "--no-tags", "origin", \`+refs/heads/\${input.baseRef}:refs/remotes/origin/\${input.baseRef}\`],
+    {
+      cwd: input.repoDir,
+      env: gitEnv,
+      timeoutMs: evalGitTimeoutMs()
+    }
+  );
 `;
   const replacement = `  if (input.baseSha?.trim()) {
     await runCommand("git", ["update-ref", \`refs/remotes/origin/\${input.baseRef}\`, input.baseSha.trim()], {
       cwd: input.repoDir,
-      timeoutMs: evalGitTimeoutMs(),
+      timeoutMs: evalGitTimeoutMs()
     });
   } else {
-    await runCommand("git", ["fetch", "--no-tags", "origin", \`+refs/heads/\${input.baseRef}:refs/remotes/origin/\${input.baseRef}\`], {
-      cwd: input.repoDir,
-      env: gitEnv,
-      timeoutMs: evalGitTimeoutMs(),
-    });
+    await runCommand(
+      "git",
+      ["fetch", "--no-tags", "origin", \`+refs/heads/\${input.baseRef}:refs/remotes/origin/\${input.baseRef}\`],
+      {
+        cwd: input.repoDir,
+        env: gitEnv,
+        timeoutMs: evalGitTimeoutMs()
+      }
+    );
   }
 `;
   if (!source.includes(original)) {
-    throw new Error("Could not patch historical base SHA checkout in trigger/src/runtime-review/index.ts");
+    throw new Error("Could not patch historical base SHA checkout in packages/review-agent/src/runtime-review/index.ts");
   }
   return source.replace(original, replacement);
 }
@@ -555,69 +557,42 @@ function addEvalGitTimeouts(source) {
 
 `;
   if (!source.includes(anchor)) {
-    throw new Error("Could not locate checkoutPullRequest for git timeout patch in trigger/src/runtime-review/index.ts");
+    throw new Error("Could not locate checkoutPullRequest for git timeout patch in packages/review-agent/src/runtime-review/index.ts");
   }
   return source.replace(anchor, `${helper}${anchor}`);
 }
 
 function addEvalRuntimeCaps(source) {
-  const original = `export function runtimeReviewOptions(env: NodeJS.ProcessEnv = process.env): RuntimeReviewOptions {
-  const all = Number.MAX_SAFE_INTEGER;
-  return {
-    profile: "prod",
-    areaConcurrency: all,
-    taskConcurrency: all,
-    maxAreas: all,
-    maxProbesPerArea: all,
-    maxMentalTraceCalls: all,
-    maxAgentIterations: all,
-    plannerModel: runtimePlannerModel(env),
-    plannerEffort: "medium",
-    agentModel: runtimeAgentModel(env),
-    agentEffort: "medium",
-    mentalTraceModel: runtimeMentalTraceModel(env),
-    mentalTraceEffort: "low",
-  };
-}
-`;
-  const replacement = `export function runtimeReviewOptions(env: NodeJS.ProcessEnv = process.env): RuntimeReviewOptions {
-  const all = Number.MAX_SAFE_INTEGER;
-  return {
-    profile: "prod",
-    areaConcurrency: evalPositiveInt(env, "EVAL_RUNTIME_REVIEW_AREA_CONCURRENCY") ?? all,
-    taskConcurrency: evalPositiveInt(env, "EVAL_RUNTIME_REVIEW_TASK_CONCURRENCY") ?? all,
-    maxAreas: evalPositiveInt(env, "EVAL_RUNTIME_REVIEW_MAX_EXPECTATIONS") ?? all,
-    maxProbesPerArea: all,
-    maxMentalTraceCalls: evalPositiveInt(env, "EVAL_RUNTIME_REVIEW_MAX_MENTAL_TRACE_CALLS") ?? all,
-    maxAgentIterations: evalPositiveInt(env, "EVAL_RUNTIME_REVIEW_MAX_AGENT_ITERATIONS") ?? all,
-    plannerModel: runtimePlannerModel(env),
-    plannerEffort: "medium",
-    agentModel: runtimeAgentModel(env),
-    agentEffort: "medium",
-    mentalTraceModel: runtimeMentalTraceModel(env),
-    mentalTraceEffort: "low",
-  };
-}
-
-function evalPositiveInt(env: NodeJS.ProcessEnv, name: string): number | undefined {
+  const optionsAnchor = `    maxAreas: Number.MAX_SAFE_INTEGER,`;
+  const concurrencyAnchor = `export const MAX_PARALLEL_INVESTIGATIONS = 10;`;
+  const helperAnchor = `// The resolved repository config is the loop termination condition.`;
+  if (!source.includes(optionsAnchor) || !source.includes(concurrencyAnchor) || !source.includes(helperAnchor)) {
+    throw new Error("Could not patch runtimeReviewOptions in packages/review-agent/src/runtime-review/index.ts");
+  }
+  return source
+    .replace(
+      concurrencyAnchor,
+      `export const MAX_PARALLEL_INVESTIGATIONS =
+  evalPositiveInt(process.env, "EVAL_RUNTIME_REVIEW_AREA_CONCURRENCY") ?? 10;`,
+    )
+    .replace(
+      optionsAnchor,
+      `    maxAreas: evalPositiveInt(env, "EVAL_RUNTIME_REVIEW_MAX_EXPECTATIONS") ?? Number.MAX_SAFE_INTEGER,`,
+    )
+    .replace(
+      helperAnchor,
+      `function evalPositiveInt(env: NodeJS.ProcessEnv, name: string): number | undefined {
   const parsed = Number.parseInt(env[name] ?? "", 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
-`;
-  if (!source.includes(original)) {
-    throw new Error("Could not patch runtimeReviewOptions in trigger/src/runtime-review/index.ts");
-  }
-  return source.replace(original, replacement);
+
+${helperAnchor}`,
+    );
 }
 
 function addEvalArtifactCopy(source) {
-  const original = `  } finally {
-    await cleanupTransientPath(workspace, "runtime_review_workspace");
-  }
-}
-`;
-  const replacement = `  } finally {
-    const evalArtifactDir = process.env.EVAL_RUNTIME_REVIEW_ARTIFACTS_DIR?.trim();
+  const original = `    await cleanupTransientPath(workspace, "runtime_review_workspace");`;
+  const replacement = `    const evalArtifactDir = process.env.EVAL_RUNTIME_REVIEW_ARTIFACTS_DIR?.trim();
     if (evalArtifactDir) {
       await mkdir(evalArtifactDir, { recursive: true })
         .then(() => cp(workspace, evalArtifactDir, { recursive: true, force: true }))
@@ -626,11 +601,9 @@ function addEvalArtifactCopy(source) {
         });
     }
     await cleanupTransientPath(workspace, "runtime_review_workspace");
-  }
-}
 `;
   if (!source.includes(original)) {
-    throw new Error("Could not patch runtime workspace artifact copy in trigger/src/runtime-review/index.ts");
+    throw new Error("Could not patch runtime workspace artifact copy in packages/review-agent/src/runtime-review/index.ts");
   }
   return source.replace(original, replacement);
 }
@@ -662,7 +635,7 @@ ${boundary}
     );
   }
 
-  throw new Error("Could not inject eval isolation boundary into trigger/src/runtime-review/index.ts");
+  throw new Error("Could not inject eval isolation boundary into packages/review-agent/src/runtime-review/index.ts");
 }
 
 function runnerSource(workerDir, inputPath, resultPath) {
@@ -738,9 +711,6 @@ function isolatedEnv(args, artifactDir) {
   env.EVAL_RUNTIME_REVIEW_ARTIFACTS_DIR = artifactDir;
   if (args.maxExpectations) env.EVAL_RUNTIME_REVIEW_MAX_EXPECTATIONS = String(args.maxExpectations);
   if (args.areaConcurrency) env.EVAL_RUNTIME_REVIEW_AREA_CONCURRENCY = String(args.areaConcurrency);
-  if (args.taskConcurrency) env.EVAL_RUNTIME_REVIEW_TASK_CONCURRENCY = String(args.taskConcurrency);
-  if (args.maxMentalTrace) env.EVAL_RUNTIME_REVIEW_MAX_MENTAL_TRACE_CALLS = String(args.maxMentalTrace);
-  if (args.maxAgentIterations) env.EVAL_RUNTIME_REVIEW_MAX_AGENT_ITERATIONS = String(args.maxAgentIterations);
   return env;
 }
 
@@ -884,9 +854,6 @@ async function main() {
     eval_caps: {
       max_expectations: args.maxExpectations || null,
       area_concurrency: args.areaConcurrency || null,
-      task_concurrency: args.taskConcurrency || null,
-      max_mental_trace: args.maxMentalTrace || null,
-      max_agent_iterations: args.maxAgentIterations || null,
     },
     golden_reference_metadata_reserved_for_post_review: datasetMatch
       ? {

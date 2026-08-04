@@ -7,7 +7,6 @@ export type AppConfig = {
   dashboardUrl: string;
   apiBaseUrl?: string;
   auth: AuthConfig;
-  trigger: TriggerConfig;
   billing: BillingConfig;
   graph?: GraphConfig;
 };
@@ -60,22 +59,11 @@ type AuthConfig = {
   clerkSecretKey?: string;
 };
 
-export type TriggerConfig = {
-  apiBaseUrl: string;
-  secretKey: string;
-  previewBranch?: string;
-  backfillTaskId: string;
-};
-
-const BACKFILL_TASK_ID = "github-installation-backfill";
-
 export function loadConfig(env = process.env): AppConfig {
   const dashboardUrl = dashboardUrlFromEnv(env);
   const dashboardAllowedOrigins = parseDashboardAllowedOrigins(env.DASHBOARD_ORIGIN, dashboardUrl);
-  const triggerSecretKey = requiredEnv(env, "TRIGGER_SECRET_KEY");
   // Context and review workers rotate independently even though one API serves both.
   const internalApiToken = optionalEnv(env, "JINA_PRODUCT_INTERNAL_API_TOKEN") ?? requiredEnv(env, "INTERNAL_API_TOKEN");
-  validateTriggerSecretKey(triggerSecretKey, env);
   validateSecretsEncryptionKey(env);
   return {
     port: parsePort(env.PORT),
@@ -86,12 +74,6 @@ export function loadConfig(env = process.env): AppConfig {
     dashboardUrl,
     apiBaseUrl: normalizeBaseUrl(env.API_BASE_URL),
     auth: parseAuthConfig(env),
-    trigger: {
-      apiBaseUrl: env.TRIGGER_API_URL ?? "https://api.trigger.dev",
-      secretKey: triggerSecretKey,
-      previewBranch: optionalEnv(env, "TRIGGER_PREVIEW_BRANCH"),
-      backfillTaskId: BACKFILL_TASK_ID,
-    },
     billing: parseBillingConfig(env, dashboardUrl),
     graph: parseGraphConfig(env),
   };
@@ -138,16 +120,6 @@ function parseBillingEnforcement(value: string | undefined): BillingEnforcement 
     return normalized;
   }
   return "off";
-}
-
-function validateTriggerSecretKey(secretKey: string, env: NodeJS.ProcessEnv): void {
-  const production = env.NODE_ENV === "production";
-  const allowDevKey = parseBoolean(env.TRIGGER_ALLOW_DEV_SECRET_IN_PRODUCTION, false);
-  if (production && !allowDevKey && secretKey.startsWith("tr_dev_")) {
-    throw new Error(
-      "TRIGGER_SECRET_KEY is a Trigger.dev development key while NODE_ENV=production; configure a production key.",
-    );
-  }
 }
 
 /**

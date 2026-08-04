@@ -26,7 +26,7 @@ steps:
         pnpm install --frozen-lockfile --store-dir=/tmp/pnpm-store
         pnpm typecheck
         pnpm --filter @jina/api build
-        pnpm --filter @jina/api migrate:product
+        node apps/api/dist/product/migrate-all.js
         unset DATABASE_URL
         pnpm test
         pnpm --filter @jina/dashboard build

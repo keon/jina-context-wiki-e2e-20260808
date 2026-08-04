@@ -19,6 +19,12 @@ import {
   type DashboardTeam,
 } from "./auth.js";
 import { createBillingService, normalizeTopupCredits } from "./billing.js";
+import { admitScheduledBillingRetry } from "./billing-board-admission.js";
+import {
+  getRelationalBoardDashboardOverview,
+  mergeDashboardWorkOverviews,
+  type DashboardWorkOverview,
+} from "./board-dashboard.js";
 import { parseCodexConnectTelemetry } from "./codex-connect-telemetry.js";
 import { normalizeCodexHarnessAuthInput, normalizeHarnessModelInput } from "./codex-harness.js";
 import { dashboardOriginAllowed, type AppConfig } from "./config.js";
@@ -32,7 +38,6 @@ import {
 import { GraphApiClient } from "./graph-client.js";
 import {
   acceptBackfill,
-  acceptScheduledScan,
   authorizeInternal,
   completeReview,
   prepareReview,
@@ -51,6 +56,7 @@ import {
 } from "./model-settings.js";
 import { openRouterOAuthCallback, startOpenRouterOAuth } from "./openrouter-oauth.js";
 import { buildDashboard } from "./records.js";
+import { ReviewOrchestratorDispatcher } from "./review-dispatcher.js";
 import {
   connectGithubInstallationToTenant,
   createJinaOrganization,
@@ -78,6 +84,7 @@ import {
   knownProjects,
   listTenantRepositoryAccess,
   listTenantGithubConnections,
+  listManualReviewRuns,
   listViewerTenants,
   normalizeModelProvider,
   normalizeReviewTriggerMode,
@@ -93,12 +100,11 @@ import {
   updateJinaOrganizationName,
 } from "./store.js";
 import type { DashboardSession as Session } from "./auth.js";
-import { TriggerClient } from "./trigger.js";
 
 const FLOW_ID_LOG_VALUE = /^[a-zA-Z0-9_-]{8,80}$/;
 
 export function createApp(config: AppConfig): Hono {
-  const trigger = new TriggerClient(config.trigger);
+  const reviewDispatcher = new ReviewOrchestratorDispatcher();
   const billing = createBillingService(config);
   const graphs = new GraphApiClient(config.graph);
   const app = new Hono();
@@ -653,9 +659,14 @@ export function createApp(config: AppConfig): Hono {
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
     const membershipMs = Date.now() - startedAt - sessionMs;
     const repository = c.req.query("repository")?.trim();
+    const ref = c.req.query("ref")?.trim();
     const context = await tenantGraphContext(tenantId, repository || undefined);
     const repositoriesMs = Date.now() - startedAt - sessionMs - membershipMs;
-    const documents = await graphs.listDocuments(context, repository || undefined);
+    const documents = await graphs.listDocuments(
+      context,
+      repository || undefined,
+      ref || undefined,
+    );
     const contextApiMs = Date.now() - startedAt - sessionMs - membershipMs - repositoriesMs;
     const totalMs = Date.now() - startedAt;
     c.header(
@@ -665,6 +676,7 @@ export function createApp(config: AppConfig): Hono {
     console.info("context_documents_profile", {
       tenant_id: tenantId,
       repository: repository || "all",
+      ref: ref || "default",
       document_count: documents.length,
       session_ms: sessionMs,
       membership_ms: membershipMs,
@@ -771,7 +783,18 @@ export function createApp(config: AppConfig): Hono {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
-    return c.json(await graphs.getWorkOverview(await tenantGraphContext(tenantId)));
+    const context = await tenantGraphContext(tenantId);
+    const [legacy, relational] = await Promise.all([
+      graphs.getWorkOverview(context).catch((error): DashboardWorkOverview => {
+        console.warn("legacy_board_overview_unavailable", {
+          tenant_id: tenantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return { board: { tasks: [], dependencies: [] }, events: [] };
+      }),
+      getRelationalBoardDashboardOverview(tenantId),
+    ]);
+    return c.json(mergeDashboardWorkOverviews(legacy, relational));
   });
 
   app.get("/dashboard/tenants/:tenantId/operations/task-types", async (c) => {
@@ -1410,7 +1433,7 @@ export function createApp(config: AppConfig): Hono {
     const rawBody = await c.req.text();
     const response = await handleGithubWebhook({
       config,
-      trigger,
+      trigger: reviewDispatcher,
       headers: c.req.raw.headers,
       rawBody,
       billing,
@@ -1432,6 +1455,15 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post("/internal/reviews/prepare", (c) => prepareReview(c, config, billing));
+  app.post("/internal/reviews/manual-runs", async (c) => {
+    authorizeInternal(c, config);
+    const body = (await c.req.json().catch(() => undefined)) as Record<string, unknown> | undefined;
+    const scopeTag = typeof body?.scope_tag === "string" ? body.scope_tag.trim() : "";
+    if (!/^manual-pr:[1-9][0-9]*:[1-9][0-9]*:[1-9][0-9]*$/.test(scopeTag)) {
+      throw new ApiError(400, "scope_tag is invalid");
+    }
+    return c.json(await listManualReviewRuns(scopeTag));
+  });
   app.post("/internal/reviews/:reviewRunId/events", (c) => recordReviewEvent(c, config));
   app.post("/internal/reviews/:reviewRunId/complete", (c) => completeReview(c, config, billing));
   app.post("/internal/reviews/:reviewRunId/usage", (c) => recordReviewUsage(c, config, billing));
@@ -1486,7 +1518,12 @@ export function createApp(config: AppConfig): Hono {
     });
   });
   app.post("/internal/installations/backfill", (c) => acceptBackfill(c, config, billing));
-  app.post("/internal/scheduled-review-scan", (c) => acceptScheduledScan(c, config));
+  app.post("/internal/schedules/billing-retry", async (c) => {
+    authorizeInternal(c, config);
+    const body = await c.req.json().catch(() => ({}));
+    const workflow = await admitScheduledBillingRetry(body);
+    return c.json({ accepted: true, workflow_id: workflow.id, replayed: workflow.replayed }, 202);
+  });
   app.post("/internal/integrations/resolve", (c) => resolveIntegrations(c, config));
   app.post("/internal/context/execution-profile", (c) => resolveContextExecutionProfile(c, config));
   app.post("/internal/billing/retry", (c) => retryBilling(c, config, billing));

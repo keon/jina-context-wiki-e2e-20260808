@@ -23,6 +23,7 @@ import {
   contextBuildUrl,
   contextDocumentUrl,
   contextDocumentsUrl,
+  contextReleasesUrl,
   contextRepositoriesUrl,
   formatCitation,
 } from "../lib/context";
@@ -49,6 +50,16 @@ import {
 } from "../lib/context-progress";
 
 type Repository = { name: string; defaultBranch: string };
+
+type ContextRelease = {
+  id: string;
+  repository: string;
+  ref: string;
+  commitSha: string;
+  createdAt: string;
+  publishedAt?: string;
+  contextStatus: "available" | "partial" | "unavailable";
+};
 
 type DocumentDetail = ContextDocumentSummary & {
   bodyMarkdown: string;
@@ -122,6 +133,8 @@ export default function ContextPage() {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [repositoriesLoading, setRepositoriesLoading] = useState(false);
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
+  const [releases, setReleases] = useState<ContextRelease[]>([]);
+  const [releasesLoading, setReleasesLoading] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState("");
   const [detail, setDetail] = useState<DocumentDetail | null>(null);
@@ -130,6 +143,7 @@ export default function ContextPage() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [repositoryFilter, setRepositoryFilter] = useState("");
+  const [refFilter, setRefFilter] = useState("");
 
   const [buildRepository, setBuildRepository] = useState("");
   const [building, setBuilding] = useState(false);
@@ -180,15 +194,64 @@ export default function ContextPage() {
     }
   }, [selected, isCurrentTenant]);
 
-  const loadDocuments = useCallback(async (repository: string) => {
+  const loadReleases = useCallback(async (repository: string) => {
     if (!selected || !repository) return;
+    const requestTenantId = selected.tenantId;
+    setReleasesLoading(true);
+    setError(null);
+    try {
+      const body = await fetchProfiledContextJson<{ releases?: ContextRelease[] }>(
+        "releases",
+        contextReleasesUrl(selected, repository),
+        () => "Could not load context versions.",
+      );
+      if (!isCurrentTenant(requestTenantId)) return;
+      const seen = new Set<string>();
+      const nextReleases = (body.releases ?? [])
+        .filter(
+          (release) =>
+            release.repository.toLowerCase() === repository.toLowerCase() &&
+            release.contextStatus !== "unavailable" &&
+            !seen.has(release.ref) &&
+            seen.add(release.ref),
+        )
+        .sort((left, right) =>
+          (right.publishedAt ?? right.createdAt).localeCompare(
+            left.publishedAt ?? left.createdAt,
+          ),
+        );
+      setReleases(nextReleases);
+      const defaultBranch = repositories.find(
+        (candidate) => candidate.name === repository,
+      )?.defaultBranch;
+      setRefFilter((current) =>
+        current && nextReleases.some((release) => release.ref === current)
+          ? current
+          : nextReleases.find((release) => release.ref === defaultBranch)?.ref ??
+            nextReleases[0]?.ref ??
+            "",
+      );
+    } catch (cause) {
+      if (!isCurrentTenant(requestTenantId)) return;
+      setReleases([]);
+      setRefFilter("");
+      setError(
+        cause instanceof Error ? cause.message : "Could not load context versions.",
+      );
+    } finally {
+      if (isCurrentTenant(requestTenantId)) setReleasesLoading(false);
+    }
+  }, [selected, isCurrentTenant, repositories]);
+
+  const loadDocuments = useCallback(async (repository: string, ref: string) => {
+    if (!selected || !repository || !ref) return;
     const requestTenantId = selected.tenantId;
     setLoading(true);
     setError(null);
     try {
       const body = await fetchProfiledContextJson<{ documents?: ContextDocumentSummary[] }>(
         "documents",
-        contextDocumentsUrl(selected, repository),
+        contextDocumentsUrl(selected, repository, ref),
         (status) =>
           status === 503
             ? "Context is not configured for this deployment."
@@ -222,7 +285,10 @@ export default function ContextPage() {
     setRepositories([]);
     setRepositoriesLoading(false);
     setRepositoryError(null);
+    setReleases([]);
+    setReleasesLoading(false);
     setRepositoryFilter("");
+    setRefFilter("");
     setProgress(null);
     setActiveBuilds([]);
     setBuildNotice(null);
@@ -267,9 +333,22 @@ export default function ContextPage() {
     setDetail(null);
     setExpanded(new Set());
     setDocuments([]);
+    setReleases([]);
+    setRefFilter("");
     setError(null);
-    if (repositoryFilter) void loadDocuments(repositoryFilter);
-  }, [repositoryFilter, loadDocuments]);
+    if (repositoryFilter) void loadReleases(repositoryFilter);
+  }, [repositoryFilter, loadReleases]);
+
+  useEffect(() => {
+    setSelectedId("");
+    setDetail(null);
+    setExpanded(new Set());
+    setDocuments([]);
+    setError(null);
+    if (repositoryFilter && refFilter) {
+      void loadDocuments(repositoryFilter, refFilter);
+    }
+  }, [repositoryFilter, refFilter, loadDocuments]);
 
   useEffect(() => {
     if (!selected || !selectedId) {
@@ -560,7 +639,10 @@ export default function ContextPage() {
         // The catalog only changes once the build commits, so it is reloaded
         // then rather than on every poll.
         if (next.status === "completed" && repositoryFilter === next.repository) {
-          void loadDocuments(repositoryFilter);
+          void loadReleases(repositoryFilter);
+          if (refFilter && (!next.ref || next.ref === refFilter)) {
+            void loadDocuments(repositoryFilter, refFilter);
+          }
         }
       } catch {
         // A failed poll is not worth surfacing: the next one is seconds away.
@@ -580,6 +662,8 @@ export default function ContextPage() {
     progress?.status,
     isCurrentTenant,
     repositoryFilter,
+    refFilter,
+    loadReleases,
     loadDocuments,
     applyBuildProgress,
   ]);
@@ -593,6 +677,7 @@ export default function ContextPage() {
   const activeRepository = repositories.find(
     (repository) => repository.name === repositoryFilter,
   );
+  const activeRelease = releases.find((release) => release.ref === refFilter);
 
   return (
     <div className="context-page">
@@ -606,7 +691,7 @@ export default function ContextPage() {
             <strong>{repositoryFilter || "Choose a repository"}</strong>
           </div>
           {activeRepository ? (
-            <code>{documents[0]?.ref ?? activeRepository.defaultBranch}</code>
+            <code>{activeRelease?.ref ?? documents[0]?.ref ?? activeRepository.defaultBranch}</code>
           ) : null}
         </div>
         <div className="context-repository-bar__actions">
@@ -634,6 +719,30 @@ export default function ContextPage() {
                   </option>
                 ),
               )}
+            </select>
+          </label>
+          <label>
+            <select
+              aria-label="Context version"
+              value={refFilter}
+              onChange={(event) => {
+                setRefFilter(event.target.value);
+                setFilter("");
+              }}
+              disabled={!repositoryFilter || releasesLoading || !releases.length}
+            >
+              <option value="">
+                {releasesLoading
+                  ? "Loading versions…"
+                  : releases.length
+                    ? "Choose a version"
+                    : "No context published"}
+              </option>
+              {releases.map((release) => (
+                <option value={release.ref} key={release.id}>
+                  {release.ref} · {release.commitSha.slice(0, 8)}
+                </option>
+              ))}
             </select>
           </label>
           <details className="context-build-menu">

@@ -1,17 +1,19 @@
 # Deployment
 
 The unified API lives in `apps/api`; product/review, Board, Context, causal graph,
-and MCP routes ship in one backend image. Trigger.dev review workers remain under
-`services/review-trigger` and deploy through
-`.github/workflows/deploy-review-trigger.yml`. The customer dashboard deploys from
-`apps/dashboard`.
+and MCP routes ship in one backend image. Review, Context, and control workflows are
+durably admitted to the relational Board and executed by `apps/worker`. The portable
+Daytona review runtime lives in `packages/review-agent`. The customer dashboard deploys
+from `apps/dashboard`.
 
-Run `scripts/check-staging-readiness.sh` before a staging release. Build immutable
-API/worker images with `cloudbuild.staging-images.yaml` and a tag containing `staging`, then pass
+Build immutable API/worker images with `cloudbuild.staging-images.yaml` and a tag
+containing `staging`, then pass
 that tag and the UUID-valued `JINA_CONTEXT_TENANT_ID` to
 `scripts/deploy-staging.sh`. The script is fail-closed on any resource, service
 account, secret, database, tenant, bucket, URL, or image tag that is not explicitly
-staging-scoped. Production continues to use the coordinated `cloudbuild.yaml` path below.
+staging-scoped. The staging deploy also installs the Board-recorded 15-minute billing
+retry schedule and the OpenTelemetry sidecars. Production continues to use the
+coordinated `cloudbuild.yaml` path below.
 
 Cloud Build validates, builds, and deploys one coordinated release to
 `jina-v2/us-east1`. API, worker, dashboard, and admin images are built from the same

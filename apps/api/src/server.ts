@@ -78,6 +78,7 @@ import {
   type BoardPageIndexAttachmentTransactionPort,
   type VerifiedApiToken
 } from "@jina/context-engine";
+import type { PostgresRelationalBoardWorkerStore } from "@jina/db";
 import type { GitHubWebhookEvent, ParsedGitHubWebhook } from "@jina/github";
 import { isContextTrigger } from "@jina/github";
 import {
@@ -86,6 +87,7 @@ import {
   MetricsRegistry,
   recordHttpRequest,
   requestTraceContext,
+  withOpenTelemetrySpan,
   type Logger
 } from "@jina/observability";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
@@ -131,9 +133,27 @@ const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = [
   "run-review",
+  "prepare-review",
+  "summary-review",
+  "runtime-review",
+  "finalize-review",
+  "publish-review",
+  "settle-review",
+  "github-installation-backfill",
+  "billing-retry",
   ...Object.values(contextWorkflowBoardTopics),
   ...Object.values(causalGraphBoardTopics)
 ] as const;
+const RELATIONAL_BOARD_TOPICS = new Set<string>([
+  "prepare-review",
+  "summary-review",
+  "runtime-review",
+  "finalize-review",
+  "publish-review",
+  "settle-review",
+  "github-installation-backfill",
+  "billing-retry"
+]);
 const CONTEXT_BOARD_TOPICS = new Set<string>(Object.values(contextWorkflowBoardTopics));
 const CAUSAL_GRAPH_TOPICS = new Set<string>(Object.values(causalGraphBoardTopics));
 const MODEL_BOARD_TOPICS = new Set<string>([
@@ -221,6 +241,11 @@ export interface ApiServerConfig {
   readonly issueGraphPublicationTransaction?: BoardIssueGraphPublicationTransactionPort;
   readonly contextQuotaService?: ContextQuotaService;
   readonly contextPhaseCheckpointStore?: ContextPhaseCheckpointStore;
+  /** Relational workflow adapter used only by the versioned review topics. */
+  readonly relationalBoardWorkerStore?: Pick<
+    PostgresRelationalBoardWorkerStore,
+    "claim" | "renew" | "release" | "complete" | "retry" | "fail"
+  >;
   /** Test/embedding override. Production uses the structured service logger. */
   readonly logger?: Logger;
   /** Dashboard and review API handler mounted into the single Jina server. */
@@ -706,7 +731,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     response.once("finish", () => settle(false));
     response.once("close", () => settle(true));
     if (config.productApiRequestHandler && isProductApiRoute(pathname)) {
-      void Promise.resolve(config.productApiRequestHandler(request, response)).catch((error: unknown) => {
+      void withOpenTelemetrySpan({
+        name: `${request.method ?? "GET"} ${routeLabel}`,
+        parent: trace,
+        attributes: {
+          "http.request.method": request.method ?? "GET",
+          "http.route": routeLabel
+        },
+        operation: () => Promise.resolve(config.productApiRequestHandler!(request, response))
+      }).catch((error: unknown) => {
         if (response.destroyed || response.socket?.destroyed) return;
         requestLogger.error("Product API request failed", {
           event: "http.product_request.error",
@@ -724,12 +757,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // run inside it. The wrapping IIFE keeps `routed` a synchronously-produced
     // promise, so the catch below stays the sole error-to-response path and now
     // also covers a throw raised during verification.
-    const routed = (async () => {
-      const principal = await authenticatedPrincipal(request, config, pathname, verifyApiToken);
-      return principal && principal.tenantId !== "*" && contextStore.runInTenantScope
-        ? contextStore.runInTenantScope(principal.tenantId, () => route(request, response, principal))
-        : route(request, response, principal);
-    })();
+    const routed = withOpenTelemetrySpan({
+      name: `${request.method ?? "GET"} ${routeLabel}`,
+      parent: trace,
+      attributes: {
+        "http.request.method": request.method ?? "GET",
+        "http.route": routeLabel
+      },
+      operation: async () => {
+        const principal = await authenticatedPrincipal(request, config, pathname, verifyApiToken);
+        return principal && principal.tenantId !== "*" && contextStore.runInTenantScope
+          ? contextStore.runInTenantScope(principal.tenantId, () => route(request, response, principal))
+          : route(request, response, principal);
+      }
+    });
     void routed.catch((error: unknown) => {
       if (response.destroyed || response.socket?.destroyed) return;
       const apiError = httpError(error);
@@ -3135,20 +3176,65 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     };
   }
 
+  function workerRuntimeIdentity(
+    body: Record<string, unknown>
+  ): Pick<WorkerReleaseGuard, "service" | "revision"> | undefined {
+    if (config.requireWorkerReleaseGate) return undefined;
+    const rawService = body.workerRuntimeService;
+    const rawRevision = body.workerRuntimeRevision;
+    if (rawService === undefined && rawRevision === undefined) return undefined;
+    const service = requiredString(rawService, "workerRuntimeService");
+    const revision = requiredString(rawRevision, "workerRuntimeRevision");
+    if (service !== "jina-context-worker" && service !== "jina-causal-graph-worker" && service !== "jina-task-worker") {
+      throw invalidRequest("workerRuntimeService is not a recognized worker service");
+    }
+    if (!revision.startsWith(`${service}-`) || !/^[a-z0-9][a-z0-9-]{0,127}$/.test(revision)) {
+      throw invalidRequest("workerRuntimeRevision does not belong to workerRuntimeService");
+    }
+    return { service, revision };
+  }
+
   function requireWorkerServiceForTopics(
-    workerRelease: WorkerReleaseGuard | undefined,
+    workerIdentity: Pick<WorkerReleaseGuard, "service"> | undefined,
     topics: readonly string[]
   ): void {
-    if (!workerRelease) return;
-    const expectedService = topics.every((topic) => topic === "run-review")
+    if (!workerIdentity) return;
+    const expectedService = topics.every((topic) => topic === "run-review" || RELATIONAL_BOARD_TOPICS.has(topic))
       ? "jina-task-worker"
       : topics.every((topic) => CONTEXT_BOARD_TOPICS.has(topic))
         ? "jina-context-worker"
         : topics.every((topic) => CAUSAL_GRAPH_TOPICS.has(topic))
           ? "jina-causal-graph-worker"
           : undefined;
-    if (!expectedService || workerRelease.service !== expectedService) {
+    if (!expectedService || workerIdentity.service !== expectedService) {
       throw new ApiError(409, "worker_release_rejected", "worker service is not allowed to process these topics");
+    }
+  }
+
+  function requireRelationalBoardWorkerStore(): NonNullable<ApiServerConfig["relationalBoardWorkerStore"]> {
+    if (!config.relationalBoardWorkerStore) {
+      throw new ApiError(503, "relational_board_unavailable", "relational Board worker storage is not configured");
+    }
+    return config.relationalBoardWorkerStore;
+  }
+
+  function relationalReleaseIdentity(workerRelease: WorkerReleaseGuard) {
+    return {
+      releaseId: workerRelease.releaseId,
+      credentialSha256: workerRelease.credentialSha256,
+      service: workerRelease.service,
+      revision: workerRelease.revision
+    };
+  }
+
+  async function relationalBoardCall<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof Error && error.name === "RelationalBoardWorkerReleaseRejectedError") {
+        throw new ApiError(409, "worker_release_rejected", "worker release identity is not active");
+      }
+      throw error;
     }
   }
 
@@ -3169,8 +3255,60 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw invalidRequest("preferredRepository must be an owner/repository name");
     }
     const workerRelease = workerReleaseGuard(body);
+    const workerRuntime = workerRuntimeIdentity(body);
+    const workerIdentity = workerRelease ?? workerRuntime;
     const claimRelease = workerRelease ? { ...workerRelease, requireClaimAdmission: true as const } : undefined;
-    requireWorkerServiceForTopics(workerRelease, topics);
+    requireWorkerServiceForTopics(workerIdentity, topics);
+    if (topics.some((topic) => RELATIONAL_BOARD_TOPICS.has(topic))) {
+      if (!topics.every((topic) => RELATIONAL_BOARD_TOPICS.has(topic))) {
+        throw invalidRequest("relational Board topics cannot be mixed with legacy Board topics in one claim");
+      }
+      const store = requireRelationalBoardWorkerStore();
+      const claimed = await relationalBoardCall(() =>
+        store.claim({
+          topics,
+          workerId,
+          workerService: workerIdentity?.service ?? "jina-task-worker",
+          workerRelease: workerRelease?.releaseId ?? (workerRuntime ? "ungated" : "development"),
+          workerRevision: workerIdentity?.revision ?? "development",
+          leaseDurationMs: WORKER_LEASE_MS,
+          ...(tenantId === "*" ? {} : { tenantId }),
+          ...(workerRelease ? { releaseIdentity: relationalReleaseIdentity(workerRelease) } : {})
+        })
+      );
+      json(
+        response,
+        claimed ? 200 : 204,
+        claimed
+          ? {
+              message: {
+                id: claimed.deliveryId,
+                topic: claimed.topic,
+                leaseId: claimed.leaseId,
+                leaseExpiresAt: claimed.leaseExpiresAt,
+                attempt: claimed.attempt,
+                maxAttempts: claimed.maxAttempts,
+                writeFenceToken: claimed.writeFenceToken
+              },
+              task: {
+                id: claimed.taskId,
+                metadata: {
+                  ...claimed.metadata,
+                  tenantId: claimed.tenantId,
+                  workflowId: claimed.workflowId,
+                  workflowType: claimed.workflowType,
+                  pipelineVersion: claimed.pipelineVersion,
+                  traceId: claimed.traceId,
+                  spanId: claimed.spanId,
+                  workflowMetadata: claimed.workflowMetadata,
+                  dependencyResults: claimed.dependencyResults
+                }
+              }
+            }
+          : {}
+      );
+      return;
+    }
     const claimTenantIds = tenantId === "*" ? [...(await config.sharedIdentityResolver!.listTenantIds())] : [tenantId];
     await reload();
     await promotePendingContextBoardFollowups(claimTenantIds);
@@ -3421,6 +3559,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const workerRelease = workerReleaseGuard(body);
     const messageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
+    if (isRelationalReviewDelivery(messageId)) {
+      const renewed = await relationalBoardCall(() =>
+        requireRelationalBoardWorkerStore().renew(
+          {
+            deliveryId: messageId,
+            leaseId,
+            writeFenceToken: requiredString(body.writeFenceToken, "writeFenceToken"),
+            leaseDurationMs: WORKER_LEASE_MS
+          },
+          workerRelease ? relationalReleaseIdentity(workerRelease) : undefined
+        )
+      );
+      if (!renewed.accepted) throw staleLease();
+      json(response, 200, { accepted: true, leaseExpiresAt: renewed.leaseExpiresAt });
+      return;
+    }
     const id = entityId<"board_outbox_message">(messageId) as BoardOutboxMessageId;
     const renewed = await mutate(
       async () => {
@@ -3521,9 +3675,23 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function releaseWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const workerRelease = workerReleaseGuard(body);
-    const messageId = entityId<"board_outbox_message">(
-      requiredString(body.messageId, "messageId")
-    ) as BoardOutboxMessageId;
+    const rawMessageId = requiredString(body.messageId, "messageId");
+    if (isRelationalReviewDelivery(rawMessageId)) {
+      const released = await relationalBoardCall(() =>
+        requireRelationalBoardWorkerStore().release(
+          {
+            deliveryId: rawMessageId,
+            leaseId: requiredString(body.leaseId, "leaseId"),
+            writeFenceToken: requiredString(body.writeFenceToken, "writeFenceToken")
+          },
+          workerRelease ? relationalReleaseIdentity(workerRelease) : undefined
+        )
+      );
+      if (!released.accepted) throw staleLease();
+      json(response, 200, { accepted: true });
+      return;
+    }
+    const messageId = entityId<"board_outbox_message">(rawMessageId) as BoardOutboxMessageId;
     const taskId = entityId<"task">(requiredString(body.taskId, "taskId")) as TaskId;
     const leaseId = requiredString(body.leaseId, "leaseId");
     const released = await mutate(
@@ -3599,6 +3767,38 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const failureCategory = outcome === "done" ? undefined : workerFailureCategory(body.failureCategory);
     const retryable =
       outcome === "retry" && failureCategory !== undefined && RETRYABLE_WORKER_FAILURE_CATEGORIES.has(failureCategory);
+    if (isRelationalReviewDelivery(messageId)) {
+      const store = requireRelationalBoardWorkerStore();
+      const fence = { deliveryId: messageId, leaseId, writeFenceToken };
+      const releaseIdentity = workerRelease ? relationalReleaseIdentity(workerRelease) : undefined;
+      const completed = await relationalBoardCall(() => {
+        if (outcome === "done") {
+          const resultArtifact = relationalResultArtifact(body.result);
+          const usage = isRecord(body.modelUsage) ? body.modelUsage : {};
+          return store.complete(
+            {
+              ...fence,
+              resultArtifact,
+              resultDigest: fingerprintBytes(Buffer.from(JSON.stringify(resultArtifact), "utf8")),
+              usage,
+              usageDigest: fingerprintBytes(Buffer.from(JSON.stringify(usage), "utf8"))
+            },
+            releaseIdentity
+          );
+        }
+        const failure = {
+          ...fence,
+          failureCategory: failureCategory!,
+          diagnostic: failureReason!
+        };
+        return retryable
+          ? store.retry({ ...failure, retryDelayMs: relationalRetryDelayMs(attempt) }, releaseIdentity)
+          : store.fail(failure, releaseIdentity);
+      });
+      if (!completed.accepted) throw staleLease();
+      json(response, 200, { accepted: true, replay: completed.replayed, terminal: completed.terminal });
+      return;
+    }
     const terminalOutcome: "done" | "failed" = outcome === "done" ? "done" : "failed";
     const outboxId = entityId<"board_outbox_message">(messageId) as BoardOutboxMessageId;
     const boardTaskId = entityId<"task">(taskId) as TaskId;
@@ -5937,8 +6137,28 @@ function safeResultPayload(value: unknown): Record<string, unknown> {
   );
 }
 
-function normalizedTenantId(value: string | undefined): string | undefined {
+function isRelationalReviewDelivery(value: string): boolean {
+  return /^outbox_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}_[1-9][0-9]*$/i.test(value);
+}
+
+function relationalResultArtifact(value: unknown): Record<string, unknown> {
+  const artifact = isRecord(value) ? value : {};
+  const bytes = Buffer.byteLength(JSON.stringify(artifact), "utf8");
+  if (bytes > 16_000) {
+    throw invalidRequest("relational Board results over 16KB must be uploaded as an immutable artifact reference");
+  }
+  return artifact;
+}
+
+function relationalRetryDelayMs(attempt: number): number {
+  return Math.min(30_000, 1_000 * 2 ** Math.max(0, attempt - 1));
+}
+
+export function normalizedTenantId(value: string | undefined): string | undefined {
   if (!value) return undefined;
+  if (value === "system:billing" || /^system:github-installation:[1-9][0-9]*$/.test(value)) {
+    return value;
+  }
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
     ? value.toLowerCase()
     : undefined;
