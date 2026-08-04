@@ -5837,8 +5837,7 @@ function assertCurrentTaskUploadedArtifact(
   task: BoardTask,
   buildTaskId: string,
   attempt: number,
-  artifact: ContextArtifactRef,
-  releaseId?: string
+  artifact: ContextArtifactRef
 ): void {
   assertBoardArtifactScope(task, buildTaskId, artifact);
   const scopePrefix = `${contextArtifactScopePrefix({
@@ -5862,7 +5861,8 @@ function assertCurrentTaskCompletionArtifact(
   task: BoardTask,
   buildTaskId: string,
   attempt: number,
-  artifact: ContextArtifactRef
+  artifact: ContextArtifactRef,
+  releaseId?: string
 ): void {
   assertBoardArtifactScope(task, buildTaskId, artifact);
   const scopePrefix = `${contextArtifactScopePrefix({
