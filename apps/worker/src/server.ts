@@ -150,6 +150,7 @@ import {
 } from "./board-publication-plan.js";
 import { parseBoardResearchPlan, parseResearchPlanWithRepair } from "./board-research-plan.js";
 import { contextPageArtifactName } from "./context-page-artifact-name.js";
+import { contextPageDispositionArtifact } from "./context-page-disposition.js";
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
@@ -1078,10 +1079,16 @@ async function runContextPageBuild(work: ClaimedWork<"run-context-page-build">):
     );
     phaseReceiptIds.push(`${pageTaskId}:audit:1`);
   }
-  if (requiredString(auditResult.verdict, "Context page final audit verdict") !== "supported") {
-    throw new Error(`Context page ${documentPath} remained unsupported after its bounded repair`);
-  }
   const finalAuditArtifact = parseArtifactRef(auditResult.outputArtifact, "final audit outputArtifact");
+  if (requiredString(auditResult.verdict, "Context page final audit verdict") !== "supported") {
+    return {
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      outputArtifact: finalAuditArtifact,
+      disposition: { status: "omitted", reasonCode: "unsupported_core_claims" },
+      phaseReceiptIds
+    };
+  }
   const page = parseContextPageArtifact(await readContextBoardArtifact(work, pageArtifact));
   return {
     contract: CONTEXT_WORKFLOW_CONTRACT,
@@ -1351,7 +1358,12 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   const publicationPlan = parsePublicationPlanArtifact(await readContextBoardArtifact(work, publicationPlanArtifact));
   const pageArtifacts = work.task.metadata.dependencyResults
     .filter((dependency) => dependency.taskType === "build-context-page")
-    .map((dependency) => dependency.result.outputArtifact);
+    .flatMap((dependency) => {
+      const artifact = contextPageDispositionArtifact(dependency.result);
+      return artifact === undefined
+        ? []
+        : [parseArtifactRef(artifact, `${dependency.taskId} disposition pageArtifact`)];
+    });
   const priorContext = await loadPriorContext(work);
   for (const plannedPage of publicationPlan.plan.pages.filter((page) => (page.change ?? "add") === "retain")) {
     const priorPage = priorContext?.pages.find((page) => page.documentPath === plannedPage.path);
