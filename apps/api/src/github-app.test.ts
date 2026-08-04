@@ -201,7 +201,7 @@ test("manual Context admission creates a resumable board build and exposes only 
     body: JSON.stringify({
       ...lease,
       outcome: "done",
-      result: { version: 1, outputArtifact, commitSha }
+      result: { contract: "page-oriented", schemaRevision: 1, outputArtifact, commitSha }
     })
   });
   assert.equal(completed.response.status, 200);
@@ -212,7 +212,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(resumedProgress.response.status, 200);
   const resumedStages = array(resumedProgress.body.stages).map(record);
   assert.equal(resumedStages.find((stage) => stage.type === "snapshot-context-input")?.status, "done");
-  assert.equal(resumedStages.find((stage) => stage.type === "plan-context-research")?.status, "queued");
+  assert.equal(resumedStages.find((stage) => stage.type === "plan-context-pages")?.status, "queued");
   assert.deepEqual(resumedProgress.body.pages, []);
 
   const missingPage = await api(
@@ -338,7 +338,7 @@ test("an incremental manual admission is durably deferred behind invested work a
   assert.equal(progress.body.status, "active");
   assert.deepEqual(
     array(progress.body.stages).map((stage) => record(stage).type),
-    ["snapshot-context-input", "plan-context-research"]
+    ["snapshot-context-input", "plan-context-pages"]
   );
   assert.deepEqual(progress.body.pages, []);
 

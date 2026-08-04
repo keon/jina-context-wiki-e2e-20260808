@@ -342,15 +342,15 @@ echo "==> Board workers"
 start_worker snapshot "run-context-input-snapshot"
 for index in $(seq 1 "$AGENT_WORKERS"); do
   start_worker "agent-$index" \
-    "run-context-research-plan|run-context-research|run-context-publication-plan|run-context-page-write|run-context-page-repair|run-context-gap-repair"
+    "run-context-page-plan|run-context-page-build"
 done
 for index in $(seq 1 "$AUDIT_WORKERS"); do
   start_worker "auditor-$index" \
-    "run-context-page-audit|run-context-source-challenge|run-context-task-evaluation"
+    "run-context-page-build"
 done
-start_worker certification "run-context-certification"
+start_worker certification "run-context-page-plan"
 start_worker publication "run-context-publication"
-start_worker pageindex "run-context-pageindex"
+start_worker pageindex "run-context-publication"
 
 # Let every process finish configuration before calling the stack healthy.
 sleep 2

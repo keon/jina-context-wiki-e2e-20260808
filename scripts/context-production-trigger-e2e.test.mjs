@@ -313,8 +313,7 @@ function productionFixture(configuration = {}) {
   const state = {
     roots: [
       root("baseline-main", "main", 4, MAIN_SHA, "manual", "baseline-main-request"),
-      stage("baseline-main-publish", "baseline-main", "publish-context-release"),
-      stage("baseline-main-index", "baseline-main", "index-context-release")
+      stage("baseline-main-publish", "baseline-main", "publish-context-release")
     ],
     releases: [
       release("release-main-prior", "main", MAIN_SHA),
@@ -359,11 +358,7 @@ function productionFixture(configuration = {}) {
         const existing = state.roots.find((candidate) => candidate.metadata?.requestKey === body.requestKey);
         if (existing) return json({ duplicate: true, build: { id: existing.id } });
         const build = root("build-full", body.ref, 1, body.commitSha, "manual", body.requestKey);
-        state.roots.push(
-          build,
-          stage("build-full-publish", build.id, "publish-context-release"),
-          stage("build-full-index", build.id, "index-context-release")
-        );
+        state.roots.push(build, stage("build-full-publish", build.id, "publish-context-release"));
         state.releases.unshift(release("release-full", body.ref, body.commitSha));
         return json({ duplicate: false, build: { id: build.id } }, 202);
       }
@@ -439,11 +434,7 @@ function productionFixture(configuration = {}) {
         "issue",
         `github:issue:${REPOSITORY}:${state.issueNumber}`
       );
-      state.roots.push(
-        issueBuild,
-        stage("build-issue-publish", issueBuild.id, "publish-context-release"),
-        stage("build-issue-index", issueBuild.id, "index-context-release")
-      );
+      state.roots.push(issueBuild, stage("build-issue-publish", issueBuild.id, "publish-context-release"));
       state.releases.unshift(release("release-issue", "main", MAIN_SHA));
       return json({ number: state.issueNumber }, 201);
     }
@@ -506,11 +497,7 @@ function productionFixture(configuration = {}) {
           "push",
           `github:push:${REPOSITORY}:${acceptanceBranch}:${COMMIT_SHA}:delivery-push`
         );
-        state.roots.push(
-          pushBuild,
-          stage("build-push-publish", pushBuild.id, "publish-context-release"),
-          stage("build-push-index", pushBuild.id, "index-context-release")
-        );
+        state.roots.push(pushBuild, stage("build-push-publish", pushBuild.id, "publish-context-release"));
         state.releases.unshift(release("release-push", acceptanceBranch, COMMIT_SHA));
         return json({ content: { sha: MARKER_BLOB_SHA }, commit: { sha: COMMIT_SHA } }, 201);
       }
@@ -533,8 +520,7 @@ function productionFixture(configuration = {}) {
       );
       state.roots.push(
         synchronizedPushBuild,
-        stage("build-push-synchronize-publish", synchronizedPushBuild.id, "publish-context-release"),
-        stage("build-push-synchronize-index", synchronizedPushBuild.id, "index-context-release")
+        stage("build-push-synchronize-publish", synchronizedPushBuild.id, "publish-context-release")
       );
       state.releases.unshift(release("release-push-synchronize", acceptanceBranch, SYNCHRONIZED_COMMIT_SHA));
 
@@ -558,8 +544,7 @@ function productionFixture(configuration = {}) {
       );
       state.roots.push(
         synchronizedPullBuild,
-        stage("build-pull-synchronize-publish", synchronizedPullBuild.id, "publish-context-release"),
-        stage("build-pull-synchronize-index", synchronizedPullBuild.id, "index-context-release")
+        stage("build-pull-synchronize-publish", synchronizedPullBuild.id, "publish-context-release")
       );
       state.releases.unshift(
         release("release-pull-synchronize", synchronizedPullBuild.metadata.ref, SYNCHRONIZED_COMMIT_SHA)
@@ -592,11 +577,7 @@ function productionFixture(configuration = {}) {
         "pull_request",
         `github:pull:${REPOSITORY}:${state.pullRequestNumber}:${COMMIT_SHA}:delivery-pull`
       );
-      state.roots.push(
-        pullBuild,
-        stage("build-pull-publish", pullBuild.id, "publish-context-release"),
-        stage("build-pull-index", pullBuild.id, "index-context-release")
-      );
+      state.roots.push(pullBuild, stage("build-pull-publish", pullBuild.id, "publish-context-release"));
       state.releases.unshift(release("release-pull", pullBuild.metadata.ref, COMMIT_SHA));
       return json({ number: state.pullRequestNumber }, 201);
     }

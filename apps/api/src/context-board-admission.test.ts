@@ -190,7 +190,11 @@ test("admission binds only a prior published release for the exact tenant, repos
   });
   assert.equal(incremental.outcome, "created");
   assert.equal(incremental.scope.refSequence, 2);
-  assert.deepEqual(buildTask(incremental).metadata.priorRelease, priorRelease);
+  assert.deepEqual(buildTask(incremental).metadata.priorRelease, {
+    ...priorRelease,
+    contract: "page-oriented",
+    schemaRevision: 1
+  });
 
   assert.throws(
     () =>

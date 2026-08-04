@@ -9,6 +9,7 @@ import {
 } from "@jina/board";
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
 import { fingerprint, isFullCommitSha, normalizeIsoTime, normalizeRepository } from "../domain/fingerprint.js";
+import type { DerivationDetail } from "../derive/verbosity.js";
 import {
   isContextArtifactKeyInScope,
   type ContextArtifactKind,
@@ -103,13 +104,15 @@ export interface ContextWorkflowMetadata {
 export interface ContextWorkflowPriorReleaseSeed {
   readonly contract: typeof CONTEXT_WORKFLOW_CONTRACT;
   readonly schemaRevision: typeof CONTEXT_WORKFLOW_SCHEMA_REVISION;
+  readonly version: 1;
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
   readonly refSequence: number;
   readonly releaseId: string;
   readonly commitSha: string;
-  readonly manifestArtifact: ContextArtifactRef;
+  readonly publicSnapshotDigest: string;
+  readonly releaseArtifact: ContextArtifactRef;
 }
 
 export interface ContextWorkflowBuildScope extends ContextWorkflowMetadata {
@@ -120,6 +123,8 @@ export interface ContextWorkflowBuildScope extends ContextWorkflowMetadata {
   readonly requestKey: string;
   readonly commitSha?: string;
   readonly githubInstallationId?: number;
+  readonly derivationDetail?: DerivationDetail;
+  readonly derivationBudgetSeconds?: number;
   readonly derivationTokenBudget?: number;
   readonly trigger?: "push" | "pull_request" | "issue" | "manual";
   readonly priorRelease?: ContextWorkflowPriorReleaseSeed;
@@ -619,6 +624,12 @@ function normalizeScope(input: ContextWorkflowBuildScope): ContextWorkflowBuildS
     throw new Error("Context githubInstallationId must be a positive integer");
   }
   if (
+    input.derivationBudgetSeconds !== undefined &&
+    (!Number.isSafeInteger(input.derivationBudgetSeconds) || input.derivationBudgetSeconds < 1)
+  ) {
+    throw new Error("Context derivationBudgetSeconds must be a positive integer");
+  }
+  if (
     input.derivationTokenBudget !== undefined &&
     (!Number.isSafeInteger(input.derivationTokenBudget) || input.derivationTokenBudget < 1)
   ) {
@@ -644,6 +655,8 @@ function normalizeScope(input: ContextWorkflowBuildScope): ContextWorkflowBuildS
     requestKey,
     ...(input.commitSha ? { commitSha: input.commitSha.toLowerCase() } : {}),
     ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {}),
+    ...(input.derivationDetail ? { derivationDetail: input.derivationDetail } : {}),
+    ...(input.derivationBudgetSeconds ? { derivationBudgetSeconds: input.derivationBudgetSeconds } : {}),
     ...(input.derivationTokenBudget ? { derivationTokenBudget: input.derivationTokenBudget } : {}),
     ...(input.trigger ? { trigger: input.trigger } : {}),
     ...(priorRelease ? { priorRelease } : {})
@@ -657,7 +670,8 @@ function normalizePriorRelease(
   if (input.contract !== CONTEXT_WORKFLOW_CONTRACT || input.schemaRevision !== CONTEXT_WORKFLOW_SCHEMA_REVISION) {
     throw new Error("prior Context release contract is missing or mismatched");
   }
-  const manifestArtifact = parsedArtifact(input.manifestArtifact, "priorRelease.manifestArtifact");
+  if (input.version !== 1) throw new Error("prior Context release version must be 1");
+  const releaseArtifact = parsedArtifact(input.releaseArtifact, "priorRelease.releaseArtifact");
   if (
     input.tenantId !== scope.tenantId ||
     normalizeRepository(input.repository) !== scope.repository ||
@@ -670,10 +684,10 @@ function normalizePriorRelease(
   }
   if (!isFullCommitSha(input.commitSha)) throw new Error("prior Context release commit must be a full Git SHA");
   if (
-    !isContextArtifactKeyInScope(manifestArtifact.key, {
+    !isContextArtifactKeyInScope(releaseArtifact.key, {
       tenantId: scope.tenantId,
       repository: scope.repository,
-      buildId: priorBuildIdFromArtifact(manifestArtifact)
+      buildId: priorBuildIdFromArtifact(releaseArtifact)
     })
   ) {
     throw new Error("prior Context manifest artifact is outside the repository scope");
@@ -683,7 +697,8 @@ function normalizePriorRelease(
     repository: scope.repository,
     commitSha: input.commitSha.toLowerCase(),
     releaseId: requiredString(input.releaseId, "priorRelease.releaseId", 240),
-    manifestArtifact
+    publicSnapshotDigest: requiredDigest(input.publicSnapshotDigest, "priorRelease.publicSnapshotDigest"),
+    releaseArtifact
   };
 }
 
@@ -711,6 +726,8 @@ function scopeMetadata(scope: ContextWorkflowBuildScope, buildTaskId: TaskId): R
     requestKey: scope.requestKey,
     ...(scope.commitSha ? { commitSha: scope.commitSha } : {}),
     ...(scope.githubInstallationId ? { githubInstallationId: scope.githubInstallationId } : {}),
+    ...(scope.derivationDetail ? { derivationDetail: scope.derivationDetail } : {}),
+    ...(scope.derivationBudgetSeconds ? { derivationBudgetSeconds: scope.derivationBudgetSeconds } : {}),
     ...(scope.derivationTokenBudget ? { derivationTokenBudget: scope.derivationTokenBudget } : {}),
     ...(scope.trigger ? { trigger: scope.trigger } : {}),
     ...(scope.priorRelease ? { priorRelease: scope.priorRelease } : {})
@@ -748,6 +765,8 @@ function assertExistingBuildScope(
     "refSequence",
     "requestKey",
     "githubInstallationId",
+    "derivationDetail",
+    "derivationBudgetSeconds",
     "derivationTokenBudget",
     "trigger"
   ] as const;

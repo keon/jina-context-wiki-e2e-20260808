@@ -227,7 +227,12 @@ test("board snapshot worker captures evidence, uploads it, and completes with on
   assert.doesNotMatch(serializedSnapshot, /transient-clone-secret|nested-secret/);
   assert.doesNotMatch(serializedSnapshot, /temp_clone_token|clone_url/);
   assert.equal(completion?.outcome, "done");
-  assert.deepEqual(completion?.result, { version: 1, outputArtifact, commitSha });
+  assert.deepEqual(completion?.result, {
+    contract: "page-oriented",
+    schemaRevision: 1,
+    outputArtifact,
+    commitSha
+  });
 });
 
 async function waitForHealth(

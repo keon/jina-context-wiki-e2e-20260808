@@ -9,6 +9,11 @@ import test from "node:test";
 const execFileAsync = promisify(execFile);
 const BOARD_TOPICS = [
   "run-context-input-snapshot",
+  "run-context-page-plan",
+  "run-context-page-build",
+  "run-context-publication"
+];
+const LEGACY_TOPICS = [
   "run-context-research-plan",
   "run-context-research",
   "run-context-publication-plan",
@@ -19,10 +24,11 @@ const BOARD_TOPICS = [
   "run-context-task-evaluation",
   "run-context-gap-repair",
   "run-context-certification",
-  "run-context-publication",
-  "run-context-pageindex"
+  "run-context-pageindex",
+  "run-ingest-evidence",
+  "run-derive-knowledge",
+  "run-index-context"
 ];
-const LEGACY_TOPICS = ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"];
 
 const deployment = await readFile("scripts/cloud-build-deploy.sh", "utf8");
 const releaseCleanupLibrary = await readFile("scripts/cloud-release-cleanup-lib.sh", "utf8");
@@ -77,6 +83,11 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.doesNotMatch(stagingDeployment, /JINA_PRODUCT_DATABASE_URL|jina-staging-database-url/);
   assert.doesNotMatch(stagingDeployment, /jina-product-migrate-staging|jina-context-migrate-staging/);
   assert.match(stagingDeployment, /services update-traffic "\$\{api_service\}"[\s\S]+?--to-latest/);
+  assert.match(
+    stagingDeployment,
+    /context_topics="run-context-input-snapshot\|run-context-page-plan\|run-context-page-build\|run-context-publication"/
+  );
+  for (const topic of LEGACY_TOPICS) assert.doesNotMatch(stagingDeployment, new RegExp(topic));
   assert.match(stagingDatabaseCutover, /for _attempt in \$\(seq 1 180\)/);
   assert.match(stagingDatabaseCutover, /jina-v1-staging-db-password/);
   assert.match(stagingDatabaseCutover, /gcloud run jobs delete "\$\{job\}"/);
