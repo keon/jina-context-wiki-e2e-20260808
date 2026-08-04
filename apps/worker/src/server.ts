@@ -149,6 +149,7 @@ import {
   retainedPublicationPlanProblems
 } from "./board-publication-plan.js";
 import { parseBoardResearchPlan, parseResearchPlanWithRepair } from "./board-research-plan.js";
+import { contextPageArtifactName } from "./context-page-artifact-name.js";
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
@@ -1358,7 +1359,7 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
     pageArtifacts.push(
       await uploadContextBoardArtifact(work, {
         kind: "context-page",
-        name: pageArtifactName(plannedPage.path),
+        name: contextPageArtifactName(plannedPage.path, "retain"),
         contentType: "application/json",
         content: Buffer.from(
           JSON.stringify({
@@ -2179,7 +2180,7 @@ async function runContextPageWrite(work: ClaimedWork<"run-context-page-write">):
     const publicSnapshotDigest = boardPublicPageDigest(page.path, bodyMarkdown);
     const outputArtifact = await uploadContextBoardArtifact(work, {
       kind: "context-page",
-      name: pageArtifactName(page.path),
+      name: contextPageArtifactName(page.path, `write-${work.task.metadata.pass}`),
       contentType: "application/json",
       content: Buffer.from(
         JSON.stringify({
@@ -2289,7 +2290,7 @@ async function runContextPageWrite(work: ClaimedWork<"run-context-page-write">):
     const publicSnapshotDigest = boardPublicPageDigest(page.path, bodyMarkdown);
     const outputArtifact = await uploadContextBoardArtifact(work, {
       kind: "context-page",
-      name: pageArtifactName(page.path),
+      name: contextPageArtifactName(page.path, `write-${work.task.metadata.pass}`),
       contentType: "application/json",
       content: Buffer.from(
         JSON.stringify({
@@ -2528,7 +2529,7 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
   });
   const outputArtifact = await uploadContextBoardArtifact(work, {
     kind: "citation-audit",
-    name: `${pageArtifactName(page.documentPath)}.json`,
+    name: contextPageArtifactName(page.documentPath, `audit-${work.task.metadata.pass}`),
     contentType: "application/json",
     content: Buffer.from(
       JSON.stringify({
@@ -2730,7 +2731,7 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
         ? undefined
         : await uploadContextBoardArtifact(work, {
             kind: "context-page",
-            name: pageArtifactName(page.documentPath),
+            name: contextPageArtifactName(page.documentPath, `repair-${work.task.metadata.pass}`),
             contentType: "application/json",
             content: Buffer.from(
               JSON.stringify({
@@ -2754,7 +2755,7 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
     const publicSnapshotDigest = boardPublicPageDigest(page.documentPath, bodyMarkdown);
     const outputArtifact = await uploadContextBoardArtifact(work, {
       kind: "context-page",
-      name: pageArtifactName(page.documentPath),
+      name: contextPageArtifactName(page.documentPath, `repair-${work.task.metadata.pass}`),
       contentType: "application/json",
       content: Buffer.from(
         JSON.stringify({
@@ -4573,10 +4574,6 @@ function safeStageId(value: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 80) || "page"
   );
-}
-
-function pageArtifactName(documentPath: string): string {
-  return `${safeStageId(documentPath).slice(0, 160)}.json`;
 }
 
 function requireBoardAgentStageRunner(): PortableContextBoardAgentStageRunner {
