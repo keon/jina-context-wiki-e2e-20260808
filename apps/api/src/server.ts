@@ -68,6 +68,7 @@ import {
   type ContextArtifactStore,
   type ContextArtifactRef,
   type ContextArtifactKind,
+  type ContextWorkflowBoardTaskResult,
   type ContextEngineStore,
   type ContextPhaseCheckpoint,
   type ContextPhaseCheckpointStore,
@@ -3841,7 +3842,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       isBoardWorkTaskType(currentTask.type) &&
       (ownsCurrentLease || isCompletionReplay)
     ) {
-      const parsed = isContextWorkflowBoardTaskType(currentTask.type)
+      const isContextWorkflowTask = isContextWorkflowBoardTaskType(currentTask.type);
+      const parsed = isContextWorkflowTask
         ? parseContextWorkflowBoardTaskResult(intakeState.board, currentTask.id, body.result)
         : parseContextBoardTaskResult(intakeState.board, currentTask.id, body.result);
       assertCurrentTaskCompletionArtifact(
@@ -3849,6 +3851,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         requiredString(currentTask.metadata.contextBuildId, "contextBuildId"),
         attempt,
         parsed.outputArtifact,
+        isContextWorkflowTask
+          ? contextWorkflowCompletionArtifactKind(parsed as ContextWorkflowBoardTaskResult)
+          : boardWorkArtifactKind(currentTask.type),
         "releaseId" in parsed && typeof parsed.releaseId === "string" ? parsed.releaseId : undefined
       );
       if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
@@ -5862,6 +5867,7 @@ function assertCurrentTaskCompletionArtifact(
   buildTaskId: string,
   attempt: number,
   artifact: ContextArtifactRef,
+  artifactKind: ContextArtifactKind,
   releaseId?: string
 ): void {
   assertBoardArtifactScope(task, buildTaskId, artifact);
@@ -5870,7 +5876,6 @@ function assertCurrentTaskCompletionArtifact(
     repository: requiredRepositoryName(task.metadata.repository, "repository"),
     buildId: buildTaskId
   })}/`;
-  const artifactKind = boardWorkArtifactKind(task.type);
   const kindPrefix = `${scopePrefix}${artifactKind}/`;
   if (!artifact.key.startsWith(kindPrefix)) {
     throw invalidRequest("completion artifact has the wrong kind for its task");
@@ -5888,6 +5893,17 @@ function assertCurrentTaskCompletionArtifact(
   if (!/^[a-z0-9][a-z0-9._-]{0,480}$/.test(relative) || !relative.startsWith(currentAttemptPrefix)) {
     throw invalidRequest("completion artifact was not uploaded by the current task attempt");
   }
+}
+
+function contextWorkflowCompletionArtifactKind(result: ContextWorkflowBoardTaskResult): ContextArtifactKind {
+  if (result.taskType !== contextWorkflowBoardTaskTypes.page) {
+    return contextWorkflowBoardArtifactKind(result.taskType);
+  }
+  if (result.disposition.status === "omitted") return "citation-audit";
+  if (!sameArtifactIdentity(result.outputArtifact, result.disposition.pageArtifact)) {
+    throw invalidRequest("page completion output artifact does not match its disposition");
+  }
+  return "context-page";
 }
 
 function tenantBoardView(state: GitHubIntakeState, tenantId: string, allowedRepositories?: ReadonlySet<string>) {
