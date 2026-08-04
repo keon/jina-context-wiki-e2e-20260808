@@ -51,7 +51,9 @@ function taskIdFromHash(): string | null {
 export default function BoardPage() {
   const { selected } = useTenant();
   const { data: dashboardData } = useDashboard();
-  const { data } = usePoll<OverviewResponse>(selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "");
+  const { data, online, refresh } = usePoll<OverviewResponse>(
+    selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : ""
+  );
   const hasLocalReviewFixture = dashboardData?.review_runs.some(
     (run) => run.review_run_id === "local-review-work-fixture"
   );
@@ -60,6 +62,7 @@ export default function BoardPage() {
 
   const [filters, setFilters] = useState<BoardFilters>(EMPTY_BOARD_FILTERS);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const partition = useMemo(() => partitionBoardTasks(board.tasks), [board.tasks]);
   const options = useMemo(
@@ -120,19 +123,34 @@ export default function BoardPage() {
     setFilters((previous) => ({ ...previous, [field]: value }));
   }, []);
 
+  const refreshBoard = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await refresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refresh]);
+
   const visibleTasks = filterBoardTasks(partition.current, effectiveFilters);
   const selectedTask = selectedTaskId ? (board.tasks.find((task) => task.id === selectedTaskId) ?? null) : null;
 
   return (
     <>
-      <section id="board-page">
-        <header className="page-heading">
-          <div>
-            <h1>Task Board</h1>
-            <p>Live tasks across repositories, reviews, Context builds, and causal graph workflows.</p>
-          </div>
-        </header>
-        <BoardToolbar filters={effectiveFilters} options={options} onFilterChange={setFilter} />
+      <section id="board-page" className="agent-board">
+        <h1 className="sr-only">Task Board</h1>
+        <BoardToolbar
+          filters={effectiveFilters}
+          options={options}
+          visibleCount={visibleTasks.length}
+          totalCount={partition.current.length}
+          status={
+            online === false ? "offline" : online === true ? "live" : hasLocalReviewFixture ? "preview" : "connecting"
+          }
+          refreshing={refreshing}
+          onRefresh={() => void refreshBoard()}
+          onFilterChange={setFilter}
+        />
         <BoardColumns tasks={visibleTasks} onOpenTask={openTask} />
       </section>
       <TaskDialog task={selectedTask} board={board} events={events} onOpenTask={openTask} onClose={closeTask} />

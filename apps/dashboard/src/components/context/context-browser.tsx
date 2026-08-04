@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { contextCitationHref, contextCitationLabel, contextRelevantSourceFiles } from "../../lib/context-citations.ts";
 import { usePoll } from "../../lib/poll.ts";
 import type {
@@ -11,15 +10,16 @@ import type {
   ContextReadResponse,
   ContextRelease,
   ContextSearchResponse,
-  ContextSourceCitation,
-  ContextTreeNode
+  ContextSourceCitation
 } from "../../lib/types.ts";
 import { ContextMarkdown } from "./context-markdown.tsx";
+
+type BrowserMode = "document" | "search" | "changes";
 
 export function ContextBrowser({
   release,
   releases,
-  apiBasePath,
+  apiBasePath
 }: {
   readonly release: ContextRelease;
   readonly releases: readonly ContextRelease[];
@@ -29,27 +29,29 @@ export function ContextBrowser({
     `${apiBasePath}/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`,
     10_000
   );
-  const [selectedId, setSelectedId] = useState("");
-  const [document, setDocument] = useState<ContextReadResponse["document"] | null>(null);
-  const [query, setQuery] = useState("");
-  const [search, setSearch] = useState<ContextSearchResponse | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
   const currentCatalog =
     catalog.data?.release.id === release.id && catalog.data.release.repository === release.repository
       ? catalog.data
       : undefined;
   const documents = currentCatalog?.documents ?? [];
+  const [selectedId, setSelectedId] = useState("");
+  const [document, setDocument] = useState<ContextReadResponse["document"] | null>(null);
+  const [filter, setFilter] = useState("");
+  const [mode, setMode] = useState<BrowserMode>("document");
+  const [readError, setReadError] = useState("");
+
   useEffect(() => {
     setSelectedId("");
     setDocument(null);
-    setSearch(null);
-    setError("");
+    setFilter("");
+    setMode("document");
+    setReadError("");
   }, [release.id]);
 
   useEffect(() => {
-    if (!documents.some((candidate) => candidate.id === selectedId)) setSelectedId(documents[0]?.id ?? "");
+    if (!documents.some((candidate) => candidate.id === selectedId)) {
+      setSelectedId(documents[0]?.id ?? "");
+    }
   }, [documents, selectedId]);
 
   useEffect(() => {
@@ -59,151 +61,281 @@ export function ContextBrowser({
     }
     const controller = new AbortController();
     setDocument(null);
-    setError("");
+    setReadError("");
     void fetch(
       `${apiBasePath}/read?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}&document=${encodeURIComponent(selectedId)}`,
-      { credentials: "include", headers: { accept: "application/json" }, signal: controller.signal }
+      {
+        credentials: "include",
+        headers: { accept: "application/json" },
+        signal: controller.signal
+      }
     )
       .then(async (response) => {
-        if (!response.ok) throw new Error(`Document read failed with ${response.status}`);
+        if (!response.ok) throw new Error(`The page could not be loaded (${response.status}).`);
         return (await response.json()) as ContextReadResponse;
       })
       .then((response) => {
         if (response.release.id !== release.id || response.release.repository !== release.repository) {
-          throw new Error("Document read returned a different Context release");
+          throw new Error("The page belongs to a different context release.");
         }
         setDocument(response.document);
       })
-      .catch((cause) => {
-        if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(String(cause));
+      .catch((cause: unknown) => {
+        if (!(cause instanceof DOMException && cause.name === "AbortError")) {
+          setReadError(cause instanceof Error ? cause.message : "The page could not be loaded.");
+        }
       });
     return () => controller.abort();
   }, [apiBasePath, release.id, release.repository, selectedId]);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
+  const visibleDocuments = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) return documents;
+    return documents.filter((item) =>
+      `${item.title}\n${item.summary}\n${item.logicalId}`.toLowerCase().includes(needle)
+    );
+  }, [documents, filter]);
+
+  function openDocument(id: string) {
+    setSelectedId(id);
+    setMode("document");
+  }
+
+  if (catalog.online === false && !currentCatalog) {
+    return (
+      <div className="knowledge-placeholder knowledge-placeholder--compact">
+        <span className="knowledge-placeholder__icon" aria-hidden="true">
+          <DocumentIcon />
+        </span>
+        <strong>The wiki catalog is unavailable</strong>
+        <p>The published release could not be read. Refresh to try again.</p>
+      </div>
+    );
+  }
+
+  return (
+    <section className="knowledge-browser" aria-label="Context Wiki browser">
+      <aside className="knowledge-index">
+        <header className="knowledge-index__header">
+          <div>
+            <strong>Pages</strong>
+            <span>{documents.length}</span>
+          </div>
+          <label className="knowledge-search">
+            <SearchIcon />
+            <input
+              aria-label="Filter wiki pages"
+              placeholder="Filter pages"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+            />
+          </label>
+        </header>
+        <nav className="knowledge-index__list" aria-label="Wiki pages">
+          {visibleDocuments.map((item) => (
+            <button
+              type="button"
+              key={item.id}
+              className={item.id === selectedId ? "selected" : undefined}
+              onClick={() => openDocument(item.id)}
+            >
+              <DocumentIcon />
+              <span>
+                <strong>{item.title}</strong>
+                <small>{item.summary}</small>
+              </span>
+            </button>
+          ))}
+          {catalog.data === undefined ? <IndexSkeleton /> : null}
+          {catalog.data !== undefined && visibleDocuments.length === 0 ? (
+            <p className="knowledge-index__empty">{filter ? "No matching pages." : "No pages published."}</p>
+          ) : null}
+        </nav>
+      </aside>
+
+      <main className="knowledge-reader">
+        <header className="knowledge-reader__toolbar">
+          <div className="knowledge-tabs" role="tablist" aria-label="Wiki tools">
+            <ModeButton mode="document" current={mode} onSelect={setMode}>
+              Page
+            </ModeButton>
+            <ModeButton mode="search" current={mode} onSelect={setMode}>
+              Search
+            </ModeButton>
+            <ModeButton mode="changes" current={mode} onSelect={setMode}>
+              Changes
+            </ModeButton>
+          </div>
+          <span className="knowledge-reader__commit mono">{release.commitSha.slice(0, 12)}</span>
+        </header>
+
+        {mode === "search" ? <ContextSearch release={release} apiBasePath={apiBasePath} onOpen={openDocument} /> : null}
+        {mode === "changes" ? (
+          <ContextDiff release={release} releases={releases} apiBasePath={apiBasePath} onOpen={openDocument} />
+        ) : null}
+        {mode === "document" ? (
+          document ? (
+            <DocumentView document={document} release={release} documents={documents} onOpen={openDocument} />
+          ) : readError ? (
+            <ReaderState title="This page could not be loaded" detail={readError} />
+          ) : selectedId ? (
+            <ReaderLoading />
+          ) : (
+            <ReaderState title="No page selected" detail="Choose a wiki page from the index." />
+          )
+        ) : null}
+      </main>
+    </section>
+  );
+}
+
+function ModeButton({
+  mode,
+  current,
+  onSelect,
+  children
+}: {
+  readonly mode: BrowserMode;
+  readonly current: BrowserMode;
+  readonly onSelect: (mode: BrowserMode) => void;
+  readonly children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={current === mode}
+      className={current === mode ? "selected" : undefined}
+      onClick={() => onSelect(mode)}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DocumentView({
+  document,
+  release,
+  documents,
+  onOpen
+}: {
+  readonly document: ContextReadResponse["document"];
+  readonly release: ContextRelease;
+  readonly documents: readonly ContextCatalogDocument[];
+  readonly onOpen: (id: string) => void;
+}) {
+  const sourceFiles = contextRelevantSourceFiles(document.citations);
+  return (
+    <article className="knowledge-document" id={`context-document-${encodeURIComponent(document.id)}`}>
+      <header className="knowledge-document__heading">
+        <span>{document.kind ?? "Context page"}</span>
+        <h2>{document.title}</h2>
+        <p>{document.summary}</p>
+        <div>
+          <span>
+            {sourceFiles.length} source {sourceFiles.length === 1 ? "file" : "files"}
+          </span>
+          <span>
+            {document.citations.length} verified {document.citations.length === 1 ? "citation" : "citations"}
+          </span>
+        </div>
+      </header>
+      <ContextMarkdown
+        bodyMarkdown={document.bodyMarkdown}
+        release={release}
+        document={document}
+        documents={documents}
+        onOpen={onOpen}
+      />
+      <DocumentEvidence citations={document.citations} />
+    </article>
+  );
+}
+
+function ContextSearch({
+  release,
+  apiBasePath,
+  onOpen
+}: {
+  readonly release: ContextRelease;
+  readonly apiBasePath: string;
+  readonly onOpen: (id: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [response, setResponse] = useState<ContextSearchResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function search(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!query.trim() || loading) return;
     setLoading(true);
     setError("");
     try {
-      const response = await fetch(`${apiBasePath}/search`, {
+      const result = await fetch(`${apiBasePath}/search`, {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify({
-          repository: release.repository,
-          releaseId: release.id,
-          query: query.trim()
-        })
+        body: JSON.stringify({ repository: release.repository, releaseId: release.id, query: query.trim() })
       });
-      if (!response.ok) throw new Error(`Context search failed with ${response.status}`);
-      const searched = (await response.json()) as ContextSearchResponse;
-      if (searched.release.id !== release.id || searched.release.repository !== release.repository) {
-        throw new Error("Context search returned a different release");
+      if (!result.ok) throw new Error(`Search failed (${result.status}).`);
+      const body = (await result.json()) as ContextSearchResponse;
+      if (body.release.id !== release.id || body.release.repository !== release.repository) {
+        throw new Error("Search returned a different context release.");
       }
-      setSearch(searched);
+      setResponse(body);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Context search failed");
+      setResponse(null);
+      setError(cause instanceof Error ? cause.message : "Search failed.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <>
-      <section className="context-tool-contract" aria-label="Context tool contract">
-        <div>
-          <span className="context-eyebrow">Agent interface</span>
-          <strong>Four grounded Context operations</strong>
-        </div>
-        <code>list_context</code>
-        <code>read_context</code>
-        <code>search_context</code>
-        <code>diff_context</code>
-        <span>No answer synthesis</span>
-      </section>
-
-      <section className="context-query-workspace">
-        <header className="context-panel-heading">
-          <div>
-            <span className="context-eyebrow">Context retrieval</span>
-            <h2>Find relevant context</h2>
-          </div>
-          <span className="context-generation-chip">Returns context, not an answer</span>
-        </header>
-        <form className="context-query-form" onSubmit={(event) => void submit(event)}>
-          <label>
-            <span className="sr-only">Search context</span>
-            <textarea
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="What should an agent read before changing the webhook build flow?"
-              rows={2}
-            />
-          </label>
-          <div className="context-query-actions">
+    <section className="knowledge-tool">
+      <header>
+        <span>Grounded retrieval</span>
+        <h2>Search this wiki</h2>
+        <p>Find pages and source-backed excerpts without generating an answer.</p>
+      </header>
+      <form className="knowledge-tool__form" onSubmit={(event) => void search(event)}>
+        <label className="knowledge-search knowledge-search--large">
+          <SearchIcon />
+          <input
+            aria-label="Search Context Wiki"
+            placeholder="What should I read before changing the webhook flow?"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <button className="knowledge-button knowledge-button--primary" disabled={loading || !query.trim()}>
+          {loading ? "Searching…" : "Search"}
+        </button>
+      </form>
+      {error ? <p className="knowledge-inline-error">{error}</p> : null}
+      {response ? (
+        <div className="knowledge-results">
+          <div className="knowledge-results__summary">
             <span>
-              {search ? `${search.results.length} documents selected` : "Deterministic tree and lexical search"}
+              {response.results.length} {response.results.length === 1 ? "result" : "results"}
             </span>
-            <button type="submit" className="primary-button" disabled={loading || !query.trim()}>
-              {loading ? "Selecting context…" : "Search context"}
-            </button>
+            <span>{response.retrieval.selector}</span>
           </div>
-        </form>
-        {search ? <SearchResults response={search} onOpen={setSelectedId} /> : null}
-        {error ? <p className="context-alert danger">{error}</p> : null}
-      </section>
-
-      <ContextDiff release={release} releases={releases} apiBasePath={apiBasePath} onOpen={setSelectedId} />
-
-      <section className="context-browser-grid">
-        <nav className="context-operations-panel context-document-list" aria-label="Context tree">
-          <header className="context-panel-heading">
-            <div>
-              <span className="context-eyebrow">Context tree</span>
-              <h2>{documents.length} grounded documents</h2>
-            </div>
-          </header>
-          {currentCatalog?.tree.map((node) => (
-            <TreeBranch
-              key={node.id}
-              node={node}
-              documents={documents}
-              selectedId={selectedId}
-              onOpen={setSelectedId}
-            />
+          {response.results.map((result) => (
+            <button type="button" key={result.documentId} onClick={() => onOpen(result.documentId)}>
+              <span>
+                <strong>{result.title}</strong>
+                <small>{result.citations.length} verified citations</small>
+              </span>
+              <p>{result.excerpts[0]?.slice(0, 360) ?? "Open the page to read more."}</p>
+              <ArrowIcon />
+            </button>
           ))}
-          {documents.length === 0 ? <p className="context-panel-empty">No derived context is published.</p> : null}
-        </nav>
-        <article
-          id={document ? `context-document-${encodeURIComponent(document.id)}` : undefined}
-          className="context-operations-panel context-document-detail"
-        >
-          {document ? (
-            <>
-              <header className="context-document-heading">
-                <div>
-                  <span className="context-eyebrow">{document.kind ?? "context"}</span>
-                  <h2>{document.title}</h2>
-                </div>
-              </header>
-              <p className="context-document-summary">{document.summary}</p>
-              <RelevantSourceFiles citations={document.citations} />
-              <ContextMarkdown
-                bodyMarkdown={document.bodyMarkdown}
-                release={release}
-                document={document}
-                documents={documents}
-                onOpen={setSelectedId}
-              />
-              <CitationList citations={document.citations} />
-            </>
-          ) : (
-            <p className="context-panel-empty">Select a context document.</p>
-          )}
-        </article>
-      </section>
-    </>
+          {response.results.length === 0 ? <ReaderState title="No results" detail="Try a broader search." /> : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -221,19 +353,14 @@ function ContextDiff({
   const candidates = useMemo(
     () =>
       releases
-        .filter(
-          (candidate) =>
-            candidate.id !== release.id && candidate.repository === release.repository && candidate.ref === release.ref
-        )
-        .sort((left, right) =>
-          (right.publishedAt ?? right.createdAt).localeCompare(left.publishedAt ?? left.createdAt)
-        ),
+        .filter((item) => item.id !== release.id && item.repository === release.repository && item.ref === release.ref)
+        .sort((a, b) => (b.publishedAt ?? b.createdAt).localeCompare(a.publishedAt ?? a.createdAt)),
     [release.id, release.ref, release.repository, releases]
   );
   const [fromReleaseId, setFromReleaseId] = useState("");
   const [diff, setDiff] = useState<ContextDiffResponse | null>(null);
-  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     setFromReleaseId(candidates[0]?.id ?? "");
@@ -253,201 +380,212 @@ function ContextDiff({
         fromReleaseId,
         toReleaseId: release.id
       });
-      const response = await fetch(`${apiBasePath}/diff?${parameters.toString()}`, {
+      const result = await fetch(`${apiBasePath}/diff?${parameters}`, {
         credentials: "include",
         headers: { accept: "application/json" }
       });
-      if (!response.ok) throw new Error(`Context diff failed with ${response.status}`);
-      const compared = (await response.json()) as ContextDiffResponse;
-      if (
-        compared.from.id !== fromReleaseId ||
-        compared.to.id !== release.id ||
-        compared.to.repository !== release.repository
-      ) {
-        throw new Error("Context diff returned different release identities");
+      if (!result.ok) throw new Error(`Comparison failed (${result.status}).`);
+      const body = (await result.json()) as ContextDiffResponse;
+      if (body.from.id !== fromReleaseId || body.to.id !== release.id) {
+        throw new Error("Comparison returned different release identities.");
       }
-      setDiff(compared);
+      setDiff(body);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Context diff failed");
+      setError(cause instanceof Error ? cause.message : "Comparison failed.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <section className="context-operations-panel context-diff-panel">
-      <header className="context-panel-heading">
-        <div>
-          <span className="context-eyebrow">Release changes · diff_context</span>
-          <h2>Compare grounded documents</h2>
-        </div>
-        <span>To {release.commitSha.slice(0, 12)}</span>
+    <section className="knowledge-tool">
+      <header>
+        <span>Release history</span>
+        <h2>Compare wiki versions</h2>
+        <p>See which grounded pages changed between published commits.</p>
       </header>
-      {candidates.length === 0 ? (
-        <p className="context-panel-empty">A prior release on this ref is required before Context can show a diff.</p>
-      ) : (
-        <form className="context-diff-form" onSubmit={(event) => void compare(event)}>
-          <label>
-            <span>From release</span>
+      {candidates.length ? (
+        <form className="knowledge-tool__form" onSubmit={(event) => void compare(event)}>
+          <label className="knowledge-select">
+            <span className="sr-only">Earlier release</span>
             <select value={fromReleaseId} onChange={(event) => setFromReleaseId(event.target.value)}>
-              {candidates.map((candidate) => (
-                <option key={candidate.id} value={candidate.id}>
-                  {candidate.commitSha.slice(0, 12)} · {candidate.publishedAt ?? candidate.createdAt}
+              {candidates.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.commitSha.slice(0, 12)} · {item.publishedAt ?? item.createdAt}
                 </option>
               ))}
             </select>
+            <ChevronIcon />
           </label>
-          <button type="submit" className="primary-button" disabled={loading || !fromReleaseId}>
-            {loading ? "Comparing…" : "Compare context"}
+          <span className="knowledge-tool__to">to {release.commitSha.slice(0, 12)}</span>
+          <button className="knowledge-button knowledge-button--primary" disabled={loading || !fromReleaseId}>
+            {loading ? "Comparing…" : "Compare"}
           </button>
         </form>
-      )}
-      {diff ? <ContextDiffResults diff={diff} onOpen={onOpen} /> : null}
-      {error ? <p className="context-alert danger">{error}</p> : null}
-    </section>
-  );
-}
-
-function ContextDiffResults({
-  diff,
-  onOpen
-}: {
-  readonly diff: ContextDiffResponse;
-  readonly onOpen: (id: string) => void;
-}) {
-  return (
-    <div className="context-diff-results">
-      <p className="context-structure-note">
-        {diff.added.length} added · {diff.changed.length} changed · {diff.removed.length} removed ·{" "}
-        {diff.unchanged.length} unchanged
-      </p>
-      {diff.added.map((document) => (
-        <DiffDocument key={`added:${document.id}`} label="Added" document={document} onOpen={onOpen} />
-      ))}
-      {diff.changed.map(({ after }) => (
-        <DiffDocument key={`changed:${after.id}`} label="Changed" document={after} onOpen={onOpen} />
-      ))}
-      {diff.removed.map((document) => (
-        <DiffDocument key={`removed:${document.id}`} label="Removed" document={document} />
-      ))}
-    </div>
-  );
-}
-
-function DiffDocument({
-  label,
-  document,
-  onOpen
-}: {
-  readonly label: "Added" | "Changed" | "Removed";
-  readonly document: ContextCatalogDocument;
-  readonly onOpen?: (id: string) => void;
-}) {
-  return (
-    <article>
-      <span className={`context-status ${label.toLowerCase()}`}>{label}</span>
-      {onOpen ? (
-        <button onClick={() => onOpen(document.id)}>{document.title}</button>
       ) : (
-        <strong>{document.title}</strong>
+        <ReaderState title="No earlier release" detail="Publish another release before comparing changes." />
       )}
-      <p>{document.summary}</p>
-    </article>
+      {error ? <p className="knowledge-inline-error">{error}</p> : null}
+      {diff ? <DiffResults diff={diff} onOpen={onOpen} /> : null}
+    </section>
   );
 }
 
-function TreeBranch({
-  node,
-  documents,
-  selectedId,
-  onOpen
-}: {
-  readonly node: ContextTreeNode;
-  readonly documents: readonly ContextCatalogDocument[];
-  readonly selectedId: string;
-  readonly onOpen: (id: string) => void;
-}) {
-  const document = documents.find((candidate) => candidate.id === node.documentId);
+function DiffResults({ diff, onOpen }: { readonly diff: ContextDiffResponse; readonly onOpen: (id: string) => void }) {
+  const rows = [
+    ...diff.added.map((document) => ({ status: "Added", document })),
+    ...diff.changed.map(({ after }) => ({ status: "Changed", document: after })),
+    ...diff.removed.map((document) => ({ status: "Removed", document }))
+  ] as const;
   return (
-    <div className="context-tree-branch" style={{ paddingLeft: `${Math.max(0, node.depth - 1) * 14}px` }}>
-      <button className={selectedId === node.documentId ? "active" : ""} onClick={() => onOpen(node.documentId)}>
-        <strong>{node.title}</strong>
-        <small>{document?.summary ?? node.summary}</small>
-      </button>
-      {node.children.map((child) => (
-        <TreeBranch key={child.id} node={child} documents={documents} selectedId={selectedId} onOpen={onOpen} />
+    <div className="knowledge-diff">
+      <div className="knowledge-results__summary">
+        <span>
+          {diff.added.length} added · {diff.changed.length} changed · {diff.removed.length} removed
+        </span>
+        <span>{diff.unchanged.length} unchanged</span>
+      </div>
+      {rows.map(({ status, document }) => (
+        <button
+          type="button"
+          key={`${status}:${document.id}`}
+          disabled={status === "Removed"}
+          onClick={() => status !== "Removed" && onOpen(document.id)}
+        >
+          <span className={`knowledge-change knowledge-change--${status.toLowerCase()}`}>{status}</span>
+          <span>
+            <strong>{document.title}</strong>
+            <small>{document.summary}</small>
+          </span>
+          {status !== "Removed" ? <ArrowIcon /> : null}
+        </button>
       ))}
+      {rows.length === 0 ? (
+        <ReaderState title="No page changes" detail="These releases have identical published pages." />
+      ) : null}
     </div>
   );
 }
 
-function SearchResults({
-  response,
-  onOpen
-}: {
-  readonly response: ContextSearchResponse;
-  readonly onOpen: (id: string) => void;
-}) {
-  const note = useMemo(() => `Deterministic PageIndex tree retrieval by ${response.retrieval.selector}`, [response]);
-  return (
-    <section className="context-search-results">
-      <p className="context-structure-note">{note}</p>
-      {response.results.map((result) => (
-        <article key={result.documentId}>
-          <button onClick={() => onOpen(result.documentId)}>{result.title}</button>
-          {result.excerpts.slice(0, 1).map((excerpt) => (
-            <p key={excerpt}>{excerpt.slice(0, 500)}</p>
-          ))}
-          <span>{result.citations.length} verified citations</span>
-        </article>
-      ))}
-    </section>
-  );
-}
-
-function RelevantSourceFiles({ citations }: { readonly citations: readonly ContextSourceCitation[] }) {
+function DocumentEvidence({ citations }: { readonly citations: readonly ContextSourceCitation[] }) {
   const files = contextRelevantSourceFiles(citations);
-  if (files.length === 0) return null;
+  if (!citations.length) return null;
   return (
-    <section className="context-relevant-sources" aria-labelledby="context-relevant-sources-heading">
-      <h3 id="context-relevant-sources-heading">Relevant source files</h3>
-      <ul>
-        {files.map((file) => (
-          <li key={file.href}>
-            <a href={file.href} target="_blank" rel="noreferrer">
+    <details className="knowledge-evidence">
+      <summary>
+        <span>Evidence</span>
+        <small>
+          {files.length} files · {citations.length} citations
+        </small>
+        <ChevronIcon />
+      </summary>
+      {files.length ? (
+        <div className="knowledge-evidence__files">
+          {files.map((file) => (
+            <a key={file.href} href={file.href} target="_blank" rel="noreferrer">
+              <DocumentIcon />
               <code>{file.path}</code>
+              <span>{file.citationCount}</span>
             </a>
-            <span>
-              {file.citationCount} {file.citationCount === 1 ? "citation" : "citations"}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </section>
+          ))}
+        </div>
+      ) : null}
+      <div className="knowledge-evidence__citations">
+        {citations.map((citation, index) => {
+          const href = contextCitationHref(citation);
+          return (
+            <article key={`${citation.anchor.sourceId}:${index}`}>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              <div>
+                <strong>{citation.claim}</strong>
+                {href ? (
+                  <a href={href} target="_blank" rel="noreferrer">
+                    {contextCitationLabel(citation)}
+                  </a>
+                ) : (
+                  <small>{contextCitationLabel(citation)}</small>
+                )}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 
-function CitationList({ citations }: { readonly citations: readonly ContextSourceCitation[] }) {
+function ReaderState({ title, detail }: { readonly title: string; readonly detail: string }) {
   return (
-    <section className="context-document-evidence">
-      <h3>Verified source citations</h3>
-      {citations.map((citation, index) => {
-        const href = contextCitationHref(citation);
-        return (
-          <article className="context-citation" key={`${citation.anchor.sourceId}-${index}`}>
-            <strong>{citation.claim}</strong>
-            <p>
-              {href ? (
-                <a href={href} target="_blank" rel="noreferrer">
-                  {contextCitationLabel(citation)}
-                </a>
-              ) : (
-                contextCitationLabel(citation)
-              )}
-            </p>
-          </article>
-        );
-      })}
-    </section>
+    <div className="knowledge-reader-state">
+      <DocumentIcon />
+      <strong>{title}</strong>
+      <p>{detail}</p>
+    </div>
+  );
+}
+
+function ReaderLoading() {
+  return (
+    <div className="knowledge-reader-loading" aria-label="Loading wiki page" aria-busy="true">
+      <span />
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+function IndexSkeleton() {
+  return (
+    <div className="knowledge-index__skeleton" aria-label="Loading wiki index" aria-busy="true">
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="7" cy="7" r="4.25" stroke="currentColor" strokeWidth="1.3" />
+      <path d="m10.25 10.25 3 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function DocumentIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3.5 2.5h5.75l3.25 3.25v7.75h-9z" stroke="currentColor" strokeWidth="1.15" strokeLinejoin="round" />
+      <path
+        d="M9.25 2.75v3h3M5.75 8.25h4.5M5.75 10.5h3.5"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="m5 6.25 3 3 3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ArrowIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M3.5 8h9m-3-3 3 3-3 3"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
