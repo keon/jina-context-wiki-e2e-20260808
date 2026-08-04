@@ -263,8 +263,8 @@ gcloud --quiet run deploy "${context_worker_service}" \
   --service-account="${context_worker_service_account}" \
   --concurrency=1 \
   --timeout=300 \
-  --min-instances=1 \
-  --max-instances=1 \
+  --min-instances=3 \
+  --max-instances=10 \
   --no-traffic \
   --image="${worker_image}" \
   --port=8080 \
@@ -303,7 +303,7 @@ gcloud --quiet run deploy "${task_worker_service}" \
   --concurrency=1 \
   --timeout=3600 \
   --min-instances=1 \
-  --max-instances=1 \
+  --max-instances=5 \
   --no-traffic \
   --image="${worker_image}" \
   --port=8080 \
