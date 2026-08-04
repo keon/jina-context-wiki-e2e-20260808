@@ -73,7 +73,7 @@ export function contextArtifactScopePrefix(input: ContextArtifactScope): string 
 
 export function contextArtifactRepositoryPrefix(input: ContextArtifactRepositoryScope): string {
   return [
-    "context-v2",
+    "context",
     "tenants",
     safeSegment(input.tenantId),
     "repositories",
@@ -86,7 +86,7 @@ export function isCanonicalContextArtifactKey(key: string): boolean {
   const segments = key.split("/");
   return (
     segments.length >= 9 &&
-    segments[0] === "context-v2" &&
+    segments[0] === "context" &&
     segments.every((segment) => Boolean(segment) && segment !== "." && segment !== "..")
   );
 }

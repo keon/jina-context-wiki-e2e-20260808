@@ -1,5 +1,12 @@
 export const CONTEXT_BOARD_TOPICS = [
   "run-context-input-snapshot",
+  "run-context-page-plan",
+  "run-context-page-build",
+  "run-context-publication"
+] as const;
+
+/** Internal implementation stages executed inside one durable Context task. */
+const _INTERNAL_CONTEXT_STAGE_TOPICS = [
   "run-context-research-plan",
   "run-context-research",
   "run-context-publication-plan",
@@ -10,7 +17,6 @@ export const CONTEXT_BOARD_TOPICS = [
   "run-context-task-evaluation",
   "run-context-gap-repair",
   "run-context-certification",
-  "run-context-publication",
   "run-context-pageindex"
 ] as const;
 
@@ -22,9 +28,10 @@ export const CAUSAL_GRAPH_TOPICS = [
 
 export const SUPPORTED_WORKER_TOPICS = ["run-review", ...CONTEXT_BOARD_TOPICS, ...CAUSAL_GRAPH_TOPICS] as const;
 
-export type WorkerTopic = (typeof SUPPORTED_WORKER_TOPICS)[number];
 export type ContextWorkerTopic = (typeof CONTEXT_BOARD_TOPICS)[number];
+export type InternalContextStageTopic = (typeof _INTERNAL_CONTEXT_STAGE_TOPICS)[number];
 export type CausalGraphWorkerTopic = (typeof CAUSAL_GRAPH_TOPICS)[number];
+export type WorkerTopic = (typeof SUPPORTED_WORKER_TOPICS)[number] | InternalContextStageTopic;
 export type WorkerClaimMode = "enabled" | "paused";
 
 export function configuredWorkerClaimMode(value: string | undefined): WorkerClaimMode {
@@ -49,7 +56,9 @@ export function configuredWorkerTopics(value: string | undefined): WorkerTopic[]
     .split(/[|,]/)
     .map((topic) => topic.trim())
     .filter(Boolean);
-  const unknown = requested.filter((topic) => !SUPPORTED_WORKER_TOPICS.includes(topic as WorkerTopic));
+  const unknown = requested.filter(
+    (topic) => !SUPPORTED_WORKER_TOPICS.includes(topic as (typeof SUPPORTED_WORKER_TOPICS)[number])
+  );
   if (unknown.length > 0) {
     throw new Error(`WORKER_TOPICS contains unsupported topics: ${unknown.join(", ")}`);
   }

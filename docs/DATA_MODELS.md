@@ -1,6 +1,6 @@
 # Data models
 
-This document describes the active Context v2 model. Executable definitions in
+This document describes the active Context model. Executable definitions in
 `packages/board`, `apps/api/src/context-board-runtime.ts`,
 `packages/db/src/context/schema.ts`, and the domain types in
 `packages/context-engine/src` are authoritative.
@@ -164,7 +164,7 @@ dashboard reads raw-source, provider, structural, dense, or answer-synthesis row
 Large immutable artifacts use a shared key function:
 
 ```text
-context-v2/tenants/<tenant>/repositories/<repository>/builds/<build>/<kind>/<name>
+context/tenants/<tenant>/repositories/<repository>/builds/<build>/<kind>/<name>
 ```
 
 Kinds include:

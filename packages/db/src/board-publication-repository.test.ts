@@ -84,7 +84,7 @@ test("current release seed lookup rejects an artifact outside the requested tena
 
 function releaseArtifact(tenantId: string) {
   const key =
-    `context-v2/tenants/${tenantId}/repositories/omxyz/jina/builds/` + `task_prior/context-release/${RELEASE_ID}.json`;
+    `context/tenants/${tenantId}/repositories/omxyz/jina/builds/` + `task_prior/context-release/${RELEASE_ID}.json`;
   return {
     uri: `gs://context-artifacts/${key}`,
     key,

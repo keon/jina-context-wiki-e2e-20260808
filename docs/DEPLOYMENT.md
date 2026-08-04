@@ -371,12 +371,11 @@ a credential.
 ## Worker configuration
 
 The context service runs three one-concurrency instances with continuous CPU.
-Every instance claims the same Board topic set, which lets independent research,
-page-writing, and citation-audit tasks execute in parallel while the Board keeps
-their dependencies and checkpoints durable:
+Every instance claims the same Board topic set, which lets independent page builds
+execute in parallel while the Board keeps their dependencies and checkpoints durable:
 
 ```text
-WORKER_TOPICS=run-context-input-snapshot|run-context-research-plan|run-context-research|run-context-publication-plan|run-context-page-write|run-context-page-audit|run-context-page-repair|run-context-source-challenge|run-context-task-evaluation|run-context-gap-repair|run-context-certification|run-context-publication|run-context-pageindex
+WORKER_TOPICS=run-context-input-snapshot|run-context-page-plan|run-context-page-build|run-context-publication
 JINA_REQUIRE_GITHUB_INSTALLATION=false
 CONTEXT_GITHUB_HISTORY_LIMIT=500
 CONTEXT_GIT_HISTORY_LIMIT=5000
@@ -449,9 +448,8 @@ The worker image embeds the pinned PageIndex OSS source, isolated Python
 environment, and bridge. The pin is commit
 `982514ab40fe42a169ea087c13819cf87c87724f` with expected source digest
 `b96135e27a2f725971a90ada1c8979d9110d640778bcbdae57b1587f97ffc0a5`;
-the image build probes both. The
-`run-context-pageindex` task invokes that local bridge only after atomic
-publication; private context is never sent to PageIndex Cloud. The API image
+the image build probes both. The `run-context-publication` task invokes that local
+bridge as part of atomic publication; private context is never sent to PageIndex Cloud. The API image
 contains neither Codex nor model credentials and does not contain PageIndex source or
 Python. It performs bounded deterministic lexical search over the published tree.
 
@@ -1229,8 +1227,7 @@ curl -X POST "${JINA_API_URL}/internal/context/outbox/drain" \
 
 The endpoint selects checkpoint IDs represented by pending evidence, knowledge, ACL, or
 retention deliveries and re-runs the idempotent derived-projection outbox drain. This is
-projection recovery, not the production workflow scheduler or the
-`run-context-pageindex` Board task. Each projector claims and
+projection recovery, not the production workflow scheduler. Each projector claims and
 acknowledges only its own unexpired delivery lease for the exact
 tenant/repository/ref/commit scope. The response reports processed checkpoint IDs and the
 remaining per-consumer backlog.

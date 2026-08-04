@@ -1,13 +1,16 @@
 import { applyCommand, isTerminalTaskStatus, reduceBoard, type BoardState, type TaskId } from "@jina/board";
 import {
+  CONTEXT_WORKFLOW_CONTRACT,
+  CONTEXT_WORKFLOW_SCHEMA_REVISION,
   contextBoardTaskTypes,
-  createContextBoardBuild,
+  createContextWorkflowBoardBuild,
+  fingerprint,
   isDerivationDetail,
   nextContextBoardRefSequence,
   normalizeRepository,
-  type ContextBoardBuild,
   type ContextBuildScope,
   type ContextPriorReleaseSeed,
+  type ContextWorkflowBoardBuild,
   type DerivationDetail
 } from "@jina/context-engine";
 import { isContextTrigger, type GitHubWebhookEvent } from "@jina/github";
@@ -61,7 +64,7 @@ export type ContextBoardAdmissionInput =
 interface CreatedContextBoardAdmission {
   readonly state: BoardState;
   readonly outcome: "created";
-  readonly build: ContextBoardBuild;
+  readonly build: ContextWorkflowBoardBuild;
   readonly scope: ContextBuildScope;
   readonly supersededBuildTaskIds: readonly TaskId[];
 }
@@ -135,11 +138,7 @@ export function admitContextBoardBuild(
     // commit, installation, trigger, or tuning mismatch throws its collision
     // error. Discard the returned state so a duplicate delivery creates no
     // events, tasks, or outbox messages.
-    const verified = createContextBoardBuild(state, {
-      ...scopeWithoutSequence,
-      refSequence,
-      now: input.now
-    });
+    const verified = createWorkflowBuild(state, { ...scopeWithoutSequence, refSequence }, input.now);
     return {
       state,
       outcome: "duplicate",
@@ -223,7 +222,7 @@ export function admitContextBoardBuild(
     ...scopeWithoutSequence,
     refSequence
   };
-  const build = createContextBoardBuild(state, { ...scope, now: input.now });
+  const build = createWorkflowBuild(state, scope, input.now);
   const superseded = supersedeOlderRefBuilds(build.state, build.buildTaskId, scope, input.now);
   return {
     state: superseded.state,
@@ -232,6 +231,34 @@ export function admitContextBoardBuild(
     scope,
     supersededBuildTaskIds: superseded.buildTaskIds
   };
+}
+
+function createWorkflowBuild(state: BoardState, scope: ContextBuildScope, now: string): ContextWorkflowBoardBuild {
+  const { priorRelease, ...baseScope } = scope;
+  return createContextWorkflowBoardBuild(state, {
+    ...baseScope,
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-page-workflow-1",
+    validatorVersion: "context-page-validator-1",
+    pageIndexVersion: "pageindex-local-1",
+    executionProfileDigest: fingerprint({
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      derivationDetail: scope.derivationDetail ?? "standard",
+      credential: "tenant-selected"
+    }),
+    ...(priorRelease
+      ? {
+          priorRelease: {
+            ...priorRelease,
+            contract: CONTEXT_WORKFLOW_CONTRACT,
+            schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION
+          }
+        }
+      : {}),
+    now
+  });
 }
 
 /**
@@ -429,8 +456,7 @@ function newestRecoverableRepositoryBuild(
             candidate.metadata.tenantId === scope.tenantId &&
             candidate.metadata.repository === scope.repository &&
             candidate.metadata.ref === scope.ref &&
-            requiredRefSequence(candidate.metadata.refSequence) >
-              requiredRefSequence(task.metadata.refSequence)
+            requiredRefSequence(candidate.metadata.refSequence) > requiredRefSequence(task.metadata.refSequence)
         ) &&
         contextBuildHasOperatorRecovery(state, task, now)
     )

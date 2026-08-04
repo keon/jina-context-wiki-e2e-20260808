@@ -8,7 +8,7 @@ import { resolveRepositoryInstallations } from "./resolve-repository-installatio
 loadDotEnv(resolve(process.cwd(), "../.env"));
 loadDotEnv(resolve(process.cwd(), ".env"));
 
-const flags = new Set(process.argv.slice(2));
+const flags = new Set(process.argv.slice(2).filter((argument) => argument !== "--"));
 if (flags.has("--apply") === flags.has("--dry-run")) {
   throw new Error("pass exactly one of --dry-run or --apply");
 }

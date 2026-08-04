@@ -128,7 +128,7 @@ pnpm evaluate:context-board-quality -- \
 ```
 
 The Board evaluator resolves exactly one
-`context-v2/.../builds/<build-id>/` subtree and never uses artifacts from a
+`context/.../builds/<build-id>/` subtree and never uses artifacts from a
 sibling build. It independently verifies:
 
 - immutable artifact references and SHA-256 byte bindings;

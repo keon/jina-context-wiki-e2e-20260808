@@ -582,7 +582,7 @@ function validateScopedArtifactRef(
     invalidRelease(`${label} is invalid`);
   }
   const scopePrefix = [
-    "context-v2",
+    "context",
     "tenants",
     encodeURIComponent(release.tenantId),
     "repositories",

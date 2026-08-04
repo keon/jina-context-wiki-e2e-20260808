@@ -101,7 +101,7 @@ const FORBIDDEN_PUBLIC_STRING_PATTERNS = [
   },
   {
     code: "artifact_object_key",
-    pattern: /\bcontext-v2\/tenants\/[^/\s]+\/repositories\/[^/\s]+\/[^/\s]+\/builds\/task_[a-z0-9]+\/[^\s)"']+/i
+    pattern: /\bcontext\/tenants\/[^/\s]+\/repositories\/[^/\s]+\/[^/\s]+\/builds\/task_[a-z0-9]+\/[^\s)"']+/i
   },
   {
     code: "stack_trace",

@@ -29,8 +29,8 @@ One run uses a unique `run-id` and performs this sequence:
    branch or open acceptance issue blocks the run.
 2. Create a unique branch at the immutable default-branch head. The branch-creation
    event must create no Context build.
-3. Request a manual Context build on that fresh ref, wait for publication and
-   PageIndex completion, and verify the resulting available release. Replay the
+3. Request a manual Context build on that fresh ref, wait for the integrated
+   publication and PageIndex completion, and verify the resulting available release. Replay the
    same request key and require the exact original build ID with no second root.
    Because the unique ref had no release, this is the full-initialization proof.
 4. Open a uniquely marked issue. Require one issue-triggered build on the default

@@ -295,18 +295,9 @@ function fixtureRelease(options: { readonly rootJsonPointer?: boolean } = {}): C
 }
 
 function artifactRef(kind: string, name: string): ContextArtifactRef {
-  const key = [
-    "context-v2",
-    "tenants",
-    tenantId,
-    "repositories",
-    "acme",
-    "context",
-    "builds",
-    buildId,
-    kind,
-    name
-  ].join("/");
+  const key = ["context", "tenants", tenantId, "repositories", "acme", "context", "builds", buildId, kind, name].join(
+    "/"
+  );
   return {
     uri: `gs://context-artifacts/${key}`,
     key,

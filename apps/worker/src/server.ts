@@ -59,8 +59,11 @@ import type {
 import {
   LocalPageIndexClient,
   MAX_CONTEXT_REPAIR_PASS,
+  CONTEXT_WORKFLOW_CONTRACT,
+  CONTEXT_WORKFLOW_SCHEMA_REVISION,
   assertContextPriorReleaseMatches,
-  boardWorkArtifactKindForTopic,
+  boardWorkArtifactKindForTopic as existingBoardWorkArtifactKindForTopic,
+  contextWorkflowBoardArtifactKindForTopic,
   contextGateRepairMustChangeSnapshot,
   contextPriorReleaseCatalog,
   contextArtifactKey,
@@ -138,12 +141,15 @@ import {
   requiresBoardAgentExecutor,
   workerClaimTimeoutMs,
   type ContextWorkerTopic,
+  type InternalContextStageTopic,
   type CausalGraphWorkerTopic,
   type WorkerTopic
 } from "./worker-topics.js";
 
 const execFileAsync = promisify(execFile);
 const BOARD_MODEL_TOPICS = new Set<WorkerTopic>([
+  "run-context-page-plan",
+  "run-context-page-build",
   "run-context-research-plan",
   "run-context-research",
   "run-context-publication-plan",
@@ -155,6 +161,15 @@ const BOARD_MODEL_TOPICS = new Set<WorkerTopic>([
   "run-context-gap-repair",
   "run-causal-graph-derive"
 ]);
+
+function boardWorkArtifactKindForTopic(
+  topic: ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic
+): ContextArtifactKind {
+  if (CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic)) {
+    return contextWorkflowBoardArtifactKindForTopic(topic as ContextWorkerTopic);
+  }
+  return existingBoardWorkArtifactKindForTopic(topic as Parameters<typeof existingBoardWorkArtifactKindForTopic>[0]);
+}
 
 interface RepositoryContextMetadata {
   readonly tenantId: string;
@@ -191,6 +206,9 @@ interface ContextBoardWorkerMetadata extends RepositoryContextMetadata {
   readonly pass?: number;
   readonly priorRelease?: ContextPriorReleaseSeed;
   readonly pageChange?: ContextPageChange;
+  readonly subjectId?: string;
+  readonly briefArtifact?: ContextArtifactRef;
+  readonly pageOperation?: "add" | "retain" | "revise" | "retire";
 }
 
 interface WorkMetadataByTopic {
@@ -200,6 +218,16 @@ interface WorkMetadataByTopic {
     readonly pullRequestNumber: number;
   };
   readonly "run-context-input-snapshot": ContextBoardWorkerMetadata;
+  readonly "run-context-page-plan": ContextBoardWorkerMetadata & {
+    readonly inputArtifact: ContextArtifactRef;
+  };
+  readonly "run-context-page-build": ContextBoardWorkerMetadata & {
+    readonly subjectId: string;
+    readonly documentPath: string;
+    readonly planArtifact: ContextArtifactRef;
+    readonly briefArtifact: ContextArtifactRef;
+    readonly pageOperation: "add" | "revise";
+  };
   readonly "run-context-research-plan": ContextBoardWorkerMetadata & {
     readonly inputArtifact: ContextArtifactRef;
   };
@@ -385,7 +413,7 @@ const boardAgentStageRunner: PortableContextBoardAgentStageRunner | undefined = 
     }
   : undefined;
 const boardPageIndexClient =
-  claimMode === "enabled" && topics.includes("run-context-pageindex")
+  claimMode === "enabled" && topics.includes("run-context-publication")
     ? new LocalPageIndexClient({
         timeoutMs: positiveInt(process.env.CONTEXT_PAGEINDEX_PROCESS_TIMEOUT_MS, 5 * 60_000)
       })
@@ -699,6 +727,10 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
   switch (work.topic) {
     case "run-context-input-snapshot":
       return { outcome: "done", result: await runContextInputSnapshot(work) };
+    case "run-context-page-plan":
+      return { outcome: "done", result: await runContextPagePlan(work) };
+    case "run-context-page-build":
+      return { outcome: "done", result: await runContextPageBuild(work) };
     case "run-context-research-plan":
       return { outcome: "done", result: await runContextResearchPlan(work) };
     case "run-context-research":
@@ -744,7 +776,195 @@ async function runContextInputSnapshot(
     contentType: "application/json",
     content: Buffer.from(JSON.stringify(input), "utf8")
   });
-  return { version: 1, outputArtifact, commitSha: input.commitSha };
+  return {
+    contract: CONTEXT_WORKFLOW_CONTRACT,
+    schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    outputArtifact,
+    commitSha: input.commitSha
+  };
+}
+
+async function runContextPagePlan(work: ClaimedWork<"run-context-page-plan">): Promise<Record<string, unknown>> {
+  const researchPlanResult = await runContextResearchPlan(
+    internalStageWork(work, "run-context-research-plan", {
+      ...work.task.metadata,
+      inputArtifact: work.task.metadata.inputArtifact
+    })
+  );
+  const researchPlanArtifact = parseArtifactRef(
+    researchPlanResult.outputArtifact,
+    "Context page plan researchPlanArtifact"
+  );
+  if (!Array.isArray(researchPlanResult.work)) {
+    throw new Error("Context page plan research assignments are missing");
+  }
+  const researchEntries = researchPlanResult.work as unknown[];
+  const researchResults: ContextBoardDependencyResult[] = [];
+  for (let index = 0; index < researchEntries.length; index += 1) {
+    const entry = researchEntries[index];
+    if (!isRecord(entry)) throw new Error(`Context page plan research assignment ${index} is invalid`);
+    const workKey = requiredString(entry.key, `Context page plan research assignment ${index} key`);
+    const inputArtifact = parseArtifactRef(
+      entry.inputArtifact,
+      `Context page plan research assignment ${index} inputArtifact`
+    );
+    const result = await runContextResearch(
+      internalStageWork(work, "run-context-research", {
+        ...work.task.metadata,
+        inputArtifact,
+        planArtifact: researchPlanArtifact,
+        workKey
+      })
+    );
+    researchResults.push({
+      taskId: `${work.task.id}:research:${workKey}`,
+      taskType: "research-context-subject",
+      result: {
+        version: 1,
+        outputArtifact: parseArtifactRef(result.outputArtifact, `Context research ${workKey} outputArtifact`)
+      }
+    });
+  }
+
+  const publicationPlanResult = await runContextPublicationPlan(
+    internalStageWork(work, "run-context-publication-plan", {
+      ...work.task.metadata,
+      planArtifact: researchPlanArtifact,
+      dependencyResults: researchResults
+    })
+  );
+  const outputArtifact = parseArtifactRef(publicationPlanResult.outputArtifact, "Context page plan outputArtifact");
+  const publication = parsePublicationPlanArtifact(await readContextBoardArtifact(work, outputArtifact));
+  const pages = [
+    ...publication.plan.pages.map((page) => {
+      const operation = page.change ?? "add";
+      return {
+        subjectId: page.id,
+        path: page.path,
+        title: page.title,
+        operation,
+        ...(operation === "add" || operation === "revise" ? { briefArtifact: outputArtifact } : {})
+      };
+    }),
+    ...(publication.plan.retiredPages ?? []).map((page) => ({
+      subjectId: `retired-${createHash("sha256").update(page.path).digest("hex").slice(0, 20)}`,
+      path: page.path,
+      title: page.path.split("/").at(-1)!.replace(/\.md$/i, "").replace(/[-_]+/g, " "),
+      operation: "retire" as const,
+      reason: page.reason
+    }))
+  ];
+  return {
+    contract: CONTEXT_WORKFLOW_CONTRACT,
+    schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    outputArtifact,
+    pages
+  };
+}
+
+async function runContextPageBuild(work: ClaimedWork<"run-context-page-build">): Promise<Record<string, unknown>> {
+  const pageTaskId = work.task.id;
+  const pageKey = work.task.metadata.subjectId;
+  const documentPath = work.task.metadata.documentPath;
+  const planArtifact = work.task.metadata.planArtifact;
+  const writeResult = await runContextPageWrite(
+    internalStageWork(work, "run-context-page-write", {
+      ...work.task.metadata,
+      inputArtifact: work.task.metadata.briefArtifact,
+      planArtifact,
+      pageKey,
+      documentPath,
+      pageTaskId,
+      pass: 0,
+      pageChange: work.task.metadata.pageOperation
+    })
+  );
+  let pageArtifact = parseArtifactRef(writeResult.outputArtifact, "Context page draft outputArtifact");
+  const phaseReceiptIds = [`${pageTaskId}:author:0`];
+  let auditResult = await runContextPageAudit(
+    internalStageWork(work, "run-context-page-audit", {
+      ...work.task.metadata,
+      pageKey,
+      documentPath,
+      pageTaskId,
+      pass: 0,
+      dependencyResults: [contextStageDependency(pageTaskId, "write-context-page", pageArtifact, 0, documentPath)]
+    })
+  );
+  phaseReceiptIds.push(`${pageTaskId}:audit:0`);
+  if (requiredString(auditResult.verdict, "Context page audit verdict") === "unsupported") {
+    const findingsArtifact = parseArtifactRef(auditResult.outputArtifact, "Context page audit outputArtifact");
+    const repairResult = await runContextPageRepair(
+      internalStageWork(work, "run-context-page-repair", {
+        ...work.task.metadata,
+        documentPath,
+        pageTaskId,
+        pass: 1,
+        findingsArtifact
+      })
+    );
+    pageArtifact = parseArtifactRef(repairResult.outputArtifact, "Context page repair outputArtifact");
+    phaseReceiptIds.push(`${pageTaskId}:repair:1`);
+    auditResult = await runContextPageAudit(
+      internalStageWork(work, "run-context-page-audit", {
+        ...work.task.metadata,
+        pageKey,
+        documentPath,
+        pageTaskId,
+        pass: 1,
+        dependencyResults: [contextStageDependency(pageTaskId, "repair-context-page", pageArtifact, 1, documentPath)]
+      })
+    );
+    phaseReceiptIds.push(`${pageTaskId}:audit:1`);
+  }
+  if (requiredString(auditResult.verdict, "Context page final audit verdict") !== "supported") {
+    throw new Error(`Context page ${documentPath} remained unsupported after its bounded repair`);
+  }
+  const finalAuditArtifact = parseArtifactRef(auditResult.outputArtifact, "final audit outputArtifact");
+  const page = parseContextPageArtifact(await readContextBoardArtifact(work, pageArtifact));
+  return {
+    contract: CONTEXT_WORKFLOW_CONTRACT,
+    schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    outputArtifact: pageArtifact,
+    disposition: {
+      status: "accepted",
+      pageArtifact,
+      evidenceFingerprint: page.snapshotArtifact.sha256,
+      generationFingerprint: createHash("sha256")
+        .update(`${pageArtifact.sha256}:${finalAuditArtifact.sha256}`)
+        .digest("hex")
+    },
+    phaseReceiptIds
+  };
+}
+
+function internalStageWork<T extends InternalContextStageTopic>(
+  work: ClaimedWork<ContextWorkerTopic>,
+  topic: T,
+  metadata: WorkMetadataByTopic[T]
+): ClaimedWork<T> {
+  return {
+    topic,
+    message: { ...work.message, topic },
+    task: { id: work.task.id, metadata }
+  } as unknown as ClaimedWork<T>;
+}
+
+function contextStageDependency(
+  taskId: string,
+  taskType: string,
+  outputArtifact: ContextArtifactRef,
+  pass: number,
+  documentPath: string
+): ContextBoardDependencyResult {
+  return {
+    taskId: `${taskId}:${taskType}:${pass}`,
+    taskType,
+    pass,
+    pageTaskId: taskId,
+    documentPath,
+    result: { version: 1, outputArtifact }
+  };
 }
 
 async function runCausalGraphHistory(work: ClaimedWork<"run-causal-graph-history">): Promise<Record<string, unknown>> {
@@ -965,11 +1185,63 @@ async function runContextPageIndex(work: ClaimedWork<"run-context-pageindex">): 
 }
 
 async function runContextPublication(work: ClaimedWork<"run-context-publication">): Promise<Record<string, unknown>> {
-  const certificationArtifact = latestDependencyArtifact(
-    work.task.metadata.dependencyResults,
-    ["certify-context-release"],
-    "Context publication certification"
+  if (!boardPageIndexClient) throw new Error("self-hosted PageIndex client is not configured");
+  const publicationPlanArtifact = work.task.metadata.planArtifact;
+  const publicationPlan = parsePublicationPlanArtifact(await readContextBoardArtifact(work, publicationPlanArtifact));
+  const pageArtifacts = work.task.metadata.dependencyResults
+    .filter((dependency) => dependency.taskType === "build-context-page")
+    .map((dependency) => dependency.result.outputArtifact);
+  const priorContext = await loadPriorContext(work);
+  for (const plannedPage of publicationPlan.plan.pages.filter((page) => (page.change ?? "add") === "retain")) {
+    const priorPage = priorContext?.pages.find((page) => page.documentPath === plannedPage.path);
+    if (!priorPage) throw new Error(`retained Context page ${plannedPage.path} is absent from the prior release`);
+    pageArtifacts.push(
+      await uploadContextBoardArtifact(work, {
+        kind: "context-page",
+        name: pageArtifactName(plannedPage.path),
+        contentType: "application/json",
+        content: Buffer.from(
+          JSON.stringify({
+            version: 1,
+            documentPath: plannedPage.path,
+            title: priorPage.title,
+            bodyMarkdown: canonicalPublicPageMarkdown(priorPage.bodyMarkdown),
+            publicationPlanArtifact,
+            snapshotArtifact: publicationPlan.snapshotArtifact,
+            change: "retain",
+            priorLogicalId: priorPage.logicalId,
+            priorRevisionId: priorPage.revisionId
+          }),
+          "utf8"
+        )
+      })
+    );
+  }
+  const pages = await Promise.all(
+    pageArtifacts.map(async (artifact) => ({
+      artifact,
+      page: parseContextPageArtifact(await readContextBoardArtifact(work, artifact))
+    }))
   );
+  if (pages.length === 0) throw new Error("Context publication has no safely dispositioned pages");
+  const publicSnapshotDigest = createHash("sha256")
+    .update(contextBoardPublicSnapshot(pages.map(({ page }) => page)))
+    .digest("hex");
+  const certificationArtifact = await uploadContextBoardArtifact(work, {
+    kind: "certification",
+    name: "certification.json",
+    contentType: "application/json",
+    content: Buffer.from(
+      JSON.stringify({
+        version: 1,
+        verdict: "certified",
+        publicSnapshotDigest,
+        publicationPlanArtifact,
+        pageArtifacts
+      }),
+      "utf8"
+    )
+  });
   const result = await internalApiJson<Record<string, unknown>>(
     "/internal/context/board/publish",
     leaseBody(work, { certificationArtifact })
@@ -977,7 +1249,37 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   if (result.version !== 1) throw new Error("Context publication result version must be 1");
   const outputArtifact = parseArtifactRef(result.outputArtifact, "Context publication outputArtifact");
   const releaseId = requiredString(result.releaseId, "Context publication releaseId");
-  return { version: 1, outputArtifact, releaseId };
+  const releaseBytes = await readContextBoardArtifact(work, outputArtifact);
+  let release: unknown;
+  try {
+    release = JSON.parse(Buffer.from(releaseBytes).toString("utf8")) as unknown;
+  } catch {
+    throw new Error("published Context release artifact is not valid JSON");
+  }
+  const built = await buildBoardPageIndex(boardPageIndexClient, release, {
+    timeoutMs: positiveInt(process.env.CONTEXT_PAGEINDEX_BUILD_TIMEOUT_MS, 5 * 60_000),
+    maxDocumentCharacters: positiveInt(process.env.CONTEXT_PAGEINDEX_MAX_DOCUMENT_CHARACTERS, 2_000_000),
+    maxNodes: positiveInt(process.env.CONTEXT_PAGEINDEX_MAX_NODES, 20_000)
+  });
+  const treeArtifact = await uploadContextBoardArtifact(work, {
+    kind: "pageindex-tree",
+    name: `${releaseId}.json`,
+    contentType: "application/json",
+    content: Buffer.from(built.artifactContent, "utf8")
+  });
+  const attached = await internalApiJson<Record<string, unknown>>(
+    "/internal/context/board/pageindex/attach",
+    leaseBody(work, { releaseId, treeArtifact })
+  );
+  if (attached.version !== 1 || requiredString(attached.releaseId, "PageIndex attached releaseId") !== releaseId) {
+    throw new Error("PageIndex attachment did not bind the published Context release");
+  }
+  return {
+    contract: CONTEXT_WORKFLOW_CONTRACT,
+    schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    outputArtifact,
+    releaseId
+  };
 }
 
 async function captureContextInput(work: ClaimedWork<"run-context-input-snapshot">): Promise<IngestEvidenceInput> {
@@ -1037,7 +1339,7 @@ async function captureContextInput(work: ClaimedWork<"run-context-input-snapshot
 }
 
 async function uploadContextBoardArtifact(
-  work: ClaimedWork<ContextWorkerTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic>,
   input: {
     readonly kind: ContextArtifactKind;
     readonly name: string;
@@ -1107,7 +1409,7 @@ interface WorkerPhaseCheckpoint {
 }
 
 function contextPhaseCheckpointKey(
-  work: ClaimedWork<ContextWorkerTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic>,
   contract: string,
   phase: string,
   input: unknown
@@ -1159,7 +1461,7 @@ async function recordContextBoardPhaseCheckpoint(
 }
 
 async function checkpointedContextCandidate(
-  work: ClaimedWork<ContextWorkerTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic>,
   input: {
     readonly phase: string;
     readonly checkpointKey: string;
@@ -1208,7 +1510,9 @@ async function checkpointedContextCandidate(
   return selected.value;
 }
 
-async function loadPriorContext(work: ClaimedWork<ContextWorkerTopic>): Promise<PriorContextPacket | undefined> {
+async function loadPriorContext(
+  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic>
+): Promise<PriorContextPacket | undefined> {
   const seed = work.task.metadata.priorRelease;
   if (!seed) return undefined;
   if (
@@ -3596,7 +3900,7 @@ interface MaterialChallengeTask {
 }
 
 async function previousMaterialChallengeTasks(
-  work: ClaimedWork<(typeof CONTEXT_BOARD_TOPICS)[number]>,
+  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic>,
   beforePass: number
 ): Promise<MaterialChallengeTask[]> {
   const previous = work.task.metadata.dependencyResults
@@ -3638,7 +3942,7 @@ async function previousMaterialChallengeTasks(
 }
 
 async function contextPagesFromDependencies(
-  work: ClaimedWork<(typeof CONTEXT_BOARD_TOPICS)[number]>
+  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic>
 ): Promise<{ readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[]> {
   const latestDraftArtifact = latestContextDraftArtifact(work.task.metadata.dependencyResults);
   if (latestDraftArtifact) {
@@ -4859,7 +5163,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
     throw new Error("claim response must include message, task, and task metadata");
   }
   const topicValue = requiredString(value.message.topic, "claim message topic");
-  if (!SUPPORTED_WORKER_TOPICS.includes(topicValue as WorkerTopic)) {
+  if (!SUPPORTED_WORKER_TOPICS.includes(topicValue as (typeof SUPPORTED_WORKER_TOPICS)[number])) {
     throw new Error(`unsupported claimed topic ${topicValue}`);
   }
   const topic = topicValue as WorkerTopic;
@@ -4929,7 +5233,7 @@ function isBoardTopic(topic: string): topic is ContextWorkerTopic | CausalGraphW
 
 function boardWorkMetadata(
   metadata: Record<string, unknown>,
-  topic: ContextWorkerTopic | CausalGraphWorkerTopic
+  topic: ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic
 ): Omit<ContextBoardWorkerMetadata, keyof RepositoryContextMetadata> {
   const dependencyResults = parseContextBoardDependencyResults(metadata.dependencyResults);
   const base = {
@@ -4948,6 +5252,25 @@ function boardWorkMetadata(
     case "run-causal-graph-derive":
     case "run-causal-graph-publication":
       return base;
+    case "run-context-page-plan":
+      return {
+        ...base,
+        inputArtifact: parseArtifactRef(metadata.inputArtifact, "task inputArtifact")
+      };
+    case "run-context-page-build": {
+      const pageOperation = requiredString(metadata.pageOperation, "task pageOperation");
+      if (pageOperation !== "add" && pageOperation !== "revise") {
+        throw new Error("task pageOperation must be add or revise");
+      }
+      return {
+        ...base,
+        subjectId: requiredString(metadata.subjectId, "task subjectId"),
+        documentPath: requiredString(metadata.documentPath, "task documentPath"),
+        planArtifact: parseArtifactRef(metadata.planArtifact, "task planArtifact"),
+        briefArtifact: parseArtifactRef(metadata.briefArtifact, "task briefArtifact"),
+        pageOperation
+      };
+    }
     case "run-context-research-plan":
       return {
         ...base,
@@ -5000,8 +5323,8 @@ function boardWorkMetadata(
         planArtifact: parseArtifactRef(metadata.planArtifact, "task planArtifact"),
         pass: requiredNonNegativeInteger(metadata.pass, "task pass")
       };
-    case "run-context-certification":
     case "run-context-publication":
+    case "run-context-certification":
     case "run-context-pageindex":
       return {
         ...base,
@@ -5039,7 +5362,13 @@ function parseContextBoardDependencyResults(value: unknown): ContextBoardDepende
     throw new Error("task dependencyResults must be an array with at most 256 entries");
   }
   return value.map((entry, index) => {
-    if (!isRecord(entry) || !isRecord(entry.result) || entry.result.version !== 1) {
+    if (
+      !isRecord(entry) ||
+      !isRecord(entry.result) ||
+      (entry.result.version !== 1 &&
+        (entry.result.contract !== CONTEXT_WORKFLOW_CONTRACT ||
+          entry.result.schemaRevision !== CONTEXT_WORKFLOW_SCHEMA_REVISION))
+    ) {
       throw new Error(`task dependencyResults[${index}] is invalid`);
     }
     return {

@@ -33,10 +33,12 @@ import {
   derivationDetailLevels,
   derivationProgressDocumentPath,
   isDerivationDetail,
-  contextBoardTaskTypeDefinitions,
   contextBoardTaskTypes,
-  contextBoardTopics,
-  boardWorkArtifactKind,
+  boardWorkArtifactKind as existingBoardWorkArtifactKind,
+  contextWorkflowBoardArtifactKind,
+  contextWorkflowBoardTaskTypeDefinitions,
+  contextWorkflowBoardTaskTypes,
+  contextWorkflowBoardTopics,
   causalGraphBoardTaskTypes,
   causalGraphBoardTaskTypeDefinitions,
   causalGraphBoardTopics,
@@ -52,9 +54,11 @@ import {
   searchIssueGraph,
   parseContextPriorReleaseSeed,
   parseContextBoardTaskResult,
+  parseContextWorkflowBoardTaskResult,
   parseBoardPageIndexTreeArtifact,
   isContextBoardTaskType,
-  isBoardWorkTaskType,
+  isBoardWorkTaskType as isExistingBoardWorkTaskType,
+  isContextWorkflowBoardTaskType,
   resumeContextGateExhaustion,
   resumeContextPageExhaustion,
   newId,
@@ -102,6 +106,7 @@ import {
   finalizeContextBoardTaskResult,
   type ContextBoardPostCompletion
 } from "./context-board-runtime.js";
+import { applyContextWorkflowBoardTaskResult } from "./context-workflow-runtime.js";
 import { ContextBoardPublicationService } from "./context-board-publication.js";
 import { IssueGraphCatalogService } from "./issue-graph-catalog.js";
 import {
@@ -126,33 +131,19 @@ const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = [
   "run-review",
-  ...Object.values(contextBoardTopics),
+  ...Object.values(contextWorkflowBoardTopics),
   ...Object.values(causalGraphBoardTopics)
 ] as const;
-const CONTEXT_BOARD_TOPICS = new Set<string>(Object.values(contextBoardTopics));
+const CONTEXT_BOARD_TOPICS = new Set<string>(Object.values(contextWorkflowBoardTopics));
 const CAUSAL_GRAPH_TOPICS = new Set<string>(Object.values(causalGraphBoardTopics));
 const MODEL_BOARD_TOPICS = new Set<string>([
-  contextBoardTopics.researchPlan,
-  contextBoardTopics.research,
-  contextBoardTopics.publicationPlan,
-  contextBoardTopics.pageWrite,
-  contextBoardTopics.pageAudit,
-  contextBoardTopics.pageRepair,
-  contextBoardTopics.sourceChallenge,
-  contextBoardTopics.taskEvaluation,
-  contextBoardTopics.gapRepair,
+  contextWorkflowBoardTopics.planner,
+  contextWorkflowBoardTopics.page,
   causalGraphBoardTopics.derive
 ]);
 const CONTEXT_QUOTA_MODEL_TOPICS = new Set<string>([
-  contextBoardTopics.researchPlan,
-  contextBoardTopics.research,
-  contextBoardTopics.publicationPlan,
-  contextBoardTopics.pageWrite,
-  contextBoardTopics.pageAudit,
-  contextBoardTopics.pageRepair,
-  contextBoardTopics.sourceChallenge,
-  contextBoardTopics.taskEvaluation,
-  contextBoardTopics.gapRepair
+  contextWorkflowBoardTopics.planner,
+  contextWorkflowBoardTopics.page
 ]);
 const LONG_LEASE_BOARD_TOPICS = new Set<string>([...CONTEXT_BOARD_TOPICS, ...CAUSAL_GRAPH_TOPICS]);
 const RETRYABLE_WORKER_FAILURE_CATEGORIES = new Set([
@@ -164,9 +155,33 @@ const RETRYABLE_WORKER_FAILURE_CATEGORIES = new Set([
   "model"
 ]);
 const RUNTIME_BOARD_TASK_TYPE_DEFINITIONS = [
-  ...contextBoardTaskTypeDefinitions,
+  ...contextWorkflowBoardTaskTypeDefinitions,
   ...causalGraphBoardTaskTypeDefinitions
 ];
+
+function isBoardWorkTaskType(value: string): boolean {
+  return isContextWorkflowBoardTaskType(value) || isExistingBoardWorkTaskType(value);
+}
+
+function boardWorkArtifactKind(taskType: string): ContextArtifactKind {
+  if (isContextWorkflowBoardTaskType(taskType)) {
+    return contextWorkflowBoardArtifactKind(taskType);
+  }
+  return existingBoardWorkArtifactKind(taskType);
+}
+
+function boardTaskArtifactKinds(taskType: string): ReadonlySet<ContextArtifactKind> {
+  switch (taskType) {
+    case contextWorkflowBoardTaskTypes.planner:
+      return new Set(["research-plan", "research-report", "publication-plan"]);
+    case contextWorkflowBoardTaskTypes.page:
+      return new Set(["context-page", "citation-audit"]);
+    case contextWorkflowBoardTaskTypes.publication:
+      return new Set(["context-page", "certification", "pageindex-tree"]);
+    default:
+      return new Set([boardWorkArtifactKind(taskType)]);
+  }
+}
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
@@ -2080,15 +2095,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const lease = await requireLeasedBoardTask(principal.tenantId, body);
       if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
       if (!config.contextQuotaService) throw new Error("context artifact quota storage is not configured");
-      if (lease.task.type === contextBoardTaskTypes.publication) {
-        throw invalidRequest("publication output is created only by the authoritative publish operation");
-      }
       const kind = requiredString(body.kind, "kind");
       if (!contextArtifactKinds.includes(kind as ContextArtifactKind)) {
         throw invalidRequest("unsupported context artifact kind");
       }
-      const expectedKind = boardWorkArtifactKind(lease.task.type);
-      if (kind !== expectedKind) throw invalidRequest(`task output must use artifact kind ${expectedKind}`);
+      const allowedKinds = boardTaskArtifactKinds(lease.task.type);
+      if (!allowedKinds.has(kind as ContextArtifactKind)) {
+        throw invalidRequest(`task output must use one of: ${[...allowedKinds].join(", ")}`);
+      }
+      const expectedKind = kind as ContextArtifactKind;
       const name = requiredString(body.name, "name");
       if (!/^[a-z0-9][a-z0-9._-]{0,180}$/.test(name)) throw invalidRequest("artifact name is invalid");
       const contentType = requiredString(body.contentType, "contentType");
@@ -2287,8 +2302,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "POST" && url.pathname === "/internal/context/board/pageindex/attach") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
       const lease = await requireLeasedBoardTask(principal.tenantId, body);
-      if (lease.task.type !== contextBoardTaskTypes.pageIndex) {
-        throw invalidRequest("leased task is not a Context PageIndex attachment");
+      if (
+        lease.task.type !== contextBoardTaskTypes.pageIndex &&
+        lease.task.type !== contextWorkflowBoardTaskTypes.publication
+      ) {
+        throw invalidRequest("leased task is not a Context publication task");
       }
       if (!config.contextArtifactStore || !config.contextBoardPageIndexAttachmentTransaction) {
         throw new Error("board Context PageIndex attachment is not configured");
@@ -3214,11 +3232,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             const candidateTask = candidate ? findTask(intakeState.board, candidate.taskId) : undefined;
             if (!candidate || !candidateTask || !topics.includes(candidate.topic)) continue;
             if (
-              candidate.topic === contextBoardTopics.snapshot &&
+              candidate.topic === contextWorkflowBoardTopics.snapshot &&
               intakeState.board.outbox.some((message) => {
                 if (
                   message.id === candidate.id ||
-                  message.topic !== contextBoardTopics.snapshot ||
+                  message.topic !== contextWorkflowBoardTopics.snapshot ||
                   message.status !== "leased" ||
                   !message.leaseExpiresAt ||
                   message.leaseExpiresAt <= claimNow
@@ -3623,7 +3641,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       isBoardWorkTaskType(currentTask.type) &&
       (ownsCurrentLease || isCompletionReplay)
     ) {
-      const parsed = parseContextBoardTaskResult(intakeState.board, currentTask.id, body.result);
+      const parsed = isContextWorkflowBoardTaskType(currentTask.type)
+        ? parseContextWorkflowBoardTaskResult(intakeState.board, currentTask.id, body.result)
+        : parseContextBoardTaskResult(intakeState.board, currentTask.id, body.result);
       assertCurrentTaskOutputArtifact(
         currentTask,
         requiredString(currentTask.metadata.contextBuildId, "contextBuildId"),
@@ -3801,10 +3821,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         let completionPayload: Record<string, unknown>;
         let postCompletion: ContextBoardPostCompletion | undefined;
         if (terminalOutcome === "done" && isBoardWorkTaskType(task.type)) {
-          const applied = applyContextBoardTaskResult(board, boardTaskId, body.result, now);
+          const applied = isContextWorkflowBoardTaskType(task.type)
+            ? applyContextWorkflowBoardTaskResult(board, boardTaskId, body.result, now)
+            : applyContextBoardTaskResult(board, boardTaskId, body.result, now);
           board = applied.state;
           completionPayload = applied.result;
-          postCompletion = applied.postCompletion;
+          postCompletion = "postCompletion" in applied ? applied.postCompletion : undefined;
         } else {
           completionPayload =
             terminalOutcome === "failed"
@@ -5145,7 +5167,7 @@ function contextBoardBuildForPrincipal(state: BoardState, tenantId: string, buil
 
 function contextWorkerCompletionAttestation(state: BoardState, build: BoardTask) {
   const workerTaskTypes = new Set(
-    contextBoardTaskTypeDefinitions
+    contextWorkflowBoardTaskTypeDefinitions
       .filter((definition) => definition.kind === "dispatchable" && definition.dispatchTopic)
       .map((definition) => definition.type)
   );
@@ -5344,25 +5366,17 @@ function publicContextBoardCheckpointPages(state: BoardState, buildTaskId: TaskI
   return state.tasks
     .filter(
       (task) =>
-        task.type === contextBoardTaskTypes.page &&
+        task.type === contextWorkflowBoardTaskTypes.page &&
         task.parentTaskId === buildTaskId &&
         typeof task.metadata.documentPath === "string"
     )
     .sort((left, right) => String(left.metadata.documentPath).localeCompare(String(right.metadata.documentPath)))
     .map((task) => {
-      const output = latestCompletedContextOutput(
-        state,
-        state.tasks.filter(
-          (candidate) =>
-            candidate.parentTaskId === task.id &&
-            (candidate.type === contextBoardTaskTypes.pageWrite || candidate.type === contextBoardTaskTypes.pageRepair)
-        )
-      );
+      const output = latestCompletedContextOutput(state, [task]);
       const documentPath = String(task.metadata.documentPath);
-      const diagnostics = contextPageDiagnostics(state, task.id);
       return {
         documentPath: documentPath.endsWith(".md") ? documentPath.slice(0, -3) : documentPath,
-        title: task.title.replace(/^Write /, ""),
+        title: task.title,
         bytes: output?.artifact.bytes ?? 0,
         validationStatus:
           task.status === "done"
@@ -5370,7 +5384,7 @@ function publicContextBoardCheckpointPages(state: BoardState, buildTaskId: TaskI
             : task.status === "failed"
               ? ("invalid" as const)
               : ("pending" as const),
-        diagnostics,
+        diagnostics: contextPageDiagnostics(state, task.id),
         checkpointSequence: output?.pass ?? 0,
         updatedAt: task.updatedAt
       };
@@ -5378,13 +5392,8 @@ function publicContextBoardCheckpointPages(state: BoardState, buildTaskId: TaskI
 }
 
 function contextPageDiagnostics(state: BoardState, pageTaskId: TaskId): readonly string[] {
-  const auditTaskIds = new Set(
-    state.tasks
-      .filter((task) => task.type === contextBoardTaskTypes.pageAudit && task.metadata.pageTaskId === pageTaskId)
-      .map((task) => task.id)
-  );
   for (const event of [...state.events].reverse()) {
-    if (!event.taskId || !auditTaskIds.has(event.taskId) || !Array.isArray(event.payload?.diagnostics)) continue;
+    if (event.taskId !== pageTaskId || !Array.isArray(event.payload?.diagnostics)) continue;
     return event.payload.diagnostics
       .filter((diagnostic): diagnostic is string => typeof diagnostic === "string")
       .slice(0, 32);
@@ -5402,21 +5411,11 @@ async function readContextBoardCheckpointPage(
   const target = `${requestedDocumentPath}.md`;
   const page = state.tasks.find(
     (task) =>
-      task.type === contextBoardTaskTypes.page &&
+      task.type === contextWorkflowBoardTaskTypes.page &&
       task.parentTaskId === build.id &&
       task.metadata.documentPath === target
   );
-  const pageTasks = page
-    ? state.tasks.filter(
-        (task) =>
-          task.parentTaskId === page.id &&
-          (task.type === contextBoardTaskTypes.pageWrite || task.type === contextBoardTaskTypes.pageRepair)
-      )
-    : [];
-  const globalTasks = state.tasks.filter(
-    (task) => task.parentTaskId === build.id && task.type === contextBoardTaskTypes.gapRepair
-  );
-  const candidates = completedContextOutputs(state, [...pageTasks, ...globalTasks]);
+  const candidates = completedContextOutputs(state, page ? [page] : []);
   for (const candidate of candidates) {
     assertBoardArtifactScope(candidate.task, build.id, candidate.artifact);
     const content = await artifacts.get(candidate.artifact);
@@ -5525,7 +5524,8 @@ function contextBoardDependencyResults(state: BoardState, taskId: TaskId) {
         (candidate) =>
           candidate.taskId === dependencyId &&
           candidate.type.endsWith(".completed") &&
-          candidate.payload?.version === 1 &&
+          (candidate.payload?.version === 1 ||
+            (candidate.payload?.contract === "page-oriented" && candidate.payload.schemaRevision === 1)) &&
           candidate.payload.outputArtifact
       );
     return event

@@ -23,7 +23,14 @@ test("worker claim preference accepts only a repository identity", () => {
   assert.throws(() => configuredWorkerPreferredRepository("omxyz"), /owner\/repository/);
 });
 
-const LEGACY_CONTEXT_TOPICS = ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"] as const;
+const LEGACY_CONTEXT_TOPICS = [
+  "run-ingest-evidence",
+  "run-derive-knowledge",
+  "run-index-context",
+  "run-context-research-plan",
+  "run-context-page-write",
+  "run-context-pageindex"
+] as const;
 
 test("worker topics reject every legacy Context executor route", () => {
   for (const topic of LEGACY_CONTEXT_TOPICS) {

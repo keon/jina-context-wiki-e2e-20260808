@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CONTROLLED_REPOSITORY = "omxyz/jina-context-graph-e2e";
-const REQUIRED_RELEASE_TASKS = new Set(["publish-context-release", "index-context-release"]);
+const REQUIRED_RELEASE_TASKS = new Set(["publish-context-release"]);
 const FIXTURE_INSTALLATION_PERMISSIONS = Object.freeze({
   contents: "write",
   issues: "write",

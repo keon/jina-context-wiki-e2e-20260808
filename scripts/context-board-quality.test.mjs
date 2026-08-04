@@ -96,7 +96,7 @@ test("scans only the requested build subtree", async () => {
   const fixture = await boardFixture();
   const unrelated = path.join(
     fixture.root,
-    "context-v2",
+    "context",
     "tenants",
     "other",
     "repositories",
@@ -225,7 +225,7 @@ async function boardFixture(options = {}) {
   const ref = "main";
   const buildDirectory = path.join(
     root,
-    "context-v2",
+    "context",
     "tenants",
     encodeURIComponent(tenantId),
     "repositories",
@@ -244,7 +244,7 @@ async function boardFixture(options = {}) {
     return {
       uri: `file://${target}`,
       key: [
-        "context-v2",
+        "context",
         "tenants",
         encodeURIComponent(tenantId),
         "repositories",

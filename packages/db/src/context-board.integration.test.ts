@@ -1311,7 +1311,7 @@ function pageIndexFixture(publication: Awaited<ReturnType<typeof publicationFixt
 
 function artifactRef(buildId: string, kind: string, name: string, content: string): ContextArtifactRef {
   const key = [
-    "context-v2",
+    "context",
     "tenants",
     encodeURIComponent(TENANT),
     "repositories",
