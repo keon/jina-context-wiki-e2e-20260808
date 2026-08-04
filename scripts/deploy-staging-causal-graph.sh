@@ -162,7 +162,7 @@ gcloud run deploy "${worker_service}" \
   --memory=1Gi \
   --timeout=300 \
   --min-instances=1 \
-  --max-instances=1 \
+  --max-instances=3 \
   --no-cpu-throttling \
   --set-env-vars="${worker_environment}" \
   --set-secrets="${worker_secrets}" \

@@ -49,3 +49,9 @@ test("first staging worker creation remains release-gated", () => {
   );
   assert.match(deployment, /gcloud run deploy "\$\{worker_service\}"[\s\S]+?activate-causal-graph-release\.js/);
 });
+
+test("causal graph staging keeps bounded warm capacity", () => {
+  assert.match(deployment, /--min-instances=1/);
+  assert.match(deployment, /--max-instances=3/);
+  assert.match(deployment, /--concurrency=1/);
+});

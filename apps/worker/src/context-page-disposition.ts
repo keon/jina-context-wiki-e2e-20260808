@@ -1,4 +1,4 @@
-export function contextPageDispositionArtifact(result: Record<string, unknown>): unknown | undefined {
+export function contextPageDispositionArtifact(result: Record<string, unknown>): unknown {
   const disposition = result.disposition;
   if (!disposition || typeof disposition !== "object" || Array.isArray(disposition)) {
     throw new Error("Context page dependency disposition is missing");
