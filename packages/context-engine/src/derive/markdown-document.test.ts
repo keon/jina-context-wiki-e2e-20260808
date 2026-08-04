@@ -6,7 +6,8 @@ import {
   markdownEvidenceSections,
   normalizeMarkdownEvidenceTargets,
   parseMarkdownDocument,
-  resolveDocumentLink
+  resolveDocumentLink,
+  unlinkMarkdownDocumentTargets
 } from "./markdown-document.js";
 import { evidenceSupportsClaim, verifyMarkdownCatalog } from "./markdown-verifier.js";
 import { mapMarkdownCatalog } from "./markdown-catalog.js";
@@ -65,6 +66,27 @@ test("both kinds of reference are ordinary Markdown links", () => {
   assert.deepEqual(parsed.documentLinks, [
     { text: "Diagnose a stalled publication", target: "../runbooks/stalled-publication.md" }
   ]);
+});
+
+test("unlinking an omitted document preserves its label and every other rendered target", () => {
+  const source = [
+    "See [Legacy deletion](../runbooks/legacy.md) and [Runtime](runtime.md).",
+    "[The worker fences completion](src/worker.ts#L10-L12).",
+    "![Legacy diagram](../runbooks/legacy.md)",
+    "`[Legacy example](../runbooks/legacy.md)`",
+    "<!-- [Legacy comment](../runbooks/legacy.md) -->"
+  ].join("\n");
+
+  assert.equal(
+    unlinkMarkdownDocumentTargets(source, "components/api.md", new Set(["runbooks/legacy.md"])),
+    [
+      "See Legacy deletion and [Runtime](runtime.md).",
+      "[The worker fences completion](src/worker.ts#L10-L12).",
+      "![Legacy diagram](../runbooks/legacy.md)",
+      "`[Legacy example](../runbooks/legacy.md)`",
+      "<!-- [Legacy comment](../runbooks/legacy.md) -->"
+    ].join("\n")
+  );
 });
 
 test("normalizes agent source locations to repository-relative GitHub line links", () => {

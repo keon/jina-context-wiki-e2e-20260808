@@ -889,6 +889,26 @@ function isDocumentTarget(target: string): boolean {
   return target.endsWith(".md") || target.includes(".md#");
 }
 
+/**
+ * Removes only rendered links to an explicitly omitted Context document while
+ * retaining their visible text. Evidence links, images, code examples,
+ * comments, escaped literals, and links to every published document remain
+ * byte-for-byte unchanged.
+ */
+export function unlinkMarkdownDocumentTargets(
+  source: string,
+  fromDocumentPath: string,
+  omittedDocumentPaths: ReadonlySet<string>
+): string {
+  const fromPath = documentPathFromFile(fromDocumentPath);
+  const omitted = new Set([...omittedDocumentPaths].map(documentPathFromFile));
+  return source.replace(LINK_PATTERN, (whole, label: string, target: string, offset: number) => {
+    if (!isRenderedMarkdownLink(source, offset) || !isDocumentTarget(target)) return whole;
+    const resolved = resolveDocumentLink(fromPath, target);
+    return resolved && omitted.has(resolved) ? label : whole;
+  });
+}
+
 export function parseMarkdownDocument(documentPath: string, source: string): ParsedMarkdownDocument {
   source = normalizeMarkdownEvidenceTargets(source);
   const documentLinks: MarkdownDocumentLink[] = [];

@@ -96,6 +96,7 @@ import {
   deriveIssueCandidateLedger,
   materializeIssueGraph,
   minimumDerivedIssueCount,
+  unlinkMarkdownDocumentTargets,
   type CertifiedContextReleaseArtifactV1,
   type ContextPageChange,
   type ContextPriorPage,
@@ -1401,11 +1402,38 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
       })
     );
   }
-  const pages = await Promise.all(
+  const loadedPages = await Promise.all(
     pageArtifacts.map(async (artifact) => ({
       artifact,
       page: parseContextPageArtifact(await readContextBoardArtifact(work, artifact))
     }))
+  );
+  const omittedDocumentPaths = new Set(omittedPages.map((page) => page.path));
+  const pages = await Promise.all(
+    loadedPages.map(async ({ artifact, page }) => {
+      const bodyMarkdown = unlinkMarkdownDocumentTargets(
+        page.bodyMarkdown,
+        page.documentPath,
+        omittedDocumentPaths
+      );
+      if (bodyMarkdown === page.bodyMarkdown) return { artifact, page };
+      const publicationPage = { ...page, bodyMarkdown };
+      const publicationArtifact = await uploadContextBoardArtifact(work, {
+        kind: "context-page",
+        name: contextPageArtifactName(page.documentPath, "publication"),
+        contentType: "application/json",
+        content: Buffer.from(
+          JSON.stringify({
+            version: 1,
+            ...publicationPage,
+            sourcePageArtifact: artifact,
+            omittedDocumentPaths: [...omittedDocumentPaths].sort()
+          }),
+          "utf8"
+        )
+      });
+      return { artifact: publicationArtifact, page: publicationPage };
+    })
   );
   if (pages.length === 0) throw new Error("Context publication has no safely dispositioned pages");
   const publicSnapshotDigest = createHash("sha256")
