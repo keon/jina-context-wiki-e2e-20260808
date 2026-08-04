@@ -89,6 +89,7 @@ export interface BoardPageIndexAttachCommit {
   readonly scope: BoardContextPublicationScope;
   readonly lease: BoardPublicationLeaseFence;
   readonly releaseId: string;
+  readonly releaseArtifactRef: ContextArtifactRef;
   readonly idempotencyKey: string;
   readonly attachmentInputDigest: string;
   readonly treeArtifactRef: ContextArtifactRef;
@@ -146,6 +147,7 @@ export function serializeBoardPageIndexTreeArtifact(artifact: BoardPageIndexTree
 export function boardPageIndexAttachmentInputDigest(input: {
   readonly scope: BoardContextPublicationScope;
   readonly releaseId: string;
+  readonly releaseArtifactRef: ContextArtifactRef;
   readonly treeArtifactRef: ContextArtifactRef;
   readonly treeDigest: string;
   readonly buildDigest: string;
@@ -154,6 +156,7 @@ export function boardPageIndexAttachmentInputDigest(input: {
     version: 1,
     scope: input.scope,
     releaseId: input.releaseId,
+    releaseArtifactRef: artifactIdentity(input.releaseArtifactRef),
     treeArtifactRef: artifactIdentity(input.treeArtifactRef),
     treeDigest: input.treeDigest,
     buildDigest: input.buildDigest
@@ -178,7 +181,8 @@ export function validateBoardPageIndexAttachCommit(input: BoardPageIndexAttachCo
   ) {
     invalid("PageIndex artifact escapes the leased release scope");
   }
-  validateArtifactRef(input.treeArtifactRef, input.scope);
+  validateArtifactRef(input.treeArtifactRef, input.scope, "pageindex-tree");
+  validateArtifactRef(input.releaseArtifactRef, input.scope, "context-release");
   const content = serializeBoardPageIndexTreeArtifact(artifact);
   if (
     input.treeArtifactRef.bytes !== Buffer.byteLength(content, "utf8") ||
@@ -189,6 +193,7 @@ export function validateBoardPageIndexAttachCommit(input: BoardPageIndexAttachCo
   const expectedInputDigest = boardPageIndexAttachmentInputDigest({
     scope: input.scope,
     releaseId: input.releaseId,
+    releaseArtifactRef: input.releaseArtifactRef,
     treeArtifactRef: input.treeArtifactRef,
     treeDigest: artifact.metrics.treeDigest,
     buildDigest: artifact.metrics.buildDigest
@@ -471,7 +476,11 @@ function validateTree(
   }
 }
 
-function validateArtifactRef(artifact: ContextArtifactRef, scope: BoardContextPublicationScope): void {
+function validateArtifactRef(
+  artifact: ContextArtifactRef,
+  scope: BoardContextPublicationScope,
+  kind: "pageindex-tree" | "context-release"
+): void {
   if (
     artifact.contentType !== "application/json" ||
     !Number.isSafeInteger(artifact.bytes) ||
@@ -483,7 +492,7 @@ function validateArtifactRef(artifact: ContextArtifactRef, scope: BoardContextPu
   }
   if (
     !isContextArtifactKeyInScope(artifact.key, scope) ||
-    !artifact.key.startsWith(`${contextArtifactScopePrefix(scope)}/pageindex-tree/`)
+    !artifact.key.startsWith(`${contextArtifactScopePrefix(scope)}/${kind}/`)
   ) {
     invalid("PageIndex artifact reference is outside the release build scope");
   }

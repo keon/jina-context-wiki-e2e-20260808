@@ -1430,7 +1430,7 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   });
   const attached = await internalApiJson<Record<string, unknown>>(
     "/internal/context/board/pageindex/attach",
-    leaseBody(work, { releaseId, treeArtifact })
+    leaseBody(work, { releaseId, releaseArtifact: outputArtifact, treeArtifact })
   );
   if (attached.version !== 1 || requiredString(attached.releaseId, "PageIndex attached releaseId") !== releaseId) {
     throw new Error("PageIndex attachment did not bind the published Context release");
