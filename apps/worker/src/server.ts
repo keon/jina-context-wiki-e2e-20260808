@@ -152,6 +152,7 @@ import { parseBoardResearchPlan, parseResearchPlanWithRepair } from "./board-res
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
+import { contextPhaseCandidateArtifact } from "./phase-checkpoint-artifact.js";
 import { runtimeWorkerId } from "./worker-identity.js";
 import { GcsReviewArtifactStore, decodeReviewTaskResult, encodeReviewTaskResult } from "./review-artifacts.js";
 import {
@@ -1644,11 +1645,17 @@ async function checkpointedContextCandidate(
   }
   const candidate = await input.generate();
   await input.validate?.(candidate);
+  const candidateArtifact = contextPhaseCandidateArtifact(input.phase, candidate);
   const artifact = await uploadContextBoardArtifact(work, {
     kind: boardWorkArtifactKindForTopic(work.topic),
-    name: `${input.phase}.json`,
+    // A Cloud Run instance can terminate after uploading a candidate but before
+    // recording its checkpoint. A replacement worker then owns the same Board
+    // attempt and may regenerate different model output. Content-address the
+    // immutable object so both candidates can coexist while the checkpoint
+    // transaction still selects exactly one of them.
+    name: candidateArtifact.name,
     contentType: "application/json",
-    content: Buffer.from(JSON.stringify(candidate), "utf8")
+    content: candidateArtifact.content
   });
   const recorded = await recordContextBoardPhaseCheckpoint(work, {
     phase: input.phase,
