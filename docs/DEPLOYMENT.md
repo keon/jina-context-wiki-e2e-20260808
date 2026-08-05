@@ -41,9 +41,10 @@ The build and deployment identity is
 use a GitHub Actions deployment identity or GitHub environment secrets. The account has
 the project deployment roles checked by `scripts/check-staging-readiness.sh`, plus
 `roles/secretmanager.secretVersionAdder` only on
-`jina-staging-causal-graph-worker-release-credential`. Cloud Scheduler is a platform
-prerequisite; application deployment verifies that its API is enabled but does not grant
-itself service-usage administration.
+`jina-staging-causal-graph-worker-release-credential`; only the staging project's Cloud
+Build service agent can mint its short-lived build credentials. Cloud Scheduler is a
+platform prerequisite; application deployment verifies that its API is enabled but does
+not grant itself service-usage administration.
 
 Before a staging deploy, run `scripts/check-staging-readiness.sh`. It verifies the
 staging-only Cloud Build trigger, Cloud SQL runtime state, migration job, secrets,

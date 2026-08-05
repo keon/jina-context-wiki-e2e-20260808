@@ -8,6 +8,7 @@ trigger_name="${JINA_STAGING_CLOUD_BUILD_TRIGGER:-jina-staging-deploy}"
 connection_name="${JINA_STAGING_CLOUD_BUILD_CONNECTION:-jina-github}"
 repository_name="${JINA_STAGING_CLOUD_BUILD_REPOSITORY:-jina}"
 staging_deployer="jina-cloud-build-staging@${staging_project}.iam.gserviceaccount.com"
+cloud_build_service_agent="service-679811160186@gcp-sa-cloudbuild.iam.gserviceaccount.com"
 repository_resource="projects/${staging_project}/locations/${cloud_build_region}/connections/${connection_name}/repositories/${repository_name}"
 failures=0
 
@@ -60,6 +61,18 @@ for role in "${required_deployer_roles[@]}"; do
     fail "Automatic staging deployer requires ${role}"
   fi
 done
+
+deployer_policy="$(gcloud iam service-accounts get-iam-policy "${staging_deployer}" \
+  --project="${staging_project}" --format=json 2>/dev/null || true)"
+if jq -e --arg member "serviceAccount:${cloud_build_service_agent}" '
+    .bindings[]? |
+    select(.role == "roles/iam.serviceAccountTokenCreator") |
+    .members[]? | select(. == $member)
+  ' <<<"${deployer_policy}" >/dev/null; then
+  pass "Cloud Build service agent can mint the dedicated staging build identity"
+else
+  fail "Cloud Build service agent requires TokenCreator on ${staging_deployer}"
+fi
 
 connection_json="$(gcloud builds connections describe "${connection_name}" \
   --project="${staging_project}" --region="${cloud_build_region}" \
