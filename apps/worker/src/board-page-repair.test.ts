@@ -350,7 +350,7 @@ test("page repair scope rejects a shallow replacement even when the prior page i
 
 test("a rejected repair completes with only the prior checkpoint result envelope", () => {
   const priorArtifact = {
-    key: "context-v2/build/prior.json",
+    key: "context/build/prior.json",
     sha256: "a".repeat(64)
   };
   assert.deepEqual(

@@ -63,7 +63,6 @@ interface DocumentRow {
 }
 
 interface LivePageIndexLease {
-  readonly releaseArtifact: ContextArtifactRef;
   readonly latestAdmittedSequence: number;
 }
 
@@ -149,7 +148,7 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
       }
 
       const publication = await publicationForUpdate(client, input.releaseId);
-      assertPublicationIdentity(publication, input, artifact, liveLease);
+      assertPublicationIdentity(publication, input, artifact);
       if (publication.pageindex_attachment_input_digest !== null) {
         if (
           publication.pageindex_idempotency_key !== input.idempotencyKey ||
@@ -375,9 +374,7 @@ function assertLivePageIndexLease(
   const root = objectValue(snapshot);
   const board = objectValue(objectValue(root?.intakeState)?.board);
   const tasks = Array.isArray(board?.tasks) ? board.tasks.map(objectValue).filter(isObject) : [];
-  const dependencies = Array.isArray(board?.dependencies) ? board.dependencies.map(objectValue).filter(isObject) : [];
   const outbox = Array.isArray(board?.outbox) ? board.outbox.map(objectValue).filter(isObject) : [];
-  const events = Array.isArray(board?.events) ? board.events.map(objectValue).filter(isObject) : [];
   const task = tasks.find((candidate) => candidate.id === input.lease.taskId);
   const message = outbox.find((candidate) => candidate.id === input.lease.messageId);
   const metadata = objectValue(task?.metadata);
@@ -385,7 +382,7 @@ function assertLivePageIndexLease(
   if (
     !task ||
     !message ||
-    task.type !== "index-context-release" ||
+    task.type !== "publish-context-release" ||
     task.kind !== "dispatchable" ||
     task.status !== "in_progress" ||
     task.attempt !== input.lease.attempt ||
@@ -396,7 +393,7 @@ function assertLivePageIndexLease(
     metadata.commitSha !== input.scope.commitSha ||
     metadata.contextBuildId !== input.scope.buildId ||
     message.taskId !== input.lease.taskId ||
-    message.topic !== "run-context-pageindex" ||
+    message.topic !== "run-context-publication" ||
     message.status !== "leased" ||
     payload?.attempt !== input.lease.attempt ||
     message.leaseId !== input.lease.leaseId ||
@@ -404,7 +401,7 @@ function assertLivePageIndexLease(
     typeof message.leaseExpiresAt !== "string" ||
     new Date(message.leaseExpiresAt).valueOf() <= databaseNowMillis
   ) {
-    staleLease("PageIndex task no longer owns the durable board lease");
+    staleLease("Context publication task no longer owns the durable board lease");
   }
   const build = tasks.find((candidate) => candidate.id === input.scope.buildId);
   const buildMetadata = objectValue(build?.metadata);
@@ -419,28 +416,6 @@ function assertLivePageIndexLease(
   ) {
     staleLease("PageIndex build scope no longer matches its board root");
   }
-  const publicationDependencies = dependencies
-    .filter((dependency) => dependency.taskId === input.lease.taskId && dependency.required === true)
-    .map((dependency) => tasks.find((candidate) => candidate.id === dependency.dependsOnTaskId))
-    .filter((candidate) => candidate?.type === "publish-context-release" && candidate.status === "done");
-  if (publicationDependencies.length !== 1) {
-    staleLease("PageIndex task does not have one completed publication dependency");
-  }
-  const publicationTask = publicationDependencies[0]!;
-  const completion = [...events]
-    .reverse()
-    .find(
-      (event) =>
-        event.taskId === publicationTask.id &&
-        typeof event.type === "string" &&
-        event.type.endsWith(".completed") &&
-        objectValue(event.payload)?.version === 1
-    );
-  const result = objectValue(completion?.payload);
-  const releaseArtifact = artifactRefValue(result?.outputArtifact);
-  if (result?.releaseId !== input.releaseId || !releaseArtifact) {
-    staleLease("PageIndex task is not fenced to the requested published release");
-  }
   const admitted = tasks
     .filter((candidate) => {
       const candidateMetadata = objectValue(candidate.metadata);
@@ -453,7 +428,7 @@ function assertLivePageIndexLease(
       );
     })
     .map((candidate) => Number(objectValue(candidate.metadata)!.refSequence));
-  return { releaseArtifact, latestAdmittedSequence: Math.max(0, ...admitted) };
+  return { latestAdmittedSequence: Math.max(0, ...admitted) };
 }
 
 function assertAttachmentFrontier(
@@ -475,8 +450,7 @@ function assertAttachmentFrontier(
 function assertPublicationIdentity(
   publication: PublicationRow,
   input: BoardPageIndexAttachCommit,
-  artifact: BoardPageIndexTreeArtifactV1,
-  liveLease: LivePageIndexLease
+  artifact: BoardPageIndexTreeArtifactV1
 ): void {
   if (
     publication.release_id !== input.releaseId ||
@@ -488,7 +462,7 @@ function assertPublicationIdentity(
     publication.build_id !== input.scope.buildId ||
     publication.publication_input_digest !== artifact.release.publicationInputDigest ||
     publication.public_snapshot_digest !== artifact.release.publicSnapshotDigest ||
-    !sameArtifact(publication.release_artifact, liveLease.releaseArtifact)
+    !sameArtifact(publication.release_artifact, input.releaseArtifactRef)
   ) {
     throw new BoardPageIndexAttachmentError(
       "release_not_current",
@@ -657,28 +631,6 @@ async function databaseClockMillis(client: PoolClient): Promise<number> {
 async function activateTenantPublicationRole(client: PoolClient, tenantId: string): Promise<void> {
   await client.query("set local role jina_context_tenant_admin");
   await client.query("select set_config('jina.tenant_id',$1,true)", [tenantId]);
-}
-
-function artifactRefValue(value: unknown): ContextArtifactRef | undefined {
-  const artifact = objectValue(value);
-  if (
-    !artifact ||
-    typeof artifact.uri !== "string" ||
-    typeof artifact.key !== "string" ||
-    typeof artifact.contentType !== "string" ||
-    !Number.isSafeInteger(artifact.bytes) ||
-    typeof artifact.sha256 !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    uri: artifact.uri,
-    key: artifact.key,
-    contentType: artifact.contentType,
-    bytes: Number(artifact.bytes),
-    sha256: artifact.sha256,
-    ...(typeof artifact.objectGeneration === "string" ? { objectGeneration: artifact.objectGeneration } : {})
-  };
 }
 
 function sameArtifact(left: ContextArtifactRef | null | undefined, right: ContextArtifactRef): boolean {

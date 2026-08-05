@@ -340,7 +340,7 @@ function publicationGraph(requestKey: string): {
 }
 
 function artifact(name: string, buildTaskId: TaskId): ContextArtifactRef {
-  const key = `context-v2/tenants/tenant-1/repositories/omxyz/jina/builds/${buildTaskId}/${name}.json`;
+  const key = `context/tenants/tenant-1/repositories/omxyz/jina/builds/${buildTaskId}/${name}.json`;
   return {
     uri: `gs://context-test/${key}`,
     key,

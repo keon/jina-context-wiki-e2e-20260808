@@ -271,15 +271,15 @@ dev_restart_main() {
   restart_worker snapshot "run-context-input-snapshot"
   for index in $(seq 1 "$JINA_RESTART_AGENT_WORKERS"); do
     restart_worker "agent-$index" \
-      "run-context-research-plan|run-context-research|run-context-publication-plan|run-context-page-write|run-context-page-repair|run-context-gap-repair"
+      "run-context-page-plan|run-context-page-build"
   done
   for index in $(seq 1 "$JINA_RESTART_AUDIT_WORKERS"); do
     restart_worker "auditor-$index" \
-      "run-context-page-audit|run-context-source-challenge|run-context-task-evaluation"
+      "run-context-page-build"
   done
-  restart_worker certification "run-context-certification"
+  restart_worker certification "run-context-page-plan"
   restart_worker publication "run-context-publication"
-  restart_worker pageindex "run-context-pageindex"
+  restart_worker pageindex "run-context-publication"
 
   for index in "${!worker_roles[@]}"; do
     if ! jina_wait_for_health "http://127.0.0.1:${worker_ports[$index]}/health" 90 1; then
@@ -508,14 +508,14 @@ capture_current_restart_state() {
   local -a roles=(snapshot agent-1 agent-2 agent-3 auditor-1 auditor-2 certification publication pageindex)
   local -a topics=(
     "run-context-input-snapshot"
-    "run-context-research-plan|run-context-research|run-context-publication-plan|run-context-page-write|run-context-page-repair|run-context-gap-repair"
-    "run-context-research-plan|run-context-research|run-context-publication-plan|run-context-page-write|run-context-page-repair|run-context-gap-repair"
-    "run-context-research-plan|run-context-research|run-context-publication-plan|run-context-page-write|run-context-page-repair|run-context-gap-repair"
-    "run-context-page-audit|run-context-source-challenge|run-context-task-evaluation"
-    "run-context-page-audit|run-context-source-challenge|run-context-task-evaluation"
-    "run-context-certification"
+    "run-context-page-plan|run-context-page-build"
+    "run-context-page-plan|run-context-page-build"
+    "run-context-page-plan|run-context-page-build"
+    "run-context-page-build"
+    "run-context-page-build"
+    "run-context-page-plan"
     "run-context-publication"
-    "run-context-pageindex"
+    "run-context-publication"
   )
   local -a pid_files=("$state_directory"/worker-*.pid)
   [[ ${#pid_files[@]} -eq ${#roles[@]} ]] || {

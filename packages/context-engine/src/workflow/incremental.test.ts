@@ -102,6 +102,45 @@ test("rejects changed bytes behind a retain disposition", () => {
   );
 });
 
+test("an explicit disposition may omit only a newly added page", () => {
+  const publishedPages = [
+    {
+      documentPath: "architecture.md",
+      title: "Architecture",
+      bodyMarkdown: "# Architecture\n\nThe supported repository overview.\n"
+    }
+  ];
+
+  assert.doesNotThrow(() =>
+    validatePublishedContextIncrement({
+      plannedPages: [
+        { path: "architecture.md", change: "add" },
+        { path: "legacy-administrator-deletion.md", change: "add" }
+      ],
+      omittedPages: [{ path: "legacy-administrator-deletion.md", reasonCode: "unsupported_core_claims" }],
+      publishedPages
+    })
+  );
+  assert.throws(
+    () =>
+      validatePublishedContextIncrement({
+        priorRelease: priorRelease(),
+        plannedPages: [
+          { path: "architecture.md", change: "retain" },
+          { path: "components/api.md", change: "revise" },
+          { path: "runbooks/legacy.md", change: "retain" }
+        ],
+        omittedPages: [{ path: "components/api.md", reasonCode: "unsupported_core_claims" }],
+        publishedPages: priorRelease().pages.map((page) => ({
+          documentPath: page.documentPath,
+          title: page.title,
+          bodyMarkdown: page.bodyMarkdown
+        }))
+      }),
+    /may omit only a new add page/
+  );
+});
+
 test("derives stable logical IDs from the prior immutable catalog", () => {
   assert.deepEqual(
     contextPriorReleaseCatalog(priorRelease()).map(({ documentPath, logicalId }) => [documentPath, logicalId]),
@@ -128,7 +167,7 @@ test("prior seed parser rejects a cross-tenant release artifact key", () => {
         publicSnapshotDigest: release.publicSnapshotDigest,
         releaseArtifact: {
           ...release.certificationArtifact,
-          key: "context-v2/tenants/other/repositories/acme/sample/builds/task_prior/context-release/cr_prior.json"
+          key: "context/tenants/other/repositories/acme/sample/builds/task_prior/context-release/cr_prior.json"
         }
       }),
     /outside its immutable repository release scope/
@@ -160,7 +199,7 @@ function priorRelease(): CertifiedContextReleaseArtifactV1 {
   }));
   const artifact = {
     uri: "file:///prior.json",
-    key: "context-v2/tenants/tenant-a/repositories/acme/sample/builds/task_prior/context-release/cr_prior.json",
+    key: "context/tenants/tenant-a/repositories/acme/sample/builds/task_prior/context-release/cr_prior.json",
     contentType: "application/json",
     bytes: 1,
     sha256: "a".repeat(64)

@@ -17,6 +17,7 @@ const ACTIVE_RELEASE = {
 test("production worker routes reject a stale release generation before mutating Board state", async () => {
   const store = guardedStateStore(ACTIVE_RELEASE);
   const { baseUrl, close } = await runningApi(store, true);
+  const initialLoadCount = store.loadCount();
   try {
     for (const [path, body] of [
       ["/internal/worker/claim", { workerId: "stale", topics: ["run-context-input-snapshot"] }],
@@ -57,6 +58,7 @@ test("production worker routes reject a stale release generation before mutating
       assert.equal((await response.json()).code, "worker_release_rejected", path);
     }
     assert.equal(store.mutationCount(), 0);
+    assert.equal(store.loadCount(), initialLoadCount);
   } finally {
     await close();
   }
@@ -150,6 +152,7 @@ function requestIdentity(credential: string): Record<string, string> {
 }
 
 function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStore & {
+  loadCount(): number;
   mutationCount(): number;
   verificationCount(): number;
   lastVerification(): WorkerReleaseGuard | undefined;
@@ -158,6 +161,7 @@ function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStor
     intakeState: createGitHubIntakeState(),
     devDeliverySequence: 0
   };
+  let loads = 0;
   let mutations = 0;
   let verifications = 0;
   let lastVerification: WorkerReleaseGuard | undefined;
@@ -178,6 +182,7 @@ function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStor
   };
   return {
     async load() {
+      loads += 1;
       return snapshot;
     },
     async ping() {},
@@ -203,6 +208,9 @@ function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStor
       return { committed: true, result: result.result };
     },
     async close() {},
+    loadCount() {
+      return loads;
+    },
     mutationCount() {
       return mutations;
     },

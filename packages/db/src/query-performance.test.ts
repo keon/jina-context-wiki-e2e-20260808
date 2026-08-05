@@ -94,8 +94,8 @@ test("issue graph publication has constant SQL work regardless of graph cardinal
     }
   } as unknown as ContextDatabase;
   const artifact = {
-    uri: "gs://context/context-v2/tenants/tenant-1/repositories/acme/widgets/builds/build-1/issue-graph/release.json",
-    key: "context-v2/tenants/tenant-1/repositories/acme/widgets/builds/build-1/issue-graph/release.json",
+    uri: "gs://context/context/tenants/tenant-1/repositories/acme/widgets/builds/build-1/issue-graph/release.json",
+    key: "context/tenants/tenant-1/repositories/acme/widgets/builds/build-1/issue-graph/release.json",
     contentType: "application/json",
     bytes: 8_000_000,
     sha256: "b".repeat(64)
@@ -142,8 +142,8 @@ test("atomic issue publication rejects a stale Board write fence before relation
     buildId: "task_issue_build",
     contentDigest: "d".repeat(64),
     artifact: {
-      uri: "gs://context/context-v2/tenants/tenant-1/repositories/acme/widgets/builds/task_issue_build/issue-graph/release.json",
-      key: "context-v2/tenants/tenant-1/repositories/acme/widgets/builds/task_issue_build/issue-graph/release.json",
+      uri: "gs://context/context/tenants/tenant-1/repositories/acme/widgets/builds/task_issue_build/issue-graph/release.json",
+      key: "context/tenants/tenant-1/repositories/acme/widgets/builds/task_issue_build/issue-graph/release.json",
       contentType: "application/json",
       bytes: 1024,
       sha256: "b".repeat(64)

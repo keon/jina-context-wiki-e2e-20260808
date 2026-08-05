@@ -16,6 +16,7 @@ import {
   fingerprint,
   isFullCommitSha,
   isContextArtifactKeyInScope,
+  contextWorkflowPageDispositionReasonCodes,
   markdownCatalogToOutput,
   normalizeIsoTime,
   normalizeRepository,
@@ -87,6 +88,7 @@ interface CertificationArtifact {
   readonly publicSnapshotDigest: string;
   readonly publicationPlanArtifact: ContextArtifactRef;
   readonly pageArtifacts: readonly ContextArtifactRef[];
+  readonly omittedPages: readonly { readonly path: string; readonly reasonCode: string }[];
 }
 
 interface PageArtifact {
@@ -148,7 +150,12 @@ export class ContextBoardPublicationService {
     if (new Set(pages.map((page) => page.documentPath)).size !== pages.length) {
       throw publicationError("invalid_publication", "certified context contains duplicate document paths");
     }
-    const priorRelease = await this.validateIncrementalPublication(scope, publicationPlan, pages);
+    const priorRelease = await this.validateIncrementalPublication(
+      scope,
+      publicationPlan,
+      pages,
+      certification.omittedPages
+    );
 
     const snapshotRefs = uniqueArtifacts(pages.map((page) => page.snapshotArtifact));
     if (snapshotRefs.length !== 1) {
@@ -276,7 +283,8 @@ export class ContextBoardPublicationService {
   private async validateIncrementalPublication(
     scope: BoardContextPublicationScope,
     publicationArtifact: Record<string, unknown>,
-    pages: readonly PageArtifact[]
+    pages: readonly PageArtifact[],
+    omittedPages: CertificationArtifact["omittedPages"]
   ): Promise<ContextPriorReleaseSeed | undefined> {
     const plan = record(publicationArtifact.plan, "publication plan");
     if (!Array.isArray(plan.pages)) {
@@ -304,7 +312,7 @@ export class ContextBoardPublicationService {
       : [];
     if (publicationArtifact.priorRelease === undefined) {
       try {
-        validatePublishedContextIncrement({ plannedPages, retiredPages, publishedPages: pages });
+        validatePublishedContextIncrement({ plannedPages, retiredPages, omittedPages, publishedPages: pages });
       } catch (error) {
         throw publicationError("invalid_publication", boundedError(error));
       }
@@ -334,6 +342,7 @@ export class ContextBoardPublicationService {
         priorRelease: release,
         plannedPages,
         retiredPages,
+        omittedPages,
         publishedPages: pages
       });
     } catch (error) {
@@ -570,12 +579,27 @@ function parseCertificationArtifact(content: Uint8Array, scope: BoardContextPubl
   if (!Array.isArray(value.pageArtifacts)) {
     throw publicationError("invalid_publication", "certification pageArtifacts must be an array");
   }
+  const rawOmittedPages = value.omittedPages ?? [];
+  if (!Array.isArray(rawOmittedPages) || rawOmittedPages.length > MAX_PAGES) {
+    throw publicationError("invalid_publication", "certification omittedPages must be a bounded array");
+  }
   return {
     publicSnapshotDigest: digest(value.publicSnapshotDigest, "certification publicSnapshotDigest"),
     publicationPlanArtifact,
     pageArtifacts: value.pageArtifacts.map((item, index) =>
       parseArtifactRef(item, `certification pageArtifacts[${index}]`)
-    )
+    ),
+    omittedPages: rawOmittedPages.map((item, index) => {
+      const omitted = record(item, `certification omittedPages[${index}]`);
+      const reasonCode = string(omitted.reasonCode, `certification omittedPages[${index}].reasonCode`, 80);
+      if (!contextWorkflowPageDispositionReasonCodes.some((candidate) => candidate === reasonCode)) {
+        throw publicationError("invalid_publication", `certification omittedPages[${index}].reasonCode is invalid`);
+      }
+      return {
+        path: pagePath(omitted.path, `certification omittedPages[${index}].path`),
+        reasonCode
+      };
+    })
   };
 }
 

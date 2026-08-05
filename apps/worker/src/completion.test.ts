@@ -327,7 +327,7 @@ test("Board context API timeout requests a bounded retry with diagnostics", asyn
       });
       return;
     }
-    if (request.url === "/internal/context/board/publish") {
+    if (request.url === "/internal/context/board/artifacts/read") {
       // Intentionally leave the response open. A delayed response can become
       // observable before the client's shorter abort timer when the full test
       // suite starves the worker process, making this timeout test flaky.
@@ -423,7 +423,7 @@ test("a worker voluntarily releases a Context lease after renewal rejects it", a
       });
       return;
     }
-    if (request.url === "/internal/context/board/publish") {
+    if (request.url === "/internal/context/board/artifacts/read") {
       await delay(1_000);
       json(response, 200, {
         version: 1,
@@ -493,7 +493,7 @@ test("SIGTERM keeps the worker alive until its fenced Context lease release sett
       json(response, 200, publicationWork("cs_shutdown_release"));
       return;
     }
-    if (request.url === "/internal/context/board/publish") {
+    if (request.url === "/internal/context/board/artifacts/read") {
       // Keep the leased operation active until SIGTERM aborts its request.
       return;
     }
@@ -743,7 +743,7 @@ function publicationWork(taskId: string): Record<string, unknown> {
 function artifact(kind: string): Record<string, unknown> {
   return {
     uri: `gs://context-artifacts/${kind}.json`,
-    key: `context-v2/tenants/tenant-completion-timeout/repositories/acme/large-repository/builds/cb_completion_timeout/${kind}.json`,
+    key: `context/tenants/tenant-completion-timeout/repositories/acme/large-repository/builds/cb_completion_timeout/${kind}.json`,
     contentType: "application/json",
     bytes: 123,
     sha256: "b".repeat(64),

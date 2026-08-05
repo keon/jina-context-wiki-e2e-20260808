@@ -8,19 +8,258 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  CONTEXT_WORKFLOW_CONTRACT,
+  CONTEXT_WORKFLOW_SCHEMA_REVISION,
   PAGEINDEX_OSS_ADAPTER_NAME,
   PAGEINDEX_OSS_SOURCE_DIGEST,
   PAGEINDEX_OSS_SOURCE_PIN,
   boardContextPublicationInputDigest,
   boardContextReleaseId,
+  contextArtifactKey,
   contextPublicSnapshotDigest,
   fingerprint,
   type CertifiedContextReleaseArtifactV1,
+  type ContextArtifactKind,
   type ContextArtifactRef,
   type KnowledgeEvidenceCitation
 } from "@jina/context-engine";
 
-test("board publication worker uses only the authoritative fenced publication operation", async (context) => {
+test("current Context publication checkpoints PageIndex before attachment and completes with the release", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "jina-current-publication-worker-"));
+  const fakePageIndex = join(root, "fake-pageindex.cjs");
+  await writeFile(fakePageIndex, fakePageIndexProgram());
+  const researchPlanArtifact = scopedContentArtifact("research-plan", "research-plan.json", '{"version":1}');
+  const snapshotArtifact = scopedContentArtifact("evidence-snapshot", "snapshot.json", '{"version":1}');
+  const planContent = JSON.stringify({
+    plan: {
+      version: 1,
+      pages: [{ id: "architecture", path: "architecture.md", title: "Architecture", change: "add" }]
+    },
+    researchPlanArtifact,
+    researchReportArtifacts: [],
+    snapshotArtifact
+  });
+  const exactPublicationPlanArtifact = scopedContentArtifact("publication-plan", "plan.json", planContent);
+  const pageContent = JSON.stringify({
+    version: 1,
+    documentPath: "architecture.md",
+    title: "Architecture",
+    bodyMarkdown: "# Architecture\n\nA board task owns the published Context release.\n",
+    publicationPlanArtifact: exactPublicationPlanArtifact,
+    snapshotArtifact
+  });
+  const pageArtifact = scopedContentArtifact("context-page", "architecture.json", pageContent);
+  const artifactContent = new Map<string, Buffer>([
+    [exactPublicationPlanArtifact.key, Buffer.from(planContent)],
+    [pageArtifact.key, Buffer.from(pageContent)]
+  ]);
+  let certificationArtifact: ContextArtifactRef | undefined;
+  let releaseArtifact: ContextArtifactRef | undefined;
+  let release: CertifiedContextReleaseArtifactV1 | undefined;
+  let checkpoint:
+    | {
+        phase: string;
+        checkpointKey: string;
+        attempt: number;
+        artifact: ContextArtifactRef;
+        recordedAt: string;
+      }
+    | undefined;
+  let attachmentRequest: Record<string, unknown> | undefined;
+  let completion: Record<string, unknown> | undefined;
+  const uploadedPageIndexNames: string[] = [];
+  const mock = createServer(async (request, response) => {
+    const body = await readJson(request);
+    if (request.url === "/internal/worker/claim") {
+      if (completion) {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      json(response, 200, {
+        message: {
+          id: "message_publication",
+          topic: "run-context-publication",
+          leaseId: "lease_publication",
+          leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          attempt: 1,
+          writeFenceToken: "fence_publication"
+        },
+        task: {
+          id: "task_publication",
+          metadata: {
+            tenantId: "tenant-board",
+            repository: "acme/sample",
+            ref: "main",
+            refSequence: 7,
+            commitSha: "9".repeat(40),
+            contextBuildId: "task_build",
+            planArtifact: exactPublicationPlanArtifact,
+            dependencyResults: [
+              {
+                taskId: "task_page",
+                taskType: "build-context-page",
+                result: {
+                  version: 1,
+                  outputArtifact: pageArtifact,
+                  disposition: {
+                    status: "accepted",
+                    pageArtifact,
+                    evidenceFingerprint: "a".repeat(64),
+                    generationFingerprint: "b".repeat(64)
+                  }
+                }
+              }
+            ]
+          }
+        }
+      });
+      return;
+    }
+    if (request.url === "/internal/context/board/artifacts/read") {
+      const artifact = body.artifact as ContextArtifactRef;
+      const content = artifactContent.get(artifact.key);
+      if (!content) {
+        json(response, 404, { error: "artifact not found" });
+        return;
+      }
+      json(response, 200, { artifact, contentBase64: content.toString("base64") });
+      return;
+    }
+    if (request.url === "/internal/context/board/artifacts") {
+      const kind = String(body.kind) as ContextArtifactKind;
+      const name = String(body.name);
+      const content = Buffer.from(String(body.contentBase64), "base64");
+      const key = contextArtifactKey({
+        tenantId: "tenant-board",
+        repository: "acme/sample",
+        buildId: "task_build",
+        kind,
+        name: `task_publication-attempt-1-${name}`,
+        contentType: "application/json",
+        content
+      });
+      const artifact: ContextArtifactRef = {
+        uri: `gs://context-artifacts/${key}`,
+        key,
+        contentType: "application/json",
+        bytes: content.byteLength,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        objectGeneration: String(artifactContent.size + 100)
+      };
+      artifactContent.set(key, content);
+      if (kind === "certification") certificationArtifact = artifact;
+      if (kind === "pageindex-tree") uploadedPageIndexNames.push(name);
+      json(response, 201, { artifact });
+      return;
+    }
+    if (request.url === "/internal/context/board/publish") {
+      assert.ok(certificationArtifact);
+      release = pageIndexRelease({ certificationArtifact, publicationPlanArtifact: exactPublicationPlanArtifact });
+      const releaseContent = Buffer.from(JSON.stringify(release), "utf8");
+      releaseArtifact = scopedContentArtifact(
+        "context-release",
+        `${release.release.releaseId}.json`,
+        releaseContent.toString("utf8")
+      );
+      artifactContent.set(releaseArtifact.key, releaseContent);
+      json(response, 200, {
+        version: 1,
+        outputArtifact: releaseArtifact,
+        releaseId: release.release.releaseId
+      });
+      return;
+    }
+    if (request.url === "/internal/context/board/phase-checkpoints/read") {
+      json(response, 200, { checkpoint: checkpoint ?? null });
+      return;
+    }
+    if (request.url === "/internal/context/board/phase-checkpoints") {
+      checkpoint ??= {
+        phase: String(body.phase),
+        checkpointKey: String(body.checkpointKey),
+        attempt: 1,
+        artifact: body.artifact as ContextArtifactRef,
+        recordedAt: "2026-08-04T15:00:00.000Z"
+      };
+      json(response, 201, { created: true, checkpoint });
+      return;
+    }
+    if (request.url === "/internal/context/board/pageindex/attach") {
+      attachmentRequest = body;
+      json(response, 200, {
+        version: 1,
+        outputArtifact: body.treeArtifact,
+        releaseId: body.releaseId,
+        generationId: body.releaseId
+      });
+      return;
+    }
+    if (request.url === "/internal/worker/renew") {
+      json(response, 200, { accepted: true });
+      return;
+    }
+    if (request.url === "/internal/worker/complete") {
+      completion = body;
+      json(response, 200, { accepted: true });
+      return;
+    }
+    json(response, 404, { error: "not found" });
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+  const workerPort = await availablePort();
+  const worker = spawn(process.execPath, [new URL("./server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: String(workerPort),
+      JINA_API_URL: `http://127.0.0.1:${(mock.address() as AddressInfo).port}`,
+      INTERNAL_API_TOKEN: "test-token",
+      WORKER_TOPICS: "run-context-publication",
+      WORKER_POLL_INTERVAL_MS: "10",
+      WORKER_API_TIMEOUT_MS: "5000",
+      CONTEXT_API_TIMEOUT_MS: "5000",
+      CONTEXT_COMPLETION_TIMEOUT_MS: "5000",
+      WORKER_HEARTBEAT_INTERVAL_MS: "1000",
+      CONTEXT_PAGEINDEX_PYTHON: process.execPath,
+      CONTEXT_PAGEINDEX_WORKER: fakePageIndex
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  context.after(async () => {
+    await terminate(worker);
+    await new Promise<void>((resolve) => mock.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  });
+  let output = "";
+  worker.stdout?.on("data", (chunk) => {
+    output = `${output}${String(chunk)}`.slice(-8_000);
+  });
+  worker.stderr?.on("data", (chunk) => {
+    output = `${output}${String(chunk)}`.slice(-8_000);
+  });
+
+  await waitForHealth(
+    workerPort,
+    (value) => record(value.lastWork)?.outcome === "done",
+    () => output
+  );
+  assert.ok(release);
+  assert.ok(releaseArtifact);
+  assert.ok(checkpoint);
+  assert.equal(checkpoint.phase, "pageindex-tree.complete");
+  assert.equal(uploadedPageIndexNames.length, 1);
+  assert.match(uploadedPageIndexNames[0]!, new RegExp(`^${release.release.releaseId}\\.[0-9a-f]{64}\\.json$`));
+  assert.deepEqual(attachmentRequest?.treeArtifact, checkpoint.artifact);
+  assert.deepEqual(attachmentRequest?.releaseArtifact, releaseArtifact);
+  assert.deepEqual(completion?.result, {
+    contract: CONTEXT_WORKFLOW_CONTRACT,
+    schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    outputArtifact: releaseArtifact,
+    releaseId: release.release.releaseId
+  });
+});
+
+test.skip("obsolete split publication worker fixture", async (context) => {
   const certificationArtifact = artifact("certification", "certification.json", "a");
   const releaseArtifact = artifact("context-release", "release.json", "b");
   let publicationRequest: Record<string, unknown> | undefined;
@@ -141,7 +380,7 @@ test("board publication worker uses only the authoritative fenced publication op
   });
 });
 
-test("board PageIndex worker uploads exact tree bytes, attaches under its lease, then completes", async (context) => {
+test.skip("obsolete split PageIndex worker fixture", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "jina-pageindex-worker-http-"));
   const fakePageIndex = join(root, "fake-pageindex.cjs");
   await writeFile(fakePageIndex, fakePageIndexProgram());
@@ -206,7 +445,7 @@ test("board PageIndex worker uploads exact tree bytes, attaches under its lease,
       const content = Buffer.from(String(body.contentBase64), "base64");
       uploadedTree = {
         uri: "gs://context-artifacts/pageindex-tree.json",
-        key: `context-v2/tenants/tenant-board/repositories/acme/sample/builds/task_build/pageindex-tree/task_pageindex-attempt-1-${String(body.name)}`,
+        key: `context/tenants/tenant-board/repositories/acme/sample/builds/task_build/pageindex-tree/task_pageindex-attempt-1-${String(body.name)}`,
         contentType: "application/json",
         bytes: content.byteLength,
         sha256: createHash("sha256").update(content).digest("hex"),
@@ -297,15 +536,20 @@ test("board PageIndex worker uploads exact tree bytes, attaches under its lease,
 
 function artifact(kind: string, name: string, digestCharacter: string) {
   return {
-    uri: `file:///context-v2/${name}`,
-    key: `context-v2/tenants/tenant-board/repositories/acme%2Fsample/builds/task_build/${kind}/${name}`,
+    uri: `file:///context/${name}`,
+    key: `context/tenants/tenant-board/repositories/acme%2Fsample/builds/task_build/${kind}/${name}`,
     contentType: "application/json",
     bytes: 128,
     sha256: digestCharacter.repeat(64)
   };
 }
 
-function pageIndexRelease(): CertifiedContextReleaseArtifactV1 {
+function pageIndexRelease(
+  input: {
+    readonly certificationArtifact?: ContextArtifactRef;
+    readonly publicationPlanArtifact?: ContextArtifactRef;
+  } = {}
+): CertifiedContextReleaseArtifactV1 {
   const tenantId = "tenant-board";
   const repository = "acme/sample";
   const commitSha = "9".repeat(40);
@@ -348,8 +592,9 @@ function pageIndexRelease(): CertifiedContextReleaseArtifactV1 {
     commitSha,
     buildId: "task_build"
   };
-  const certificationArtifact = scopedArtifact("certification", "certification.json", "a");
-  const publicationPlanArtifact = scopedArtifact("publication-plan", "plan.json", "b");
+  const certificationArtifact =
+    input.certificationArtifact ?? scopedArtifact("certification", "certification.json", "a");
+  const publicationPlanArtifact = input.publicationPlanArtifact ?? scopedArtifact("publication-plan", "plan.json", "b");
   const publicSnapshotDigest = contextPublicSnapshotDigest(pages);
   const publicationInputDigest = boardContextPublicationInputDigest({
     scope,
@@ -382,7 +627,7 @@ function pageIndexRelease(): CertifiedContextReleaseArtifactV1 {
 
 function scopedArtifact(kind: string, name: string, digestCharacter: string): ContextArtifactRef {
   const key = [
-    "context-v2",
+    "context",
     "tenants",
     "tenant-board",
     "repositories",
@@ -399,6 +644,30 @@ function scopedArtifact(kind: string, name: string, digestCharacter: string): Co
     contentType: "application/json",
     bytes: 128,
     sha256: digestCharacter.repeat(64),
+    objectGeneration: "42"
+  };
+}
+
+function scopedContentArtifact(kind: ContextArtifactKind, name: string, content: string): ContextArtifactRef {
+  const bytes = Buffer.from(content, "utf8");
+  const key = [
+    "context",
+    "tenants",
+    "tenant-board",
+    "repositories",
+    "acme",
+    "sample",
+    "builds",
+    "task_build",
+    kind,
+    name
+  ].join("/");
+  return {
+    uri: `gs://context-artifacts/${key}`,
+    key,
+    contentType: "application/json",
+    bytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
     objectGeneration: "42"
   };
 }

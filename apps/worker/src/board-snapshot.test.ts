@@ -91,8 +91,8 @@ test("board snapshot worker captures evidence, uploads it, and completes with on
   let uploadLease: Record<string, unknown> | undefined;
   let claimedTopics: unknown;
   const outputArtifact = {
-    uri: "file:///context-v2/snapshot.json",
-    key: "context-v2/tenants/tenant-board/repositories/acme/sample/builds/task_build/evidence-snapshot/task_snapshot-attempt-1-snapshot.json",
+    uri: "file:///context/snapshot.json",
+    key: "context/tenants/tenant-board/repositories/acme/sample/builds/task_build/evidence-snapshot/task_snapshot-attempt-1-snapshot.json",
     contentType: "application/json",
     bytes: 0,
     sha256: "a".repeat(64)
@@ -227,7 +227,12 @@ test("board snapshot worker captures evidence, uploads it, and completes with on
   assert.doesNotMatch(serializedSnapshot, /transient-clone-secret|nested-secret/);
   assert.doesNotMatch(serializedSnapshot, /temp_clone_token|clone_url/);
   assert.equal(completion?.outcome, "done");
-  assert.deepEqual(completion?.result, { version: 1, outputArtifact, commitSha });
+  assert.deepEqual(completion?.result, {
+    contract: "page-oriented",
+    schemaRevision: 1,
+    outputArtifact,
+    commitSha
+  });
 });
 
 async function waitForHealth(

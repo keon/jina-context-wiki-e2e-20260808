@@ -45,6 +45,7 @@ const artifactStore: ContextArtifactStore = {
 };
 
 const store = new MemoryContextEngineStore();
+let releaseSeedFailuresRemaining = 0;
 const serverConfig = {
   tenantId,
   enableDevEndpoints: true,
@@ -53,6 +54,15 @@ const serverConfig = {
   githubWebhookSecret,
   contextStore: store,
   contextArtifactStore: artifactStore,
+  contextBoardReleaseSeedStore: {
+    async findCurrentReleaseSeed() {
+      if (releaseSeedFailuresRemaining > 0) {
+        releaseSeedFailuresRemaining -= 1;
+        throw new Error("injected release-seed lookup failure");
+      }
+      return undefined;
+    }
+  },
   contextQuotaService: new ContextQuotaService({
     store: new InMemoryContextQuotaStore(),
     defaults: {
@@ -201,7 +211,7 @@ test("manual Context admission creates a resumable board build and exposes only 
     body: JSON.stringify({
       ...lease,
       outcome: "done",
-      result: { version: 1, outputArtifact, commitSha }
+      result: { contract: "page-oriented", schemaRevision: 1, outputArtifact, commitSha }
     })
   });
   assert.equal(completed.response.status, 200);
@@ -212,7 +222,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(resumedProgress.response.status, 200);
   const resumedStages = array(resumedProgress.body.stages).map(record);
   assert.equal(resumedStages.find((stage) => stage.type === "snapshot-context-input")?.status, "done");
-  assert.equal(resumedStages.find((stage) => stage.type === "plan-context-research")?.status, "queued");
+  assert.equal(resumedStages.find((stage) => stage.type === "plan-context-pages")?.status, "queued");
   assert.deepEqual(resumedProgress.body.pages, []);
 
   const missingPage = await api(
@@ -338,24 +348,34 @@ test("an incremental manual admission is durably deferred behind invested work a
   assert.equal(progress.body.status, "active");
   assert.deepEqual(
     array(progress.body.stages).map((stage) => record(stage).type),
-    ["snapshot-context-input", "plan-context-research"]
+    ["snapshot-context-input", "plan-context-pages"]
   );
   assert.deepEqual(progress.body.pages, []);
 
+  releaseSeedFailuresRemaining = 1;
   const canceled = await fetch(`${baseUrl}/internal/context/builds/${encodeURIComponent(string(build.id))}/cancel`, {
     method: "POST",
     headers: internalHeaders(),
     body: JSON.stringify({ reason: "exercise deferred follow-up promotion" })
   });
   assert.equal(canceled.status, 200, await canceled.text());
-  const promotedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
-    method: "POST",
-    headers: internalHeaders(),
-    body: JSON.stringify({ workerId: "followup-promotion-test", topics: ["run-context-input-snapshot"] })
-  });
-  const promotedClaimText = await promotedClaim.text();
-  assert.equal(promotedClaim.status, 200, promotedClaimText);
-  const claim = record(JSON.parse(promotedClaimText));
+  let claim: Record<string, unknown> | undefined;
+  const promotionDeadline = Date.now() + 3_000;
+  while (Date.now() < promotionDeadline) {
+    const promotedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: internalHeaders(),
+      body: JSON.stringify({ workerId: "followup-promotion-test", topics: ["run-context-input-snapshot"] })
+    });
+    const promotedClaimText = await promotedClaim.text();
+    if (promotedClaim.status === 200) {
+      claim = record(JSON.parse(promotedClaimText));
+      break;
+    }
+    assert.equal(promotedClaim.status, 204, promotedClaimText);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(claim, "the deferred build must be promoted after a transient release-seed lookup failure");
   const promotedTask = record(claim.task);
   const promotedMetadata = record(promotedTask.metadata);
   assert.equal(promotedMetadata.commitSha, incrementalCommitSha);
@@ -1448,7 +1468,7 @@ test("malformed persisted runtime state is ignored instead of breaking unrelated
   }
 });
 
-test("persisted tasks unsupported by the current runtime are removed with their references", async () => {
+test("active persisted tasks unsupported by the current runtime fail closed while terminal history is pruned", async () => {
   const staleSnapshot = {
     intakeState: {
       board: {
@@ -1504,12 +1524,41 @@ test("persisted tasks unsupported by the current runtime are removed with their 
   const staleUrl = `http://127.0.0.1:${(staleServer.address() as AddressInfo).port}`;
   try {
     const response = await fetch(`${staleUrl}/board`);
+    assert.equal(response.status, 500, await response.text());
+  } finally {
+    await new Promise<void>((resolve, reject) => staleServer.close((error) => (error ? reject(error) : resolve())));
+  }
+
+  const terminalSnapshot: ApiSnapshot = {
+    ...staleSnapshot,
+    intakeState: {
+      ...staleSnapshot.intakeState,
+      board: {
+        ...staleSnapshot.intakeState.board,
+        tasks: staleSnapshot.intakeState.board.tasks.map((task) => ({ ...task, status: "done" as const })),
+        outbox: staleSnapshot.intakeState.board.outbox.map((message) => ({
+          ...message,
+          status: "dispatched" as const,
+          dispatchedAt: "2026-07-26T00:00:01.000Z"
+        }))
+      }
+    }
+  };
+  const terminalServer = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore: readOnlyStateStore(terminalSnapshot)
+  });
+  await new Promise<void>((resolve) => terminalServer.listen(0, "127.0.0.1", resolve));
+  const terminalUrl = `http://127.0.0.1:${(terminalServer.address() as AddressInfo).port}`;
+  try {
+    const response = await fetch(`${terminalUrl}/board`);
     assert.equal(response.status, 200);
     const body = record(await response.json());
     assert.deepEqual(body.tasks, []);
     assert.deepEqual(body.dependencies, []);
   } finally {
-    await new Promise<void>((resolve, reject) => staleServer.close((error) => (error ? reject(error) : resolve())));
+    await new Promise<void>((resolve, reject) => terminalServer.close((error) => (error ? reject(error) : resolve())));
   }
 });
 

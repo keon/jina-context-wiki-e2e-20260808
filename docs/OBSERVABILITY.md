@@ -121,14 +121,9 @@ Like other in-process metrics, these diagnostics reset when the instance restart
 
 A production context dashboard should show:
 
-- stage throughput/failure and p95 duration for all thirteen Board topics:
-  `run-context-input-snapshot`, `run-context-research-plan`,
-  `run-context-research`, `run-context-publication-plan`,
-  `run-context-page-write`, `run-context-page-audit`,
-  `run-context-page-repair`, `run-context-source-challenge`,
-  `run-context-task-evaluation`, `run-context-gap-repair`,
-  `run-context-certification`, `run-context-publication`, and
-  `run-context-pageindex`;
+- stage throughput/failure and p95 duration for all four Board topics:
+  `run-context-input-snapshot`, `run-context-page-plan`,
+  `run-context-page-build`, and `run-context-publication`;
 - snapshot size, prior-release inputs, Codex model/prompt/schema version, page-audit
   failures, repair passes, and fail-closed count;
 - Board graph phase and checkpoint age, planned/completed subjects and pages, gate
@@ -175,7 +170,7 @@ Notification channels are configured in Cloud Monitoring, not in application sou
 
 ```text
 jsonPayload.event="stage.failed"
-jsonPayload.event="stage.completed" AND jsonPayload.topic="run-context-pageindex"
+jsonPayload.event="stage.completed" AND jsonPayload.topic="run-context-publication"
 jsonPayload.event="context.page_audit_evaluated" AND jsonPayload.unsupportedCitationCount>0
 jsonPayload.event="context.page_repair_evaluated" AND jsonPayload.regressionProblemCount>0
 jsonPayload.event="http.request" AND severity>=ERROR

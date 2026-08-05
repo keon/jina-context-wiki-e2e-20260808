@@ -26,7 +26,7 @@ test("local artifacts use tenant-scoped GCS-compatible keys and round-trip exact
     };
     assert.equal(
       contextArtifactKey(input),
-      "context-v2/tenants/tenant-a/repositories/acme/widgets/builds/build-1/context-release/release.json"
+      "context/tenants/tenant-a/repositories/acme/widgets/builds/build-1/context-release/release.json"
     );
     const ref = await store.put(input);
     assert.deepEqual(await store.put(input), ref);
@@ -76,21 +76,21 @@ test("artifact scope checks reject dot-segment prefix escapes", () => {
   };
   assert.equal(
     isContextArtifactKeyInScope(
-      "context-v2/tenants/tenant/repositories/acme/widgets/builds/build-one/context-page/page.json",
+      "context/tenants/tenant/repositories/acme/widgets/builds/build-one/context-page/page.json",
       scope
     ),
     true
   );
   assert.equal(
     isContextArtifactKeyInScope(
-      "context-v2/tenants/tenant/repositories/acme/widgets/builds/build-one/../build-two/context-page/page.json",
+      "context/tenants/tenant/repositories/acme/widgets/builds/build-one/../build-two/context-page/page.json",
       scope
     ),
     false
   );
   assert.equal(
     isContextArtifactKeyInScope(
-      "context-v2/tenants/tenant/repositories/acme/widgets/builds/build-one\\..\\build-two\\page.json",
+      "context/tenants/tenant/repositories/acme/widgets/builds/build-one\\..\\build-two\\page.json",
       scope
     ),
     false
@@ -110,9 +110,9 @@ test("local artifacts reject symlinked directories, files, and mismatched refere
     content: '{"page":1}'
   };
   try {
-    await symlink(outside, join(root, "context-v2"));
+    await symlink(outside, join(root, "context"));
     await assert.rejects(new FileContextArtifactStore(root).put(input), /symbolic link/);
-    await unlink(join(root, "context-v2"));
+    await unlink(join(root, "context"));
 
     const store = new FileContextArtifactStore(root);
     const ref = await store.put(input);

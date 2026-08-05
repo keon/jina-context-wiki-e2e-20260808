@@ -25,6 +25,11 @@ export interface ContextRetiredPageAccounting {
   readonly reason: string;
 }
 
+export interface ContextOmittedPageAccounting {
+  readonly path: string;
+  readonly reasonCode: string;
+}
+
 export interface ContextIncrementalAccounting {
   readonly priorPages: readonly ContextPriorPage[];
   readonly active: readonly {
@@ -131,6 +136,7 @@ export function validatePublishedContextIncrement(input: {
   readonly priorRelease?: CertifiedContextReleaseArtifactV1;
   readonly plannedPages: readonly ContextPlannedPageAccounting[];
   readonly retiredPages?: readonly ContextRetiredPageAccounting[];
+  readonly omittedPages?: readonly ContextOmittedPageAccounting[];
   readonly publishedPages: readonly ContextPublicPage[];
 }): ContextIncrementalAccounting {
   const accounting = validateContextIncrementalAccounting({
@@ -138,8 +144,21 @@ export function validatePublishedContextIncrement(input: {
     pages: input.plannedPages,
     ...(input.retiredPages ? { retiredPages: input.retiredPages } : {})
   });
+  const omittedPaths = new Set<string>();
+  for (const omitted of input.omittedPages ?? []) {
+    if (!omitted.reasonCode.trim()) throw new Error(`omitted Context page ${omitted.path} requires a reason code`);
+    if (omittedPaths.has(omitted.path)) throw new Error(`Context publication omits ${omitted.path} more than once`);
+    omittedPaths.add(omitted.path);
+    const planned = accounting.active.find((entry) => entry.path === omitted.path);
+    if (!planned) throw new Error(`Context publication omits unplanned page ${omitted.path}`);
+    if (planned.change !== "add" || planned.prior) {
+      throw new Error(`Context publication may omit only a new add page: ${omitted.path}`);
+    }
+  }
   const publishedByPath = new Map(input.publishedPages.map((page) => [page.documentPath, page]));
-  const plannedPaths = new Set(accounting.active.map((entry) => entry.path));
+  const plannedPaths = new Set(
+    accounting.active.filter((entry) => !omittedPaths.has(entry.path)).map((entry) => entry.path)
+  );
   if (
     publishedByPath.size !== input.publishedPages.length ||
     publishedByPath.size !== plannedPaths.size ||

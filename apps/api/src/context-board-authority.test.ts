@@ -56,7 +56,7 @@ class PageIndexAttachmentCapture implements BoardPageIndexAttachmentTransactionP
   }
 }
 
-test("HTTP PageIndex attachment requires its exact live board authority and forwards canonical bytes", async () => {
+test("collapsed publication task owns the fenced PageIndex attachment", async () => {
   const artifactRoot = await mkdtemp(join(tmpdir(), "jina-context-pageindex-http-"));
   const artifactStore = new FileContextArtifactStore(artifactRoot);
   const treeArtifact = pageIndexTree();
@@ -68,6 +68,15 @@ test("HTTP PageIndex attachment requires its exact live board authority and forw
     name: `${RELEASE_ID}.json`,
     contentType: "application/json",
     content: serializeBoardPageIndexTreeArtifact(treeArtifact)
+  });
+  const releaseArtifactRef = await artifactStore.put({
+    tenantId: TENANT,
+    repository: REPOSITORY,
+    buildId: BUILD_ID,
+    kind: "context-release",
+    name: `${RELEASE_ID}.json`,
+    contentType: "application/json",
+    content: JSON.stringify({ version: 1, releaseId: RELEASE_ID })
   });
   const capture = new PageIndexAttachmentCapture();
   const token = "context-pageindex-http-token";
@@ -104,21 +113,11 @@ test("HTTP PageIndex attachment requires its exact live board authority and forw
         ...lease,
         writeFenceToken: "wrong-fence",
         releaseId: RELEASE_ID,
+        releaseArtifact: releaseArtifactRef,
         treeArtifact: treeArtifactRef
       })
     });
     assert.equal(stale.status, 409);
-    assert.equal(capture.input, undefined);
-
-    const wrongAuthority = await fetch(`${baseUrl}/internal/context/board/publish`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        ...lease,
-        certificationArtifact: treeArtifactRef
-      })
-    });
-    assert.equal(wrongAuthority.status, 400);
     assert.equal(capture.input, undefined);
 
     const response = await fetch(`${baseUrl}/internal/context/board/pageindex/attach`, {
@@ -127,6 +126,7 @@ test("HTTP PageIndex attachment requires its exact live board authority and forw
       body: JSON.stringify({
         ...lease,
         releaseId: RELEASE_ID,
+        releaseArtifact: releaseArtifactRef,
         treeArtifact: treeArtifactRef
       })
     });
@@ -154,6 +154,7 @@ test("HTTP PageIndex attachment requires its exact live board authority and forw
       leaseExpiresAt: "2099-01-01T00:00:00.000Z"
     });
     assert.deepEqual(attachedInput.treeArtifact, treeArtifact);
+    assert.deepEqual(attachedInput.releaseArtifactRef, releaseArtifactRef);
     assert.equal(attachedInput.treeArtifactRef.sha256, treeArtifactRef.sha256);
     assert.equal(attachedInput.attachedAt, TASK_CREATED_AT);
     assert.equal(
@@ -161,6 +162,7 @@ test("HTTP PageIndex attachment requires its exact live board authority and forw
       boardPageIndexAttachmentInputDigest({
         scope: expectedScope,
         releaseId: RELEASE_ID,
+        releaseArtifactRef,
         treeArtifactRef,
         treeDigest: treeArtifact.metrics.treeDigest,
         buildDigest: treeArtifact.metrics.buildDigest
@@ -290,9 +292,9 @@ function pageIndexBoard(): BoardState {
       {
         ...baseTask,
         id: PAGEINDEX_TASK_ID,
-        type: "index-context-release",
+        type: "publish-context-release",
         kind: "dispatchable",
-        dispatchTopic: "run-context-pageindex",
+        dispatchTopic: "run-context-publication",
         status: "in_progress",
         attempt: 1,
         metadata: {
@@ -310,7 +312,7 @@ function pageIndexBoard(): BoardState {
       {
         id: MESSAGE_ID,
         taskId: PAGEINDEX_TASK_ID,
-        topic: "run-context-pageindex",
+        topic: "run-context-publication",
         idempotencyKey: `${PAGEINDEX_TASK_ID}:1`,
         status: "leased",
         payload: { taskId: PAGEINDEX_TASK_ID, attempt: 1 },

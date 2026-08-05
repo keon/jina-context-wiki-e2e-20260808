@@ -171,7 +171,7 @@ test("admission binds only a prior published release for the exact tenant, repos
     publicSnapshotDigest: "2".repeat(64),
     releaseArtifact: {
       uri: "file:///prior.json",
-      key: "context-v2/tenants/tenant-1/repositories/omxyz/jina/builds/task_prior/context-release/cr_prior.json",
+      key: "context/tenants/tenant-1/repositories/omxyz/jina/builds/task_prior/context-release/cr_prior.json",
       contentType: "application/json",
       bytes: 1,
       sha256: "3".repeat(64)
@@ -190,7 +190,11 @@ test("admission binds only a prior published release for the exact tenant, repos
   });
   assert.equal(incremental.outcome, "created");
   assert.equal(incremental.scope.refSequence, 2);
-  assert.deepEqual(buildTask(incremental).metadata.priorRelease, priorRelease);
+  assert.deepEqual(buildTask(incremental).metadata.priorRelease, {
+    ...priorRelease,
+    contract: "page-oriented",
+    schemaRevision: 1
+  });
 
   assert.throws(
     () =>

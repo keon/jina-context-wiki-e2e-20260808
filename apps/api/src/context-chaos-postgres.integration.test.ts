@@ -5,7 +5,13 @@ import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { applyCommand, createEmptyBoardState, reduceBoard, type BoardState, type TaskId } from "@jina/board";
-import { contextBoardTaskTypes, contextBoardTopics, type ContextArtifactRef } from "@jina/context-engine";
+import {
+  CONTEXT_WORKFLOW_CONTRACT,
+  CONTEXT_WORKFLOW_SCHEMA_REVISION,
+  contextWorkflowBoardTaskTypes,
+  contextWorkflowBoardTopics,
+  type ContextArtifactRef
+} from "@jina/context-engine";
 import {
   ContextDatabase,
   GcsContextArtifactStore,
@@ -236,10 +242,12 @@ test(
     let database = resources.database;
     let server: Server | undefined;
     try {
-      await stateStore.save(snapshotFor(contextBoardTaskTypes.researchPlan, contextBoardTopics.researchPlan, "before"));
+      await stateStore.save(
+        snapshotFor(contextWorkflowBoardTaskTypes.planner, contextWorkflowBoardTopics.planner, "before")
+      );
       let quota = new ContextQuotaService({ store: new PostgresContextQuotaStore(database) });
       ({ server } = await startServer(stateStore, quota, undefined, 50));
-      const first = await claim(server, contextBoardTopics.researchPlan, "worker-before-crash");
+      const first = await claim(server, contextWorkflowBoardTopics.planner, "worker-before-crash");
       assert.equal((await quota.snapshot(TENANT)).active.modelTasks, 1);
 
       await closeServer(server);
@@ -251,7 +259,7 @@ test(
       database = contextDatabase(false);
       quota = new ContextQuotaService({ store: new PostgresContextQuotaStore(database) });
       ({ server } = await startServer(stateStore, quota, undefined, 1_000));
-      const reclaimed = await claim(server, contextBoardTopics.researchPlan, "worker-after-restart");
+      const reclaimed = await claim(server, contextWorkflowBoardTopics.planner, "worker-after-restart");
       assert.equal(reclaimed.message.id, first.message.id);
       assert.notEqual(reclaimed.message.leaseId, first.message.leaseId);
       assert.equal((await quota.snapshot(TENANT)).active.modelTasks, 1);
@@ -282,10 +290,12 @@ test(
     });
     let server: Server | undefined;
     try {
-      await stateStore.save(snapshotFor(contextBoardTaskTypes.snapshot, contextBoardTopics.snapshot, "after"));
+      await stateStore.save(
+        snapshotFor(contextWorkflowBoardTaskTypes.snapshot, contextWorkflowBoardTopics.snapshot, "after")
+      );
       let quota = new ContextQuotaService({ store: new PostgresContextQuotaStore(database) });
       ({ server } = await startServer(stateStore, quota, artifacts, 50));
-      const first = await claim(server, contextBoardTopics.snapshot, "worker-upload-crash");
+      const first = await claim(server, contextWorkflowBoardTopics.snapshot, "worker-upload-crash");
       const content = Buffer.from('{"version":1,"snapshot":"durable"}');
       const uploaded = await upload(server, first, "snapshot.json", content);
       assert.match(uploaded.uri, /^gs:\/\/context-chaos-artifacts\//);
@@ -305,7 +315,7 @@ test(
       database = contextDatabase(false);
       quota = new ContextQuotaService({ store: new PostgresContextQuotaStore(database) });
       ({ server } = await startServer(stateStore, quota, artifacts, 1_000));
-      const reclaimed = await claim(server, contextBoardTopics.snapshot, "worker-upload-recovery");
+      const reclaimed = await claim(server, contextWorkflowBoardTopics.snapshot, "worker-upload-recovery");
       assert.equal(reclaimed.message.id, first.message.id);
       assert.notEqual(reclaimed.message.writeFenceToken, first.message.writeFenceToken);
 
@@ -346,10 +356,12 @@ test(
     });
     let server: Server | undefined;
     try {
-      await stateStore.save(snapshotFor(contextBoardTaskTypes.snapshot, contextBoardTopics.snapshot, "expansion"));
+      await stateStore.save(
+        snapshotFor(contextWorkflowBoardTaskTypes.snapshot, contextWorkflowBoardTopics.snapshot, "expansion")
+      );
       let quota = new ContextQuotaService({ store: new PostgresContextQuotaStore(database) });
       ({ server } = await startServer(stateStore, quota, artifacts, 500));
-      const claimed = await claim(server, contextBoardTopics.snapshot, "graph-expansion-worker");
+      const claimed = await claim(server, contextWorkflowBoardTopics.snapshot, "graph-expansion-worker");
       const outputArtifact = await upload(
         server,
         claimed,
@@ -359,7 +371,12 @@ test(
       const completion = {
         ...leaseBody(claimed),
         outcome: "done",
-        result: { version: 1, outputArtifact, commitSha: "a".repeat(40) }
+        result: {
+          contract: CONTEXT_WORKFLOW_CONTRACT,
+          schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+          outputArtifact,
+          commitSha: "a".repeat(40)
+        }
       };
 
       faultStore.arm();
@@ -379,7 +396,7 @@ test(
       const persisted = await stateStore.load();
       assert.ok(persisted);
       const board = persisted.intakeState.board;
-      const researchPlans = board.tasks.filter((task) => task.type === contextBoardTaskTypes.researchPlan);
+      const researchPlans = board.tasks.filter((task) => task.type === contextWorkflowBoardTaskTypes.planner);
       assert.equal(researchPlans.length, 1);
       assert.equal(
         board.events.filter(
@@ -455,7 +472,7 @@ function snapshotFor(type: string, topic: string, suffix: string): ApiSnapshot {
   let board = createEmptyBoardState();
   board = addTask(board, {
     id: buildId,
-    type: contextBoardTaskTypes.build,
+    type: contextWorkflowBoardTaskTypes.build,
     kind: "aggregate",
     title: "Context chaos build",
     assigneeRole: "system",
@@ -466,7 +483,14 @@ function snapshotFor(type: string, topic: string, suffix: string): ApiSnapshot {
       ref: "main",
       refSequence: 1,
       commitSha: "a".repeat(40),
-      requestKey: `context-chaos:${suffix}`
+      requestKey: `context-chaos:${suffix}`,
+      contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+      contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      promptContractVersion: "context-page-workflow-1",
+      validatorVersion: "context-page-validator-1",
+      pageIndexVersion: "pageindex-local-1",
+      executionProfileDigest: "c".repeat(64),
+      contextBuildId: buildId
     }
   });
   board = addTask(board, {
@@ -485,7 +509,13 @@ function snapshotFor(type: string, topic: string, suffix: string): ApiSnapshot {
       refSequence: 1,
       commitSha: "a".repeat(40),
       requestKey: `context-chaos:${suffix}`,
-      contextBuildId: buildId
+      contextBuildId: buildId,
+      contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+      contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      promptContractVersion: "context-page-workflow-1",
+      validatorVersion: "context-page-validator-1",
+      pageIndexVersion: "pageindex-local-1",
+      executionProfileDigest: "c".repeat(64)
     }
   });
   return {

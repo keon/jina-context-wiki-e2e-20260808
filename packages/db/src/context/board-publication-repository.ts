@@ -86,6 +86,21 @@ export class PostgresBoardContextPublicationRepository
     );
     const row = result.rows[0];
     if (!row) return undefined;
+    // Releases produced before the compact Context workflow used the
+    // `context-v2/...` object namespace. They remain valid historical
+    // publications, but their artifacts cannot be safely reused by the new
+    // `context/...` workflow scope. Treat an exact-scoped legacy pointer as a
+    // cold-start boundary so the next build replaces it with a canonical
+    // release; malformed or cross-scope pointers still fail closed below.
+    if (
+      isLegacyContextV2ReleaseArtifact(row.release_artifact, {
+        tenantId,
+        repository,
+        releaseId: row.release_id
+      })
+    ) {
+      return undefined;
+    }
     return parseContextPriorReleaseSeed({
       version: 1,
       tenantId,
@@ -142,20 +157,38 @@ export class PostgresBoardContextPublicationRepository
         return recordFromRow(existing);
       }
 
-      const current = await client.query<{ ref_sequence: string; release_id: string; commit_sha: string }>(
-        `select ref_sequence::text,release_id,commit_sha
-         from jina_context.current_context_board_releases
-         where tenant_id=$1 and repository=$2 and ref_name=$3
+      const current = await client.query<{
+        ref_sequence: string;
+        release_id: string;
+        commit_sha: string;
+        release_artifact: unknown;
+      }>(
+        `select current.ref_sequence::text,current.release_id,current.commit_sha,publication.release_artifact
+         from jina_context.current_context_board_releases current
+         join jina_context.context_board_publications publication
+           on publication.tenant_id=current.tenant_id and publication.release_id=current.release_id
+         where current.tenant_id=$1 and current.repository=$2 and current.ref_name=$3
          for update`,
         [input.scope.tenantId, input.scope.repository, input.scope.ref]
       );
       const currentSequence = Number(current.rows[0]?.ref_sequence ?? 0);
       const currentReleaseId = current.rows[0]?.release_id;
       if (
-        currentSequence > 0 &&
-        (!input.priorRelease ||
-          input.priorRelease.releaseId !== currentReleaseId ||
-          input.priorRelease.refSequence !== currentSequence)
+        !contextPublicationMayAdvanceCurrent({
+          tenantId: input.scope.tenantId,
+          repository: input.scope.repository,
+          publicationSequence: input.scope.refSequence,
+          ...(currentSequence > 0 && currentReleaseId
+            ? {
+                current: {
+                  refSequence: currentSequence,
+                  releaseId: currentReleaseId,
+                  releaseArtifact: current.rows[0]!.release_artifact
+                }
+              }
+            : {}),
+          ...(input.priorRelease ? { priorRelease: input.priorRelease } : {})
+        })
       ) {
         throw new BoardContextPublicationError(
           "stale_ref_sequence",
@@ -239,6 +272,58 @@ export class PostgresBoardContextPublicationRepository
       client.release();
     }
   }
+}
+
+/** @internal Exported for the exact legacy-boundary transaction policy test. */
+export function contextPublicationMayAdvanceCurrent(input: {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly publicationSequence: number;
+  readonly current?: {
+    readonly refSequence: number;
+    readonly releaseId: string;
+    readonly releaseArtifact: unknown;
+  };
+  readonly priorRelease?: Pick<ContextPriorReleaseSeed, "releaseId" | "refSequence">;
+}): boolean {
+  if (!input.current) return input.priorRelease === undefined;
+  if (
+    input.priorRelease?.releaseId === input.current.releaseId &&
+    input.priorRelease.refSequence === input.current.refSequence
+  ) {
+    return true;
+  }
+  return (
+    input.priorRelease === undefined &&
+    input.current.refSequence < input.publicationSequence &&
+    isLegacyContextV2ReleaseArtifact(input.current.releaseArtifact, {
+      tenantId: input.tenantId,
+      repository: input.repository,
+      releaseId: input.current.releaseId
+    })
+  );
+}
+
+function isLegacyContextV2ReleaseArtifact(
+  value: unknown,
+  input: { readonly tenantId: string; readonly repository: string; readonly releaseId: string }
+): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const artifact = value as Record<string, unknown>;
+  if (artifact.contentType !== "application/json" || typeof artifact.key !== "string") return false;
+  const repositorySegments = input.repository.split("/").map((segment) => encodeURIComponent(segment));
+  const prefix = [
+    "context-v2",
+    "tenants",
+    encodeURIComponent(input.tenantId),
+    "repositories",
+    ...repositorySegments,
+    "builds"
+  ].join("/");
+  return (
+    artifact.key.startsWith(`${prefix}/`) &&
+    artifact.key.endsWith(`/context-release/${encodeURIComponent(input.releaseId)}.json`)
+  );
 }
 
 async function assertPublicationEvidenceNotErased(

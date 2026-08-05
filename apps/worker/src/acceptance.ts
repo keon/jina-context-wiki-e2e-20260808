@@ -1,27 +1,18 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { contextBoardTaskTypeDefinitions } from "@jina/context-engine";
+import { contextWorkflowBoardTaskTypeDefinitions } from "@jina/context-engine";
 
 const CONTEXT_BOARD_WORKER_TOPICS = [
   "run-context-input-snapshot",
-  "run-context-research-plan",
-  "run-context-research",
-  "run-context-publication-plan",
-  "run-context-page-write",
-  "run-context-page-audit",
-  "run-context-page-repair",
-  "run-context-source-challenge",
-  "run-context-task-evaluation",
-  "run-context-gap-repair",
-  "run-context-certification",
-  "run-context-publication",
-  "run-context-pageindex"
+  "run-context-page-plan",
+  "run-context-page-build",
+  "run-context-publication"
 ] as const;
-const REQUIRED_RELEASE_TASK_TYPES = ["publish-context-release", "index-context-release"] as const;
+const REQUIRED_RELEASE_TASK_TYPES = ["publish-context-release"] as const;
 const TERMINAL_TASK_STATUSES = new Set(["done", "canceled", "failed", "superseded"]);
 const CONTEXT_WORKER_TASK_TYPES = new Set(
-  contextBoardTaskTypeDefinitions
+  contextWorkflowBoardTaskTypeDefinitions
     .filter((definition) => definition.kind === "dispatchable" && definition.dispatchTopic)
     .map((definition) => definition.type)
 );

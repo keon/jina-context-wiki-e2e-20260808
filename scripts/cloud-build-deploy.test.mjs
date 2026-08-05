@@ -9,6 +9,11 @@ import test from "node:test";
 const execFileAsync = promisify(execFile);
 const BOARD_TOPICS = [
   "run-context-input-snapshot",
+  "run-context-page-plan",
+  "run-context-page-build",
+  "run-context-publication"
+];
+const LEGACY_TOPICS = [
   "run-context-research-plan",
   "run-context-research",
   "run-context-publication-plan",
@@ -19,10 +24,11 @@ const BOARD_TOPICS = [
   "run-context-task-evaluation",
   "run-context-gap-repair",
   "run-context-certification",
-  "run-context-publication",
-  "run-context-pageindex"
+  "run-context-pageindex",
+  "run-ingest-evidence",
+  "run-derive-knowledge",
+  "run-index-context"
 ];
-const LEGACY_TOPICS = ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"];
 
 const deployment = await readFile("scripts/cloud-build-deploy.sh", "utf8");
 const releaseCleanupLibrary = await readFile("scripts/cloud-release-cleanup-lib.sh", "utf8");

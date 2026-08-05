@@ -27,6 +27,10 @@ overrides:
   # Patched transitive releases for minimatch/ESLint and the Daytona SDK.
   "brace-expansion": ">=5.0.8"
   "tar": ">=7.5.21"
+  # The MCP SDK currently resolves vulnerable transitive URL/IP parsers.
+  # Pin the first patched releases until the SDK dependency graph catches up.
+  "fast-uri": "3.1.5"
+  "ip-address": "10.3.1"
 
 minimumReleaseAgeExclude:
   - knip@6.29.0

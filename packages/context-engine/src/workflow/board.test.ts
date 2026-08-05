@@ -246,7 +246,7 @@ test("an incremental Board graph propagates its immutable prior release and page
     publicSnapshotDigest: "8".repeat(64),
     releaseArtifact: {
       uri: "file:///prior-release.json",
-      key: "context-v2/tenants/tenant-1/repositories/omxyz/jina/builds/task_prior/context-release/cr_prior.json",
+      key: "context/tenants/tenant-1/repositories/omxyz/jina/builds/task_prior/context-release/cr_prior.json",
       contentType: "application/json",
       bytes: 1,
       sha256: "7".repeat(64)
@@ -723,7 +723,7 @@ test("worker result envelopes retain only scoped artifact references and bounded
 });
 
 function artifact(name: string, buildTaskId = "task_test"): ContextArtifactRef {
-  const key = `context-v2/tenants/tenant-1/repositories/omxyz/jina/builds/${buildTaskId}/test-artifact/${name}.json`;
+  const key = `context/tenants/tenant-1/repositories/omxyz/jina/builds/${buildTaskId}/test-artifact/${name}.json`;
   return {
     uri: `gs://context-test/${key}`,
     key,
