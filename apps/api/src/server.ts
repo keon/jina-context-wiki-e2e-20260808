@@ -100,6 +100,7 @@ import {
   supportedWorkerTopics,
   type IsoTimestamp
 } from "@jina/shared-kernel";
+import { constantTimeEquals } from "./secure-compare.js";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
 import {
@@ -4326,10 +4327,15 @@ async function authenticatedPrincipal(
       forwarded: true
     };
   }
-  const internal = Boolean(config.internalApiToken && authorization === `Bearer ${config.internalApiToken}`);
+  const internal = Boolean(
+    config.internalApiToken &&
+    authorization !== undefined &&
+    constantTimeEquals(authorization, `Bearer ${config.internalApiToken}`)
+  );
   const context = Boolean(
     config.contextApiToken &&
-    authorization === `Bearer ${config.contextApiToken}` &&
+    authorization !== undefined &&
+    constantTimeEquals(authorization, `Bearer ${config.contextApiToken}`) &&
     isContextCredentialRoute(pathname, request.method ?? "GET")
   );
   if (!internal && !context) return undefined;
@@ -4416,8 +4422,11 @@ function trustsDevIdentityHeaders(config: ApiServerConfig): boolean {
 }
 
 function hasInternalApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
+  const authorization = firstHeader(request.headers.authorization);
   return Boolean(
-    config.internalApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.internalApiToken}`
+    config.internalApiToken &&
+    authorization !== undefined &&
+    constantTimeEquals(authorization, `Bearer ${config.internalApiToken}`)
   );
 }
 
