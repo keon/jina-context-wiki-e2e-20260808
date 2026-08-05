@@ -1,10 +1,7 @@
 {
   "name": "Golden Dataset 1: Regression-Introducing PRs",
   "generated": "2026-06-16",
-  "repositories": [
-    "manaflow-ai/cmux",
-    "calcom/cal.diy"
-  ],
+  "repositories": ["manaflow-ai/cmux", "calcom/cal.diy"],
   "objective": "Select 12 regression-introducing merged PRs per repository, split into 4 Easy, 4 Medium, and 4 Hard candidates. Within each bucket, prefer PRs that introduced the largest number of known closed issues with direct GitHub evidence; where multi-issue candidates are scarce, use the strongest single-issue attributions.",
   "evidence_policy": "A known issue is counted only when the issue body, a GitHub issue comment, or a linked PR/timeline discussion explicitly connects the issue to the introducing PR. Closed PRs are not counted as issues.",
   "repo_results": [

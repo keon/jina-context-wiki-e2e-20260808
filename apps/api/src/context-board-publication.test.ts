@@ -142,7 +142,10 @@ test("publication accepts an explicitly dispositioned unsupported new page", asy
   await withFixture(
     async ({ service, transaction, request }) => {
       await service.publish(request);
-      assert.deepEqual(transaction.commits[0]?.pages.map((page) => page.documentPath), ["architecture.md"]);
+      assert.deepEqual(
+        transaction.commits[0]?.pages.map((page) => page.documentPath),
+        ["architecture.md"]
+      );
     },
     {
       pages: [architecture],
@@ -154,9 +157,7 @@ test("publication accepts an explicitly dispositioned unsupported new page", asy
           bodyMarkdown: "# Legacy Administrator Deletion\n"
         }
       ],
-      omittedPages: [
-        { path: "legacy-administrator-deletion.md", reasonCode: "unsupported_core_claims" }
-      ]
+      omittedPages: [{ path: "legacy-administrator-deletion.md", reasonCode: "unsupported_core_claims" }]
     }
   );
 });

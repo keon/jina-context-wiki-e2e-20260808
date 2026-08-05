@@ -167,8 +167,7 @@ test("publication may replace only an older exact-scoped legacy cold-start bound
 
 function releaseArtifact(tenantId: string, root = "context") {
   const key =
-    `${root}/tenants/${tenantId}/repositories/omxyz/jina/builds/` +
-    `task_prior/context-release/${RELEASE_ID}.json`;
+    `${root}/tenants/${tenantId}/repositories/omxyz/jina/builds/` + `task_prior/context-release/${RELEASE_ID}.json`;
   return {
     uri: `gs://context-artifacts/${key}`,
     key,

@@ -6,7 +6,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: { default: "Jina Documentation", template: "%s · Jina Documentation" },
-  description: "Guides for onboarding, code reviews, Context Wiki, Causal Graph, integrations, and .jina configuration.",
+  description: "Guides for onboarding, code reviews, Context Wiki, Causal Graph, integrations, and .jina configuration."
 };
 
 export default function RootLayout({ children }: { readonly children: ReactNode }) {
@@ -15,10 +15,14 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
     <html lang="en">
       <body>
         <header className="topbar">
-          <Link className="wordmark" href="/">Jina <span>Docs</span></Link>
+          <Link className="wordmark" href="/">
+            Jina <span>Docs</span>
+          </Link>
           <nav aria-label="Documentation utilities">
             <a href={`${dashboardUrl}/reviews`}>Dashboard</a>
-            <a href="https://github.com/omxyz/jina" target="_blank" rel="noreferrer">GitHub</a>
+            <a href="https://github.com/omxyz/jina" target="_blank" rel="noreferrer">
+              GitHub
+            </a>
           </nav>
         </header>
         <div className="docs-layout">
@@ -26,7 +30,11 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
             {docGroups.map(({ group, docs }) => (
               <section key={group}>
                 <h2>{group}</h2>
-                {docs.map((doc) => <Link key={doc.slug} href={`/${doc.slug}`}>{doc.title}</Link>)}
+                {docs.map((doc) => (
+                  <Link key={doc.slug} href={`/${doc.slug}`}>
+                    {doc.title}
+                  </Link>
+                ))}
               </section>
             ))}
           </aside>
