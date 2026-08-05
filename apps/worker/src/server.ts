@@ -153,7 +153,7 @@ import {
 import { parseBoardResearchPlan, parseResearchPlanWithRepair } from "./board-research-plan.js";
 import { parsedContextDependencyResult } from "./context-dependency-result.js";
 import { contextPageArtifactName } from "./context-page-artifact-name.js";
-import { contextPagePublicationDisposition } from "./context-page-disposition.js";
+import { contextPagePublicationDisposition, resolveContextPageOmission } from "./context-page-disposition.js";
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
@@ -1362,12 +1362,13 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   const publicationPlan = parsePublicationPlanArtifact(await readContextBoardArtifact(work, publicationPlanArtifact));
   const sourcePageArtifacts: ContextArtifactRef[] = [];
   const omittedPages: { readonly path: string; readonly reasonCode: string }[] = [];
+  const unsupportedPages: { readonly path: string; readonly reasonCode: string }[] = [];
   for (const dependency of work.task.metadata.dependencyResults.filter(
     (candidate) => candidate.taskType === "build-context-page"
   )) {
     const disposition = contextPagePublicationDisposition(dependency.result);
     if (disposition.status === "omitted") {
-      omittedPages.push({
+      unsupportedPages.push({
         path: requiredString(dependency.documentPath, `${dependency.taskId} documentPath`),
         reasonCode: disposition.reasonCode
       });
@@ -1378,23 +1379,27 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
     }
   }
   const priorContext = await loadPriorContext(work);
-  for (const plannedPage of publicationPlan.plan.pages.filter((page) => (page.change ?? "add") === "retain")) {
-    const priorPage = priorContext?.pages.find((page) => page.documentPath === plannedPage.path);
-    if (!priorPage) throw new Error(`retained Context page ${plannedPage.path} is absent from the prior release`);
+
+  const uploadPriorPage = async (input: {
+    readonly path: string;
+    readonly change: "retain" | "revise";
+  }): Promise<void> => {
+    const priorPage = priorContext?.pages.find((page) => page.documentPath === input.path);
+    if (!priorPage) throw new Error(`${input.change} Context page ${input.path} is absent from the prior release`);
     sourcePageArtifacts.push(
       await uploadContextBoardArtifact(work, {
         kind: "context-page",
-        name: contextPageArtifactName(plannedPage.path, "retain"),
+        name: contextPageArtifactName(input.path, input.change === "retain" ? "retain" : "fallback"),
         contentType: "application/json",
         content: Buffer.from(
           JSON.stringify({
             version: 1,
-            documentPath: plannedPage.path,
+            documentPath: input.path,
             title: priorPage.title,
             bodyMarkdown: canonicalPublicPageMarkdown(priorPage.bodyMarkdown),
             publicationPlanArtifact,
             snapshotArtifact: publicationPlan.snapshotArtifact,
-            change: "retain",
+            change: input.change,
             priorLogicalId: priorPage.logicalId,
             priorRevisionId: priorPage.revisionId
           }),
@@ -1402,6 +1407,33 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
         )
       })
     );
+  };
+
+  for (const unsupported of unsupportedPages) {
+    const plannedPage = publicationPlan.plan.pages.find((page) => page.path === unsupported.path);
+    if (!plannedPage)
+      throw new Error(`unsupported Context page ${unsupported.path} is absent from the publication plan`);
+    const plannedChange = plannedPage.change ?? "add";
+    const priorPage = priorContext?.pages.find((page) => page.documentPath === unsupported.path);
+    const resolution = resolveContextPageOmission({ plannedChange, hasPriorPage: Boolean(priorPage) });
+    if (resolution.status === "omit_new_page") {
+      omittedPages.push(unsupported);
+      continue;
+    }
+    await uploadPriorPage({ path: unsupported.path, change: plannedChange === "retain" ? "retain" : "revise" });
+    logger.warn("unsupported Context revision retained the certified prior page", {
+      event: "context.page.unsupported_revision_retained_prior",
+      taskId: work.task.id,
+      contextBuildId: work.task.metadata.contextBuildId,
+      repository: work.task.metadata.repository,
+      ref: work.task.metadata.ref,
+      documentPath: unsupported.path,
+      reasonCode: unsupported.reasonCode
+    });
+  }
+
+  for (const plannedPage of publicationPlan.plan.pages.filter((page) => (page.change ?? "add") === "retain")) {
+    await uploadPriorPage({ path: plannedPage.path, change: "retain" });
   }
   const loadedPages = await Promise.all(
     sourcePageArtifacts.map(async (artifact) => ({
@@ -1412,11 +1444,7 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
   const omittedDocumentPaths = new Set(omittedPages.map((page) => page.path));
   const pages = await Promise.all(
     loadedPages.map(async ({ artifact, page }) => {
-      const bodyMarkdown = unlinkMarkdownDocumentTargets(
-        page.bodyMarkdown,
-        page.documentPath,
-        omittedDocumentPaths
-      );
+      const bodyMarkdown = unlinkMarkdownDocumentTargets(page.bodyMarkdown, page.documentPath, omittedDocumentPaths);
       if (bodyMarkdown === page.bodyMarkdown) return { artifact, page };
       const publicationPage = { ...page, bodyMarkdown };
       const publicationArtifact = await uploadContextBoardArtifact(work, {

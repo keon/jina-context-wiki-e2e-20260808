@@ -2,9 +2,10 @@ export type ContextPagePublicationDisposition =
   | { readonly status: "accepted" | "retained_stale"; readonly pageArtifact: unknown }
   | { readonly status: "omitted"; readonly reasonCode: string };
 
-export function contextPagePublicationDisposition(
-  result: Record<string, unknown>
-): ContextPagePublicationDisposition {
+export type ContextPageOmissionResolution =
+  { readonly status: "omit_new_page" } | { readonly status: "retain_prior_page" };
+
+export function contextPagePublicationDisposition(result: Record<string, unknown>): ContextPagePublicationDisposition {
   const disposition = result.disposition;
   if (!disposition || typeof disposition !== "object" || Array.isArray(disposition)) {
     throw new Error("Context page dependency disposition is missing");
@@ -24,4 +25,20 @@ export function contextPagePublicationDisposition(
     return { status, pageArtifact: value.pageArtifact };
   }
   throw new Error("Context page dependency disposition status is invalid");
+}
+
+/**
+ * A failed new page can be omitted from a release. An existing page cannot:
+ * incremental publication must keep the last certified bytes rather than
+ * silently deleting established Context when a proposed revision fails audit.
+ */
+export function resolveContextPageOmission(input: {
+  readonly plannedChange: "add" | "retain" | "revise";
+  readonly hasPriorPage: boolean;
+}): ContextPageOmissionResolution {
+  if (input.plannedChange === "add") return { status: "omit_new_page" };
+  if (!input.hasPriorPage) {
+    throw new Error(`Omitted ${input.plannedChange} Context page has no certified prior page`);
+  }
+  return { status: "retain_prior_page" };
 }
