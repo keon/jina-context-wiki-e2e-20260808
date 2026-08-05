@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-repository="${JINA_STAGING_REPOSITORY:-omxyz/jina}"
-github_environment="${JINA_STAGING_GITHUB_ENVIRONMENT:-Staging}"
 staging_project="${JINA_STAGING_GCP_PROJECT:-jina-staging-20260802}"
 region="${JINA_STAGING_REGION:-us-east1}"
+cloud_build_region="${JINA_STAGING_CLOUD_BUILD_REGION:-us-central1}"
+trigger_name="${JINA_STAGING_CLOUD_BUILD_TRIGGER:-jina-staging-deploy}"
+connection_name="${JINA_STAGING_CLOUD_BUILD_CONNECTION:-jina-github}"
+repository_name="${JINA_STAGING_CLOUD_BUILD_REPOSITORY:-jina}"
+staging_deployer="jina-cloud-build-staging@${staging_project}.iam.gserviceaccount.com"
+cloud_build_service_agent="service-679811160186@gcp-sa-cloudbuild.iam.gserviceaccount.com"
+repository_resource="projects/${staging_project}/locations/${cloud_build_region}/connections/${connection_name}/repositories/${repository_name}"
 failures=0
 
 pass() {
@@ -24,7 +29,7 @@ require_command() {
   fi
 }
 
-for command_name in gh gcloud jq; do
+for command_name in gcloud jq; do
   require_command "$command_name"
 done
 
@@ -32,133 +37,101 @@ if ((failures > 0)); then
   exit 1
 fi
 
-environment_json="$(gh api "repos/${repository}/environments/${github_environment}" 2>/dev/null || true)"
-if [[ -z "${environment_json}" ]]; then
-  fail "GitHub environment ${repository}/${github_environment} exists"
-else
-  pass "GitHub environment ${repository}/${github_environment} exists"
-  branch_policy="$(jq -r '
-    .deployment_branch_policy.custom_branch_policies == true and
-    .deployment_branch_policy.protected_branches == false
-  ' <<<"${environment_json}")"
-  if [[ "${branch_policy}" == "true" ]]; then
-    policies="$(gh api "repos/${repository}/environments/${github_environment}/deployment-branch-policies?per_page=100" 2>/dev/null || true)"
-    if jq -e '.branch_policies[]? | select(.name == "staging" and .type == "branch")' \
-        <<<"${policies}" >/dev/null; then
-      pass "Staging deployments are restricted to the staging branch"
-    else
-      fail "Staging branch deployment policy is missing"
-    fi
-  else
-    fail "Staging does not use custom branch deployment policies"
-  fi
-fi
-
-variables_json="$(
-  gh api --paginate --slurp \
-    "repos/${repository}/environments/${github_environment}/variables?per_page=30" 2>/dev/null |
-    jq '{variables: [.[].variables[]]}' || true
-)"
-secrets_json="$(gh api "repos/${repository}/environments/${github_environment}/secrets?per_page=100" 2>/dev/null || true)"
-
-configured_project="$(jq -r '.variables[]? | select(.name == "GCP_PROJECT_ID") | .value' \
-  <<<"${variables_json}")"
-if [[ "${configured_project}" == "${staging_project}" ]]; then
-  pass "GitHub Staging targets the isolated GCP project ${staging_project}"
-else
-  fail "GitHub Staging GCP_PROJECT_ID must equal ${staging_project}"
-fi
-
-required_variables=(
-  GCP_PROJECT_ID
-  GCP_REGION
-  CLOUD_RUN_SERVICE
-  CLOUD_SQL_INSTANCE
-  CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT
-  ARTIFACT_REGISTRY_REPOSITORY
-  JINA_API_BASE_URL
-  JINA_DASHBOARD_URL
-  JINA_GITHUB_APP_ID
-  JINA_GITHUB_APP_SLUG
-  JINA_GITHUB_OAUTH_CLIENT_ID
-  JINA_DASHBOARD_AUTH_MODE
-  JINA_CLERK_PUBLISHABLE_KEY
-  JINA_GRAPH_API_URL
-  JINA_MCP_URL
-  JINA_CONTEXT_TENANT_ID
-  JINA_BILLING_ENFORCE
-  WEBHOOK_SECRET_NAME
-  JINA_GITHUB_APP_PRIVATE_KEY_SECRET_NAME
-  INTERNAL_API_TOKEN_SECRET_NAME
-  OAUTH_CLIENT_SECRET_NAME
-  CLERK_SECRET_KEY_SECRET_NAME
-  ENCRYPTION_KEY_SECRET_NAME
-  GRAPH_API_TOKEN_SECRET_NAME
-  GRAPH_INTERNAL_TOKEN_SECRET_NAME
-  AUTUMN_SECRET_KEY_SECRET_NAME
+project_policy="$(gcloud projects get-iam-policy "${staging_project}" --format=json 2>/dev/null || true)"
+required_deployer_roles=(
+  roles/artifactregistry.writer
+  roles/cloudbuild.builds.builder
+  roles/cloudbuild.builds.viewer
+  roles/cloudscheduler.admin
+  roles/cloudsql.client
+  roles/cloudsql.viewer
+  roles/iam.serviceAccountUser
+  roles/logging.logWriter
+  roles/run.admin
+  roles/secretmanager.secretAccessor
+  roles/secretmanager.viewer
+  roles/serviceusage.serviceUsageConsumer
+  roles/storage.objectViewer
 )
-
-for variable_name in "${required_variables[@]}"; do
-  variable_value="$(jq -r --arg name "${variable_name}" \
-    '.variables[]? | select(.name == $name) | .value' <<<"${variables_json}")"
-  if [[ -z "${variable_value}" ]]; then
-    fail "GitHub Staging variable ${variable_name} is configured"
-  elif [[ "${variable_value}" == *usejina.com* || "${variable_name}" == *_SERVICE ||
-          "${variable_name}" == *_INSTANCE || "${variable_name}" == *_SECRET_NAME ||
-          "${variable_name}" == JINA_GITHUB_APP_SLUG ||
-          "${variable_name}" == CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT ]]; then
-    if [[ "${variable_value}" == *staging* ]]; then
-      pass "GitHub Staging variable ${variable_name} is staging-scoped"
-    else
-      fail "GitHub Staging variable ${variable_name} must contain staging"
-    fi
+for role in "${required_deployer_roles[@]}"; do
+  if jq -e --arg role "${role}" --arg member "serviceAccount:${staging_deployer}" '
+      .bindings[]? | select(.role == $role) | .members[]? | select(. == $member)
+    ' <<<"${project_policy}" >/dev/null; then
+    pass "Automatic staging deployer has ${role}"
   else
-    pass "GitHub Staging variable ${variable_name} is configured"
+    fail "Automatic staging deployer requires ${role}"
   fi
 done
 
-require_exact_staging_variable() {
-  local variable_name="$1"
-  local expected_value="$2"
-  local actual_value
-  actual_value="$(jq -r --arg name "${variable_name}" \
-    '.variables[]? | select(.name == $name) | .value' <<<"${variables_json}")"
-  if [[ "${actual_value}" == "${expected_value}" ]]; then
-    pass "GitHub Staging variable ${variable_name} uses ${expected_value}"
-  else
-    fail "GitHub Staging variable ${variable_name} must equal ${expected_value}"
-  fi
-}
-
-require_exact_staging_variable JINA_DASHBOARD_URL https://app.staging.usejina.com
-require_exact_staging_variable JINA_DASHBOARD_ORIGIN https://app.staging.usejina.com
-require_exact_staging_variable JINA_API_BASE_URL https://api.staging.usejina.com
-require_exact_staging_variable JINA_GRAPH_API_URL https://api.staging.usejina.com
-require_exact_staging_variable JINA_MCP_URL https://mcp.staging.usejina.com/mcp
-
-context_tenant_id="$(jq -r '.variables[]? | select(.name == "JINA_CONTEXT_TENANT_ID") | .value' \
-  <<<"${variables_json}")"
-if [[ -n "${context_tenant_id}" && ! "${context_tenant_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
-  fail "GitHub Staging variable JINA_CONTEXT_TENANT_ID must be a UUID"
+deployer_policy="$(gcloud iam service-accounts get-iam-policy "${staging_deployer}" \
+  --project="${staging_project}" --format=json 2>/dev/null || true)"
+if jq -e --arg member "serviceAccount:${cloud_build_service_agent}" '
+    .bindings[]? |
+    select(.role == "roles/iam.serviceAccountTokenCreator") |
+    .members[]? | select(. == $member)
+  ' <<<"${deployer_policy}" >/dev/null; then
+  pass "Cloud Build service agent can mint the dedicated staging build identity"
+else
+  fail "Cloud Build service agent requires TokenCreator on ${staging_deployer}"
 fi
 
-required_environment_secrets=(
-  STAGING_JINA_GITHUB_APP_PRIVATE_KEY
-  STAGING_JINA_INTERNAL_API_TOKEN
-  STAGING_JINA_DAYTONA_API_KEY
-  STAGING_JINA_OPENROUTER_API_KEY
-  STAGING_JINA_OPENAI_API_KEY
-  STAGING_JINA_GITHUB_CLONE_TOKEN
-)
+connection_json="$(gcloud builds connections describe "${connection_name}" \
+  --project="${staging_project}" --region="${cloud_build_region}" \
+  --format=json 2>/dev/null || true)"
+if jq -e '.installationState.stage == "COMPLETE" and .githubConfig.appInstallationId != null' \
+    <<<"${connection_json}" >/dev/null; then
+  pass "Cloud Build GitHub connection ${connection_name} is ready"
+else
+  fail "Cloud Build GitHub connection ${connection_name} is not ready"
+fi
 
-for secret_name in "${required_environment_secrets[@]}"; do
-  if jq -e --arg name "${secret_name}" '.secrets[]? | select(.name == $name)' \
-      <<<"${secrets_json}" >/dev/null; then
-    pass "GitHub Staging secret ${secret_name} exists"
-  else
-    fail "GitHub Staging secret ${secret_name} is missing"
-  fi
-done
+configured_repository="$(gcloud builds repositories describe "${repository_name}" \
+  --connection="${connection_name}" --project="${staging_project}" \
+  --region="${cloud_build_region}" --format='value(name)' 2>/dev/null || true)"
+if [[ "${configured_repository}" == "${repository_resource}" ]]; then
+  pass "Cloud Build repository is bound to omxyz/jina"
+else
+  fail "Cloud Build repository ${repository_resource} is missing"
+fi
+
+trigger_json="$(gcloud builds triggers describe "${trigger_name}" \
+  --project="${staging_project}" --region="${cloud_build_region}" \
+  --format=json 2>/dev/null || true)"
+if jq -e \
+    --arg repository "${repository_resource}" \
+    --arg service_account "projects/${staging_project}/serviceAccounts/${staging_deployer}" '
+      .filename == "cloudbuild.staging.yaml" and
+      .repositoryEventConfig.repository == $repository and
+      .repositoryEventConfig.push.branch == "^staging$" and
+      .serviceAccount == $service_account and
+      (.approvalConfig.approvalRequired // false) == false and
+      (.substitutions | keys) == ["_JINA_CONTEXT_TENANT_ID"]
+    ' <<<"${trigger_json}" >/dev/null; then
+  pass "${trigger_name} deploys every staging push through cloudbuild.staging.yaml"
+else
+  fail "${trigger_name} must be an unapproved staging-only cloudbuild.staging.yaml trigger"
+fi
+
+context_tenant_id="$(jq -r '.substitutions._JINA_CONTEXT_TENANT_ID // empty' \
+  <<<"${trigger_json}")"
+if [[ "${context_tenant_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+  pass "${trigger_name} carries an explicit staging Context tenant UUID"
+else
+  fail "${trigger_name} requires a UUID-valued _JINA_CONTEXT_TENANT_ID substitution"
+fi
+
+release_secret_policy="$(gcloud secrets get-iam-policy \
+  jina-staging-causal-graph-worker-release-credential \
+  --project="${staging_project}" --format=json 2>/dev/null || true)"
+if jq -e --arg member "serviceAccount:${staging_deployer}" '
+    .bindings[]? |
+    select(.role == "roles/secretmanager.secretVersionAdder") |
+    .members[]? | select(. == $member)
+  ' <<<"${release_secret_policy}" >/dev/null; then
+  pass "Automatic staging deployer can add causal release credential versions"
+else
+  fail "Automatic staging deployer requires secretVersionAdder on the causal release credential"
+fi
 
 sql_state="$(gcloud sql instances describe jina-db-staging --project="${staging_project}" \
   --format='value(state)' 2>/dev/null || true)"

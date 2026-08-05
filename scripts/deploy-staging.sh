@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${IMAGE_TAG:?IMAGE_TAG is required and must identify images already pushed by cloudbuild.staging-images.yaml}"
+: "${IMAGE_TAG:?IMAGE_TAG is required and must identify images already pushed by cloudbuild.staging.yaml}"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -25,8 +25,10 @@ otel_endpoint="http://localhost:4318/v1/traces"
 api_service="jina-api-staging"
 context_worker_service="jina-context-worker-staging"
 task_worker_service="jina-task-worker-staging"
+causal_worker_service="jina-causal-graph-worker"
 migration_job="jina-v2-migrate-staging"
 billing_retry_scheduler_job="jina-billing-retry-staging"
+causal_activation_job="jina-causal-graph-release-activate-staging"
 api_service_account="jina-api-staging@${project}.iam.gserviceaccount.com"
 context_worker_service_account="jina-context-worker-staging@${project}.iam.gserviceaccount.com"
 task_worker_service_account="jina-task-worker-staging@${project}.iam.gserviceaccount.com"
@@ -49,6 +51,7 @@ github_app_id_secret="jina-staging-github-app-id"
 github_app_private_key_secret="jina-staging-github-app-private-key"
 github_clone_token_secret="jina-staging-github-clone-token"
 openai_secret="jina-staging-openai-api-key"
+causal_release_credential_secret="jina-staging-causal-graph-worker-release-credential"
 
 required_staging_values=(
   "${project}"
@@ -63,6 +66,7 @@ required_staging_values=(
   "${task_worker_service}"
   "${migration_job}"
   "${billing_retry_scheduler_job}"
+  "${causal_activation_job}"
   "${owner_password_secret}"
   "${runtime_password_secret}"
   "${webhook_secret}"
@@ -80,6 +84,7 @@ required_staging_values=(
   "${github_app_private_key_secret}"
   "${github_clone_token_secret}"
   "${openai_secret}"
+  "${causal_release_credential_secret}"
 )
 if [[ "${project}" == "jina-463721" || "${project}" == "jina-v2" ]]; then
   printf 'Refusing to deploy staging services into production project: %s\n' "${project}" >&2
@@ -137,6 +142,121 @@ for secret_name in \
 done
 gcloud storage buckets describe "gs://${artifact_bucket}" --project="${project}" >/dev/null
 gcloud storage buckets describe "gs://${review_artifact_bucket}" --project="${project}" >/dev/null
+
+serving_revision() {
+  local service="$1"
+  local description
+  description="$(gcloud run services describe "${service}" \
+    --project="${project}" --region="${region}" --format=json)"
+  SERVICE_DESCRIPTION="${description}" SERVICE_NAME="${service}" python3 -c '
+import json
+import os
+
+description = json.loads(os.environ["SERVICE_DESCRIPTION"])
+service_name = os.environ["SERVICE_NAME"]
+serving = {
+    target.get("revisionName"): int(target.get("percent", 0))
+    for target in description.get("status", {}).get("traffic", [])
+    if target.get("revisionName") and int(target.get("percent", 0)) > 0
+}
+if len(serving) != 1 or next(iter(serving.values())) != 100:
+    raise SystemExit(
+        f"{service_name} must have one 100% serving revision before deployment; observed {serving}"
+    )
+print(next(iter(serving)))
+'
+}
+
+causal_release_state() {
+  local revision="$1"
+  gcloud run revisions describe "${revision}" \
+    --project="${project}" --region="${region}" --format=json |
+    python3 -c '
+import json
+import sys
+
+revision = json.load(sys.stdin)
+environment = revision.get("spec", {}).get("containers", [])[0].get("env", [])
+release_id = next(
+    (item.get("value", "") for item in environment if item.get("name") == "JINA_WORKER_RELEASE_ID"),
+    "",
+)
+credential = next(
+    (
+        item.get("valueFrom", {}).get("secretKeyRef", {})
+        for item in environment
+        if item.get("name") == "JINA_WORKER_RELEASE_CREDENTIAL"
+    ),
+    {},
+)
+if not release_id or credential.get("name") != "jina-staging-causal-graph-worker-release-credential":
+    raise SystemExit("serving causal worker does not expose a restorable release identity")
+version = credential.get("key", "")
+if not version.isdigit() or int(version) < 1:
+    raise SystemExit("serving causal worker does not pin a numbered release credential")
+print(release_id, version)
+'
+}
+
+previous_api_revision="$(serving_revision "${api_service}")"
+previous_context_revision="$(serving_revision "${context_worker_service}")"
+previous_task_revision="$(serving_revision "${task_worker_service}")"
+previous_causal_revision="$(serving_revision "${causal_worker_service}")"
+read -r previous_causal_release_id previous_causal_secret_version \
+  < <(causal_release_state "${previous_causal_revision}")
+
+traffic_mutation_started="false"
+causal_deploy_started="false"
+
+restore_revision() {
+  local service="$1"
+  local revision="$2"
+  gcloud run services update-traffic "${service}" \
+    --project="${project}" --region="${region}" \
+    --to-revisions="${revision}=100" --clear-tags --quiet
+}
+
+restore_causal_release_control() {
+  gcloud run jobs deploy "${causal_activation_job}" \
+    --project="${project}" \
+    --region="${region}" \
+    --image="${api_image}" \
+    --service-account="${migration_service_account}" \
+    --set-cloudsql-instances="${sql_instance}" \
+    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${owner_user}~RUNTIME_DB_USER=${runtime_user}~JINA_CAUSAL_GRAPH_RELEASE_ID=${previous_causal_release_id}~JINA_CAUSAL_GRAPH_WORKER_REVISION=${previous_causal_revision}" \
+    --set-secrets="DB_PASS=${owner_password_secret}:latest,JINA_CAUSAL_GRAPH_RELEASE_CREDENTIAL=${causal_release_credential_secret}:${previous_causal_secret_version}" \
+    --args=node_modules/@jina/db/dist/activate-causal-graph-release.js \
+    --tasks=1 \
+    --max-retries=0 \
+    --task-timeout=10m \
+    --quiet
+  gcloud run jobs execute "${causal_activation_job}" \
+    --project="${project}" --region="${region}" --wait
+}
+
+rollback_failed_staging_release() {
+  local status=$?
+  local rollback_failed="false"
+  trap - EXIT
+  if [[ "${status}" -ne 0 && "${traffic_mutation_started}" == "true" ]]; then
+    set +e
+    printf 'Staging deployment failed; restoring the prior coordinated release\n' >&2
+    if [[ "${causal_deploy_started}" == "true" ]]; then
+      restore_causal_release_control || rollback_failed="true"
+      restore_revision "${causal_worker_service}" "${previous_causal_revision}" || rollback_failed="true"
+    fi
+    restore_revision "${context_worker_service}" "${previous_context_revision}" || rollback_failed="true"
+    restore_revision "${task_worker_service}" "${previous_task_revision}" || rollback_failed="true"
+    restore_revision "${api_service}" "${previous_api_revision}" || rollback_failed="true"
+    if [[ "${rollback_failed}" == "true" ]]; then
+      printf 'Staging compensation was incomplete; inspect all four serving revisions before retrying\n' >&2
+    else
+      printf 'Prior staging release restored after failed deployment\n' >&2
+    fi
+  fi
+  exit "${status}"
+}
+trap rollback_failed_staging_release EXIT
 
 if [[ "${JINA_SKIP_STAGING_MIGRATIONS:-false}" == "true" ]]; then
   deployed_migration_image="$(gcloud run jobs describe "${migration_job}" \
@@ -206,6 +326,7 @@ gcloud --quiet run deploy "${api_service}" \
 # A previous emergency rollback pins traffic to a named revision. Cloud Run
 # preserves that pin across later deploys, so explicitly restore latest-revision
 # routing before any health check can accidentally verify the rollback target.
+traffic_mutation_started="true"
 gcloud run services update-traffic "${api_service}" \
   --project="${project}" \
   --region="${region}" \
@@ -223,7 +344,12 @@ fi
 
 # Cloud Scheduler only admits a durable Board workflow. The task worker owns
 # execution, retries, event history, and trace export for every billing drain.
-gcloud services enable cloudscheduler.googleapis.com --project="${project}" --quiet
+if ! gcloud services list --enabled --project="${project}" \
+    --filter='config.name=cloudscheduler.googleapis.com' \
+    --format='value(config.name)' | grep -Fxq cloudscheduler.googleapis.com; then
+  printf 'Cloud Scheduler API must be enabled as a staging platform prerequisite\n' >&2
+  exit 2
+fi
 product_internal_token="$(gcloud secrets versions access latest \
   --secret="${product_internal_token_secret}" --project="${project}")"
 scheduler_headers="Authorization=Bearer ${product_internal_token},Content-Type=application/json"
@@ -368,6 +494,7 @@ done
 # coordinated staging deploy. The standalone script remains available for a
 # causal-only release, but a normal staging cutover must not leave an older
 # artifact protocol behind the unified API.
+causal_deploy_started="true"
 GCP_PROJECT_ID="${project}" \
 GCP_REGION="${region}" \
 CLOUD_SQL_INSTANCE="${sql_instance}" \
@@ -378,5 +505,6 @@ JINA_ARTIFACT_REGISTRY_REPOSITORY="${artifact_repository}" \
 IMAGE_TAG="${IMAGE_TAG}" \
 bash "${script_dir}/deploy-staging-causal-graph.sh"
 
+traffic_mutation_started="false"
 printf 'Jina staging deployed successfully\n'
 printf 'API: %s\n' "${api_url}"
