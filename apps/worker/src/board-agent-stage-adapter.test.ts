@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { REVIEW_FINDINGS_SCHEMA } from "@jina/ai";
+import { LEGACY_REVIEW_FINDINGS_SCHEMA } from "./legacy-review-contract.js";
 import {
   CITATION_AUDIT_STAGE_SCHEMA,
   CRITIC_STAGE_SCHEMA,
@@ -35,7 +35,7 @@ test("all production Codex response schemas recursively require every declared s
     SOURCE_CHALLENGE_STAGE_SCHEMA,
     CITATION_AUDIT_STAGE_SCHEMA,
     CRITIC_STAGE_SCHEMA,
-    REVIEW_FINDINGS_SCHEMA
+    LEGACY_REVIEW_FINDINGS_SCHEMA
   };
   const violations: string[] = [];
 

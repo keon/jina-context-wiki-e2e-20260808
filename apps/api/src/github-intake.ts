@@ -8,7 +8,7 @@ import {
   type TaskId
 } from "@jina/board";
 import { isIssueTrigger, isReviewTrigger, type ParsedGitHubWebhook } from "@jina/github";
-import { applyPrReviewPlan, planPrReview } from "@jina/review";
+import { applyPrReviewPlan, planPrReview } from "./legacy-review-pipeline.js";
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
 
 interface TrackedPullRequest {

@@ -329,6 +329,34 @@ export function pagePlanStructuralProblems(
   return problems;
 }
 
+/**
+ * Fails closed when a page is structurally valid but drops the publication
+ * plan's actual subject. This is intentionally lexical rather than a second
+ * model judge: the independent citation audit still decides whether present
+ * claims are supported, while this host-owned check proves that every planned
+ * topic and maintenance question remains represented in the published bytes.
+ */
+export function pagePlanContentProblems(page: DocumentationPagePlan, bodyMarkdown: string): readonly string[] {
+  const problems: string[] = [];
+  const bodyTerms = scopeTermSet(bodyMarkdown);
+  for (const [kind, values] of [
+    ["required topic", page.requiredTopics ?? []],
+    ["maintenance question", page.maintenanceQuestions ?? []]
+  ] as const) {
+    for (const value of values) {
+      const plannedTerms = scopeTerms(value);
+      if (plannedTerms.length === 0) continue;
+      const representedTerms = plannedTerms.filter((term) => bodyTerms.has(term));
+      if (representedTerms.length === 0) {
+        problems.push(
+          `${page.path} is missing planned ${kind} coverage for ${JSON.stringify(value)}: represented 0/${plannedTerms.length} substantive term(s); at least 1 required`
+        );
+      }
+    }
+  }
+  return problems;
+}
+
 export function publicPageCheckoutAliasProblems(bodyMarkdown: string): readonly string[] {
   const problems = new Set<string>();
   for (const match of bodyMarkdown.matchAll(

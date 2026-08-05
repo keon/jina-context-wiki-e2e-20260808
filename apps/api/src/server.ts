@@ -91,8 +91,15 @@ import {
   withOpenTelemetrySpan,
   type Logger
 } from "@jina/observability";
-import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
-import { entityId, nowIso, type IsoTimestamp } from "@jina/shared-kernel";
+import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "./legacy-review-pipeline.js";
+import {
+  controlBoardWorkerTopics,
+  entityId,
+  nowIso,
+  reviewBoardWorkerTopics,
+  supportedWorkerTopics,
+  type IsoTimestamp
+} from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
 import {
@@ -132,29 +139,8 @@ const WORKER_LEASE_MS = 30 * 60 * 1000;
 const DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 * 60 * 1000;
 const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
-const WORKER_TOPICS = [
-  "run-review",
-  "prepare-review",
-  "summary-review",
-  "runtime-review",
-  "finalize-review",
-  "publish-review",
-  "settle-review",
-  "github-installation-backfill",
-  "billing-retry",
-  ...Object.values(contextWorkflowBoardTopics),
-  ...Object.values(causalGraphBoardTopics)
-] as const;
-const RELATIONAL_BOARD_TOPICS = new Set<string>([
-  "prepare-review",
-  "summary-review",
-  "runtime-review",
-  "finalize-review",
-  "publish-review",
-  "settle-review",
-  "github-installation-backfill",
-  "billing-retry"
-]);
+const WORKER_TOPICS = supportedWorkerTopics;
+const RELATIONAL_BOARD_TOPICS = new Set<string>([...reviewBoardWorkerTopics, ...controlBoardWorkerTopics]);
 const CONTEXT_BOARD_TOPICS = new Set<string>(Object.values(contextWorkflowBoardTopics));
 const CAUSAL_GRAPH_TOPICS = new Set<string>(Object.values(causalGraphBoardTopics));
 const MODEL_BOARD_TOPICS = new Set<string>([

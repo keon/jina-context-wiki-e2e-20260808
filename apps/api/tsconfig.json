@@ -14,9 +14,7 @@
     { "path": "../../packages/db" },
     { "path": "../../packages/github" },
     { "path": "../../packages/observability" },
-    { "path": "../../packages/publication" },
     { "path": "../../packages/context-engine" },
-    { "path": "../../packages/review" },
     { "path": "../../packages/shared-kernel" }
   ]
 }

@@ -164,7 +164,7 @@ export const docs: Doc[] = [
       {
         heading: "Publication model",
         body: [
-          "Pages are derived against an immutable repository commit. Citation-valid pages remain private checkpoints until the release passes its publication gates.",
+          "Pages are derived against an immutable repository commit. Citation-valid pages remain private checkpoints until every planned page has an explicit disposition and the complete catalog and PageIndex hierarchy validate.",
           "A failed or superseded build does not replace the currently published release. Verified checkpoints may be retained for safe resumption.",
         ],
       },

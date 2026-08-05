@@ -4,19 +4,13 @@
     { "path": "./apps/admin" },
     { "path": "./apps/api" },
     { "path": "./apps/dashboard" },
-    { "path": "./apps/workflows" },
     { "path": "./apps/worker" },
     { "path": "./packages/board" },
-    { "path": "./packages/review" },
-    { "path": "./packages/context" },
     { "path": "./packages/context-engine" },
-    { "path": "./packages/publication" },
-    { "path": "./packages/policy" },
     { "path": "./packages/db" },
     { "path": "./packages/github" },
     { "path": "./packages/observability" },
     { "path": "./packages/daytona" },
-    { "path": "./packages/ai" },
     { "path": "./packages/shared-kernel" }
   ]
 }

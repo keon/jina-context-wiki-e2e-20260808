@@ -1,12 +1,18 @@
 import { applyCommand, type BoardState, type CommandActor } from "@jina/board";
 import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 
+/**
+ * Compatibility planner for the production `run-review` queue. Fresh webhook
+ * admission remains here only until the documented product API and relational
+ * review-topic cutover; persisted work keeps this contract alive until drain.
+ */
+
 interface PipelineRef {
   readonly slug: "pr_review";
   readonly version: string;
 }
 
-export type PlannedTaskId = EntityId<"task">;
+type PlannedTaskId = EntityId<"task">;
 
 interface PlannedTask {
   readonly id: PlannedTaskId;

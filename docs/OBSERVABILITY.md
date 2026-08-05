@@ -43,8 +43,8 @@ GitHub delivery
   -> build-context root task
   -> stage task + lease + attempt/write fence
   -> immutable input/research/page/audit artifact
-  -> certified release
-  -> PageIndex attachment
+  -> publication task and PageIndex artifact
+  -> immutable release
   -> query trace
 ```
 
@@ -126,8 +126,8 @@ A production context dashboard should show:
   `run-context-page-build`, and `run-context-publication`;
 - snapshot size, prior-release inputs, Codex model/prompt/schema version, page-audit
   failures, repair passes, and fail-closed count;
-- Board graph phase and checkpoint age, planned/completed subjects and pages, gate
-  outcomes, blocking gaps, attempt counts, and terminal failures;
+- Board graph phase and checkpoint age, planned/completed subjects and pages, page
+  dispositions, repair counts, attempt counts, and terminal failures;
 - lease loss and API polling failures, attributed to a process-unique worker ID
   (the release revision alone is not an instance identity);
 - repository/ref ingestion freshness and latest published release age;
@@ -188,12 +188,14 @@ Each release must retain:
 - migration execution;
 - API and both worker health payloads;
 - acceptance build/stage IDs;
-- certified repository/ref/commit and release ID;
+- published repository/ref/commit and release ID;
 - HTTP and real MCP citation counts;
 - final outbox depth;
-- Board artifact-quality report produced by `pnpm evaluate:context-board-quality`;
 - per-question coverage report produced by `pnpm evaluate:questions` for the maintained
   engineering-question corpus.
+
+The retained `context-board-quality-v2` report is historical compatibility evidence,
+not required page-oriented release evidence until its artifact parser is updated.
 
 The acceptance job output is a release gate, not a substitute for ongoing SLO monitoring.
 

@@ -1,18 +1,19 @@
 # Data models
 
 This document describes the active Context model. Executable definitions in
-`packages/board`, `apps/api/src/context-board-runtime.ts`,
-`packages/db/src/context/schema.ts`, and the domain types in
-`packages/context-engine/src` are authoritative.
+`packages/board`, `apps/api/src/context-workflow-runtime.ts`,
+`packages/context-engine/src/workflow/context-workflow.ts`, and
+`packages/db/src/context/schema.ts` are authoritative.
 
 ## Runtime workflow
 
-The durable task board records one `build-context` aggregate and its dynamic children.
-The root carries the tenant/repository/ref/request identity and monotonic `refSequence`.
-Dispatchable children carry only bounded orchestration metadata, content digests, and
-immutable artifact references. Research, page, audit, repair, challenge, critic,
-certification, publication, and PageIndex tasks are added as validated agent results
-discover work.
+The durable task board records one `build-context` aggregate, one manual graph latch,
+and four dispatchable task types: input snapshot, page planning, per-page construction,
+and publication. The root carries tenant/repository/ref/request identity and monotonic
+`refSequence`. Dispatchable children carry only bounded orchestration metadata, content
+digests, and immutable artifact references. Research, writing, audit, repair, and
+PageIndex construction are checkpointed phases inside those durable tasks rather than
+separate queue routes.
 
 The fresh PostgreSQL schema does not contain the legacy `pipeline_builds`,
 `pipeline_stages`, `derivation_progress`, or `derivation_orchestration` tables. Their
@@ -101,11 +102,12 @@ editing is not supported.
 
 ### Derivation checkpoints
 
-Board tasks and immutable artifacts are the checkpoint model. One `context-page`
-aggregate owns a writer, source-aware audit, and bounded repair/audit successors. Board
-rows store status, dependencies, attempts, leases, fences, bounded digests, and artifact
-references. Page bodies, diagnostics, audit reports, research plans, publication plans,
-critic results, and repair drafts are immutable artifacts under the build scope.
+Board tasks and immutable artifacts are the checkpoint model. One
+`build-context-page` dispatchable task owns page writing, source-aware audit, and at
+most one repair/replacement-audit cycle. Board rows store status, dependencies,
+attempts, leases, fences, bounded digests, and artifact references. Page bodies,
+diagnostics, audit reports, research plans, publication plans, and repair drafts are
+immutable artifacts under the build scope.
 
 `context_phase_checkpoints` is the fine-grained retry index for those artifacts. Its
 tenant/task/phase/input-digest primary key makes recording first-writer-wins; the build
@@ -119,11 +121,11 @@ the previous bytes. Dependency results carry the latest-pass references forward.
 
 Research and publication plans contain evidence-backed subjects, maintenance questions,
 stable page IDs, deterministic repository-area coverage, and question-to-page mappings.
-Challenge and task-evaluation artifacts contain findings, pages actually used, and
-blocking gaps. The API validates every result envelope, artifact scope, and dependency
-reference before completing a Board task or expanding the graph. Independent artifact
-storage is intentional: plans, research, valid sibling pages, and audits survive worker
-or sandbox loss even when the build never publishes.
+Page results contain an accepted or omitted disposition and immutable evidence and
+generation fingerprints. The API validates every result envelope, artifact scope, and
+dependency reference before completing a Board task or expanding the graph. Independent
+artifact storage is intentional: plans, research, valid sibling pages, and audits
+survive worker or sandbox loss even when the build never publishes.
 
 Phase checkpoints resume retries of the same Board task. Ref-level durability is a
 separate scheduler concern: after a default-ref build has started, a newer push, issue,
@@ -140,9 +142,9 @@ checkpoint, publication state, capability state, input fingerprints, timestamps,
 failure data.
 
 Verified page checkpoints may appear in build progress as they arrive, but they do not
-create queryable releases. Certification binds the complete unchanged public snapshot,
-and one fenced publication task atomically makes that release current. Current selection
-is the newest authorized completed release for a ref.
+create queryable releases. One fenced publication task resolves all page dispositions,
+validates the complete snapshot, builds PageIndex, and atomically makes that release
+current. Current selection is the newest authorized completed release for a ref.
 
 Active derived-only projections are:
 
@@ -170,8 +172,7 @@ context/tenants/<tenant>/repositories/<repository>/builds/<build>/<kind>/<name>
 Kinds include:
 
 - `evidence-snapshot`;
-- `derivation-checkpoint` (research, plan, page, audit, repair, challenge, critic, and
-  certification objects);
+- `derivation-checkpoint` (research, plan, page, audit, repair, and publication objects);
 - `context-release`; and
 - `pageindex-tree`.
 

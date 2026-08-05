@@ -4,6 +4,8 @@ import { pingPostgresPool } from "./postgres-health.js";
 export interface PostgresJsonStateStoreConfig extends PoolConfig {
   readonly applicationName?: string;
   readonly manageSchema?: boolean;
+  /** Reuse a process-owned pool; the state store will not close it. */
+  readonly pool?: Pool;
   /** Bounds global snapshot contention so worker renewals can retry before leases expire. */
   readonly mutationLockTimeoutMillis?: number;
 }
@@ -100,27 +102,39 @@ export const JINA_RUNTIME_SCHEMA_SQL = `
  */
 export class PostgresJsonStateStore<T> {
   private readonly pool: Pool;
+  private readonly ownsPool: boolean;
   private readonly manageSchema: boolean;
   private readonly mutationLockTimeoutMillis: number;
   private initialized?: Promise<void>;
 
   constructor(config: PostgresJsonStateStoreConfig) {
-    const { manageSchema = true, mutationLockTimeoutMillis = 10_000, ...poolConfig } = config;
+    const {
+      applicationName,
+      manageSchema = true,
+      mutationLockTimeoutMillis = 10_000,
+      pool: sharedPool,
+      ...poolConfig
+    } = config;
     if (!Number.isSafeInteger(mutationLockTimeoutMillis) || mutationLockTimeoutMillis < 1) {
       throw new Error("mutationLockTimeoutMillis must be a positive safe integer");
     }
     this.manageSchema = manageSchema;
     this.mutationLockTimeoutMillis = mutationLockTimeoutMillis;
-    this.pool = new Pool({
-      ...poolConfig,
-      application_name: config.applicationName ?? "jina-api",
-      max: config.max ?? 5,
-      idleTimeoutMillis: config.idleTimeoutMillis ?? 30_000,
-      connectionTimeoutMillis: config.connectionTimeoutMillis ?? 10_000
-    });
-    this.pool.on("error", (error) => {
-      console.error("postgres idle connection error", error);
-    });
+    this.ownsPool = sharedPool === undefined;
+    this.pool =
+      sharedPool ??
+      new Pool({
+        ...poolConfig,
+        application_name: applicationName ?? "jina-api",
+        max: poolConfig.max ?? 5,
+        idleTimeoutMillis: poolConfig.idleTimeoutMillis ?? 30_000,
+        connectionTimeoutMillis: poolConfig.connectionTimeoutMillis ?? 10_000
+      });
+    if (this.ownsPool) {
+      this.pool.on("error", (error) => {
+        console.error("postgres idle connection error", error);
+      });
+    }
   }
 
   async load(): Promise<T | undefined> {
@@ -361,7 +375,7 @@ export class PostgresJsonStateStore<T> {
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    if (this.ownsPool) await this.pool.end();
   }
 
   private initialize(): Promise<void> {

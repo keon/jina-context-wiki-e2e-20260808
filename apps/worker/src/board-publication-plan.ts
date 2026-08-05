@@ -5,7 +5,7 @@ import {
   type ResearchAssignment
 } from "@jina/daytona";
 import type { CertifiedContextReleasePage, IngestEvidenceInput, KnowledgeEvidenceCitation } from "@jina/context-engine";
-import { pagePlanStructuralProblems } from "./board-page-repair.js";
+import { pagePlanContentProblems, pagePlanStructuralProblems } from "./board-page-repair.js";
 import { parsePlanWithSingleRepair, type BoundedPlanRepairRequest } from "./board-plan-repair.js";
 
 export type PublicationPlanRepairRequest = BoundedPlanRepairRequest;
@@ -194,6 +194,7 @@ export function retainedPublicationPlanProblems(input: {
         (problem) => `${page.path}: ${problem}`
       )
     );
+    problems.push(...pagePlanContentProblems(page, prior.bodyMarkdown));
 
     const priorByCitationId = new Map(
       prior.citations.flatMap((citation) => (citation.citationId ? [[citation.citationId, citation] as const] : []))

@@ -73,7 +73,7 @@ const contextDatabase = postgresConfig
       manageRoles: process.env.JINA_DB_MANAGE_ROLES === "true"
     })
   : undefined;
-const stateStore = createStateStore(postgresConfig);
+const stateStore = createStateStore(postgresConfig, contextDatabase?.pool);
 const contextStore = createContextStore(contextDatabase);
 const contextPhaseCheckpointStore = contextDatabase
   ? new PostgresContextPhaseCheckpointRepository(contextDatabase)
@@ -111,7 +111,7 @@ const contextArtifactStore = process.env.CONTEXT_GCS_BUCKET
     ? new FileContextArtifactStore(process.env.CONTEXT_ARTIFACT_DIRECTORY?.trim() || ".jina/context-artifacts")
     : undefined;
 
-const productApiRequestHandler = await loadProductApiRequestHandler();
+const productApiRequestHandler = await loadProductApiRequestHandler(contextDatabase?.pool);
 
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
@@ -175,10 +175,14 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
-function createStateStore(config: PostgresJsonStateStoreConfig | undefined): ApiStateStore | undefined {
+function createStateStore(
+  config: PostgresJsonStateStoreConfig | undefined,
+  sharedPool: ContextDatabase["pool"] | undefined
+): ApiStateStore | undefined {
   if (!config) return undefined;
   return new PostgresJsonStateStore<ApiSnapshot>({
     ...config,
+    ...(sharedPool ? { pool: sharedPool } : {}),
     manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
   });
 }
@@ -240,16 +244,18 @@ function booleanEnvironment(name: string, fallback: boolean): boolean {
   throw new Error(`${name} must be true or false`);
 }
 
-async function loadProductApiRequestHandler() {
+async function loadProductApiRequestHandler(databasePool: import("pg").Pool | undefined) {
   if (!booleanEnvironment("JINA_PRODUCT_API_ENABLED", false)) return undefined;
   // Keep the product compiler boundary independent while the absorbed code is
   // progressively refactored onto the shared kernel.
   const productModulePath = "./product/index.js";
   const product = (await import(productModulePath)) as {
-    createProductApiRequestHandler: () => (
+    createProductApiRequestHandler: (options?: {
+      readonly databasePool?: import("pg").Pool;
+    }) => (
       request: import("node:http").IncomingMessage,
       response: import("node:http").ServerResponse
     ) => void | Promise<void>;
   };
-  return product.createProductApiRequestHandler();
+  return product.createProductApiRequestHandler(databasePool ? { databasePool } : {});
 }
