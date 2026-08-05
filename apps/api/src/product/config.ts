@@ -1,4 +1,4 @@
-export type AppConfig = {
+export interface AppConfig {
   port: number;
   githubWebhookSecret: string;
   githubAppInstallUrl?: string;
@@ -10,18 +10,18 @@ export type AppConfig = {
   billing: BillingConfig;
   graph?: GraphConfig;
   schedulerOidc?: SchedulerOidcConfig;
-};
+}
 
 /**
  * When set, Cloud Scheduler authenticates with a Google-signed OIDC identity
  * token instead of a copy of the internal API token stored in the job resource.
  */
-type SchedulerOidcConfig = {
+interface SchedulerOidcConfig {
   audience: string;
   email: string;
-};
+}
 
-export type GraphConfig = {
+export interface GraphConfig {
   apiUrl: string;
   accessToken: string;
   timeoutMs: number;
@@ -33,13 +33,13 @@ export type GraphConfig = {
    */
   internalToken?: string;
   delegatedTokenTtlMinutes?: number;
-};
+}
 
 export type DashboardAllowedOrigins = "*" | string[];
 
 export type BillingEnforcement = "off" | "shadow" | "on";
 
-export type BillingConfig = {
+export interface BillingConfig {
   // When unset, Autumn billing is entirely disabled and every billing path degrades
   // gracefully (no customer creation, no check/track, dashboard reports configured:false).
   autumnSecretKey?: string;
@@ -53,9 +53,9 @@ export type BillingConfig = {
   // Where Stripe/Autumn checkouts return the user after success. Without this,
   // Autumn redirects completed checkouts to its own site (production bug).
   checkoutSuccessUrl?: string;
-};
+}
 
-type AuthConfig = {
+interface AuthConfig {
   mode: "disabled" | "github" | "clerk";
   githubClientId?: string;
   githubClientSecret?: string;
@@ -67,7 +67,7 @@ type AuthConfig = {
   sessionTtlSeconds: number;
   clerkPublishableKey?: string;
   clerkSecretKey?: string;
-};
+}
 
 export function loadConfig(env = process.env): AppConfig {
   const dashboardUrl = dashboardUrlFromEnv(env);

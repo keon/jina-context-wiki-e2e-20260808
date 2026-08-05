@@ -35,10 +35,10 @@ import {
   type ReviewUsageRecord,
 } from "./store.js";
 
-export type InstallationBackfillStore = {
+export interface InstallationBackfillStore {
   recordInstallation: typeof recordInstallation;
   getTenantBillingIdentity: typeof getTenantBillingIdentity;
-};
+}
 
 export type InstallationCustomerProvisioner = Pick<BillingService, "provisionTenantCustomer">;
 
@@ -126,11 +126,11 @@ export async function prepareReview(c: Context, config: AppConfig, billing?: Bil
  * (defaults to the real store) so the reopen-then-pass / reopen-then-block-again flows are unit-testable
  * without a database.
  */
-export type PrepareGateStore = {
+export interface PrepareGateStore {
   reopenBlockedReviewRun: (reviewRunId: string) => Promise<boolean>;
   completeReviewRun: typeof completeReviewRun;
   recordReviewEvent: typeof storeRecordReviewEvent;
-};
+}
 
 const defaultPrepareGateStore: PrepareGateStore = {
   reopenBlockedReviewRun,

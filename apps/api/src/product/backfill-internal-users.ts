@@ -50,7 +50,7 @@ try {
   }
   console.log(JSON.stringify({ mode, converged: true, repositoryResolution, ...report }));
 } catch (error) {
-  await client.query("rollback").catch(() => {});
+  await client.query("rollback").catch(() => undefined);
   throw error;
 } finally {
   client.release();

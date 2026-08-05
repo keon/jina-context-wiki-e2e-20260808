@@ -56,7 +56,7 @@ try {
     }
   }
 } finally {
-  await lockClient.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]).catch(() => {});
+  await lockClient.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]).catch(() => undefined);
   lockClient.release();
 }
 

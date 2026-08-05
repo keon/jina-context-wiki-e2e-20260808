@@ -21,21 +21,21 @@ import {
   type ViewerOrgMembership,
 } from "./store.js";
 
-type GithubUser = {
+interface GithubUser {
   id: number;
   login: string;
   name?: string | null;
   avatar_url?: string;
   html_url?: string;
-};
+}
 
-type GithubOrg = {
+interface GithubOrg {
   id: number;
   login: string;
   avatar_url?: string;
-};
+}
 
-type GithubRepo = {
+interface GithubRepo {
   id: number;
   name: string;
   full_name: string;
@@ -44,17 +44,17 @@ type GithubRepo = {
     login: string;
   };
   html_url?: string;
-};
+}
 
-type GithubTeam = {
+interface GithubTeam {
   id: number;
   name: string;
   slug: string;
   html_url?: string;
   organization?: GithubOrg;
-};
+}
 
-export type DashboardProject = {
+export interface DashboardProject {
   id: string;
   github_repo_id?: number;
   full_name: string;
@@ -63,9 +63,9 @@ export type DashboardProject = {
   private?: boolean;
   html_url?: string;
   source: "github" | "observed";
-};
+}
 
-export type DashboardTeam = {
+export interface DashboardTeam {
   id: string;
   github_team_id: number;
   name: string;
@@ -77,27 +77,27 @@ export type DashboardTeam = {
     avatar_url?: string;
   };
   project_full_names: string[];
-};
+}
 
-type DashboardUser = {
+interface DashboardUser {
   id: number;
   login: string;
   name?: string | null;
   avatar_url?: string;
   html_url?: string;
-};
+}
 
-export type DashboardSession = {
+export interface DashboardSession {
   id: string;
   /** Stable Jina user id. Absent only on pre-transition or in-memory test sessions. */
   userId?: string;
   accessToken?: string;
   user: DashboardUser;
-  organizations: Array<{
+  organizations: {
     id: number;
     login: string;
     avatar_url?: string;
-  }>;
+  }[];
   projects: DashboardProject[];
   teams: DashboardTeam[];
   expiresAt: number;
@@ -105,15 +105,15 @@ export type DashboardSession = {
   updatedAt: string;
   clerkUserId?: string;
   clerkOrganizationId?: string;
-};
+}
 
-type OAuthTokenResponse = {
+interface OAuthTokenResponse {
   access_token?: string;
   error?: string;
   error_description?: string;
-};
+}
 
-type GithubSessionAccess = {
+interface GithubSessionAccess {
   user: GithubUser;
   organizations: GithubOrg[];
   repositories: GithubRepo[];
@@ -125,7 +125,7 @@ type GithubSessionAccess = {
     repositories: boolean;
     teams: boolean;
   };
-};
+}
 
 const SESSION_ACCESS_REFRESH_INTERVAL_MS = 5 * 60_000;
 const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
@@ -203,12 +203,12 @@ export async function githubCallback(c: Context, config: AppConfig): Promise<Res
 export async function logout(c: Context, config: AppConfig): Promise<Response> {
   if (config.auth.mode === "clerk") {
     const session = await currentSession(c, config);
-    if (session) await deleteSession(session.id).catch(() => {});
+    if (session) await deleteSession(session.id).catch(() => undefined);
     return c.json({ ok: true });
   }
   const sessionId = getCookie(c, config.auth.sessionCookieName);
   if (sessionId) {
-    await deleteSession(sessionId).catch(() => {});
+    await deleteSession(sessionId).catch(() => undefined);
   }
 
   deleteCookie(c, config.auth.sessionCookieName, {
@@ -337,7 +337,7 @@ async function currentSession(c: Context, config: AppConfig): Promise<DashboardS
     return undefined;
   }
   if (!session || session.expiresAt <= Date.now()) {
-    await deleteSession(sessionId).catch(() => {});
+    await deleteSession(sessionId).catch(() => undefined);
     return undefined;
   }
 
@@ -465,11 +465,11 @@ async function createGithubSession(config: AppConfig, accessToken: string): Prom
   return session;
 }
 
-type GithubOrgMembership = {
+interface GithubOrgMembership {
   role?: string;
   state?: string;
   organization?: { id?: number; login?: string };
-};
+}
 
 /**
  * Fetch the viewer's ACTIVE org memberships from their own token (GET /user/memberships/orgs), paginated
@@ -630,7 +630,7 @@ async function loadGithubSessionAccess(accessToken: string): Promise<GithubSessi
   };
 }
 
-type FetchResult<T> = { ok: boolean; value: T };
+interface FetchResult<T> { ok: boolean; value: T }
 
 // Resolve a list fetch into a success/failure flag instead of throwing, so a partial
 // GitHub outage degrades gracefully (the caller keeps the previously cached list).

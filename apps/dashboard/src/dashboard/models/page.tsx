@@ -27,29 +27,29 @@ import { useTenant, useTenantFence } from "../providers";
 type ModelProvider = "codex" | "byok" | "managed";
 type ReviewTriggerMode = "every_commit" | "first_commit" | "manual_only";
 type PageState = "loading" | "ready" | "unavailable";
-type SaveState = { kind: "idle" | "saving" | "saved" | "error"; message?: string };
+interface SaveState { kind: "idle" | "saving" | "saved" | "error"; message?: string }
 
-const PROVIDERS: Array<{ value: ModelProvider; title: string; description: string; mark: string }> = [
+const PROVIDERS: { value: ModelProvider; title: string; description: string; mark: string }[] = [
   { value: "codex", title: "Codex", description: "Use your ChatGPT subscription for reviews you author.", mark: "CX" },
   { value: "byok", title: "Your API keys", description: "Route through credentials configured in Integrations.", mark: "BY" },
   { value: "managed", title: "Jina managed", description: "Use managed models billed as workspace credits.", mark: "JM" },
 ];
 
-const STAGES: Array<{
+const STAGES: {
   modelKey: "planner_model" | "investigation_model" | "review_model" | "context_model";
   defaultKey: keyof StageDefaults;
   effortKey: "planner_effort" | "investigation_effort" | "review_effort" | "context_effort";
   title: string;
   description: string;
   defaultEffort: ReasoningEffort;
-}> = [
+}[] = [
   { modelKey: "planner_model", defaultKey: "planner", effortKey: "planner_effort", title: "Planning", description: "Maps the review into focused investigation areas.", defaultEffort: "medium" },
   { modelKey: "investigation_model", defaultKey: "investigation", effortKey: "investigation_effort", title: "Investigation", description: "Runs the agents that inspect code and evidence.", defaultEffort: "medium" },
   { modelKey: "review_model", defaultKey: "review", effortKey: "review_effort", title: "Final review", description: "Writes the published review and inline findings.", defaultEffort: "medium" },
   { modelKey: "context_model", defaultKey: "context", effortKey: "context_effort", title: "Context generation", description: "Builds and refreshes repository context.", defaultEffort: "low" },
 ];
 
-const TRIGGERS: Array<{ value: ReviewTriggerMode; title: string; description: string }> = [
+const TRIGGERS: { value: ReviewTriggerMode; title: string; description: string }[] = [
   { value: "every_commit", title: "Every update", description: "Review when a pull request opens and after every push." },
   { value: "first_commit", title: "First commit only", description: "Review when a pull request opens, without push reruns." },
   { value: "manual_only", title: "Manual only", description: "Review only when @usejina is mentioned in a comment." },

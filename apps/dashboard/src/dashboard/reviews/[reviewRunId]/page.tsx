@@ -166,7 +166,7 @@ function McpActivity({ events }: { events: ReviewEvent[] }) {
 
 function RunActions({ run, work }: { run: ReviewRun; work: ReviewWork }) {
   const result = runResult(run);
-  const links: Array<{ href: string | undefined; label: string }> = [];
+  const links: { href: string | undefined; label: string }[] = [];
   links.push({ href: run.pull_request.html_url, label: "GitHub PR" });
   links.push({ href: result?.github_comment_url, label: "PR context" });
   links.push({ href: result?.github_check_run_url, label: "Check run" });
@@ -691,7 +691,7 @@ function DisclosureListBlock({
   items,
 }: {
   label: string;
-  items: Array<{ title: string; details: string[] }>;
+  items: { title: string; details: string[] }[];
 }) {
   return (
     <div className="review-block">

@@ -458,7 +458,7 @@ test("planTenantMemberships keeps the personal 'admin' row when a tenant is both
     orgTenants: [{ tenantId: "tenant-x", role: "member" }],
   });
   assert.equal(desired.length, 1);
-  assert.equal(desired[0]!.role, "admin");
+  assert.equal(desired[0].role, "admin");
 });
 
 test("planTenantMemberships returns an empty set for a viewer with no personal tenant and no known orgs", () => {

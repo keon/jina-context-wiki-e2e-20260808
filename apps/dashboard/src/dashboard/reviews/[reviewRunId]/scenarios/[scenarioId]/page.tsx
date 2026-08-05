@@ -352,7 +352,7 @@ function ScenarioSimulationRuns({
   currentRun: ReviewRun;
   currentScenario: ParsedScenario;
 }) {
-  type Entry = { run: ReviewRun; scenario: ParsedScenario; sim: ScenarioSimulationScenario };
+  interface Entry { run: ReviewRun; scenario: ParsedScenario; sim: ScenarioSimulationScenario }
   // Group strictly by the stable lineage_key — i.e. the *same target scenario*
   // retried across review runs. Without a lineage_key (e.g. no simulation result
   // yet) we cannot tell scenarios apart, so we do not group: showing positional,
@@ -506,7 +506,7 @@ function StepEvidence({ step }: { step: ScenarioSimulationStep }) {
 }
 
 function stepNumberFromMarker(marker: string): number | undefined {
-  const match = marker.match(/^step (\d+)$/);
+  const match = /^step (\d+)$/.exec(marker);
   return match ? Number(match[1]) : undefined;
 }
 

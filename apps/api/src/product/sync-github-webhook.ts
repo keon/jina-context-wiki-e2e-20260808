@@ -2,22 +2,22 @@ import { createSign } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-type NgrokTunnel = {
+interface NgrokTunnel {
   public_url?: string;
   config?: {
     addr?: string;
   };
-};
+}
 
-type NgrokResponse = {
+interface NgrokResponse {
   tunnels?: NgrokTunnel[];
-};
+}
 
-type GithubHookConfig = {
+interface GithubHookConfig {
   url?: string;
   content_type?: string;
   insecure_ssl?: string;
-};
+}
 
 loadDotEnv(resolve(process.cwd(), "../.env"));
 loadDotEnv(resolve(process.cwd(), ".env"));
@@ -154,7 +154,7 @@ function hasClosingQuote(value: string, quote: string): boolean {
 
 function unquoteEnvValue(value: string): string {
   const quote = value[0];
-  const isQuoted = (quote === `"` || quote === `'`) && value[value.length - 1] === quote;
+  const isQuoted = (quote === `"` || quote === `'`) && value.endsWith(quote);
   return isQuoted ? value.slice(1, -1) : value;
 }
 

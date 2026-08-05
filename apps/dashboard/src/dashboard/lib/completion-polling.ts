@@ -1,14 +1,14 @@
-export type CompletionPollingHost = {
+export interface CompletionPollingHost {
   setTimeout(callback: () => void, delayMs: number): number;
   clearTimeout(timer: number): void;
   visible(): boolean;
   onAttention(callback: () => void): () => void;
-};
+}
 
-export type CompletionPoll = {
+export interface CompletionPoll {
   runNow(): void;
   stop(): void;
-};
+}
 
 /**
  * Poll only after the previous request settles. Hidden tabs pause completely;

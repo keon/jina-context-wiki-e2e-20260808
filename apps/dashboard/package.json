@@ -5,7 +5,7 @@
   "scripts": {
     "build": "next build",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --ignore-pattern src/dashboard --max-warnings 0",
+    "lint": "eslint . --max-warnings 0",
     "test": "node --test --import tsx src/lib/*.test.ts src/server/*.test.ts src/dashboard/**/*.test.ts",
     "dev": "next dev -p 3000"
   },

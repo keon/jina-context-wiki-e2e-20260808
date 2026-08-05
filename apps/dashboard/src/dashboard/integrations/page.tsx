@@ -15,13 +15,13 @@ import { isTenantWritable, type SelectedTenant } from "../lib/tenants";
 import { useDashboard, useTenant, useTenantFence } from "../providers";
 
 type LoadState = "loading" | "loaded" | "unavailable";
-type KeyInfo = { configured: boolean; last4?: string; connected_at?: string };
+interface KeyInfo { configured: boolean; last4?: string; connected_at?: string }
 type OpenRouterInfo = KeyInfo & { source?: string };
-type Integrations = {
+interface Integrations {
   openrouter: OpenRouterInfo;
   openai: KeyInfo;
   anthropic: KeyInfo;
-};
+}
 type ProviderField = "openrouter_api_key" | "openai_api_key" | "anthropic_api_key";
 
 const EMPTY_INTEGRATIONS: Integrations = {
@@ -30,7 +30,7 @@ const EMPTY_INTEGRATIONS: Integrations = {
   anthropic: { configured: false },
 };
 
-const PROVIDERS: Array<{
+const PROVIDERS: {
   id: keyof Integrations;
   name: string;
   mark: string;
@@ -38,7 +38,7 @@ const PROVIDERS: Array<{
   field: ProviderField;
   placeholder: string;
   oauth?: boolean;
-}> = [
+}[] = [
   {
     id: "openrouter",
     name: "OpenRouter",

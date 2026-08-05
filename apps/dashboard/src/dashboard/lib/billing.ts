@@ -14,39 +14,39 @@
  */
 
 // $1 = 100 Jina Credits (see docs/BILLING.md "Credit math").
-export const CREDITS_PER_USD = 100;
+const CREDITS_PER_USD = 100;
 
 type BillingStatus = "ok" | "unavailable" | "not_configured";
 
 /** Member counts for the org: total seats, and how many run their own harness. */
-type BillingMembers = {
+interface BillingMembers {
   total: number | null;
   with_harness: number | null;
-};
+}
 
 /** The current billing cycle's included-credit accounting. */
-type BillingCycle = {
+interface BillingCycle {
   granted: number | null;
   remaining: number | null;
   used: number | null;
   next_reset_at: string | null;
-};
+}
 
 /** The auto-review spend cap. `enabled: false` means automatic reviews never pause on spend. */
-export type BillingLimits = {
+export interface BillingLimits {
   enabled: boolean;
   limit_credits: number | null;
-};
+}
 
 /** One row of the billing-activity feed (a Stripe invoice / charge). */
-type BillingActivity = {
+interface BillingActivity {
   date: string | null;
   amount: number | null;
   status: string | null;
   url: string | null;
-};
+}
 
-export type Billing = {
+export interface Billing {
   status: BillingStatus;
   // Convenience mirror of `status === "ok"`; true only when balances are live.
   configured: boolean;
@@ -57,10 +57,10 @@ export type Billing = {
   cycle: BillingCycle;
   limits: BillingLimits;
   billing_activity: BillingActivity[];
-};
+}
 
 /** The selectable plans, in display order. Prices/credits mirror the API's plan catalog. */
-export const BILLING_PLANS: Array<{ id: "startup" | "growth"; name: string; price_usd: number; credits: number }> = [
+export const BILLING_PLANS: { id: "startup" | "growth"; name: string; price_usd: number; credits: number }[] = [
   { id: "startup", name: "Startup", price_usd: 100, credits: 10_000 },
   { id: "growth", name: "Growth", price_usd: 500, credits: 50_000 },
 ];

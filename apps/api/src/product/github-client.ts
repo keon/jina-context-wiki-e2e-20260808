@@ -2,7 +2,7 @@ import { ApiError } from "./errors.js";
 
 const GITHUB_USER_AGENT = "jina-code-review";
 
-export type GithubPullRequest = {
+export interface GithubPullRequest {
   number: number;
   title: string;
   html_url: string;
@@ -19,7 +19,7 @@ export type GithubPullRequest = {
     sha?: string;
     ref?: string;
   };
-};
+}
 
 export async function githubJson<T>(accessToken: string, path: string): Promise<T> {
   const response = await fetch(`https://api.github.com${path}`, {

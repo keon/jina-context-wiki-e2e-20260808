@@ -1,6 +1,6 @@
 type ScenarioRisk = "high" | "medium" | "low" | "unknown";
 
-export type ParsedScenario = {
+export interface ParsedScenario {
   id: string;
   index: number;
   risk: ScenarioRisk;
@@ -10,7 +10,7 @@ export type ParsedScenario = {
   context?: string;
   relevantPaths: string[];
   markdown: string;
-};
+}
 
 const scenarioLinePattern = /^\s*-\s\[(?:\s?|x|X)\]\s*(.+)$/;
 const riskPattern = /\[risk:\s*(high|medium|low)\]/i;
@@ -180,7 +180,7 @@ function stringList(value: unknown): string[] {
 }
 
 function riskFromLine(line: string): ScenarioRisk {
-  const risk = line.match(riskPattern)?.[1]?.toLowerCase();
+  const risk = (riskPattern.exec(line))?.[1]?.toLowerCase();
   if (risk === "high" || risk === "medium" || risk === "low") {
     return risk;
   }
@@ -199,7 +199,7 @@ function titleFromLine(line: string, index: number): string {
 }
 
 function relevantPathsFromLine(line: string): string[] {
-  const raw = line.match(relevantPathsPattern)?.[1];
+  const raw = (relevantPathsPattern.exec(line))?.[1];
   if (!raw) {
     return [];
   }
@@ -240,12 +240,12 @@ function scenarioDetails(lines: string[]): { steps: string[]; expectedResult?: s
       continue;
     }
 
-    const numberedStep = trimmed.match(numberedStepPattern)?.[1];
+    const numberedStep = (numberedStepPattern.exec(trimmed))?.[1];
     if (numberedStep && section === "steps") {
       steps.push(numberedStep.trim());
       continue;
     }
-    const bulletStep = trimmed.match(bulletStepPattern)?.[1];
+    const bulletStep = (bulletStepPattern.exec(trimmed))?.[1];
     if (bulletStep && section === "steps") {
       steps.push(bulletStep.trim());
     }
@@ -255,7 +255,7 @@ function scenarioDetails(lines: string[]): { steps: string[]; expectedResult?: s
 }
 
 function labelValue(value: string): { label: string; value: string } | undefined {
-  const match = value.match(/^([A-Za-z ]+):\s*(.*)$/);
+  const match = /^([A-Za-z ]+):\s*(.*)$/.exec(value);
   if (!match) {
     return undefined;
   }

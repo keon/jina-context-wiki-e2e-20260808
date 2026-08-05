@@ -5,13 +5,13 @@ const GOOGLE_ISSUERS = new Set(["https://accounts.google.com", "accounts.google.
 const JWKS_CACHE_TTL_MS = 60 * 60 * 1000;
 const CLOCK_SKEW_SECONDS = 30;
 
-type Jwk = { kty: string; kid?: string; alg?: string; n?: string; e?: string };
+interface Jwk { kty: string; kid?: string; alg?: string; n?: string; e?: string }
 type JwksFetcher = () => Promise<{ keys: Jwk[] }>;
 
-export type GoogleOidcExpectation = {
+export interface GoogleOidcExpectation {
   audience: string;
   email: string;
-};
+}
 
 let cachedJwks: { keys: Jwk[]; fetchedAt: number } | undefined;
 
@@ -66,7 +66,7 @@ export async function verifyGoogleIdToken(
   }
   if (!jwk) throw new Error("identity token kid is not a current Google signing key");
 
-  const publicKey = createPublicKey({ key: jwk as never, format: "jwk" });
+  const publicKey = createPublicKey({ key: jwk, format: "jwk" });
   const signed = Buffer.from(`${headerSegment}.${payloadSegment}`, "utf8");
   const signature = Buffer.from(signatureSegment, "base64url");
   if (!verifySignature("RSA-SHA256", signed, publicKey, signature)) {

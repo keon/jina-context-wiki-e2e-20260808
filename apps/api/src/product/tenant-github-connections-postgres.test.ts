@@ -195,7 +195,7 @@ test(
         "select merged_into_tenant_id from tenants where id = $1",
         [tenantB],
       );
-      assert.equal(sourceTenant.rows[0]!.merged_into_tenant_id, null);
+      assert.equal(sourceTenant.rows[0].merged_into_tenant_id, null);
       await client.query("rollback");
 
       const reviewRunId = await createReviewRun({

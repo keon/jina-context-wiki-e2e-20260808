@@ -22,7 +22,7 @@ type NavKey =
   | "history"
   | "tasks";
 
-type NavItem = { key: NavKey; label: string; href: string; icon: () => ReactNode };
+interface NavItem { key: NavKey; label: string; href: string; icon: () => ReactNode }
 
 const WORKSPACE_ICONS: Record<WorkspaceNavKey, () => ReactNode> = {
   reviews: ReviewsIcon,
@@ -32,7 +32,7 @@ const WORKSPACE_ICONS: Record<WorkspaceNavKey, () => ReactNode> = {
   "causal-graph": GraphIcon,
 };
 
-const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "Workspace",
     items: WORKSPACE_NAV_ITEMS.map((item) => ({ ...item, icon: WORKSPACE_ICONS[item.key] })),
@@ -137,7 +137,7 @@ export function Shell({ children }: { children: ReactNode }) {
           setCodexReconnectRequired(normalizeCodexHarnessInfo(body?.codex_harness).reconnect_required === true);
         }
       })
-      .catch(() => {});
+      .catch(() => undefined);
     return () => controller.abort();
   }, [viewer?.authenticated, viewer?.user?.id, hasDashboardData]);
 

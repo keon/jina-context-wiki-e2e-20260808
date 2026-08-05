@@ -1,7 +1,5 @@
 import type { ReviewRun } from "./types";
 
-type ReviewResult = NonNullable<ReviewRun["result"]>;
-
 export function runResult(run: ReviewRun): ReviewRun["result"] {
   const merged: Record<string, unknown> = {};
 
@@ -20,7 +18,7 @@ export function runResult(run: ReviewRun): ReviewRun["result"] {
     mergeInto(merged, stored);
   }
 
-  return Object.keys(merged).length > 0 ? (merged as ReviewResult) : run.result;
+  return Object.keys(merged).length > 0 ? (merged) : run.result;
 }
 
 function mergeInto(target: Record<string, unknown>, source: Record<string, unknown>): void {

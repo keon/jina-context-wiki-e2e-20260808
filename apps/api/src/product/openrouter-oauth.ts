@@ -39,12 +39,12 @@ export function deriveCodeChallenge(verifier: string): string {
 // tenant_id is the tenant the resolved key will be saved to (the caller validated the viewer is an
 // admin of it, or omitted it to default to the personal tenant). It is carried INSIDE the encrypted
 // binding so the callback cannot be pointed at a different tenant than the one authorized at start.
-export type VerifierBinding = {
+export interface VerifierBinding {
   code_verifier: string;
   github_user_id: number;
   nonce: string;
   tenant_id?: string;
-};
+}
 
 export function encodeVerifierBinding(binding: VerifierBinding): string {
   return encryptSecret(JSON.stringify(binding));

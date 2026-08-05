@@ -1,19 +1,19 @@
-export type ReviewEvent = {
+export interface ReviewEvent {
   status: string;
   payload?: unknown;
   trigger_run_id?: string;
   recorded_at: string;
-};
+}
 
-export type ProjectRecord = {
+export interface ProjectRecord {
   github_repo_id?: number;
   full_name: string;
   owner: string;
   name: string;
   private?: boolean;
-};
+}
 
-export type FindingRecord = {
+export interface FindingRecord {
   id: string;
   review_run_id: string;
   fingerprint: string;
@@ -28,9 +28,9 @@ export type FindingRecord = {
   pull_request?: number;
   pull_request_title?: string;
   pull_request_url?: string;
-};
+}
 
-export type ReviewRunRecord = {
+export interface ReviewRunRecord {
   review_run_id: string;
   trigger_run_id?: string;
   delivery_id?: string;
@@ -78,11 +78,11 @@ export type ReviewRunRecord = {
   created_at: string;
   updated_at: string;
   finished_at?: string;
-};
+}
 
-export type DashboardData = {
+export interface DashboardData {
   generated_at: string;
-  bots: Array<{
+  bots: {
     id: string;
     type: string;
     repository?: string;
@@ -90,14 +90,14 @@ export type DashboardData = {
     status: string;
     last_run_at: string;
     last_error?: string;
-  }>;
+  }[];
   review_runs: ReviewRunRecord[];
   issues: FindingRecord[];
   pagination?: {
     limit: number;
     next_cursor?: string;
   };
-};
+}
 
 export function buildDashboard(
   reviewRuns: ReviewRunRecord[],

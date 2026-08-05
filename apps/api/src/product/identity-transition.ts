@@ -4,7 +4,7 @@ import { INTERNAL_USER_TRANSITION_LOCK_KEY } from "./internal-user.js";
 
 export type IdentityTransitionClient = Pick<pg.PoolClient, "query">;
 
-export type IdentityTransitionReport = {
+export interface IdentityTransitionReport {
   candidates: number;
   identitiesCreated: number;
   membershipsBackfilled: number;
@@ -19,7 +19,7 @@ export type IdentityTransitionReport = {
   unmappedIntegrations: number;
   unmappedSessions: number;
   unmappedRepositories: number;
-};
+}
 
 /**
  * Backfill stable Jina users from every durable place that currently records a
@@ -354,7 +354,7 @@ export async function runInternalUserTransition(
           )
       ) as unmapped_repositories
   `);
-  const counts = summary.rows[0]!;
+  const counts = summary.rows[0];
   const unmappedIdentities =
     counts.unmapped_memberships
     + counts.unmapped_integrations

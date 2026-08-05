@@ -8,16 +8,16 @@ import type { GraphCitation, GraphDetail, GraphEdge, GraphNode, GraphQueryResult
  * code plane and documents the knowledge plane, linked to the files they cite.
  */
 
-export type ContextEvidenceAnchor = {
+export interface ContextEvidenceAnchor {
   sourceType: string;
   sourceId: string;
   commitSha?: string;
   pathOrUrl?: string;
   startLine?: number;
   endLine?: number;
-};
+}
 
-export type ContextGeneration = {
+export interface ContextGeneration {
   id: string;
   repository: string;
   ref: string;
@@ -26,18 +26,18 @@ export type ContextGeneration = {
   derivedKnowledge: string;
   createdAt: string;
   publishedAt?: string;
-};
+}
 
-export type ContextStructuralRelation = {
+export interface ContextStructuralRelation {
   id: string;
   kind: string;
   from: string;
   to: string;
   anchors?: ContextEvidenceAnchor[];
   metadata?: { symbol?: { name?: string; kind?: string }; importedNames?: string[] };
-};
+}
 
-export type ContextKnowledgeSummary = {
+export interface ContextKnowledgeSummary {
   id: string;
   logicalId: string;
   kind: string;
@@ -46,27 +46,27 @@ export type ContextKnowledgeSummary = {
   confidence: number;
   reviewStatus: string;
   commitSha: string;
-};
+}
 
-export type ContextKnowledgeCitation = { revisionId: string; ordinal: number; claim: string; anchor: ContextEvidenceAnchor };
+export interface ContextKnowledgeCitation { revisionId: string; ordinal: number; claim: string; anchor: ContextEvidenceAnchor }
 
-type ContextQueryCitation = {
+interface ContextQueryCitation {
   id: string;
   title: string;
   excerpt: string;
   anchors?: ContextEvidenceAnchor[];
   sourceKind?: string;
   sourceId?: string;
-};
+}
 
-export type ContextQueryResponse = {
+export interface ContextQueryResponse {
   answer: string;
   generation: { id: string; ref: string; commitSha: string; derivedKnowledge: string };
   citations?: ContextQueryCitation[];
-  conflicts?: Array<{ subject: string; description: string }>;
+  conflicts?: { subject: string; description: string }[];
   ambiguities?: string[];
   coverage?: { status: string; missing?: string[] };
-};
+}
 
 /** Renders an anchor the way the inspector already displays evidence strings. */
 export function formatAnchor(anchor: ContextEvidenceAnchor): string {
