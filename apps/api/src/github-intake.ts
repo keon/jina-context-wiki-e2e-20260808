@@ -24,6 +24,8 @@ interface TrackedPullRequest {
   readonly authorGithubUserId?: number;
   readonly authorLogin?: string;
   readonly authorAccountType?: string;
+  /** Last webhook activity; lets long-idle tracking entries be compacted away. */
+  readonly updatedAt?: IsoTimestamp;
 }
 
 export interface GitHubIntakeState {
@@ -146,7 +148,8 @@ function ingestPullRequest(
     epoch,
     ...(event.authorId !== undefined ? { authorGithubUserId: event.authorId } : {}),
     ...(event.authorLogin ? { authorLogin: event.authorLogin } : {}),
-    ...(event.authorAccountType ? { authorAccountType: event.authorAccountType } : {})
+    ...(event.authorAccountType ? { authorAccountType: event.authorAccountType } : {}),
+    updatedAt: options.now
   };
 
   return {

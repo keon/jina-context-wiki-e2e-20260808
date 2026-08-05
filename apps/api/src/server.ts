@@ -111,7 +111,7 @@ import {
   contextPageRemediationTaskIds,
   contextTokenInterruptedTaskIds
 } from "./context-board-recovery.js";
-import { compactTerminalContextBuildHistory } from "./context-board-compaction.js";
+import { compactTerminalContextBuildHistory, compactTerminalEpochHistory } from "./context-board-compaction.js";
 import {
   applyContextBoardTaskResult,
   finalizeContextBoardTaskResult,
@@ -132,6 +132,7 @@ import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 import { isProductApiRoute } from "./product-api-router.js";
 
 const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
+const TRACKED_PULL_REQUEST_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_CONTEXT_BOARD_ARTIFACT_BYTES = 20 * 1024 * 1024;
 const MAX_CONTEXT_QUERY_REQUEST_BYTES = 128 * 1024;
 const DEFAULT_ISSUE_GRAPH_REF = "main";
@@ -616,19 +617,62 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   function compactHotBoard(): void {
+    const now = nowIso();
     const compacted = compactTerminalContextBuildHistory(intakeState.board);
-    if (compacted.prunedBuilds === 0) return;
-    intakeState = { ...intakeState, board: compacted.state };
-    logger.info("compacted terminal Context build history", {
-      event: "context.board.compacted",
-      prunedBuilds: compacted.prunedBuilds,
-      prunedTasks: compacted.prunedTasks,
-      prunedDependencies: compacted.prunedDependencies,
-      prunedOutboxMessages: compacted.prunedOutboxMessages,
-      prunedEvents: compacted.prunedEvents,
-      retainedTasks: compacted.state.tasks.length,
-      retainedEvents: compacted.state.events.length
-    });
+    if (compacted.prunedBuilds > 0) {
+      intakeState = { ...intakeState, board: compacted.state };
+      logger.info("compacted terminal Context build history", {
+        event: "context.board.compacted",
+        prunedBuilds: compacted.prunedBuilds,
+        prunedTasks: compacted.prunedTasks,
+        prunedDependencies: compacted.prunedDependencies,
+        prunedOutboxMessages: compacted.prunedOutboxMessages,
+        prunedEvents: compacted.prunedEvents,
+        retainedTasks: compacted.state.tasks.length,
+        retainedEvents: compacted.state.events.length
+      });
+    }
+    const epochCompacted = compactTerminalEpochHistory(intakeState.board, now);
+    if (epochCompacted.prunedBuilds > 0) {
+      intakeState = { ...intakeState, board: epochCompacted.state };
+      logger.info("compacted terminal epoch history", {
+        event: "board.epoch_history.compacted",
+        prunedRoots: epochCompacted.prunedBuilds,
+        prunedTasks: epochCompacted.prunedTasks,
+        prunedDependencies: epochCompacted.prunedDependencies,
+        prunedOutboxMessages: epochCompacted.prunedOutboxMessages,
+        prunedEvents: epochCompacted.prunedEvents,
+        retainedTasks: epochCompacted.state.tasks.length
+      });
+    }
+    // Tracking entries only need to survive long enough to supersede stale
+    // epochs of an active pull request; drop entries idle past the retention
+    // window so the array does not grow with all-time PR count. Entries from
+    // snapshots that predate the timestamp are stamped now and age out later.
+    const trackedCutoff = new Date(Date.parse(now) - TRACKED_PULL_REQUEST_RETENTION_MS).toISOString();
+    const prunedPullRequests = intakeState.pullRequests.filter(
+      (pullRequest) => pullRequest.updatedAt !== undefined && pullRequest.updatedAt <= trackedCutoff
+    );
+    if (
+      prunedPullRequests.length > 0 ||
+      intakeState.pullRequests.some((pullRequest) => pullRequest.updatedAt === undefined)
+    ) {
+      intakeState = {
+        ...intakeState,
+        pullRequests: intakeState.pullRequests
+          .filter((pullRequest) => pullRequest.updatedAt === undefined || pullRequest.updatedAt > trackedCutoff)
+          .map((pullRequest) =>
+            pullRequest.updatedAt === undefined ? { ...pullRequest, updatedAt: now } : pullRequest
+          )
+      };
+      if (prunedPullRequests.length > 0) {
+        logger.info("compacted idle tracked pull requests", {
+          event: "board.tracked_pull_requests.compacted",
+          pruned: prunedPullRequests.length,
+          retained: intakeState.pullRequests.length
+        });
+      }
+    }
   }
 
   async function persist(deliveryId?: string): Promise<boolean> {
