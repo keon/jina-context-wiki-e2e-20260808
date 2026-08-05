@@ -21,6 +21,9 @@ coordinated `cloudbuild.yaml` path below.
 Before a staging deploy, run `scripts/check-staging-readiness.sh`. It verifies the
 staging-only GitHub configuration, Cloud SQL runtime state, migration job, secrets,
 services, domain mappings, dashboard projects, and causal-worker sidecar contract.
+After deploy, follow `docs/STAGING_PR_E2E.md`; a green health check or review alone
+is not sufficient acceptance because the exact-head Context release and its PageIndex
+attachment are part of the pull-request contract.
 The v2 database transition is complete: routine staging deploys use the unified
 `jina-v2-migrate-staging` job, and the retired one-time cutover job and legacy database
 credentials must remain absent.
