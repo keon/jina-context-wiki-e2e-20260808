@@ -1,0 +1,82 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-staging
+  # A coordinated API/worker rollout must finish or fail closed before the next
+  # staging release starts. Canceling midway can leave mixed service revisions.
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: Staging
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      IMAGE_TAG: staging-${{ github.sha }}
+      JINA_CONTEXT_TENANT_ID: ${{ vars.JINA_CONTEXT_TENANT_ID }}
+      JINA_ARTIFACT_REGISTRY_REPOSITORY: jina-staging
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate immutable staging release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "omxyz/jina"
+          test "${GITHUB_REF}" = "refs/heads/staging"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
+          test "${GCP_PROJECT_ID}" = "jina-staging-20260802"
+          test "${GCP_REGION}" = "us-east1"
+          [[ "${IMAGE_TAG}" =~ ^staging-[0-9a-f]{40}$ ]]
+          [[ "${JINA_CONTEXT_TENANT_ID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]
+
+      - name: Authenticate to the isolated staging project
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and validate immutable staging images
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud builds submit . \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --config=cloudbuild.staging-images.yaml \
+            --substitutions="_IMAGE_TAG=${IMAGE_TAG},_SOURCE_SHA=${GITHUB_SHA}" \
+            --quiet
+
+      - name: Deploy the coordinated staging release
+        shell: bash
+        run: bash scripts/deploy-staging.sh
+
+      - name: Record deployed revisions
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run services list \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --format='table(metadata.name,status.latestReadyRevisionName,status.url)'

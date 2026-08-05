@@ -45,6 +45,8 @@ const postgresStateStore = await readFile("packages/db/src/postgres-json-state-s
 const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
 const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
 const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
+const stagingWorkflow = await readFile(".github/workflows/deploy-staging.yml", "utf8");
+const stagingCloudBuild = await readFile("cloudbuild.staging-images.yaml", "utf8");
 
 async function withFakeGcloud(source, callback) {
   const directory = await mkdtemp(join(tmpdir(), "jina-deploy-gcloud-"));
@@ -89,7 +91,23 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--max-instances=10/);
   assert.match(stagingDeployment, /--max-instances=5/);
   assert.match(stagingDeployment, /deploy-staging-causal-graph\.sh/);
+  assert.doesNotMatch(stagingDeployment, /gcloud services enable/);
+  assert.match(stagingDeployment, /Cloud Scheduler API must be enabled as a staging platform prerequisite/);
   for (const topic of LEGACY_TOPICS) assert.doesNotMatch(stagingDeployment, new RegExp(topic));
+});
+
+test("staging branch pushes deploy one immutable coordinated release", () => {
+  assert.match(stagingWorkflow, /push:\n\s+branches:\n\s+- staging/);
+  assert.doesNotMatch(stagingWorkflow, /branches:\n(?:\s+- .*\n)*\s+- main/);
+  assert.match(stagingWorkflow, /environment: Staging/);
+  assert.match(stagingWorkflow, /id-token: write/);
+  assert.match(stagingWorkflow, /group: deploy-staging\n\s+#[\s\S]+?cancel-in-progress: false/);
+  assert.match(stagingWorkflow, /IMAGE_TAG: staging-\$\{\{ github\.sha \}\}/);
+  assert.match(stagingWorkflow, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(stagingWorkflow, /cloudbuild\.staging-images\.yaml/);
+  assert.match(stagingWorkflow, /_SOURCE_SHA=\$\{GITHUB_SHA\}/);
+  assert.match(stagingWorkflow, /bash scripts\/deploy-staging\.sh/);
+  assert.match(stagingCloudBuild, /org\.opencontainers\.image\.revision=\$\{_SOURCE_SHA\}/);
 });
 
 test("production compute, images, artifacts, and shared database are co-located in us-east1", () => {

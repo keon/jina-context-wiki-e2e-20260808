@@ -5,6 +5,7 @@ repository="${JINA_STAGING_REPOSITORY:-omxyz/jina}"
 github_environment="${JINA_STAGING_GITHUB_ENVIRONMENT:-Staging}"
 staging_project="${JINA_STAGING_GCP_PROJECT:-jina-staging-20260802}"
 region="${JINA_STAGING_REGION:-us-east1}"
+staging_deployer="jina-api-staging-deployer@${staging_project}.iam.gserviceaccount.com"
 failures=0
 
 pass() {
@@ -30,6 +31,43 @@ done
 
 if ((failures > 0)); then
   exit 1
+fi
+
+project_policy="$(gcloud projects get-iam-policy "${staging_project}" --format=json 2>/dev/null || true)"
+for role in roles/cloudbuild.builds.editor roles/cloudscheduler.admin; do
+  if jq -e --arg role "${role}" --arg member "serviceAccount:${staging_deployer}" '
+      .bindings[]? | select(.role == $role) | .members[]? | select(. == $member)
+    ' <<<"${project_policy}" >/dev/null; then
+    pass "Automatic staging deployer has ${role}"
+  else
+    fail "Automatic staging deployer requires ${role}"
+  fi
+done
+
+release_secret_policy="$(gcloud secrets get-iam-policy \
+  jina-staging-causal-graph-worker-release-credential \
+  --project="${staging_project}" --format=json 2>/dev/null || true)"
+if jq -e --arg member "serviceAccount:${staging_deployer}" '
+    .bindings[]? |
+    select(.role == "roles/secretmanager.secretVersionAdder") |
+    .members[]? | select(. == $member)
+  ' <<<"${release_secret_policy}" >/dev/null; then
+  pass "Automatic staging deployer can add causal release credential versions"
+else
+  fail "Automatic staging deployer requires secretVersionAdder on the causal release credential"
+fi
+
+cloud_build_source_bucket="gs://${staging_project}_cloudbuild"
+cloud_build_bucket_policy="$(gcloud storage buckets get-iam-policy \
+  "${cloud_build_source_bucket}" --project="${staging_project}" --format=json 2>/dev/null || true)"
+if jq -e --arg member "serviceAccount:${staging_deployer}" '
+    .bindings[]? |
+    select(.role == "roles/storage.objectCreator") |
+    .members[]? | select(. == $member)
+  ' <<<"${cloud_build_bucket_policy}" >/dev/null; then
+  pass "Automatic staging deployer can upload immutable Cloud Build source archives"
+else
+  fail "Automatic staging deployer requires objectCreator on ${cloud_build_source_bucket}"
 fi
 
 environment_json="$(gh api "repos/${repository}/environments/${github_environment}" 2>/dev/null || true)"

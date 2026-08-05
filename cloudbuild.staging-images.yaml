@@ -42,6 +42,7 @@ steps:
     args:
       - build
       - --file=apps/api/Dockerfile
+      - --label=org.opencontainers.image.revision=${_SOURCE_SHA}
       - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/api:${_IMAGE_TAG}
       - .
 
@@ -51,6 +52,7 @@ steps:
     args:
       - build
       - --file=apps/worker/Dockerfile
+      - --label=org.opencontainers.image.revision=${_SOURCE_SHA}
       - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/worker:${_IMAGE_TAG}
       - .
 
@@ -75,6 +77,7 @@ images:
 substitutions:
   _ARTIFACT_REPOSITORY: jina-staging
   _IMAGE_TAG: manual-staging
+  _SOURCE_SHA: manual
 
 timeout: 3600s
 serviceAccount: projects/jina-staging-20260802/serviceAccounts/jina-cloud-build-staging@jina-staging-20260802.iam.gserviceaccount.com

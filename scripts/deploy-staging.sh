@@ -223,7 +223,12 @@ fi
 
 # Cloud Scheduler only admits a durable Board workflow. The task worker owns
 # execution, retries, event history, and trace export for every billing drain.
-gcloud services enable cloudscheduler.googleapis.com --project="${project}" --quiet
+if ! gcloud services list --enabled --project="${project}" \
+    --filter='config.name=cloudscheduler.googleapis.com' \
+    --format='value(config.name)' | grep -Fxq cloudscheduler.googleapis.com; then
+  printf 'Cloud Scheduler API must be enabled as a staging platform prerequisite\n' >&2
+  exit 2
+fi
 product_internal_token="$(gcloud secrets versions access latest \
   --secret="${product_internal_token_secret}" --project="${project}")"
 scheduler_headers="Authorization=Bearer ${product_internal_token},Content-Type=application/json"
