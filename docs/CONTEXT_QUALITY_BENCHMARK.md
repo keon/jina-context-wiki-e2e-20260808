@@ -40,6 +40,11 @@ For every required question in an offline benchmark corpus:
 Maintenance-task evaluation is no longer a claimable runtime Board gate. It is an
 offline quality signal: production publication is gated by page dispositions, exact
 citation validation, the deterministic publication manifest, and PageIndex validation.
+The host also requires every final page to retain at least one normalized substantive
+term from each planned required topic and maintenance question, both during page audit
+and again immediately before certification. This deterministic check is not a substitute
+for the offline semantic critic, but it prevents a structurally valid page from silently
+dropping an entire planned subject without making planner wording a public-page contract.
 
 An offline pass should bind SHA-256 digests of the exact public Markdown snapshot and
 maintenance-task catalog. The critic should record an auditable attempt—headings, entry

@@ -1,7 +1,11 @@
 import { applyCommand, type BoardState, type CommandActor } from "@jina/board";
 import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 
-/** Compatibility planner for persisted `run-review` work. */
+/**
+ * Compatibility planner for the production `run-review` queue. Fresh webhook
+ * admission remains here only until the documented product API and relational
+ * review-topic cutover; persisted work keeps this contract alive until drain.
+ */
 
 interface PipelineRef {
   readonly slug: "pr_review";

@@ -33,7 +33,16 @@ test("current Context publication checkpoints PageIndex before attachment and co
   const planContent = JSON.stringify({
     plan: {
       version: 1,
-      pages: [{ id: "architecture", path: "architecture.md", title: "Architecture", change: "add" }]
+      pages: [
+        {
+          id: "architecture",
+          path: "architecture.md",
+          title: "Architecture",
+          change: "add",
+          requiredTopics: ["Board task"],
+          maintenanceQuestions: ["Who owns the published Context release?"]
+        }
+      ]
     },
     researchPlanArtifact,
     researchReportArtifacts: [],

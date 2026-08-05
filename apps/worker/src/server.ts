@@ -113,6 +113,7 @@ import {
   canonicalPublicPageMarkdown,
   contextBoardPublicSnapshot,
   nextPageRepairCheckpointDiagnostics,
+  pagePlanContentProblems,
   pagePlanStructuralProblems,
   pageRepairCoveragePrompt,
   pageRepairNoProgressProblems,
@@ -1337,6 +1338,16 @@ async function runContextPublication(work: ClaimedWork<"run-context-publication"
     })
   );
   if (pages.length === 0) throw new Error("Context publication has no safely dispositioned pages");
+  const publicationCoverageProblems = pages.flatMap(({ page }) => {
+    const plannedPage = publicationPlan.plan.pages.find((candidate) => candidate.path === page.documentPath);
+    if (!plannedPage) return [`${page.documentPath} is absent from the publication plan`];
+    return pagePlanContentProblems(plannedPage, page.bodyMarkdown);
+  });
+  if (publicationCoverageProblems.length > 0) {
+    throw new Error(
+      `Context publication dropped required plan coverage: ${publicationCoverageProblems.slice(0, 32).join("; ")}`
+    );
+  }
   const publicSnapshotDigest = createHash("sha256")
     .update(contextBoardPublicSnapshot(pages.map(({ page }) => page)))
     .digest("hex");
@@ -2280,7 +2291,8 @@ async function runContextPageWrite(work: ClaimedWork<"run-context-page-write">):
     });
     const draftStructuralProblems = [
       ...draftInventory.structuralProblems,
-      ...pagePlanStructuralProblems(page, publication.plan.pages, bodyMarkdown)
+      ...pagePlanStructuralProblems(page, publication.plan.pages, bodyMarkdown),
+      ...pagePlanContentProblems(page, bodyMarkdown)
     ];
     logger.info(`page writer produced ${page.path}`, {
       event: "context.page_draft_created",
@@ -2351,7 +2363,8 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
   });
   const structuralProblems = [
     ...inventory.structuralProblems,
-    ...pagePlanStructuralProblems(plannedPage, publication.plan.pages, page.bodyMarkdown)
+    ...pagePlanStructuralProblems(plannedPage, publication.plan.pages, page.bodyMarkdown),
+    ...pagePlanContentProblems(plannedPage, page.bodyMarkdown)
   ];
   const inputDigest = createHash("sha256")
     .update(

@@ -6,6 +6,7 @@ import {
   canonicalPublicPageMarkdown,
   contextBoardPublicSnapshot,
   nextPageRepairCheckpointDiagnostics,
+  pagePlanContentProblems,
   pagePlanStructuralProblems,
   pageRepairCoveragePrompt,
   pageRepairNoProgressProblems,
@@ -89,6 +90,21 @@ test("page repair resolves dependency IDs to public paths", () => {
   assert.match(prompt, /Migrate conventional trailing source markers into assertion links/);
   assert.match(prompt, /Split factual premises from pure maintenance questions/);
   assert.match(prompt, /reread every exact structural problem/);
+});
+
+test("page plan content requires every topic and maintenance question in published prose", () => {
+  assert.deepEqual(
+    pagePlanContentProblems(
+      architecture,
+      "# Architecture\n\nRequests enter through the API entry points, where trust boundaries separate callers.\n"
+    ),
+    []
+  );
+  assert.deepEqual(pagePlanContentProblems(architecture, "# Architecture\n\nThe worker processes ordinary jobs.\n"), [
+    'architecture.md is missing planned required topic coverage for "entry points": represented 0/2 substantive term(s); at least 1 required',
+    'architecture.md is missing planned required topic coverage for "trust boundaries": represented 0/2 substantive term(s); at least 1 required',
+    'architecture.md is missing planned maintenance question coverage for "Where does a request enter?": represented 0/2 substantive term(s); at least 1 required'
+  ]);
 });
 
 test("page repair preserves relevant proven facts and escalates after a retained no-progress checkpoint", () => {
