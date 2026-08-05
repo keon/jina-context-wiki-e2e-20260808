@@ -421,6 +421,8 @@ const workerApiTimeoutMs = positiveInt(process.env.WORKER_API_TIMEOUT_MS, 30_000
 const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 62 * 60_000);
 const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TIMEOUT_MS, 10 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
+const completionSendAttempts = positiveInt(process.env.WORKER_COMPLETION_SEND_ATTEMPTS, 3);
+const completionRetryDelayMs = positiveInt(process.env.WORKER_COMPLETION_RETRY_DELAY_MS, 1_000);
 const gitCommandTimeoutMs = positiveInt(process.env.CONTEXT_GIT_COMMAND_TIMEOUT_MS, 5 * 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
@@ -3884,25 +3886,57 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
   if (result.outcome === "done" && BOARD_MODEL_TOPICS.has(work.topic) && !modelUsage) {
     throw new Error("model-backed task completed without an exact usage accumulator");
   }
-  const response = await apiRequest(
-    "/internal/worker/complete",
-    {
-      messageId: work.message.id,
-      leaseId: work.message.leaseId,
-      taskId: work.task.id,
-      ...(work.message.attempt === undefined ? {} : { attempt: work.message.attempt }),
-      ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken }),
-      ...(modelUsage ? { modelUsage } : {}),
-      ...result
-    },
-    isDurableBoardTopic(work.topic) ? contextCompletionTimeoutMs : workerApiTimeoutMs
-  );
-  if (response.status === 409) {
-    throw new LeaseLostError(`completion rejected after lease loss: ${await boundedFailureDetail(response)}`);
+  const completionBody = {
+    messageId: work.message.id,
+    leaseId: work.message.leaseId,
+    taskId: work.task.id,
+    ...(work.message.attempt === undefined ? {} : { attempt: work.message.attempt }),
+    ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken }),
+    ...(modelUsage ? { modelUsage } : {}),
+    ...result
+  };
+  const timeoutMs = isDurableBoardTopic(work.topic) ? contextCompletionTimeoutMs : workerApiTimeoutMs;
+  // The API replays completions idempotently via the dispatched lease receipt,
+  // so an ambiguous outcome (network failure, timeout, 5xx) is retried with the
+  // identical request rather than released — a release after a committed
+  // completion would rerun the whole stage from scratch on another worker.
+  for (let sendAttempt = 1; ; sendAttempt += 1) {
+    let response: Response;
+    try {
+      response = await apiRequest("/internal/worker/complete", completionBody, timeoutMs);
+    } catch (error) {
+      if (sendAttempt >= completionSendAttempts) throw error;
+      logger.warn("worker completion send failed; retrying", {
+        event: "worker.completion_send_retry",
+        workerId,
+        taskId: work.task.id,
+        sendAttempt,
+        ...errorLogFields(error)
+      });
+      await delay(completionRetryDelayMs * 2 ** (sendAttempt - 1));
+      continue;
+    }
+    if (response.status === 409) {
+      throw new LeaseLostError(`completion rejected after lease loss: ${await boundedFailureDetail(response)}`);
+    }
+    if (!response.ok) {
+      const detail = await boundedFailureDetail(response);
+      if (response.status >= 500 && sendAttempt < completionSendAttempts) {
+        logger.warn("worker completion send failed; retrying", {
+          event: "worker.completion_send_retry",
+          workerId,
+          taskId: work.task.id,
+          sendAttempt,
+          status: response.status
+        });
+        await delay(completionRetryDelayMs * 2 ** (sendAttempt - 1));
+        continue;
+      }
+      throw new Error(`completion failed with ${response.status}: ${detail}`);
+    }
+    recordApiSuccess();
+    return;
   }
-  if (!response.ok)
-    throw new Error(`completion failed with ${response.status}: ${await boundedFailureDetail(response)}`);
-  recordApiSuccess();
 }
 
 function apiRequest(path: string, body: unknown, timeoutMs = workerApiTimeoutMs): Promise<Response> {

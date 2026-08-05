@@ -454,16 +454,20 @@ test("bounded retries fail the task and root only after the fourth attempt", () 
   state = reduceBoard(state, "2026-01-01T00:00:00.000Z");
 
   for (let attempt = 1; attempt <= BOARD_TASK_HARD_MAX_ATTEMPTS; attempt += 1) {
+    // Retry requeues carry an exponential availableAt backoff, so each claim
+    // happens comfortably after the previous retry's delay has elapsed.
+    const claimAt = `2026-01-01T00:${String(2 * attempt).padStart(2, "0")}:00.000Z`;
+    const retryAt = `2026-01-01T00:${String(2 * attempt + 1).padStart(2, "0")}:00.000Z`;
     const claim = leaseNextOutboxMessage(state, {
       topics: ["run-retry-fixture"],
       taskIds: [taskId],
       leaseId: `retry-limit-lease-${attempt}`,
       writeFenceToken: `retry-limit-fence-${attempt}`,
-      now: `2026-01-01T00:00:0${attempt}.000Z`,
-      expiresAt: "2026-01-01T00:10:00.000Z"
+      now: claimAt,
+      expiresAt: "2026-01-01T01:00:00.000Z"
     });
     assert.ok(claim);
-    state = transitionBoardTask(claim.state, taskId, "in_progress", `2026-01-01T00:00:0${attempt}.000Z`);
+    state = transitionBoardTask(claim.state, taskId, "in_progress", claimAt);
     const result = retryLeasedOutboxTask(state, {
       messageId: claim.message.id,
       taskId,
@@ -471,7 +475,7 @@ test("bounded retries fail the task and root only after the fourth attempt", () 
       writeFenceToken: `retry-limit-fence-${attempt}`,
       attempt,
       maxAttempts: BOARD_TASK_HARD_MAX_ATTEMPTS,
-      now: `2026-01-01T00:01:0${attempt}.000Z`,
+      now: retryAt,
       diagnostic: { category: "daytona", reason: "sandbox unavailable" }
     });
     assert.ok(result);
@@ -1129,4 +1133,74 @@ test("epoch supersession retires undispatched outbox messages so workers cannot 
     expiresAt: "2026-01-01T00:04:00.000Z"
   });
   assert.equal(claimed?.message.taskId, currentTaskId);
+});
+
+test("retry requeues back off exponentially before the next claim", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+  const taskId = entityId<"task">("backoff-task");
+  let state = applyCommand(
+    createEmptyBoardState(),
+    {
+      command: "CreateTask",
+      task: {
+        id: taskId,
+        type: "fixture_retry",
+        kind: "dispatchable",
+        title: "Backoff fixture",
+        assigneeRole: "worker",
+        dedupeKey: "backoff:work",
+        dispatchTopic: "run-retry-fixture"
+      }
+    },
+    { actor: { type: "system", id: "test" }, now }
+  ).state;
+  state = reduceBoard(state, now);
+
+  const first = state.outbox.find((message) => message.payload.attempt === 1);
+  assert.ok(first);
+  assert.equal(first.availableAt, undefined);
+
+  const leased = leaseNextOutboxMessage(state, {
+    topics: ["run-retry-fixture"],
+    leaseId: "lease-1",
+    writeFenceToken: "fence-1",
+    now,
+    expiresAt: "2026-01-01T00:05:00.000Z"
+  });
+  assert.ok(leased);
+  state = transitionBoardTask(leased.state, taskId, "in_progress", now);
+
+  const retried = retryLeasedOutboxTask(state, {
+    messageId: leased.message.id,
+    taskId,
+    leaseId: "lease-1",
+    writeFenceToken: "fence-1",
+    attempt: 1,
+    maxAttempts: 4,
+    now: "2026-01-01T00:01:00.000Z",
+    diagnostic: { category: "github_response", reason: "HTTP 502" }
+  });
+  assert.ok(retried);
+  assert.equal(retried.terminal, false);
+  assert.ok(retried.nextMessage);
+  // Failed attempt 1 -> second attempt waits 1s.
+  assert.equal(retried.nextMessage.availableAt, "2026-01-01T00:01:01.000Z");
+
+  const tooEarly = leaseNextOutboxMessage(retried.state, {
+    topics: ["run-retry-fixture"],
+    leaseId: "lease-2",
+    writeFenceToken: "fence-2",
+    now: "2026-01-01T00:01:00.500Z",
+    expiresAt: "2026-01-01T00:06:00.000Z"
+  });
+  assert.equal(tooEarly, undefined);
+
+  const afterDelay = leaseNextOutboxMessage(retried.state, {
+    topics: ["run-retry-fixture"],
+    leaseId: "lease-2",
+    writeFenceToken: "fence-2",
+    now: "2026-01-01T00:01:01.000Z",
+    expiresAt: "2026-01-01T00:06:00.000Z"
+  });
+  assert.equal(afterDelay?.message.payload.attempt, 2);
 });

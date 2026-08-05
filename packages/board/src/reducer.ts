@@ -22,6 +22,8 @@ export interface BoardOutboxMessage {
     readonly attempt: number;
   };
   readonly createdAt: IsoTimestamp;
+  /** Not claimable before this time. Set on retry requeues to back off transient failures. */
+  readonly availableAt?: IsoTimestamp;
   readonly leaseId?: string;
   readonly writeFenceToken?: string;
   readonly leasedAt?: IsoTimestamp;
@@ -210,6 +212,7 @@ export function leaseNextOutboxMessage(state: BoardState, input: LeaseOutboxInpu
     if (!input.topics.includes(message.topic) || message.status === "dispatched") return false;
     if (input.taskIds && !input.taskIds.includes(message.taskId)) return false;
     if (input.messageIds && !input.messageIds.includes(message.id)) return false;
+    if (message.availableAt !== undefined && message.availableAt > input.now) return false;
     if (message.status === "pending") return true;
     return message.leaseExpiresAt !== undefined && message.leaseExpiresAt <= input.now;
   });
@@ -1039,6 +1042,12 @@ function queueReadyDispatchableTasks(state: BoardState, now: IsoTimestamp): Boar
       continue;
     }
 
+    // Retries back off exponentially (matching the relational board) so a
+    // transient dependency outage does not burn every remaining attempt within
+    // seconds of the first failure. First attempts dispatch immediately.
+    const retryDelayMs = attempt > 1 ? Math.min(30_000, 1_000 * 2 ** Math.max(0, attempt - 2)) : 0;
+    const availableAt = retryDelayMs > 0 ? new Date(Date.parse(now) + retryDelayMs).toISOString() : undefined;
+
     next = appendEvent(
       {
         ...next,
@@ -1054,14 +1063,15 @@ function queueReadyDispatchableTasks(state: BoardState, now: IsoTimestamp): Boar
             idempotencyKey,
             status: "pending",
             payload: { taskId: task.id, attempt },
-            createdAt: now
+            createdAt: now,
+            ...(availableAt ? { availableAt } : {})
           }
         ]
       },
       "task.queued",
       now,
       task.id,
-      { attempt, topic }
+      { attempt, topic, ...(availableAt ? { availableAt } : {}) }
     );
   }
 

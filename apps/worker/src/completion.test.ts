@@ -191,6 +191,8 @@ test("a failed Context completion releases exactly its own lease", async (contex
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "20",
       WORKER_HEARTBEAT_INTERVAL_MS: "1000",
+      WORKER_COMPLETION_SEND_ATTEMPTS: "2",
+      WORKER_COMPLETION_RETRY_DELAY_MS: "25",
       CONTEXT_API_TIMEOUT_MS: "2000",
       CONTEXT_COMPLETION_TIMEOUT_MS: "2000"
     },
@@ -201,9 +203,11 @@ test("a failed Context completion releases exactly its own lease", async (contex
     await new Promise<void>((resolve) => mock.close(() => resolve()));
   });
 
-  await waitForCondition(() => releases.length === 1 && completionTaskIds.length === 2);
+  await waitForCondition(() => releases.length === 1 && completionTaskIds.length === 3);
   await delay(100);
-  assert.deepEqual(completionTaskIds, [...taskIds]);
+  // A 5xx completion is ambiguous (it may have committed), so it is resent
+  // once with the identical idempotent request before the lease is released.
+  assert.deepEqual(completionTaskIds, [taskIds[0], taskIds[1], taskIds[1]]);
   assert.equal(releases.length, 1);
   assert.equal(releases[0]?.taskId, taskIds[1]);
   assert.equal(releases[0]?.messageId, taskIds[1]);
