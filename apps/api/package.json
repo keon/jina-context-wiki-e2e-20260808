@@ -26,7 +26,7 @@
     "@jina/observability": "workspace:*",
     "@jina/shared-kernel": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "hono": "^4.12.33",
+    "hono": "^4.13.0",
     "pg": "^8.13.1",
     "zod": "^4.4.3"
   },
