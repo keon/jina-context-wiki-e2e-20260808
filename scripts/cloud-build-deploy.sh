@@ -669,7 +669,7 @@ task_worker_environment() {
     echo "Enabled task worker requires its exact candidate revision" >&2
     exit 2
   fi
-  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=run-review~REVIEW_MODEL=gpt-5.6-sol"
+  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~JINA_LEGACY_REVIEW_PIPELINE_ENABLED=true~WORKER_TOPICS=run-review~REVIEW_MODEL=gpt-5.6-sol"
   if [[ "${claim_mode}" == "enabled" ]]; then
     environment+="~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}"
   fi

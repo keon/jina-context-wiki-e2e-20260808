@@ -41,14 +41,20 @@ test("worker topics reject every legacy Context executor route", () => {
   assert.deepEqual(configuredWorkerTopics(CONTEXT_BOARD_TOPICS.join("|")), CONTEXT_BOARD_TOPICS);
 });
 
+test("the legacy review queue requires an explicit compatibility gate", () => {
+  assert.throws(() => configuredWorkerTopics("run-review"), /JINA_LEGACY_REVIEW_PIPELINE_ENABLED/);
+  assert.deepEqual(configuredWorkerTopics("run-review", { allowLegacyReview: true }), ["run-review"]);
+});
+
 test("every Context topic requires the production Board executor preflight", () => {
-  assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics("run-review")), false);
+  assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics("run-review", { allowLegacyReview: true })), false);
   for (const topic of CONTEXT_BOARD_TOPICS) {
     assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics(topic)), true, topic);
   }
 });
 
 test("review Board topics use the task worker without the Context agent preflight", () => {
+  assert.deepEqual(configuredWorkerTopics(undefined), [...REVIEW_BOARD_TOPICS, ...CONTROL_BOARD_TOPICS]);
   assert.deepEqual(configuredWorkerTopics(REVIEW_BOARD_TOPICS.join("|")), REVIEW_BOARD_TOPICS);
   for (const topic of REVIEW_BOARD_TOPICS) {
     assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics(topic)), false, topic);
@@ -69,7 +75,10 @@ test("causal graph topics are an explicit worker-only allowlist disjoint from Co
 });
 
 test("Context claims use the long API timeout so committed claims are not orphaned", () => {
-  assert.equal(workerClaimTimeoutMs(configuredWorkerTopics("run-review"), 30_000, 7_800_000), 30_000);
+  assert.equal(
+    workerClaimTimeoutMs(configuredWorkerTopics("run-review", { allowLegacyReview: true }), 30_000, 7_800_000),
+    30_000
+  );
   assert.equal(
     workerClaimTimeoutMs(configuredWorkerTopics(CONTEXT_BOARD_TOPICS.join("|")), 30_000, 7_800_000),
     7_800_000

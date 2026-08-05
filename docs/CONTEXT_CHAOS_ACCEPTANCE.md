@@ -1,5 +1,10 @@
 # Context chaos acceptance
 
+Status: compatibility harness. Its manifest still includes proofs for the retired
+multi-topic Context graph. It is useful while that reducer code remains in the tree, but
+it is not sufficient acceptance for the active page-oriented queue contract. Use the
+page-oriented workflow tests, production preflight, and surface acceptance in addition.
+
 `scripts/context-chaos-acceptance.mjs` is the retained, fail-closed report
 generator for the Context failure matrix. It does not replace focused tests or
 claim that a fake service is production. It gives every documented failure case
@@ -54,9 +59,10 @@ pnpm test:context-chaos
 
 ## Reused deterministic proof
 
-The manifest runs the existing compiled Board, API, worker, Context engine,
-Daytona contract, quality, GCS-adapter, and PostgreSQL integration tests. Those
-tests already prove:
+The manifest runs existing compiled Board, API, worker, Context engine, Daytona
+contract, quality, GCS-adapter, and PostgreSQL integration tests. Some entries below
+exercise compatibility code rather than claimable production topics. Together those
+tests prove:
 
 - exact completion replay and one-time model accounting;
 - lease/fence rejection and bounded retry;

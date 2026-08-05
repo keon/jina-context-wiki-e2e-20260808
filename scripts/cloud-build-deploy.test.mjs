@@ -504,6 +504,9 @@ test("production preflight fences the exact durable Board leases and independent
   assert.match(productionPreflight, /set snapshot=\$1::jsonb,version=version\+1,updated_at=clock_timestamp\(\)/);
   assert.match(productionPreflight, /Board drain did not fence exactly the active lease inventory/);
   assert.match(productionPreflight, /Board has \$\{leases\.length\} active leases after worker drain/);
+  assert.match(productionPreflight, /assertPageOrientedContextCutover\(snapshot\)/);
+  assert.match(productionPreflight, /contextWorkflowContract !== "page-oriented"/);
+  assert.match(productionPreflight, /LEGACY_CONTEXT_OUTBOX_TOPICS\.has\(message\.topic\)/);
 });
 
 test("acceptance can be claimed only by the exact coordinated candidate worker revisions", () => {

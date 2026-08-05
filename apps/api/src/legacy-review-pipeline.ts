@@ -1,12 +1,14 @@
 import { applyCommand, type BoardState, type CommandActor } from "@jina/board";
 import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 
+/** Compatibility planner for persisted `run-review` work. */
+
 interface PipelineRef {
   readonly slug: "pr_review";
   readonly version: string;
 }
 
-export type PlannedTaskId = EntityId<"task">;
+type PlannedTaskId = EntityId<"task">;
 
 interface PlannedTask {
   readonly id: PlannedTaskId;

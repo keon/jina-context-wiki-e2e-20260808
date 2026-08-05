@@ -4,6 +4,23 @@ import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const LEGACY_CONTEXT_TABLES = ["derivation_progress", "pipeline_builds", "pipeline_stages"];
+const LEGACY_CONTEXT_OUTBOX_TOPICS = new Set([
+  "run-context-research-plan",
+  "run-context-research",
+  "run-context-publication-plan",
+  "run-context-page-write",
+  "run-context-page-audit",
+  "run-context-page-repair",
+  "run-context-source-challenge",
+  "run-context-task-evaluation",
+  "run-context-gap-repair",
+  "run-context-certification",
+  "run-context-pageindex",
+  "run-ingest-evidence",
+  "run-derive-knowledge",
+  "run-index-context"
+]);
+const TERMINAL_BOARD_TASK_STATUSES = new Set(["done", "canceled", "failed", "superseded"]);
 const TABLES_ADDED_AFTER_LEGACY = [
   "context_board_publications",
   "context_quota_ledgers",
@@ -707,6 +724,7 @@ async function verifyBoardLeases(pool) {
     if (leases.length > 0) {
       throw new Error(`Board has ${leases.length} active leases after worker drain`);
     }
+    if (snapshot !== undefined) assertPageOrientedContextCutover(snapshot);
     await client.query("commit");
     console.log(JSON.stringify({ boardLeases: 0, verified: true }));
   } catch (error) {
@@ -738,6 +756,29 @@ function activeBoardLeaseInventory(snapshot) {
     leases.push({ id: message.id, topic: message.topic });
   }
   return leases;
+}
+
+function assertPageOrientedContextCutover(snapshot) {
+  const board = boardState(snapshot);
+  if (!Array.isArray(board.tasks)) throw new Error("Board snapshot has no task array");
+  const legacyBuilds = board.tasks.filter(
+    (task) =>
+      isRecord(task) &&
+      task.type === "build-context" &&
+      !TERMINAL_BOARD_TASK_STATUSES.has(task.status) &&
+      (!isRecord(task.metadata) || task.metadata.contextWorkflowContract !== "page-oriented")
+  );
+  const legacyMessages = board.outbox.filter(
+    (message) =>
+      isRecord(message) &&
+      (message.status === "pending" || message.status === "leased") &&
+      LEGACY_CONTEXT_OUTBOX_TOPICS.has(message.topic)
+  );
+  if (legacyBuilds.length > 0 || legacyMessages.length > 0) {
+    throw new Error(
+      `Board still has ${legacyBuilds.length} non-terminal legacy Context builds and ${legacyMessages.length} claimable legacy Context messages`
+    );
+  }
 }
 
 function fenceBoardSnapshot(snapshot, fenceOutboxLeases, input) {

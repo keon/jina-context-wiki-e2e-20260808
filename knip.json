@@ -1,6 +1,5 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "ignoreBinaries": ["codex"],
   "workspaces": {
     ".": {
       "entry": ["autumn.config.ts", "evals/review/run-isolated-review.mjs", "scripts/context-production-preflight.mjs"],
@@ -21,9 +20,6 @@
     },
     "apps/worker": {
       "entry": ["src/server.ts", "src/acceptance.ts", "src/**/*.test.ts"]
-    },
-    "apps/workflows": {
-      "entry": ["src/cli/review-pr.ts", "src/simulations/pr-review-trace.ts"]
     },
     "packages/review-agent": {
       "entry": ["src/index.ts", "src/review/codex-review.ts", "src/**/*.test.ts"]

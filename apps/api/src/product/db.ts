@@ -10,6 +10,18 @@ pg.types.setTypeParser(20, (value) => (value === null ? null : Number(value)));
 
 let pool: pg.Pool | undefined;
 
+/**
+ * Mount the product API on the listener's existing database pool. The product
+ * migration CLI can still create its own pool, but the combined API process
+ * must not maintain two independent pools to the same database.
+ */
+export function configureProductDatabasePool(sharedPool: pg.Pool): void {
+  if (pool && pool !== sharedPool) {
+    throw new Error("Product database pool was already initialized independently");
+  }
+  pool = sharedPool;
+}
+
 export function productDatabaseConnectionString(environment: NodeJS.ProcessEnv = process.env): string | undefined {
   const productUrl = environment.JINA_PRODUCT_DATABASE_URL?.trim();
   if (productUrl) {
@@ -48,7 +60,7 @@ export function productDatabaseConfig(environment: NodeJS.ProcessEnv = process.e
 }
 
 export function databaseConfigured(): boolean {
-  return productDatabaseConfig() !== undefined;
+  return pool !== undefined || productDatabaseConfig() !== undefined;
 }
 
 export function getPool(): pg.Pool {

@@ -6,42 +6,25 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
-  REVIEW_FINDINGS_SCHEMA,
-  REVIEW_SYSTEM_PROMPT,
-  buildReviewPrompt,
-  parseReviewOutput,
-  prepareDiff,
-  type ReviewRequest
-} from "@jina/ai";
-import {
   DOCUMENTATION_STAGE_SCHEMA,
   CITATION_AUDIT_STAGE_SCHEMA,
-  CRITIC_STAGE_SCHEMA,
   RESEARCH_STAGE_SCHEMA,
-  SOURCE_CHALLENGE_STAGE_SCHEMA,
   boardPageAuditInventory,
   boardPublicPageDigest,
   citationAuditReferenceGroups,
   citationAuditRepairPrompt,
   citationAuditStagePrompt,
-  contextGapRepairPrompt,
-  criticStagePrompt,
   documentationWriterPrompt,
   documentationPlannerPrompt,
   documentationPlannerRepairPrompt,
   parseCitationAuditStageResult,
-  parseCriticStageResult,
   parseResearchStagePlan,
-  reconcileCriticStageResult,
   researchPlannerRepairPrompt,
   researchPlannerPrompt,
   researchWorkerPrompt,
-  sourceChallengeStagePrompt,
-  sourceChallengeValidationRepairPrompt,
   type BoardAgentModelUsage,
   type CitationAuditStageResult,
   type CitationAuditReference,
-  type ChallengeAnswerPart,
   type DocumentationStagePlan,
   type ResearchStagePlan
 } from "@jina/daytona";
@@ -86,7 +69,6 @@ import {
   assertContextPriorReleaseMatches,
   boardWorkArtifactKindForTopic as existingBoardWorkArtifactKindForTopic,
   contextWorkflowBoardArtifactKindForTopic,
-  contextGateRepairMustChangeSnapshot,
   contextPriorReleaseCatalog,
   contextArtifactKey,
   parseBoardPageIndexTreeArtifact,
@@ -109,10 +91,6 @@ import {
   configuredPortableContextBoardAgentStageRunner,
   type PortableContextBoardAgentStageRunner
 } from "./board-agent-stage-adapter.js";
-import {
-  parseBoardSourceChallengeStageResult,
-  parseBoardSourceChallengeStageResultWithRepair
-} from "./board-source-challenge.js";
 import { ISSUE_GRAPH_STAGE_SCHEMA, issueGraphPrompt } from "./causal-graph-derivation.js";
 import { canonicalCausalGraphCommitTimestamp } from "./causal-graph-history.js";
 import {
@@ -131,7 +109,6 @@ import {
   sanitizeGitHubReviewCommentPayload
 } from "./github-provider-sanitizer.js";
 import { buildBoardPageIndex } from "./board-pageindex.js";
-import { gapRepairPageProblems, gapRepairPagePrompt } from "./board-gap-repair.js";
 import {
   canonicalPublicPageMarkdown,
   contextBoardPublicSnapshot,
@@ -158,6 +135,14 @@ import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCate
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
 import { contextPhaseCandidateArtifact } from "./phase-checkpoint-artifact.js";
+import {
+  LEGACY_REVIEW_FINDINGS_SCHEMA,
+  LEGACY_REVIEW_SYSTEM_PROMPT,
+  legacyReviewPrompt,
+  parseLegacyReviewOutput,
+  prepareLegacyReviewDiff,
+  type LegacyReviewRequest
+} from "./legacy-review-contract.js";
 import { runtimeWorkerId } from "./worker-identity.js";
 import { GcsReviewArtifactStore, decodeReviewTaskResult, encodeReviewTaskResult } from "./review-artifacts.js";
 import {
@@ -172,31 +157,22 @@ import {
   requiresBoardAgentExecutor,
   workerClaimTimeoutMs,
   type ContextWorkerTopic,
-  type InternalContextStageTopic,
+  type EmbeddedContextStageTopic,
   type ControlBoardWorkerTopic,
   type CausalGraphWorkerTopic,
   type ReviewBoardWorkerTopic,
-  type WorkerTopic
+  type SupportedWorkerTopic
 } from "./worker-topics.js";
 
 const execFileAsync = promisify(execFile);
-const BOARD_MODEL_TOPICS = new Set<WorkerTopic>([
+const BOARD_MODEL_TOPICS = new Set<ExecutableWorkerTopic>([
   "run-context-page-plan",
   "run-context-page-build",
-  "run-context-research-plan",
-  "run-context-research",
-  "run-context-publication-plan",
-  "run-context-page-write",
-  "run-context-page-audit",
-  "run-context-page-repair",
-  "run-context-source-challenge",
-  "run-context-task-evaluation",
-  "run-context-gap-repair",
   "run-causal-graph-derive"
 ]);
 
 function boardWorkArtifactKindForTopic(
-  topic: ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic
+  topic: ContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic
 ): ContextArtifactKind {
   if (CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic)) {
     return contextWorkflowBoardArtifactKindForTopic(topic as ContextWorkerTopic);
@@ -344,25 +320,7 @@ interface WorkMetadataByTopic {
     readonly pageTaskId: string;
     readonly pass: number;
   };
-  readonly "run-context-source-challenge": ContextBoardWorkerMetadata & {
-    readonly planArtifact: ContextArtifactRef;
-    readonly pass: number;
-  };
-  readonly "run-context-task-evaluation": ContextBoardWorkerMetadata & {
-    readonly planArtifact: ContextArtifactRef;
-    readonly pass: number;
-  };
-  readonly "run-context-gap-repair": ContextBoardWorkerMetadata & {
-    readonly planArtifact: ContextArtifactRef;
-    readonly pass: number;
-  };
-  readonly "run-context-certification": ContextBoardWorkerMetadata & {
-    readonly planArtifact: ContextArtifactRef;
-  };
   readonly "run-context-publication": ContextBoardWorkerMetadata & {
-    readonly planArtifact: ContextArtifactRef;
-  };
-  readonly "run-context-pageindex": ContextBoardWorkerMetadata & {
     readonly planArtifact: ContextArtifactRef;
   };
   readonly "run-causal-graph-history": ContextBoardWorkerMetadata;
@@ -370,7 +328,9 @@ interface WorkMetadataByTopic {
   readonly "run-causal-graph-publication": ContextBoardWorkerMetadata;
 }
 
-type ClaimedWork<T extends WorkerTopic = WorkerTopic> = T extends WorkerTopic
+type ExecutableWorkerTopic = SupportedWorkerTopic | EmbeddedContextStageTopic;
+
+type ClaimedWork<T extends ExecutableWorkerTopic = ExecutableWorkerTopic> = T extends ExecutableWorkerTopic
   ? {
       readonly topic: T;
       readonly message: {
@@ -444,7 +404,9 @@ const port = Number(process.env.PORT ?? 8080);
 const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
 const token = requiredEnv("INTERNAL_API_TOKEN");
 const productInternalToken = process.env.JINA_PRODUCT_INTERNAL_API_TOKEN?.trim() || token;
-const topics = configuredWorkerTopics(process.env.WORKER_TOPICS);
+const topics = configuredWorkerTopics(process.env.WORKER_TOPICS, {
+  allowLegacyReview: process.env.JINA_LEGACY_REVIEW_PIPELINE_ENABLED === "true"
+});
 const claimMode = configuredWorkerClaimMode(process.env.JINA_WORKER_CLAIM_MODE);
 const preferredRepository = configuredWorkerPreferredRepository(process.env.WORKER_PREFERRED_REPOSITORY);
 const workerRuntime = configuredWorkerRuntimeIdentity();
@@ -460,7 +422,6 @@ const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TI
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const gitCommandTimeoutMs = positiveInt(process.env.CONTEXT_GIT_COMMAND_TIMEOUT_MS, 5 * 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
-const MAX_CRITIC_CONTRACT_ATTEMPTS = 4;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
 const reviewArtifactStore = process.env.JINA_REVIEW_GCS_BUCKET
   ? new GcsReviewArtifactStore(process.env.JINA_REVIEW_GCS_BUCKET, {
@@ -530,7 +491,7 @@ let shutdownPromise: Promise<void> | undefined;
 let pollPromise: Promise<void> | undefined;
 let active = false;
 let activeLease: LeaseExecutionState | undefined;
-let activeWork: ClaimedWork | undefined;
+let activeWork: ClaimedWork<SupportedWorkerTopic> | undefined;
 let activeModelUsage: BoardAgentModelUsage | undefined;
 let activeModelUsageObserved = false;
 let lastApiSuccessAt: string | undefined;
@@ -540,7 +501,7 @@ let consecutiveApiFailures = 0;
 let lastClaimBackpressureLogAt = 0;
 let lastWork:
   | {
-      readonly topic: WorkerTopic;
+      readonly topic: SupportedWorkerTopic;
       readonly outcome: WorkResult["outcome"] | "lease_lost";
       readonly finishedAt: string;
       readonly failureCategory?: WorkerFailureCategory;
@@ -618,7 +579,7 @@ async function poll(): Promise<void> {
   }
 }
 
-async function claim(): Promise<ClaimedWork | undefined> {
+async function claim(): Promise<ClaimedWork<SupportedWorkerTopic> | undefined> {
   const response = await apiRequest(
     "/internal/worker/claim",
     { workerId, topics, ...(preferredRepository ? { preferredRepository } : {}) },
@@ -640,7 +601,7 @@ async function claim(): Promise<ClaimedWork | undefined> {
   return parseClaimedWork(await response.json());
 }
 
-async function execute(work: ClaimedWork): Promise<void> {
+async function execute(work: ClaimedWork<SupportedWorkerTopic>): Promise<void> {
   const metadata = work.task.metadata as Record<string, unknown>;
   const traceId = typeof metadata.traceId === "string" ? metadata.traceId : undefined;
   const spanId = typeof metadata.spanId === "string" ? metadata.spanId : undefined;
@@ -677,7 +638,7 @@ async function execute(work: ClaimedWork): Promise<void> {
   });
 }
 
-async function executeClaimedWork(work: ClaimedWork): Promise<void> {
+async function executeClaimedWork(work: ClaimedWork<SupportedWorkerTopic>): Promise<void> {
   active = true;
   activeWork = work;
   activeModelUsage = BOARD_MODEL_TOPICS.has(work.topic)
@@ -873,63 +834,34 @@ function logStageOutcome(
   });
 }
 
-async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
-  switch (work.topic) {
-    case "prepare-review":
-      return { outcome: "done", result: await runPrepareReview(work) };
-    case "summary-review":
-      return { outcome: "done", result: await runSummaryReview(work) };
-    case "runtime-review":
-      return { outcome: "done", result: await runRuntimeReview(work) };
-    case "finalize-review":
-      return { outcome: "done", result: await runFinalizeReview(work) };
-    case "publish-review":
-      return { outcome: "done", result: await runPublishReview(work) };
-    case "settle-review":
-      return { outcome: "done", result: await runSettleReview(work) };
-    case "github-installation-backfill":
-      return { outcome: "done", result: await runInstallationBackfill(work) };
-    case "billing-retry":
-      return { outcome: "done", result: await runBillingRetry(work) };
-    case "run-context-input-snapshot":
-      return { outcome: "done", result: await runContextInputSnapshot(work) };
-    case "run-context-page-plan":
-      return { outcome: "done", result: await runContextPagePlan(work) };
-    case "run-context-page-build":
-      return { outcome: "done", result: await runContextPageBuild(work) };
-    case "run-context-research-plan":
-      return { outcome: "done", result: await runContextResearchPlan(work) };
-    case "run-context-research":
-      return { outcome: "done", result: await runContextResearch(work) };
-    case "run-context-publication-plan":
-      return { outcome: "done", result: await runContextPublicationPlan(work) };
-    case "run-context-page-write":
-      return { outcome: "done", result: await runContextPageWrite(work) };
-    case "run-context-page-audit":
-      return { outcome: "done", result: await runContextPageAudit(work) };
-    case "run-context-page-repair":
-      return { outcome: "done", result: await runContextPageRepair(work) };
-    case "run-context-source-challenge":
-      return { outcome: "done", result: await runContextSourceChallenge(work) };
-    case "run-context-task-evaluation":
-      return { outcome: "done", result: await runContextTaskEvaluation(work) };
-    case "run-context-gap-repair":
-      return { outcome: "done", result: await runContextGapRepair(work) };
-    case "run-context-certification":
-      return { outcome: "done", result: await runContextCertification(work) };
-    case "run-context-publication":
-      return { outcome: "done", result: await runContextPublication(work) };
-    case "run-context-pageindex":
-      return { outcome: "done", result: await runContextPageIndex(work) };
-    case "run-causal-graph-history":
-      return { outcome: "done", result: await runCausalGraphHistory(work) };
-    case "run-causal-graph-derive":
-      return { outcome: "done", result: await runCausalGraphDerive(work) };
-    case "run-causal-graph-publication":
-      return { outcome: "done", result: await runCausalGraphPublication(work) };
-    case "run-review":
-      return { outcome: "done", result: await runReview(work) };
-  }
+type TopicHandler<T extends SupportedWorkerTopic> = (work: ClaimedWork<T>) => Promise<Record<string, unknown>>;
+type TopicHandlers = { readonly [T in SupportedWorkerTopic]: TopicHandler<T> };
+
+/** Claimable queue topics and their executors, checked as one exhaustive registry. */
+const topicHandlers = {
+  "prepare-review": runPrepareReview,
+  "summary-review": runSummaryReview,
+  "runtime-review": runRuntimeReview,
+  "finalize-review": runFinalizeReview,
+  "publish-review": runPublishReview,
+  "settle-review": runSettleReview,
+  "github-installation-backfill": runInstallationBackfill,
+  "billing-retry": runBillingRetry,
+  "run-context-input-snapshot": runContextInputSnapshot,
+  "run-context-page-plan": runContextPagePlan,
+  "run-context-page-build": runContextPageBuild,
+  "run-context-publication": runContextPublication,
+  "run-causal-graph-history": runCausalGraphHistory,
+  "run-causal-graph-derive": runCausalGraphDerive,
+  "run-causal-graph-publication": runCausalGraphPublication,
+  "run-review": runReview
+} satisfies TopicHandlers;
+
+async function executeTopic<T extends SupportedWorkerTopic>(work: ClaimedWork<T>): Promise<WorkResult> {
+  // Indexing a mapped function registry loses the key/parameter correlation;
+  // the exhaustive `satisfies` check above proves it once for every entry.
+  const handler = topicHandlers[work.topic] as unknown as TopicHandler<T>;
+  return { outcome: "done", result: await handler(work) };
 }
 
 async function runContextInputSnapshot(
@@ -1110,7 +1042,7 @@ async function runContextPageBuild(work: ClaimedWork<"run-context-page-build">):
   };
 }
 
-function internalStageWork<T extends InternalContextStageTopic>(
+function internalStageWork<T extends EmbeddedContextStageTopic>(
   work: ClaimedWork<ContextWorkerTopic>,
   topic: T,
   metadata: WorkMetadataByTopic[T]
@@ -1294,66 +1226,6 @@ async function runCausalGraphPublication(
     content: Buffer.from(JSON.stringify({ version: 1, releaseId, graphArtifact }), "utf8")
   });
   return { version: 1, outputArtifact: receiptArtifact, releaseId };
-}
-
-async function runContextPageIndex(work: ClaimedWork<"run-context-pageindex">): Promise<Record<string, unknown>> {
-  if (!boardPageIndexClient) throw new Error("self-hosted PageIndex client is not configured");
-  const publicationArtifact = latestDependencyArtifact(
-    work.task.metadata.dependencyResults,
-    ["publish-context-release"],
-    "PageIndex publication"
-  );
-  const releaseBytes = await readContextBoardArtifact(work, publicationArtifact);
-  let release: unknown;
-  try {
-    release = JSON.parse(Buffer.from(releaseBytes).toString("utf8")) as unknown;
-  } catch {
-    throw new Error("published Context release artifact is not valid JSON");
-  }
-  const built = await buildBoardPageIndex(boardPageIndexClient, release, {
-    timeoutMs: positiveInt(process.env.CONTEXT_PAGEINDEX_BUILD_TIMEOUT_MS, 5 * 60_000),
-    maxDocumentCharacters: positiveInt(process.env.CONTEXT_PAGEINDEX_MAX_DOCUMENT_CHARACTERS, 2_000_000),
-    maxNodes: positiveInt(process.env.CONTEXT_PAGEINDEX_MAX_NODES, 20_000)
-  });
-  assertLeaseOwned();
-  const outputArtifact = await uploadContextBoardArtifact(work, {
-    kind: "pageindex-tree",
-    name: `${built.releaseMetadata.releaseId}.json`,
-    contentType: "application/json",
-    content: Buffer.from(built.artifactContent, "utf8")
-  });
-  if (
-    outputArtifact.sha256 !== built.artifactSha256 ||
-    outputArtifact.bytes !== Buffer.byteLength(built.artifactContent, "utf8")
-  ) {
-    throw new Error("uploaded PageIndex tree does not match its verified immutable bytes");
-  }
-  const attached = await internalApiJson<Record<string, unknown>>(
-    "/internal/context/board/pageindex/attach",
-    leaseBody(work, {
-      releaseId: built.releaseMetadata.releaseId,
-      treeArtifact: outputArtifact
-    })
-  );
-  if (
-    attached.version !== 1 ||
-    requiredString(attached.releaseId, "PageIndex attached releaseId") !== built.releaseMetadata.releaseId
-  ) {
-    throw new Error("PageIndex attachment did not bind the expected published release");
-  }
-  const attachedArtifact = parseArtifactRef(attached.outputArtifact, "PageIndex attached outputArtifact");
-  if (
-    attachedArtifact.key !== outputArtifact.key ||
-    attachedArtifact.sha256 !== outputArtifact.sha256 ||
-    attachedArtifact.bytes !== outputArtifact.bytes
-  ) {
-    throw new Error("PageIndex attachment changed the immutable tree artifact identity");
-  }
-  return {
-    version: 1,
-    outputArtifact,
-    releaseId: built.releaseMetadata.releaseId
-  };
 }
 
 async function runContextPublication(work: ClaimedWork<"run-context-publication">): Promise<Record<string, unknown>> {
@@ -1649,7 +1521,7 @@ async function captureContextInput(work: ClaimedWork<"run-context-input-snapshot
 }
 
 async function uploadContextBoardArtifact(
-  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<ContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
   input: {
     readonly kind: ContextArtifactKind;
     readonly name: string;
@@ -1719,7 +1591,7 @@ interface WorkerPhaseCheckpoint {
 }
 
 function contextPhaseCheckpointKey(
-  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<ContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
   contract: string,
   phase: string,
   input: unknown
@@ -1771,7 +1643,7 @@ async function recordContextBoardPhaseCheckpoint(
 }
 
 async function checkpointedContextCandidate(
-  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<ContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
   input: {
     readonly phase: string;
     readonly checkpointKey: string;
@@ -1827,7 +1699,7 @@ async function checkpointedContextCandidate(
 }
 
 async function loadPriorContext(
-  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic>
+  work: ClaimedWork<ContextWorkerTopic | EmbeddedContextStageTopic>
 ): Promise<PriorContextPacket | undefined> {
   const seed = work.task.metadata.priorRelease;
   if (!seed) return undefined;
@@ -2279,19 +2151,6 @@ interface ContextPageArtifact {
   readonly repairCheckpoint?: PageRepairCheckpointDiagnostics;
   /** Host-only link to the semantic audit that caused the latest repair. */
   readonly findingsArtifact?: ContextArtifactRef;
-}
-
-interface ContextDraftArtifact {
-  readonly pages: readonly ContextPageArtifact[];
-  readonly publicationPlanArtifact: ContextArtifactRef;
-  readonly snapshotArtifact: ContextArtifactRef;
-  readonly citationAuditInput: {
-    readonly inputDigest: string;
-    readonly publicSnapshotDigest: string;
-    readonly references: readonly CitationAuditReference[];
-  };
-  readonly citationAudit: CitationAuditStageResult;
-  readonly citationAuditDigest: string;
 }
 
 interface ContextPageAuditArtifact {
@@ -2929,1529 +2788,6 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
   }
 }
 
-interface ContextGateArtifact {
-  readonly gate: "source-challenge" | "task-evaluation";
-  readonly verdict: "pass" | "repair_required";
-  readonly publicSnapshotDigest: string;
-  readonly blockingGapCount: number;
-  readonly publicationPlanArtifact: ContextArtifactRef;
-  readonly pageArtifacts: readonly ContextArtifactRef[];
-  /** Exact global draft audited by this gate, absent for the initial per-page draft. */
-  readonly contextDraftArtifact?: ContextArtifactRef;
-  readonly result: unknown;
-}
-
-async function runContextSourceChallenge(
-  work: ClaimedWork<"run-context-source-challenge">
-): Promise<Record<string, unknown>> {
-  const publicationArtifact = work.task.metadata.planArtifact;
-  const publication = parsePublicationPlanArtifact(await readContextBoardArtifact(work, publicationArtifact));
-  const pages = await contextPagesFromDependencies(work);
-  const contextDraftArtifact = latestContextDraftArtifact(work.task.metadata.dependencyResults);
-  const publicContext = publicContextSnapshot(pages);
-  const publicSnapshotDigest = createHash("sha256").update(publicContext).digest("hex");
-  const acceptedCheckpoint = await acceptedCheckpointGate(work, {
-    gate: "source-challenge",
-    pass: work.task.metadata.pass,
-    publicationArtifact,
-    ...(contextDraftArtifact ? { contextDraftArtifact } : {}),
-    pages,
-    publicSnapshotDigest
-  });
-  if (acceptedCheckpoint) return acceptedCheckpoint;
-  const researchPlan = parseResearchPlanArtifact(
-    await readContextBoardArtifact(work, publication.researchPlanArtifact)
-  ).plan;
-  const reportPackets = await Promise.all(
-    publication.researchReportArtifacts.map((artifact) =>
-      readContextBoardArtifact(work, artifact).then(parseResearchReportArtifact)
-    )
-  );
-  const researchPackets = Object.fromEntries(reportPackets.map((packet) => [packet.assignmentId, packet.report]));
-  const snapshot = parseEvidenceSnapshot(
-    await readContextBoardArtifact(work, publication.snapshotArtifact),
-    work.task.metadata
-  );
-  const challengedTasks = await previousMaterialChallengeTasks(work, work.task.metadata.pass);
-  const existingTasks = maintenanceTaskCatalog(publication.plan, challengedTasks);
-  const repositoryInventory = {
-    areas: repositoryContextAreas(
-      snapshot.files.map((file) => ({
-        checkpointId: `snapshot:${snapshot.commitSha}`,
-        path: file.path,
-        blobSha: file.blobSha,
-        contentDigest: createHash("sha256").update(file.body).digest("hex"),
-        contentAvailable: !file.contentOmitted,
-        executable: file.executable,
-        entryType: file.entryType ?? "file"
-      }))
-    ),
-    paths: snapshot.files.map((file) => file.path).sort()
-  };
-  const inputDigest = createHash("sha256")
-    .update(
-      JSON.stringify({
-        checkpoint: {
-          repository: snapshot.repository,
-          ref: snapshot.ref,
-          commitSha: snapshot.commitSha
-        },
-        repositoryInventory,
-        researchPlan,
-        researchPackets,
-        existingTasks,
-        publicSnapshotDigest
-      })
-    )
-    .digest("hex");
-  const workerId = `source-challenge-${work.task.metadata.pass}`;
-  const checkout = await checkoutRepository(snapshot.repository, snapshot.ref, snapshot.commitSha, false);
-  const stageRoot = await mkdtemp(join(tmpdir(), "jina-context-source-challenge-"));
-  try {
-    const evidencePath = join(stageRoot, "evidence.json");
-    await writeFile(evidencePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
-    const runner = requireBoardAgentStageRunner();
-    const stageInput = {
-      id: workerId,
-      prompt: sourceChallengeStagePrompt({
-        workerId,
-        repository: snapshot.repository,
-        repositoryDirectory: checkout.directory,
-        evidencePath,
-        repositoryInventory,
-        researchPlan,
-        researchPackets,
-        existingTasks,
-        publicContext,
-        inputDigest,
-        publicSnapshotDigest
-      }),
-      schema: SOURCE_CHALLENGE_STAGE_SCHEMA,
-      workingDirectory: checkout.directory,
-      additionalDirectories: [stageRoot],
-      readOnly: true,
-      budgetSeconds: stageBudgetSeconds("CONTEXT_SOURCE_CHALLENGE_SECONDS", 900)
-    } as const;
-    const existingSubjectIds = researchPlan.assignments.map((assignment) => assignment.id);
-    const candidateCheckpointKey = contextPhaseCheckpointKey(
-      work,
-      "source-challenge-phase-checkpoints-v1",
-      "source-challenge.candidate",
-      { inputDigest }
-    );
-    const repairCheckpointKey = contextPhaseCheckpointKey(
-      work,
-      "source-challenge-phase-checkpoints-v3",
-      "source-challenge.repair",
-      { inputDigest, existingSubjectIds }
-    );
-    const candidate = await checkpointedContextCandidate(work, {
-      phase: "source-challenge.candidate",
-      checkpointKey: candidateCheckpointKey,
-      generate: async () => (await runner.run(stageInput)).parsed
-    });
-    const result = await parseBoardSourceChallengeStageResultWithRepair(
-      candidate,
-      {
-        workerId,
-        inputDigest,
-        publicSnapshotDigest,
-        existingTasks,
-        researchPlan,
-        repositoryPaths: repositoryInventory.paths
-      },
-      async (diagnostic, previousResult) => {
-        return checkpointedContextCandidate(work, {
-          phase: "source-challenge.repair",
-          checkpointKey: repairCheckpointKey,
-          validate: (value) => {
-            parseBoardSourceChallengeStageResult(value, {
-              workerId,
-              inputDigest,
-              publicSnapshotDigest,
-              existingTasks,
-              researchPlan,
-              repositoryPaths: repositoryInventory.paths
-            });
-          },
-          generate: async () => {
-            const repaired = await runner.run({
-              ...stageInput,
-              id: `${workerId}-validation-repair`,
-              prompt: sourceChallengeValidationRepairPrompt({
-                workerId,
-                repositoryDirectory: checkout.directory,
-                evidencePath,
-                repositoryPaths: repositoryInventory.paths,
-                existingSubjectIds,
-                inputDigest,
-                publicSnapshotDigest,
-                diagnostic,
-                previousResult
-              })
-            });
-            return repaired.parsed;
-          }
-        });
-      }
-    );
-    const blockingTaskIds = new Set(result.addedTasks.filter((task) => task.material).map((task) => task.id));
-    const blockingGapCount = blockingTaskIds.size;
-    const verdict = blockingGapCount === 0 ? "pass" : "repair_required";
-    const pageArtifacts = pages.map((page) => page.artifact);
-    const outputArtifact = await uploadContextBoardArtifact(work, {
-      kind: "gate-evaluation",
-      name: `source-challenge-${work.task.metadata.pass}.json`,
-      contentType: "application/json",
-      content: Buffer.from(
-        JSON.stringify({
-          version: 1,
-          gate: "source-challenge",
-          verdict,
-          publicSnapshotDigest,
-          blockingGapCount,
-          publicationPlanArtifact: publicationArtifact,
-          pageArtifacts,
-          ...(contextDraftArtifact ? { contextDraftArtifact } : {}),
-          result
-        }),
-        "utf8"
-      )
-    });
-    return { version: 1, outputArtifact, verdict, publicSnapshotDigest, blockingGapCount };
-  } finally {
-    await Promise.all([
-      rm(checkout.directory, { recursive: true, force: true }),
-      rm(stageRoot, { recursive: true, force: true })
-    ]);
-  }
-}
-
-async function runContextTaskEvaluation(
-  work: ClaimedWork<"run-context-task-evaluation">
-): Promise<Record<string, unknown>> {
-  const publicationArtifact = work.task.metadata.planArtifact;
-  const publication = parsePublicationPlanArtifact(await readContextBoardArtifact(work, publicationArtifact));
-  const pages = await contextPagesFromDependencies(work);
-  const contextDraftArtifact = latestContextDraftArtifact(work.task.metadata.dependencyResults);
-  const publicContext = publicContextSnapshot(pages);
-  const publicSnapshotDigest = createHash("sha256").update(publicContext).digest("hex");
-  const acceptedCheckpoint = await acceptedCheckpointGate(work, {
-    gate: "task-evaluation",
-    pass: work.task.metadata.pass,
-    publicationArtifact,
-    ...(contextDraftArtifact ? { contextDraftArtifact } : {}),
-    pages,
-    publicSnapshotDigest
-  });
-  if (acceptedCheckpoint) return acceptedCheckpoint;
-  const challengedTasks = await previousMaterialChallengeTasks(work, work.task.metadata.pass);
-  const questions = maintenanceTaskCatalog(publication.plan, challengedTasks);
-  const taskCatalog = JSON.stringify(questions, null, 2);
-  const taskCatalogDigest = createHash("sha256").update(taskCatalog).digest("hex");
-  const workerId = `critic-context-${work.task.metadata.pass}`;
-  const prompt = criticStagePrompt({
-    workerId,
-    publicContext,
-    questions: taskCatalog,
-    snapshotDigest: publicSnapshotDigest,
-    taskCatalogDigest
-  });
-  const expected = {
-    snapshotDigest: publicSnapshotDigest,
-    taskCatalogDigest,
-    questionIds: questions.map((question) => question.id),
-    requiredAnswerPartsByQuestionId: Object.fromEntries(
-      questions
-        .filter((question) => (question.requiredAnswerParts?.length ?? 0) > 0)
-        .map((question) => [question.id, question.requiredAnswerParts!])
-    )
-  };
-  const stageRoot = await mkdtemp(join(tmpdir(), "jina-context-task-evaluation-"));
-  try {
-    let result: ReturnType<typeof parseCriticStageResult> | undefined;
-    const contractRejections: string[] = [];
-    for (let contractAttempt = 1; contractAttempt <= MAX_CRITIC_CONTRACT_ATTEMPTS; contractAttempt += 1) {
-      const phase = `task-evaluation.candidate.${contractAttempt}`;
-      const checkpointKey = contextPhaseCheckpointKey(work, "task-evaluation-phase-checkpoints-v1", phase, {
-        publicSnapshotDigest,
-        taskCatalogDigest,
-        contractRejections
-      });
-      const candidate = await checkpointedContextCandidate(work, {
-        phase,
-        checkpointKey,
-        generate: async () => {
-          const output = await requireBoardAgentStageRunner().run({
-            id: contractAttempt === 1 ? workerId : `${workerId}-contract-repair-${contractAttempt - 1}`,
-            prompt:
-              contractAttempt === 1
-                ? prompt
-                : [
-                    prompt,
-                    `Previous results violated the host contract:\n${contractRejections.map((reason, index) => `${index + 1}. ${reason}`).join("\n")}`,
-                    "Re-evaluate every task and return one corrected complete result. A task with any blocking unknown must be partial or fail and reference a concrete blocking gap; never label it pass. Every question, attempt, and gap ID must be unique, and every referenced gap ID must be defined exactly once.",
-                    "Before returning, check every host invariant: copy the supplied snapshot digest, task-catalog digest, and worker IDs exactly; emit exactly one review result and one attempt for every supplied question and no others; keep each attempt's pageIds identical to its review result; give every non-passing result at least one defined blocking gap; and give every passing attempt no blocking unknowns plus every required answer part."
-                  ].join("\n\n"),
-            schema: CRITIC_STAGE_SCHEMA,
-            workingDirectory: stageRoot,
-            readOnly: true,
-            budgetSeconds: stageBudgetSeconds("CONTEXT_CRITIC_SECONDS", 900)
-          });
-          return output.parsed;
-        }
-      });
-      try {
-        const reconciled = reconcileCriticStageResult(candidate, workerId, expected);
-        if (reconciled.corrections.length > 0) {
-          logger.info("task evaluator reconciled copy-sensitive model output", {
-            event: "context.contract_reconciled",
-            buildId: work.task.metadata.contextBuildId,
-            taskId: work.task.id,
-            stage: "task-evaluation",
-            contractAttempt,
-            correctionCount: reconciled.corrections.length,
-            corrections: reconciled.corrections
-          });
-        }
-        result = parseCriticStageResult(reconciled.value, workerId, expected);
-        break;
-      } catch (error) {
-        const rejection = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
-        if (contractAttempt === MAX_CRITIC_CONTRACT_ATTEMPTS) {
-          logger.error("task evaluator exhausted semantic contract attempts", {
-            event: "context.contract_failed",
-            buildId: work.task.metadata.contextBuildId,
-            taskId: work.task.id,
-            stage: "task-evaluation",
-            contractAttempt,
-            maxContractAttempts: MAX_CRITIC_CONTRACT_ATTEMPTS,
-            rejectionCount: contractRejections.length + 1,
-            reasons: [...contractRejections, rejection]
-          });
-          throw error;
-        }
-        contractRejections.push(rejection);
-        logger.warn("task evaluator contract rejected model output; scheduling bounded correction", {
-          event: "context.contract_retry",
-          buildId: work.task.metadata.contextBuildId,
-          taskId: work.task.id,
-          stage: "task-evaluation",
-          contractAttempt,
-          nextContractAttempt: contractAttempt + 1,
-          maxContractAttempts: MAX_CRITIC_CONTRACT_ATTEMPTS,
-          reason: rejection
-        });
-      }
-    }
-    if (!result) throw new Error("task evaluator exhausted its semantic contract attempts");
-    const hostPlanStructuralProblems = pages.flatMap(({ page }) => {
-      const plannedPage = publication.plan.pages.find((candidate) => candidate.path === page.documentPath);
-      if (!plannedPage) return [`${page.documentPath} is absent from the binding publication plan`];
-      return pagePlanStructuralProblems(plannedPage, publication.plan.pages, page.bodyMarkdown);
-    });
-    const explicitBlockingGapCount = new Set(
-      result.gaps.filter((gap) => gap.severity === "blocking").map((gap) => gap.id)
-    ).size;
-    const nonPassingTaskCount = result.review.results.filter((review) => review.verdict !== "pass").length;
-    const blockingGapCount = Math.max(explicitBlockingGapCount, nonPassingTaskCount, hostPlanStructuralProblems.length);
-    const verdict = blockingGapCount === 0 ? "pass" : "repair_required";
-    const resultWithHostChecks =
-      hostPlanStructuralProblems.length === 0 ? result : { ...result, hostPlanStructuralProblems };
-    const pageArtifacts = pages.map((page) => page.artifact);
-    const outputArtifact = await uploadContextBoardArtifact(work, {
-      kind: "gate-evaluation",
-      name: `task-evaluation-${work.task.metadata.pass}.json`,
-      contentType: "application/json",
-      content: Buffer.from(
-        JSON.stringify({
-          version: 1,
-          gate: "task-evaluation",
-          verdict,
-          publicSnapshotDigest,
-          blockingGapCount,
-          publicationPlanArtifact: publicationArtifact,
-          pageArtifacts,
-          ...(contextDraftArtifact ? { contextDraftArtifact } : {}),
-          result: resultWithHostChecks
-        }),
-        "utf8"
-      )
-    });
-    return { version: 1, outputArtifact, verdict, publicSnapshotDigest, blockingGapCount };
-  } finally {
-    await rm(stageRoot, { recursive: true, force: true });
-  }
-}
-
-async function acceptedCheckpointGate(
-  work: ClaimedWork<"run-context-source-challenge"> | ClaimedWork<"run-context-task-evaluation">,
-  input: {
-    readonly gate: "source-challenge" | "task-evaluation";
-    readonly pass: number;
-    readonly publicationArtifact: ContextArtifactRef;
-    readonly contextDraftArtifact?: ContextArtifactRef;
-    readonly pages: readonly { readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[];
-    readonly publicSnapshotDigest: string;
-  }
-): Promise<Record<string, unknown> | undefined> {
-  const acceptedBuildIds = new Set(
-    (process.env.CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS ?? "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter((value) => /^task_[a-f0-9]{32}$/.test(value))
-  );
-  if (!acceptedBuildIds.has(work.task.metadata.contextBuildId)) return undefined;
-  if (!input.contextDraftArtifact) {
-    throw new Error("checkpoint publication override requires a completed global Context draft");
-  }
-  const contextDraftArtifact = input.contextDraftArtifact;
-  if (
-    input.pages.length === 0 ||
-    input.pages.some(
-      ({ artifact }) => artifact.key !== contextDraftArtifact.key || artifact.sha256 !== contextDraftArtifact.sha256
-    )
-  ) {
-    throw new Error("checkpoint publication override pages do not match the completed global Context draft");
-  }
-  logger.warn("operator accepted the valid checkpoint draft for publication", {
-    event: "context.checkpoint_publication_override",
-    buildId: work.task.metadata.contextBuildId,
-    taskId: work.task.id,
-    gate: input.gate,
-    pass: input.pass,
-    publicSnapshotDigest: input.publicSnapshotDigest,
-    pageCount: input.pages.length
-  });
-  const pageArtifacts = input.pages.map(({ artifact }) => artifact);
-  const outputArtifact = await uploadContextBoardArtifact(work, {
-    kind: "gate-evaluation",
-    name: `${input.gate}-${input.pass}.json`,
-    contentType: "application/json",
-    content: Buffer.from(
-      JSON.stringify({
-        version: 1,
-        gate: input.gate,
-        verdict: "pass",
-        publicSnapshotDigest: input.publicSnapshotDigest,
-        blockingGapCount: 0,
-        publicationPlanArtifact: input.publicationArtifact,
-        pageArtifacts,
-        contextDraftArtifact,
-        result: {
-          version: 1,
-          operatorAcceptedCheckpoint: true,
-          reason: "Publish the completed, citation-audited checkpoint draft without another model gate cycle."
-        }
-      }),
-      "utf8"
-    )
-  });
-  return {
-    version: 1,
-    outputArtifact,
-    verdict: "pass",
-    publicSnapshotDigest: input.publicSnapshotDigest,
-    blockingGapCount: 0
-  };
-}
-
-async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">): Promise<Record<string, unknown>> {
-  const publicationArtifact = work.task.metadata.planArtifact;
-  const publication = parsePublicationPlanArtifact(await readContextBoardArtifact(work, publicationArtifact));
-  const priorPass = work.task.metadata.pass - 1;
-  const challengeArtifact = dependencyArtifactByTypeAndPass(
-    work.task.metadata.dependencyResults,
-    "challenge-context-sources",
-    priorPass,
-    "gap repair source challenge"
-  );
-  const evaluationArtifact = dependencyArtifactByTypeAndPass(
-    work.task.metadata.dependencyResults,
-    "evaluate-context-tasks",
-    priorPass,
-    "gap repair task evaluation"
-  );
-  const [challenge, evaluation, currentPages] = await Promise.all([
-    readContextBoardArtifact(work, challengeArtifact).then(parseContextGateArtifact),
-    readContextBoardArtifact(work, evaluationArtifact).then(parseContextGateArtifact),
-    contextPagesFromDependencies(work)
-  ]);
-  if (challenge.verdict === "pass" && evaluation.verdict === "pass") {
-    throw new Error("context gap repair has no repair-required gate");
-  }
-  const snapshot = parseEvidenceSnapshot(
-    await readContextBoardArtifact(work, publication.snapshotArtifact),
-    work.task.metadata
-  );
-  const checkout = await checkoutRepository(snapshot.repository, snapshot.ref, snapshot.commitSha, false);
-  const stageRoot = await mkdtemp(join(tmpdir(), "jina-context-gap-repair-"));
-  const outputDirectory = join(stageRoot, "context");
-  const priorCitationAudit = await contextCitationAuditCheckpoint(work, currentPages, challenge, evaluation);
-  await mkdir(outputDirectory, { recursive: true });
-  try {
-    for (const { page } of currentPages) {
-      const target = join(outputDirectory, page.documentPath);
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, page.bodyMarkdown, "utf8");
-    }
-    const priorSnapshotDigest = createHash("sha256").update(publicContextSnapshot(currentPages)).digest("hex");
-    const phaseCheckpointKey = (phase: string, input: unknown) =>
-      contextPhaseCheckpointKey(work, "context-gap-repair-phase-checkpoints-v1", phase, {
-        publicationArtifactSha256: publicationArtifact.sha256,
-        challengeArtifactSha256: challengeArtifact.sha256,
-        evaluationArtifactSha256: evaluationArtifact.sha256,
-        pass: work.task.metadata.pass,
-        input
-      });
-    for (const { page } of currentPages) {
-      const plannedPage = publication.plan.pages.find((candidate) => candidate.path === page.documentPath);
-      if (!plannedPage) throw new Error(`context gap repair cannot find ${page.documentPath} in its plan`);
-      const phase = `gap-repair.candidate.${safeStageId(page.documentPath)}`;
-      const pageRoot = join(stageRoot, "candidate", safeStageId(page.documentPath));
-      const pageOutputDirectory = join(pageRoot, "context");
-      const pageTarget = join(pageOutputDirectory, page.documentPath);
-      await mkdir(dirname(pageTarget), { recursive: true });
-      await writeFile(pageTarget, page.bodyMarkdown, "utf8");
-      try {
-        const candidate = await checkpointedContextCandidate(work, {
-          phase,
-          checkpointKey: phaseCheckpointKey(phase, {
-            priorSnapshotDigest,
-            documentPath: page.documentPath,
-            bodyDigest: createHash("sha256").update(page.bodyMarkdown).digest("hex")
-          }),
-          validate: (value) => {
-            if (
-              !isRecord(value) ||
-              value.version !== 1 ||
-              value.documentPath !== page.documentPath ||
-              typeof value.bodyMarkdown !== "string"
-            ) {
-              throw new Error(`context gap repair candidate checkpoint is invalid for ${page.documentPath}`);
-            }
-          },
-          generate: async () => {
-            await requireBoardAgentStageRunner().run({
-              id: `gap-repair-${work.task.metadata.pass}-${safeStageId(page.documentPath)}`,
-              prompt: contextGapRepairPrompt({
-                repository: snapshot.repository,
-                repositoryDirectory: checkout.directory,
-                outputDirectory: pageOutputDirectory,
-                contextDirectory: outputDirectory,
-                targetPage: plannedPage,
-                publicationPlan: publication.plan,
-                sourceChallenge: challenge.result,
-                taskEvaluation: evaluation.result,
-                pass: work.task.metadata.pass
-              }),
-              workingDirectory: pageRoot,
-              additionalDirectories: [checkout.directory, outputDirectory],
-              writableDirectories: [pageOutputDirectory],
-              outputFiles: [pageTarget],
-              budgetSeconds: stageBudgetSeconds("CONTEXT_GAP_PAGE_REPAIR_SECONDS", 600)
-            });
-            await assertOnlyContextPage(pageOutputDirectory, page.documentPath);
-            return {
-              version: 1,
-              documentPath: page.documentPath,
-              bodyMarkdown: canonicalPublicPageMarkdown(await readFile(pageTarget, "utf8"))
-            };
-          }
-        });
-        if (!isRecord(candidate) || typeof candidate.bodyMarkdown !== "string") {
-          throw new Error("validated gap repair page disappeared");
-        }
-        await writeFile(
-          join(outputDirectory, page.documentPath),
-          canonicalPublicPageMarkdown(candidate.bodyMarkdown),
-          "utf8"
-        );
-      } finally {
-        await rm(pageRoot, { recursive: true, force: true });
-      }
-    }
-    let pages = await structurallyRepairContextDraft({
-      work,
-      snapshot,
-      checkoutDirectory: checkout.directory,
-      stageRoot,
-      outputDirectory,
-      currentPages,
-      publicationPlan: publication.plan,
-      publicationPlanArtifact: publicationArtifact,
-      snapshotArtifact: publication.snapshotArtifact,
-      phaseCheckpointKey
-    });
-    let citationAudit: Awaited<ReturnType<typeof auditContextDraftCitations>> | undefined;
-    let priorReferences = priorCitationAudit.references;
-    let priorResults = priorCitationAudit.results;
-    const maximumCitationAuditPasses = 3;
-    for (let auditPass = 1; auditPass <= maximumCitationAuditPasses; auditPass += 1) {
-      pages = await loadContextDraftPages({
-        outputDirectory,
-        snapshot,
-        publicationPlan: publication.plan,
-        publicationPlanArtifact: publicationArtifact,
-        snapshotArtifact: publication.snapshotArtifact
-      });
-      citationAudit = await auditContextDraftCitations({
-        work,
-        snapshot,
-        checkoutDirectory: checkout.directory,
-        stageRoot,
-        pages,
-        pass: work.task.metadata.pass,
-        auditPass,
-        ...(priorReferences.length > 0 ? { priorReferences, priorResults } : {})
-      });
-      const unsupported = citationAudit.result.results.filter((candidate) => candidate.verdict === "unsupported");
-      if (unsupported.length === 0) break;
-      if (auditPass === maximumCitationAuditPasses) {
-        throw new Error(
-          `context gap repair still has ${unsupported.length} unsupported citations after bounded repair`
-        );
-      }
-      priorReferences = citationAudit.input.references;
-      priorResults = citationAudit.result.results;
-      const auditInputPath = join(stageRoot, "citation-audit-input.json");
-      const auditResultPath = join(stageRoot, "citation-audit-result.json");
-      await Promise.all([
-        writeFile(auditInputPath, `${JSON.stringify(citationAudit.input, null, 2)}\n`, "utf8"),
-        writeFile(auditResultPath, `${JSON.stringify(citationAudit.result, null, 2)}\n`, "utf8")
-      ]);
-      const repairPhase = `gap-citation-repair.pass-${auditPass}`;
-      const repairCandidate = await checkpointedContextCandidate(work, {
-        phase: repairPhase,
-        checkpointKey: phaseCheckpointKey(repairPhase, citationAudit.resultDigest),
-        generate: async () => {
-          await requireBoardAgentStageRunner().run({
-            id: `gap-citation-repair-${work.task.metadata.pass}-${auditPass}`,
-            prompt: citationAuditRepairPrompt({
-              repositoryDirectory: checkout.directory,
-              outputDirectory,
-              auditInputPath,
-              auditResultPath,
-              unsupportedCitationIds: unsupported.map((candidate) => candidate.citationId)
-            }),
-            workingDirectory: stageRoot,
-            additionalDirectories: [checkout.directory],
-            writableDirectories: [outputDirectory],
-            outputFiles: pages.map((page) => join(outputDirectory, page.documentPath)),
-            budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_REPAIR_SECONDS", 600)
-          });
-          return captureContextDirectory(outputDirectory);
-        }
-      });
-      await restoreContextDirectory(outputDirectory, repairCandidate);
-    }
-    if (!citationAudit) throw new Error("context gap repair citation audit did not run");
-    const publicSnapshotDigest = citationAudit.publicSnapshotDigest;
-    if (publicSnapshotDigest === priorSnapshotDigest && contextGateRepairMustChangeSnapshot(work.task.metadata.pass)) {
-      throw new Error("context gap repair did not change the repair-required public snapshot");
-    }
-    const outputArtifact = await uploadContextBoardArtifact(work, {
-      kind: "context-draft",
-      name: `context-draft-${work.task.metadata.pass}.json`,
-      contentType: "application/json",
-      content: Buffer.from(
-        JSON.stringify({
-          version: 1,
-          pages,
-          publicationPlanArtifact: publicationArtifact,
-          snapshotArtifact: publication.snapshotArtifact,
-          priorPageArtifacts: currentPages.map((page) => page.artifact),
-          sourceChallengeArtifact: challengeArtifact,
-          taskEvaluationArtifact: evaluationArtifact,
-          citationAuditInput: citationAudit.input,
-          citationAudit: citationAudit.result,
-          citationAuditDigest: citationAudit.resultDigest
-        }),
-        "utf8"
-      )
-    });
-    return { version: 1, outputArtifact, publicSnapshotDigest };
-  } finally {
-    await Promise.all([
-      rm(checkout.directory, { recursive: true, force: true }),
-      rm(stageRoot, { recursive: true, force: true })
-    ]);
-  }
-}
-
-async function structurallyRepairContextDraft(input: {
-  readonly work: ClaimedWork<"run-context-gap-repair">;
-  readonly snapshot: IngestEvidenceInput;
-  readonly checkoutDirectory: string;
-  readonly stageRoot: string;
-  readonly outputDirectory: string;
-  readonly currentPages: readonly { readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[];
-  readonly publicationPlan: DocumentationStagePlan;
-  readonly publicationPlanArtifact: ContextArtifactRef;
-  readonly snapshotArtifact: ContextArtifactRef;
-  readonly phaseCheckpointKey: (phase: string, value: unknown) => string;
-}): Promise<ContextPageArtifact[]> {
-  const candidateCheckpoint = await captureContextDirectory(input.outputDirectory);
-  const candidateByPath = new Map(candidateCheckpoint.files.map((file) => [file.path, file.bodyMarkdown]));
-  const expectedPaths = new Set(input.currentPages.map(({ page }) => page.documentPath));
-  const restoredPaths = input.currentPages
-    .filter(({ page }) => !candidateByPath.has(page.documentPath))
-    .map(({ page }) => page.documentPath);
-  const discardedPaths = candidateCheckpoint.files
-    .filter((file) => !expectedPaths.has(file.path))
-    .map((file) => file.path);
-  if (restoredPaths.length > 0 || discardedPaths.length > 0) {
-    logger.warn("normalized global repair output to its declared page catalog", {
-      event: "context.gap_repair.catalog_normalized",
-      taskId: input.work.task.id,
-      contextBuildId: input.work.task.metadata.contextBuildId,
-      restoredPaths,
-      discardedPaths
-    });
-  }
-  await restoreContextDirectory(input.outputDirectory, {
-    version: 1,
-    files: input.currentPages.map(({ page }) => ({
-      path: page.documentPath,
-      bodyMarkdown: candidateByPath.get(page.documentPath) ?? page.bodyMarkdown
-    }))
-  });
-
-  const pages: ContextPageArtifact[] = [];
-  for (const { page: currentPage } of input.currentPages) {
-    const plannedPage = input.publicationPlan.pages.find((candidate) => candidate.path === currentPage.documentPath);
-    if (!plannedPage) throw new Error(`context gap repair cannot find ${currentPage.documentPath} in its plan`);
-    const targetPath = join(input.outputDirectory, currentPage.documentPath);
-    let bodyMarkdown = canonicalPublicPageMarkdown(await readFile(targetPath, "utf8"));
-    const maximumStructuralRepairPasses = 3;
-    for (let structuralPass = 1; structuralPass <= maximumStructuralRepairPasses; structuralPass += 1) {
-      const problems = gapRepairPageProblems({
-        currentPage,
-        candidateBodyMarkdown: bodyMarkdown,
-        plannedPage,
-        publicationPlan: input.publicationPlan,
-        snapshot: input.snapshot
-      });
-      if (problems.length === 0) break;
-      logger.warn(`global repair page ${currentPage.documentPath} requires targeted correction`, {
-        event: "context.gap_repair.page_validation_failed",
-        taskId: input.work.task.id,
-        contextBuildId: input.work.task.metadata.contextBuildId,
-        documentPath: currentPage.documentPath,
-        structuralPass,
-        bodyDigest: createHash("sha256").update(bodyMarkdown).digest("hex"),
-        problemCount: problems.length,
-        problems: problems.slice(0, 16).map((problem) => problem.slice(0, 500))
-      });
-      if (structuralPass === maximumStructuralRepairPasses) {
-        throw new Error(
-          `context gap repair could not restore ${currentPage.documentPath} after ${maximumStructuralRepairPasses - 1} targeted corrections: ${problems
-            .slice(0, 8)
-            .join("; ")}`
-        );
-      }
-
-      const repairRoot = join(
-        input.stageRoot,
-        "structural-repair",
-        safeStageId(currentPage.documentPath),
-        String(structuralPass)
-      );
-      const repairOutputDirectory = join(repairRoot, "context");
-      const repairTargetPath = join(repairOutputDirectory, currentPage.documentPath);
-      const diagnosticsPath = join(repairRoot, "host-findings.json");
-      await mkdir(dirname(repairTargetPath), { recursive: true });
-      await Promise.all([
-        writeFile(repairTargetPath, bodyMarkdown, "utf8"),
-        writeFile(
-          diagnosticsPath,
-          `${JSON.stringify({ version: 1, documentPath: currentPage.documentPath, problems }, null, 2)}\n`,
-          "utf8"
-        )
-      ]);
-      const phase = `gap-structural-repair.${safeStageId(currentPage.documentPath)}.pass-${structuralPass}`;
-      const bodyDigest = createHash("sha256").update(bodyMarkdown).digest("hex");
-      const correction = await checkpointedContextCandidate(input.work, {
-        phase,
-        checkpointKey: input.phaseCheckpointKey(phase, { bodyDigest, problems }),
-        validate: (value) => {
-          if (!isRecord(value) || typeof value.bodyMarkdown !== "string") {
-            throw new Error(`context gap structural checkpoint is invalid for ${currentPage.documentPath}`);
-          }
-        },
-        generate: async () => {
-          await requireBoardAgentStageRunner().run({
-            id: `gap-structural-${safeStageId(currentPage.documentPath)}-${structuralPass}`,
-            prompt: gapRepairPagePrompt({
-              targetPath: repairTargetPath,
-              repositoryDirectory: input.checkoutDirectory,
-              diagnosticsPath,
-              plannedPage,
-              publicationPlan: input.publicationPlan,
-              coveragePrompt: pageRepairCoveragePrompt(plannedPage, input.publicationPlan.pages)
-            }),
-            workingDirectory: repairRoot,
-            additionalDirectories: [input.checkoutDirectory, input.outputDirectory],
-            writableDirectories: [repairOutputDirectory],
-            outputFiles: [repairTargetPath],
-            budgetSeconds: stageBudgetSeconds("CONTEXT_GAP_STRUCTURAL_REPAIR_SECONDS", 600)
-          });
-          await assertOnlyContextPage(repairOutputDirectory, currentPage.documentPath);
-          return { bodyMarkdown: canonicalPublicPageMarkdown(await readFile(repairTargetPath, "utf8")) };
-        }
-      });
-      if (!isRecord(correction) || typeof correction.bodyMarkdown !== "string") {
-        throw new Error("validated gap structural page disappeared");
-      }
-      bodyMarkdown = canonicalPublicPageMarkdown(correction.bodyMarkdown);
-      await writeFile(targetPath, bodyMarkdown, "utf8");
-      logger.info(`recorded targeted global repair correction for ${currentPage.documentPath}`, {
-        event: "context.gap_repair.page_corrected",
-        taskId: input.work.task.id,
-        contextBuildId: input.work.task.metadata.contextBuildId,
-        documentPath: currentPage.documentPath,
-        structuralPass,
-        bodyDigest: createHash("sha256").update(bodyMarkdown).digest("hex")
-      });
-    }
-    pages.push({
-      documentPath: currentPage.documentPath,
-      title: markdownTitle(bodyMarkdown, currentPage.documentPath),
-      bodyMarkdown,
-      publicationPlanArtifact: input.publicationPlanArtifact,
-      snapshotArtifact: input.snapshotArtifact
-    });
-  }
-  return pages;
-}
-
-async function loadContextDraftPages(input: {
-  readonly outputDirectory: string;
-  readonly snapshot: IngestEvidenceInput;
-  readonly publicationPlan: DocumentationStagePlan;
-  readonly publicationPlanArtifact: ContextArtifactRef;
-  readonly snapshotArtifact: ContextArtifactRef;
-}): Promise<ContextPageArtifact[]> {
-  const documentPaths = await contextMarkdownPaths(input.outputDirectory);
-  if (!documentPaths.includes("architecture.md")) {
-    throw new Error("context gap repair removed architecture.md");
-  }
-  if (documentPaths.length === 0 || documentPaths.length > 96) {
-    throw new Error("context gap repair produced an invalid page count");
-  }
-  const pages: ContextPageArtifact[] = [];
-  const structuralProblems: string[] = [];
-  for (const documentPath of documentPaths) {
-    const bodyMarkdown = canonicalPublicPageMarkdown(await readFile(join(input.outputDirectory, documentPath), "utf8"));
-    if (bodyMarkdown.trim().length < 400) {
-      structuralProblems.push(`${documentPath} is too shallow`);
-      continue;
-    }
-    const inventory = boardPageAuditInventory({
-      documentPath,
-      bodyMarkdown,
-      snapshot: input.snapshot
-    });
-    structuralProblems.push(...inventory.structuralProblems.map((problem) => `${documentPath}: ${problem}`));
-    const plannedPage = input.publicationPlan.pages.find((candidate) => candidate.path === documentPath);
-    if (!plannedPage) {
-      structuralProblems.push(`${documentPath} is absent from the binding publication plan`);
-    } else {
-      structuralProblems.push(
-        ...pagePlanStructuralProblems(plannedPage, input.publicationPlan.pages, bodyMarkdown).map(
-          (problem) => `${documentPath}: ${problem}`
-        )
-      );
-    }
-    pages.push({
-      documentPath,
-      title: markdownTitle(bodyMarkdown, documentPath),
-      bodyMarkdown,
-      publicationPlanArtifact: input.publicationPlanArtifact,
-      snapshotArtifact: input.snapshotArtifact
-    });
-  }
-  if (structuralProblems.length > 0) {
-    throw new Error(
-      `context gap repair produced ${structuralProblems.length} structurally unsupported claims: ${structuralProblems
-        .slice(0, 8)
-        .join("; ")}`
-    );
-  }
-  return pages;
-}
-
-async function auditContextDraftCitations(input: {
-  readonly work: ClaimedWork<"run-context-gap-repair">;
-  readonly snapshot: IngestEvidenceInput;
-  readonly checkoutDirectory: string;
-  readonly stageRoot: string;
-  readonly pages: readonly ContextPageArtifact[];
-  readonly pass: number;
-  readonly auditPass: number;
-  readonly priorReferences?: readonly CitationAuditReference[];
-  readonly priorResults?: CitationAuditStageResult["results"];
-}): Promise<{
-  readonly input: Record<string, unknown> & {
-    readonly references: readonly CitationAuditReference[];
-  };
-  readonly result: CitationAuditStageResult;
-  readonly resultDigest: string;
-  readonly publicSnapshotDigest: string;
-}> {
-  const references = input.pages.flatMap(
-    (page) =>
-      boardPageAuditInventory({
-        documentPath: page.documentPath,
-        bodyMarkdown: page.bodyMarkdown,
-        snapshot: input.snapshot
-      }).references
-  );
-  const publicSnapshotDigest = createHash("sha256")
-    .update(
-      publicContextSnapshot(
-        input.pages.map((page) => ({
-          artifact: page.publicationPlanArtifact,
-          page
-        }))
-      )
-    )
-    .digest("hex");
-  const inputPayload = {
-    version: 1,
-    checkpoint: {
-      repository: input.snapshot.repository,
-      ref: input.snapshot.ref,
-      commitSha: input.snapshot.commitSha
-    },
-    publicSnapshotDigest,
-    references
-  };
-  const inputDigest = createHash("sha256").update(JSON.stringify(inputPayload)).digest("hex");
-  const evidencePath = join(input.stageRoot, "evidence.json");
-  await writeFile(evidencePath, `${JSON.stringify(input.snapshot, null, 2)}\n`, "utf8");
-  const workerId = `citation-audit-gap-${input.pass}`;
-  const delta = citationAuditDelta({
-    references,
-    ...(input.priorReferences ? { priorReferences: input.priorReferences } : {}),
-    ...(input.priorResults ? { priorResults: input.priorResults } : {})
-  });
-  const batchAudits: CitationAuditStageResult[] = [];
-  const batches = citationReferenceBatches(delta.pendingReferences);
-  for (let index = 0; index < batches.length; index += 1) {
-    const batch = batches[index]!;
-    batchAudits.push(
-      await retryCitationAuditValidation({
-        attempts: 2,
-        run: async (attempt, priorDiagnostic) => {
-          const expectedCitationIds = batch.map((reference) => reference.citationId);
-          const basePrompt = citationAuditStagePrompt({
-            workerId,
-            repository: input.snapshot.repository,
-            repositoryDirectory: input.checkoutDirectory,
-            evidencePath,
-            references: batch,
-            inputDigest,
-            publicSnapshotDigest
-          });
-          const prompt = priorDiagnostic
-            ? [
-                basePrompt,
-                "The preceding result failed deterministic host validation. This is the one bounded format-correction retry; do not change the citation judgments merely to satisfy the schema.",
-                `Exact host diagnostic: ${priorDiagnostic}`,
-                `Expected worker ID: ${workerId}`,
-                `Expected inputDigest: ${inputDigest}`,
-                `Expected publicSnapshotDigest: ${publicSnapshotDigest}`,
-                `Expected citation IDs, each exactly once and no others:\n${JSON.stringify(expectedCitationIds, null, 2)}`
-              ].join("\n\n")
-            : basePrompt;
-          if (priorDiagnostic) {
-            logger.warn("retrying global citation audit after deterministic host validation", {
-              event: "context.gap_audit.validation_retry",
-              taskId: input.work.task.id,
-              contextBuildId: input.work.task.metadata.contextBuildId,
-              auditPass: input.auditPass,
-              batch: index + 1,
-              attempt,
-              diagnostic: priorDiagnostic
-            });
-          }
-          const phase = `gap-audit.pass-${input.auditPass}.batch-${index + 1}.attempt-${attempt}`;
-          const checkpointKey = contextPhaseCheckpointKey(input.work, "context-gap-audit-phase-checkpoints-v2", phase, {
-            inputDigest,
-            expectedCitationIds,
-            priorDiagnostic: priorDiagnostic ?? null
-          });
-          return checkpointedContextCandidate(input.work, {
-            phase,
-            checkpointKey,
-            generate: async () => {
-              const output = await requireBoardAgentStageRunner().run({
-                id: `gap-audit-${input.pass}-${input.auditPass}-${index + 1}-format-${attempt}`,
-                prompt,
-                schema: CITATION_AUDIT_STAGE_SCHEMA,
-                workingDirectory: input.checkoutDirectory,
-                additionalDirectories: [input.stageRoot],
-                readOnly: true,
-                budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_AUDIT_SECONDS", 600)
-              });
-              return output.parsed;
-            }
-          });
-        },
-        parse: (candidate) => {
-          const citationIds = batch.map((reference) => reference.citationId);
-          const expected = {
-            workerId,
-            inputDigest,
-            publicSnapshotDigest,
-            citationIds
-          };
-          return parseCitationAuditStageResult(
-            retainAssignedCitationAuditResults(bindCitationAuditHostIdentity(candidate, expected), citationIds),
-            expected
-          );
-        }
-      })
-    );
-  }
-  const result = parseCitationAuditStageResult(
-    {
-      version: 1,
-      inputDigest,
-      publicSnapshotDigest,
-      worker: {
-        id: workerId,
-        summary: [
-          ...(delta.reusedResults.length > 0
-            ? [`Reused ${delta.reusedResults.length} exact digest-bound supported citation verdicts.`]
-            : []),
-          ...batchAudits.map((audit) => audit.worker.summary)
-        ]
-          .join(" ")
-          .slice(0, 2_000)
-      },
-      results: [...delta.reusedResults, ...batchAudits.flatMap((audit) => audit.results)],
-      summary: [
-        ...(delta.reusedResults.length > 0
-          ? [`Reused ${delta.reusedResults.length} exact supported citation verdicts.`]
-          : []),
-        ...batchAudits.map((audit) => audit.summary)
-      ]
-        .join(" ")
-        .slice(0, 4_000)
-    },
-    {
-      workerId,
-      inputDigest,
-      publicSnapshotDigest,
-      citationIds: references.map((reference) => reference.citationId)
-    }
-  );
-  return {
-    input: { ...inputPayload, inputDigest },
-    result,
-    resultDigest: createHash("sha256").update(JSON.stringify(result)).digest("hex"),
-    publicSnapshotDigest
-  };
-}
-
-async function runContextCertification(
-  work: ClaimedWork<"run-context-certification">
-): Promise<Record<string, unknown>> {
-  const challengeArtifact = dependencyArtifactByType(
-    work.task.metadata.dependencyResults,
-    "challenge-context-sources",
-    "certification source challenge"
-  );
-  const evaluationArtifact = dependencyArtifactByType(
-    work.task.metadata.dependencyResults,
-    "evaluate-context-tasks",
-    "certification task evaluation"
-  );
-  const [challenge, evaluation, pages] = await Promise.all([
-    readContextBoardArtifact(work, challengeArtifact).then(parseContextGateArtifact),
-    readContextBoardArtifact(work, evaluationArtifact).then(parseContextGateArtifact),
-    contextPagesFromDependencies(work)
-  ]);
-  const publicSnapshotDigest = createHash("sha256").update(publicContextSnapshot(pages)).digest("hex");
-  const citationCertified = await contextCitationEvidenceCertified(work, pages, publicSnapshotDigest);
-  const pageArtifactKeys = pages.map((page) => page.artifact.key).sort();
-  const certified =
-    challenge.gate === "source-challenge" &&
-    evaluation.gate === "task-evaluation" &&
-    challenge.verdict === "pass" &&
-    evaluation.verdict === "pass" &&
-    challenge.blockingGapCount === 0 &&
-    evaluation.blockingGapCount === 0 &&
-    challenge.publicSnapshotDigest === publicSnapshotDigest &&
-    evaluation.publicSnapshotDigest === publicSnapshotDigest &&
-    JSON.stringify(challenge.pageArtifacts.map((artifact) => artifact.key).sort()) ===
-      JSON.stringify(pageArtifactKeys) &&
-    JSON.stringify(evaluation.pageArtifacts.map((artifact) => artifact.key).sort()) ===
-      JSON.stringify(pageArtifactKeys) &&
-    challenge.publicationPlanArtifact.key === work.task.metadata.planArtifact.key &&
-    evaluation.publicationPlanArtifact.key === work.task.metadata.planArtifact.key &&
-    citationCertified;
-  const outputArtifact = await uploadContextBoardArtifact(work, {
-    kind: "certification",
-    name: "certification.json",
-    contentType: "application/json",
-    content: Buffer.from(
-      JSON.stringify({
-        version: 1,
-        verdict: certified ? "certified" : "rejected",
-        publicSnapshotDigest,
-        publicationPlanArtifact: work.task.metadata.planArtifact,
-        pageArtifacts: pages.map((page) => page.artifact),
-        sourceChallengeArtifact: challengeArtifact,
-        taskEvaluationArtifact: evaluationArtifact
-      }),
-      "utf8"
-    )
-  });
-  return {
-    version: 1,
-    outputArtifact,
-    verdict: certified ? "certified" : "rejected",
-    publicSnapshotDigest
-  };
-}
-
-async function contextCitationEvidenceCertified(
-  work: ClaimedWork<"run-context-certification">,
-  pages: readonly { readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[],
-  publicSnapshotDigest: string
-): Promise<boolean> {
-  const latestDraftDependency = work.task.metadata.dependencyResults
-    .filter((dependency) => dependency.taskType === "repair-context-gaps")
-    .sort((left, right) => (right.pass ?? -1) - (left.pass ?? -1))[0];
-  if (latestDraftDependency) {
-    const draft = parseContextDraftArtifact(
-      await readContextBoardArtifact(work, latestDraftDependency.result.outputArtifact)
-    );
-    const expectedPages = [...pages]
-      .map(({ page }) => page)
-      .sort((left, right) => left.documentPath.localeCompare(right.documentPath));
-    const recordedPages = [...draft.pages].sort((left, right) => left.documentPath.localeCompare(right.documentPath));
-    if (
-      expectedPages.length !== recordedPages.length ||
-      expectedPages.some(
-        (page, index) =>
-          page.documentPath !== recordedPages[index]?.documentPath ||
-          page.bodyMarkdown !== recordedPages[index]?.bodyMarkdown
-      )
-    ) {
-      return false;
-    }
-    const snapshot = parseEvidenceSnapshot(
-      await readContextBoardArtifact(work, draft.snapshotArtifact),
-      work.task.metadata
-    );
-    const references = expectedPages.flatMap(
-      (page) =>
-        boardPageAuditInventory({
-          documentPath: page.documentPath,
-          bodyMarkdown: page.bodyMarkdown,
-          snapshot
-        }).references
-    );
-    const expectedInputPayload = {
-      version: 1,
-      checkpoint: {
-        repository: snapshot.repository,
-        ref: snapshot.ref,
-        commitSha: snapshot.commitSha
-      },
-      publicSnapshotDigest,
-      references
-    };
-    const expectedInputDigest = createHash("sha256").update(JSON.stringify(expectedInputPayload)).digest("hex");
-    return (
-      draft.citationAuditInput.inputDigest === expectedInputDigest &&
-      draft.citationAuditInput.publicSnapshotDigest === publicSnapshotDigest &&
-      JSON.stringify(draft.citationAuditInput.references) === JSON.stringify(references) &&
-      draft.citationAudit.inputDigest === expectedInputDigest &&
-      draft.citationAudit.publicSnapshotDigest === publicSnapshotDigest &&
-      draft.citationAudit.results.length === references.length &&
-      draft.citationAudit.results.every((result) => result.verdict === "supported")
-    );
-  }
-
-  const auditDependencies = work.task.metadata.dependencyResults
-    .filter((dependency) => dependency.taskType === "audit-context-page")
-    .sort((left, right) => (right.pass ?? -1) - (left.pass ?? -1));
-  const loadedAudits = await mapWithConcurrency(auditDependencies, 4, async (dependency) => ({
-    dependency,
-    audit: parseContextPageAuditArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
-  }));
-  for (const { artifact: pageArtifact, page } of pages) {
-    const matching = loadedAudits.find((candidate) => candidate.audit.pageArtifact.key === pageArtifact.key);
-    if (!matching?.audit.audit || matching.audit.structuralProblems.length > 0) {
-      return false;
-    }
-    const snapshot = parseEvidenceSnapshot(
-      await readContextBoardArtifact(work, matching.audit.snapshotArtifact),
-      work.task.metadata
-    );
-    const inventory = boardPageAuditInventory({
-      documentPath: page.documentPath,
-      bodyMarkdown: page.bodyMarkdown,
-      snapshot
-    });
-    if (inventory.structuralProblems.length > 0) return false;
-    const pageDigest = boardPublicPageDigest(page.documentPath, page.bodyMarkdown);
-    const inputPayload = {
-      version: 1,
-      checkpoint: {
-        repository: snapshot.repository,
-        ref: snapshot.ref,
-        commitSha: snapshot.commitSha
-      },
-      publicSnapshotDigest: pageDigest,
-      references: inventory.references,
-      structuralProblems: inventory.structuralProblems
-    };
-    const inputDigest = createHash("sha256").update(JSON.stringify(inputPayload)).digest("hex");
-    const audit = parseCitationAuditStageResult(matching.audit.audit, {
-      workerId: matching.audit.audit.worker.id,
-      inputDigest,
-      publicSnapshotDigest: pageDigest,
-      citationIds: inventory.references.map((reference) => reference.citationId)
-    });
-    if (
-      matching.audit.inputDigest !== inputDigest ||
-      matching.audit.publicSnapshotDigest !== pageDigest ||
-      audit.results.some((result) => result.verdict !== "supported")
-    ) {
-      return false;
-    }
-  }
-  return pages.length > 0;
-}
-
-function parseContextGateArtifact(content: Uint8Array): ContextGateArtifact {
-  const value = JSON.parse(Buffer.from(content).toString("utf8")) as Record<string, unknown>;
-  const gate = requiredString(value.gate, "context gate");
-  const verdict = requiredString(value.verdict, "context gate verdict");
-  if (gate !== "source-challenge" && gate !== "task-evaluation") {
-    throw new Error("context gate artifact has an invalid gate");
-  }
-  if (verdict !== "pass" && verdict !== "repair_required") {
-    throw new Error("context gate artifact has an invalid verdict");
-  }
-  if (!Array.isArray(value.pageArtifacts)) throw new Error("context gate artifact has no page manifest");
-  return {
-    gate,
-    verdict,
-    publicSnapshotDigest: requiredDigest(value.publicSnapshotDigest, "context gate publicSnapshotDigest"),
-    blockingGapCount: requiredNonNegativeInteger(value.blockingGapCount, "context gate blockingGapCount"),
-    publicationPlanArtifact: parseArtifactRef(value.publicationPlanArtifact, "context gate publicationPlanArtifact"),
-    pageArtifacts: value.pageArtifacts.map((artifact, index) =>
-      parseArtifactRef(artifact, `context gate pageArtifacts[${index}]`)
-    ),
-    ...(value.contextDraftArtifact === undefined
-      ? {}
-      : {
-          contextDraftArtifact: parseArtifactRef(value.contextDraftArtifact, "context gate contextDraftArtifact")
-        }),
-    result: value.result
-  };
-}
-
-function maintenanceTaskCatalog(
-  plan: DocumentationStagePlan,
-  challengedTasks: readonly MaterialChallengeTask[] = []
-): {
-  readonly id: string;
-  readonly question: string;
-  readonly priority: "required";
-  readonly requiredAnswerParts?: readonly ChallengeAnswerPart[];
-}[] {
-  const byQuestion = new Map<
-    string,
-    {
-      id: string;
-      question: string;
-      priority: "required";
-      requiredAnswerParts?: readonly ChallengeAnswerPart[];
-    }
-  >();
-  for (const page of plan.pages) {
-    let selectedForPage = 0;
-    for (const question of page.maintenanceQuestions) {
-      const normalized = question.trim().replace(/\s+/g, " ").toLowerCase();
-      if (byQuestion.has(normalized)) continue;
-      byQuestion.set(normalized, {
-        id: `task-${createHash("sha256").update(normalized).digest("hex").slice(0, 20)}`,
-        question,
-        priority: "required"
-      });
-      selectedForPage += 1;
-      // Certification needs a representative maintenance probe for every
-      // public subject, not an exhaustive restatement of every question the
-      // page was planned to answer. Material challenger tasks are added below
-      // without this sampling bound.
-      if (selectedForPage === 2) break;
-    }
-  }
-  for (const task of challengedTasks) {
-    const normalized = task.question.trim().replace(/\s+/g, " ").toLowerCase();
-    if (!byQuestion.has(normalized)) {
-      byQuestion.set(normalized, {
-        id: task.id,
-        question: task.question,
-        priority: "required",
-        requiredAnswerParts: task.requiredAnswerParts
-      });
-    }
-  }
-  return [...byQuestion.values()].sort((left, right) => left.id.localeCompare(right.id));
-}
-
-interface MaterialChallengeTask {
-  readonly id: string;
-  readonly question: string;
-  readonly requiredAnswerParts: readonly ChallengeAnswerPart[];
-}
-
-async function previousMaterialChallengeTasks(
-  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic>,
-  beforePass: number
-): Promise<MaterialChallengeTask[]> {
-  const previous = work.task.metadata.dependencyResults
-    .filter((dependency) => dependency.taskType === "challenge-context-sources" && (dependency.pass ?? -1) < beforePass)
-    .sort((left, right) => (right.pass ?? -1) - (left.pass ?? -1))[0];
-  if (!previous) return [];
-  const gate = parseContextGateArtifact(await readContextBoardArtifact(work, previous.result.outputArtifact));
-  if (!isRecord(gate.result) || !Array.isArray(gate.result.addedTasks)) return [];
-  const answerParts = new Set<ChallengeAnswerPart>([
-    "entrypoints",
-    "important_symbols",
-    "control_flow",
-    "state",
-    "invariants",
-    "failure_triage",
-    "configuration",
-    "verification"
-  ]);
-  return gate.result.addedTasks.flatMap((task, index) => {
-    if (!isRecord(task) || task.material !== true || !Array.isArray(task.requiredAnswerParts)) {
-      return [];
-    }
-    const requiredAnswerParts = task.requiredAnswerParts.map((part, partIndex) => {
-      const value = requiredString(
-        part,
-        `source challenge addedTasks[${index}].requiredAnswerParts[${partIndex}]`
-      ) as ChallengeAnswerPart;
-      if (!answerParts.has(value)) throw new Error(`source challenge has invalid answer part ${value}`);
-      return value;
-    });
-    return [
-      {
-        id: requiredString(task.id, `source challenge addedTasks[${index}].id`),
-        question: requiredString(task.question, `source challenge addedTasks[${index}].question`),
-        requiredAnswerParts
-      }
-    ];
-  });
-}
-
-async function contextPagesFromDependencies(
-  work: ClaimedWork<ContextWorkerTopic | InternalContextStageTopic>
-): Promise<{ readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[]> {
-  const latestDraftArtifact = latestContextDraftArtifact(work.task.metadata.dependencyResults);
-  if (latestDraftArtifact) {
-    const draft = parseContextDraftArtifact(await readContextBoardArtifact(work, latestDraftArtifact));
-    if (draft.pages.length === 0) throw new Error("latest context draft has no pages");
-    return [...draft.pages]
-      .sort((left, right) => left.documentPath.localeCompare(right.documentPath))
-      .map((page) => ({ artifact: latestDraftArtifact, page }));
-  }
-  const candidates = work.task.metadata.dependencyResults.filter((dependency) =>
-    ["write-context-page", "repair-context-page"].includes(dependency.taskType)
-  );
-  // A mature build can retain several write/repair artifacts per public page.
-  // Bound the internal API fan-out so retries and multiple worker instances do
-  // not exhaust Cloud Run concurrency with one synchronized read burst.
-  const loaded = await mapWithConcurrency(candidates, 4, async (dependency) => ({
-    dependency,
-    artifact: dependency.result.outputArtifact,
-    page: parseContextPageArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
-  }));
-  const selected = new Map<string, (typeof loaded)[number]>();
-  for (const candidate of loaded) {
-    const current = selected.get(candidate.page.documentPath);
-    if (
-      !current ||
-      (candidate.dependency.pass ?? -1) > (current.dependency.pass ?? -1) ||
-      ((candidate.dependency.pass ?? -1) === (current.dependency.pass ?? -1) &&
-        candidate.dependency.taskType === "repair-context-page")
-    ) {
-      selected.set(candidate.page.documentPath, candidate);
-    }
-  }
-  if (selected.size === 0) throw new Error("context gate has no completed page artifacts");
-  return [...selected.values()]
-    .sort((left, right) => left.page.documentPath.localeCompare(right.page.documentPath))
-    .map(({ artifact, page }) => ({ artifact, page }));
-}
-
-function latestContextDraftArtifact(
-  dependencies: readonly ContextBoardDependencyResult[]
-): ContextArtifactRef | undefined {
-  return dependencies
-    .filter((dependency) => dependency.taskType === "repair-context-gaps")
-    .sort((left, right) => (right.pass ?? -1) - (left.pass ?? -1))[0]?.result.outputArtifact;
-}
-
-async function contextCitationAuditCheckpoint(
-  work: ClaimedWork<"run-context-gap-repair">,
-  pages: readonly { readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[],
-  challenge: ContextGateArtifact,
-  evaluation: ContextGateArtifact
-): Promise<{
-  readonly references: readonly CitationAuditReference[];
-  readonly results: CitationAuditStageResult["results"];
-}> {
-  const latestDraft = latestContextDraftArtifact(work.task.metadata.dependencyResults);
-  const challengeDraft = challenge.contextDraftArtifact ?? latestDraft;
-  const evaluationDraft = evaluation.contextDraftArtifact ?? latestDraft;
-  if (!challengeDraft && !evaluationDraft) {
-    return contextPageCitationAuditCheckpoint(work, pages);
-  }
-  if (
-    !challengeDraft ||
-    !evaluationDraft ||
-    challengeDraft.key !== evaluationDraft.key ||
-    challengeDraft.sha256 !== evaluationDraft.sha256
-  ) {
-    throw new Error("context gates disagree about their audited global draft");
-  }
-  const sameDraft = (artifact: ContextArtifactRef): boolean =>
-    artifact.key === challengeDraft.key && artifact.sha256 === challengeDraft.sha256;
-  if (
-    pages.length === 0 ||
-    pages.some((entry) => !sameDraft(entry.artifact)) ||
-    challenge.pageArtifacts.length !== pages.length ||
-    evaluation.pageArtifacts.length !== pages.length ||
-    challenge.pageArtifacts.some((artifact) => !sameDraft(artifact)) ||
-    evaluation.pageArtifacts.some((artifact) => !sameDraft(artifact))
-  ) {
-    throw new Error("context gate global draft binding does not match its page manifest");
-  }
-  const draft = parseContextDraftArtifact(await readContextBoardArtifact(work, challengeDraft));
-  const expectedPages = [...pages]
-    .map(({ page }) => page)
-    .sort((left, right) => left.documentPath.localeCompare(right.documentPath));
-  const recordedPages = [...draft.pages].sort((left, right) => left.documentPath.localeCompare(right.documentPath));
-  if (
-    expectedPages.length !== recordedPages.length ||
-    expectedPages.some(
-      (page, index) =>
-        page.documentPath !== recordedPages[index]?.documentPath ||
-        page.bodyMarkdown !== recordedPages[index]?.bodyMarkdown
-    )
-  ) {
-    throw new Error("context gate global draft content does not match its pages");
-  }
-  const publicSnapshotDigest = createHash("sha256").update(publicContextSnapshot(pages)).digest("hex");
-  if (
-    challenge.publicSnapshotDigest !== publicSnapshotDigest ||
-    evaluation.publicSnapshotDigest !== publicSnapshotDigest ||
-    draft.citationAuditInput.publicSnapshotDigest !== publicSnapshotDigest ||
-    draft.citationAudit.publicSnapshotDigest !== publicSnapshotDigest ||
-    draft.citationAudit.results.length !== draft.citationAuditInput.references.length ||
-    draft.citationAudit.results.some((result) => result.verdict !== "supported")
-  ) {
-    throw new Error("context gate global draft has no complete supported citation checkpoint");
-  }
-  return {
-    references: draft.citationAuditInput.references,
-    results: draft.citationAudit.results
-  };
-}
-
-async function contextPageCitationAuditCheckpoint(
-  work: ClaimedWork<"run-context-gap-repair">,
-  pages: readonly { readonly artifact: ContextArtifactRef; readonly page: ContextPageArtifact }[]
-): Promise<{
-  readonly references: readonly CitationAuditReference[];
-  readonly results: CitationAuditStageResult["results"];
-}> {
-  const auditDependencies = work.task.metadata.dependencyResults
-    .filter((dependency) => dependency.taskType === "audit-context-page")
-    .sort((left, right) => (right.pass ?? -1) - (left.pass ?? -1));
-  const loaded = await mapWithConcurrency(auditDependencies, 4, async (dependency) => ({
-    dependency,
-    audit: parseContextPageAuditArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
-  }));
-  const selected = new Map<
-    string,
-    {
-      readonly references: readonly CitationAuditReference[];
-      readonly results: CitationAuditStageResult["results"];
-    }
-  >();
-  for (const candidate of loaded) {
-    const page = pages.find(
-      (entry) =>
-        entry.artifact.key === candidate.audit.pageArtifact.key &&
-        entry.artifact.sha256 === candidate.audit.pageArtifact.sha256
-    );
-    if (
-      !page ||
-      selected.has(page.page.documentPath) ||
-      candidate.audit.structuralProblems.length > 0 ||
-      !candidate.audit.audit ||
-      candidate.audit.publicSnapshotDigest !== boardPublicPageDigest(page.page.documentPath, page.page.bodyMarkdown)
-    ) {
-      continue;
-    }
-    const audit = parseCitationAuditStageResult(candidate.audit.audit, {
-      workerId: candidate.audit.audit.worker.id,
-      inputDigest: candidate.audit.inputDigest,
-      publicSnapshotDigest: candidate.audit.publicSnapshotDigest,
-      citationIds: candidate.audit.references.map((reference) => reference.citationId)
-    });
-    selected.set(page.page.documentPath, {
-      references: candidate.audit.references,
-      results: audit.results
-    });
-  }
-  return {
-    references: [...selected.values()].flatMap((candidate) => candidate.references),
-    results: [...selected.values()].flatMap((candidate) => candidate.results)
-  };
-}
-
-function publicContextSnapshot(pages: readonly { readonly page: ContextPageArtifact }[]): string {
-  return contextBoardPublicSnapshot(pages.map(({ page }) => page));
-}
-
-function dependencyArtifactByType(
-  dependencies: readonly ContextBoardDependencyResult[],
-  taskType: string,
-  name: string
-): ContextArtifactRef {
-  const dependency = dependencies
-    .filter((candidate) => candidate.taskType === taskType)
-    .sort((left, right) => (right.pass ?? -1) - (left.pass ?? -1))[0];
-  if (!dependency) throw new Error(`${name} artifact is missing`);
-  return dependency.result.outputArtifact;
-}
-
-function dependencyArtifactByTypeAndPass(
-  dependencies: readonly ContextBoardDependencyResult[],
-  taskType: string,
-  pass: number,
-  name: string
-): ContextArtifactRef {
-  const dependency = dependencies.find((candidate) => candidate.taskType === taskType && candidate.pass === pass);
-  if (!dependency) throw new Error(`${name} artifact for pass ${pass} is missing`);
-  return dependency.result.outputArtifact;
-}
-
 function parsePublicationPlanArtifact(content: Uint8Array): PublicationPlanArtifact {
   const value = JSON.parse(Buffer.from(content).toString("utf8")) as Record<string, unknown>;
   const researchReportArtifacts = Array.isArray(value.researchReportArtifacts)
@@ -4503,61 +2839,6 @@ function parsePageRepairCheckpointDiagnostics(value: unknown): PageRepairCheckpo
     regressionProblems: value.regressionProblems.map((problem, index) =>
       requiredString(problem, `context page repair checkpoint regressionProblems[${index}]`)
     )
-  };
-}
-
-function parseContextDraftArtifact(content: Uint8Array): ContextDraftArtifact {
-  const value = JSON.parse(Buffer.from(content).toString("utf8")) as Record<string, unknown>;
-  if (!Array.isArray(value.pages) || value.pages.length === 0 || value.pages.length > 96) {
-    throw new Error("context draft has an invalid page manifest");
-  }
-  if (!isRecord(value.citationAuditInput) || !Array.isArray(value.citationAuditInput.references)) {
-    throw new Error("context draft has no citation audit input");
-  }
-  const citationAuditInput = {
-    inputDigest: requiredDigest(value.citationAuditInput.inputDigest, "context draft citationAuditInput.inputDigest"),
-    publicSnapshotDigest: requiredDigest(
-      value.citationAuditInput.publicSnapshotDigest,
-      "context draft citationAuditInput.publicSnapshotDigest"
-    ),
-    references: value.citationAuditInput.references as CitationAuditReference[]
-  };
-  const citationAudit = parseCitationAuditStageResult(value.citationAudit, {
-    workerId: requiredString(
-      isRecord(value.citationAudit) && isRecord(value.citationAudit.worker) ? value.citationAudit.worker.id : undefined,
-      "context draft citation audit worker"
-    ),
-    inputDigest: citationAuditInput.inputDigest,
-    publicSnapshotDigest: citationAuditInput.publicSnapshotDigest,
-    citationIds: citationAuditInput.references.map((reference) =>
-      requiredString(reference.citationId, "context draft citation ID")
-    )
-  });
-  const citationAuditDigest = requiredDigest(value.citationAuditDigest, "context draft citationAuditDigest");
-  if (createHash("sha256").update(JSON.stringify(citationAudit)).digest("hex") !== citationAuditDigest) {
-    throw new Error("context draft citation audit digest mismatch");
-  }
-  return {
-    pages: value.pages.map((page, index) => {
-      if (!isRecord(page)) throw new Error(`context draft page ${index} is invalid`);
-      return {
-        documentPath: requiredString(page.documentPath, `context draft pages[${index}].documentPath`),
-        title: requiredString(page.title, `context draft pages[${index}].title`),
-        bodyMarkdown: canonicalPublicPageMarkdown(
-          requiredString(page.bodyMarkdown, `context draft pages[${index}].bodyMarkdown`)
-        ),
-        publicationPlanArtifact: parseArtifactRef(
-          page.publicationPlanArtifact,
-          `context draft pages[${index}].publicationPlanArtifact`
-        ),
-        snapshotArtifact: parseArtifactRef(page.snapshotArtifact, `context draft pages[${index}].snapshotArtifact`)
-      };
-    }),
-    publicationPlanArtifact: parseArtifactRef(value.publicationPlanArtifact, "context draft publicationPlanArtifact"),
-    snapshotArtifact: parseArtifactRef(value.snapshotArtifact, "context draft snapshotArtifact"),
-    citationAuditInput,
-    citationAudit,
-    citationAuditDigest
   };
 }
 
@@ -4639,80 +2920,6 @@ async function assertOnlyContextPage(outputDirectory: string, expectedPath: stri
       `page task must emit only ${expectedPath}; observed ${files.length > 0 ? files.join(", ") : "no files"}`
     );
   }
-}
-
-async function contextMarkdownPaths(outputDirectory: string): Promise<string[]> {
-  const files: string[] = [];
-  const walk = async (relative: string): Promise<void> => {
-    for (const entry of await readdir(join(outputDirectory, relative), { withFileTypes: true })) {
-      const child = relative ? `${relative}/${entry.name}` : entry.name;
-      if (entry.isSymbolicLink()) throw new Error(`context repair emitted a symbolic link: ${child}`);
-      if (entry.isDirectory()) {
-        if (entry.name.startsWith(".")) throw new Error(`context repair emitted an internal directory: ${child}`);
-        await walk(child);
-      } else if (entry.isFile()) {
-        if (!/^(?:[a-z0-9][a-z0-9-]*\/)*[a-z0-9][a-z0-9-]*\.md$/.test(child)) {
-          throw new Error(`context repair emitted a non-public file: ${child}`);
-        }
-        files.push(child);
-      } else {
-        throw new Error(`context repair emitted an unsupported artifact: ${child}`);
-      }
-    }
-  };
-  await walk("");
-  return files.sort();
-}
-
-interface ContextDirectoryCheckpoint {
-  readonly version: 1;
-  readonly files: readonly { readonly path: string; readonly bodyMarkdown: string }[];
-}
-
-async function captureContextDirectory(outputDirectory: string): Promise<ContextDirectoryCheckpoint> {
-  const paths = await contextMarkdownPaths(outputDirectory);
-  return {
-    version: 1,
-    files: await Promise.all(
-      paths.map(async (path) => ({
-        path,
-        bodyMarkdown: await readFile(join(outputDirectory, path), "utf8")
-      }))
-    )
-  };
-}
-
-async function restoreContextDirectory(outputDirectory: string, value: unknown): Promise<void> {
-  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.files) || value.files.length > 96) {
-    throw new Error("Context directory phase checkpoint is invalid");
-  }
-  const files = value.files.map((candidate, index) => {
-    if (!isRecord(candidate)) throw new Error(`Context directory checkpoint file ${index} is invalid`);
-    const path = requiredString(candidate.path, `Context directory checkpoint files[${index}].path`);
-    if (!/^(?:[a-z0-9][a-z0-9-]*\/)*[a-z0-9][a-z0-9-]*\.md$/.test(path)) {
-      throw new Error(`Context directory checkpoint path is invalid: ${path}`);
-    }
-    if (typeof candidate.bodyMarkdown !== "string" || !candidate.bodyMarkdown.trim()) {
-      throw new Error(`Context directory checkpoint files[${index}].bodyMarkdown is required`);
-    }
-    return { path, bodyMarkdown: candidate.bodyMarkdown };
-  });
-  if (new Set(files.map((file) => file.path)).size !== files.length) {
-    throw new Error("Context directory checkpoint contains duplicate paths");
-  }
-  await rm(outputDirectory, { recursive: true, force: true });
-  await mkdir(outputDirectory, { recursive: true });
-  for (const file of files) {
-    const target = join(outputDirectory, file.path);
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, file.bodyMarkdown, "utf8");
-  }
-}
-
-function markdownTitle(bodyMarkdown: string, documentPath: string): string {
-  const headings = bodyMarkdown.match(/^#\s+(.+)$/gm) ?? [];
-  if (headings.length !== 1) throw new Error(`${documentPath} must contain exactly one H1`);
-  return headings[0].replace(/^#\s+/, "").trim();
 }
 
 function safeStageId(value: string): string {
@@ -5591,13 +3798,13 @@ async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string
     githubJson(`/repos/${repository}/pulls/${pullRequestNumber}`),
     githubText(`/repos/${repository}/pulls/${pullRequestNumber}`, "application/vnd.github.v3.diff")
   ]);
-  const reviewRequest: ReviewRequest = {
+  const reviewRequest: LegacyReviewRequest = {
     repository,
     pullRequestNumber,
     title: typeof pullRequest.title === "string" ? pullRequest.title : `Pull request #${pullRequestNumber}`,
     diff
   };
-  const prepared = prepareDiff(reviewRequest.diff);
+  const prepared = prepareLegacyReviewDiff(reviewRequest.diff);
   const model = process.env.REVIEW_MODEL?.trim() || "gpt-5.6-sol";
   const apiKey = requiredEnv("OPENAI_API_KEY");
   const baseUrl = (process.env.OPENAI_API_URL?.trim() || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -5606,9 +3813,16 @@ async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
       model,
-      instructions: REVIEW_SYSTEM_PROMPT,
-      input: buildReviewPrompt(reviewRequest, prepared),
-      text: { format: { type: "json_schema", name: "review_findings", schema: REVIEW_FINDINGS_SCHEMA, strict: true } },
+      instructions: LEGACY_REVIEW_SYSTEM_PROMPT,
+      input: legacyReviewPrompt(reviewRequest, prepared),
+      text: {
+        format: {
+          type: "json_schema",
+          name: "review_findings",
+          schema: LEGACY_REVIEW_FINDINGS_SCHEMA,
+          strict: true
+        }
+      },
       store: false
     }),
     signal: requestSignal(10 * 60 * 1000)
@@ -5616,7 +3830,7 @@ async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string
   if (!response.ok) {
     throw new Error(`OpenAI review failed with ${response.status}: ${await boundedFailureDetail(response, [apiKey])}`);
   }
-  const parsed = parseReviewOutput(extractOutputText((await response.json()) as Record<string, unknown>));
+  const parsed = parseLegacyReviewOutput(extractOutputText((await response.json()) as Record<string, unknown>));
   return {
     model,
     summary: parsed.summary,
@@ -5830,7 +4044,7 @@ function extractOutputText(payload: Record<string, unknown>): string {
   throw new Error("OpenAI response did not contain output text");
 }
 
-function parseClaimedWork(value: unknown): ClaimedWork {
+function parseClaimedWork(value: unknown): ClaimedWork<SupportedWorkerTopic> {
   if (!isRecord(value) || !isRecord(value.message) || !isRecord(value.task) || !isRecord(value.task.metadata)) {
     throw new Error("claim response must include message, task, and task metadata");
   }
@@ -5838,7 +4052,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
   if (!SUPPORTED_WORKER_TOPICS.includes(topicValue as (typeof SUPPORTED_WORKER_TOPICS)[number])) {
     throw new Error(`unsupported claimed topic ${topicValue}`);
   }
-  const topic = topicValue as WorkerTopic;
+  const topic = topicValue as SupportedWorkerTopic;
   const message = {
     id: requiredString(value.message.id, "claim message id"),
     leaseId: requiredString(value.message.leaseId, "claim lease id"),
@@ -5874,7 +4088,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
       topic,
       message: { ...message, topic },
       task: { id: taskId, metadata: reviewBoardWorkMetadata(metadata) }
-    } as ClaimedWork;
+    } as ClaimedWork<SupportedWorkerTopic>;
   }
   if (isControlBoardTopic(topic)) {
     const workflowType = requiredString(metadata.workflowType, "task workflowType");
@@ -5905,7 +4119,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
               }
             : { ...common, workflowType: "billing_retry" }
       }
-    } as ClaimedWork;
+    } as ClaimedWork<SupportedWorkerTopic>;
   }
   if (isBoardTopic(topic)) {
     const common = repositoryMetadata(metadata);
@@ -5918,7 +4132,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
       topic,
       message: { ...message, topic },
       task: { id: taskId, metadata: contextMetadata }
-    } as ClaimedWork;
+    } as ClaimedWork<SupportedWorkerTopic>;
   }
   throw new Error("unsupported claimed topic");
 }
@@ -6100,7 +4314,7 @@ function isDurableBoardTopic(
 
 function boardWorkMetadata(
   metadata: Record<string, unknown>,
-  topic: ContextWorkerTopic | InternalContextStageTopic | CausalGraphWorkerTopic
+  topic: ContextWorkerTopic | CausalGraphWorkerTopic
 ): Omit<ContextBoardWorkerMetadata, keyof RepositoryContextMetadata> {
   const dependencyResults = parseContextBoardDependencyResults(metadata.dependencyResults);
   const base = {
@@ -6138,61 +4352,7 @@ function boardWorkMetadata(
         pageOperation
       };
     }
-    case "run-context-research-plan":
-      return {
-        ...base,
-        inputArtifact: parseArtifactRef(metadata.inputArtifact, "task inputArtifact")
-      };
-    case "run-context-research":
-      return {
-        ...base,
-        workKey: requiredString(metadata.workKey, "task workKey"),
-        planArtifact: parseArtifactRef(metadata.planArtifact, "task planArtifact"),
-        inputArtifact: parseArtifactRef(metadata.inputArtifact, "task inputArtifact")
-      };
-    case "run-context-publication-plan":
-      return {
-        ...base,
-        planArtifact: parseArtifactRef(metadata.planArtifact, "task planArtifact")
-      };
-    case "run-context-page-write":
-      return {
-        ...base,
-        pageTaskId: requiredString(metadata.pageTaskId, "task pageTaskId"),
-        pageKey: requiredString(metadata.pageKey, "task pageKey"),
-        documentPath: requiredString(metadata.documentPath, "task documentPath"),
-        pass: requiredNonNegativeInteger(metadata.pass, "task pass"),
-        pageChange: requiredPageChange(metadata.pageChange),
-        planArtifact: parseArtifactRef(metadata.planArtifact, "task planArtifact"),
-        inputArtifact: parseArtifactRef(metadata.inputArtifact, "task inputArtifact")
-      };
-    case "run-context-page-audit":
-      return {
-        ...base,
-        pageTaskId: requiredString(metadata.pageTaskId, "task pageTaskId"),
-        pageKey: requiredString(metadata.pageKey, "task pageKey"),
-        documentPath: requiredString(metadata.documentPath, "task documentPath"),
-        pass: requiredNonNegativeInteger(metadata.pass, "task pass")
-      };
-    case "run-context-page-repair":
-      return {
-        ...base,
-        pageTaskId: requiredString(metadata.pageTaskId, "task pageTaskId"),
-        documentPath: requiredString(metadata.documentPath, "task documentPath"),
-        pass: requiredNonNegativeInteger(metadata.pass, "task pass"),
-        findingsArtifact: parseArtifactRef(metadata.findingsArtifact, "task findingsArtifact")
-      };
-    case "run-context-source-challenge":
-    case "run-context-task-evaluation":
-    case "run-context-gap-repair":
-      return {
-        ...base,
-        planArtifact: parseArtifactRef(metadata.planArtifact, "task planArtifact"),
-        pass: requiredNonNegativeInteger(metadata.pass, "task pass")
-      };
     case "run-context-publication":
-    case "run-context-certification":
-    case "run-context-pageindex":
       return {
         ...base,
         planArtifact: parseArtifactRef(metadata.planArtifact, "task planArtifact")
@@ -6400,14 +4560,6 @@ function requiredNonNegativeInteger(value: unknown, name: string): number {
     throw new Error(`${name} must be a non-negative integer`);
   }
   return value;
-}
-
-function requiredPageChange(value: unknown): ContextPageChange {
-  const change = requiredString(value, "task pageChange");
-  if (!["add", "retain", "revise"].includes(change)) {
-    throw new Error("task pageChange must be add, retain, or revise");
-  }
-  return change as ContextPageChange;
 }
 
 function samePriorReleaseSeed(left: ContextPriorReleaseSeed, right: ContextPriorReleaseSeed): boolean {

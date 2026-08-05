@@ -1,5 +1,11 @@
 # Context quality benchmark
 
+Status: the quality dimensions in this document remain the target. The retained
+`context-board-quality-v2` filesystem evaluator was built for the retired multi-topic
+workflow and is not a release gate for page-oriented builds until its artifact parser is
+updated. Runtime page validation, citation audits, publication validation, and API/MCP
+acceptance remain authoritative.
+
 This benchmark defines what “comparable to DeepWiki and Code Wiki” means for Context. It compares the quality of the generated engineering documentation and the usefulness of the context returned to another agent. It does not require Context to copy either product's chat experience.
 
 The unit of quality is a repository-specific maintenance task that a coding or review agent can complete from the generated context and its exact source links. Word count, page count, and prose length are not parity metrics. Longer documentation can still be incomplete, ungrounded, or difficult to navigate.
@@ -22,17 +28,24 @@ published PageIndex tree; the calling coding or review agent performs the final 
 
 The derivation lead must discover concrete questions that represent real maintenance work in that repository, such as changing a flow safely, tracing state ownership, diagnosing a failure, extending an interface, or understanding why a current design exists.
 
-For every required question:
+For every required question in an offline benchmark corpus:
 
 - the question is mapped to the pages intended to answer it;
 - a context-only critic attempts the task using public generated pages;
 - the critic records the pages actually used and a `pass`, `partial`, or `fail` verdict;
-- a partial or failed attempt creates a tracked gap;
-- the latest completed verdict is `pass` before publication.
+- a partial or failed attempt creates a benchmark finding; and
+- regressions are investigated before treating a model or prompt change as an
+  improvement.
 
-Every published page must be used by at least one latest passing task. This prevents an agent from publishing plausible but untested prose.
+Maintenance-task evaluation is no longer a claimable runtime Board gate. It is an
+offline quality signal: production publication is gated by page dispositions, exact
+citation validation, the deterministic publication manifest, and PageIndex validation.
 
-For v9 local runs, a pass is bound to SHA-256 digests of the exact public Markdown snapshot and maintenance-task catalog. The critic records an auditable attempt—headings, entry points, symbols, change plan, invariants, verification, failure triage, and unknowns—rather than returning a bare verdict. Any later page or task change invalidates that certification.
+An offline pass should bind SHA-256 digests of the exact public Markdown snapshot and
+maintenance-task catalog. The critic should record an auditable attempt—headings, entry
+points, symbols, change plan, invariants, verification, failure triage, and unknowns—
+rather than returning a bare verdict. Any later page or task change invalidates that
+benchmark result.
 
 ### Grounding and exact source navigation
 
@@ -47,8 +60,8 @@ separate read-only, source-aware Codex audit receives that assertion and the exa
 captured excerpt. It must return each citation identity exactly once and mark every
 one `supported`; an unsupported or omitted citation blocks parity.
 
-For a retained run, the evaluator independently reconstructs those identities and
-checks the full private audit binding chain:
+For a retained page-oriented run, validation should reconstruct those identities and
+check the private audit binding chain:
 
 - `citation-audit-input.json` contains exactly the current public citations, their
   assertions, targets, and source-bound excerpts;
@@ -56,14 +69,13 @@ checks the full private audit binding chain:
   current ordered Markdown snapshot;
 - `citation-audit.json` covers every current citation exactly once, with no stale,
   invented, duplicated, or unsupported result;
-- `citation-audit.checkpoint.json` binds the repository/ref/commit, input digest,
-  public snapshot, ordered citation catalog, and exact audit-result bytes;
-- `certification.json` binds both the exact current public snapshot and the exact
-  audit-result digest.
+- each page phase checkpoint binds task, input digest, exact citation catalog, and audit
+  result bytes; and
+- the publication `certification.json` manifest binds the exact current public snapshot,
+  page artifacts, publication plan, and omitted-page dispositions.
 
-These files remain private orchestration state under
-`derive-state/agent-stages/`; they are never copied into `derive-output/`. The
-public contract remains ordinary engineering Markdown with ordinary source links.
+These files remain private immutable artifacts. The public contract remains ordinary
+engineering Markdown with ordinary source links.
 
 ### Navigable hierarchy
 
@@ -127,9 +139,10 @@ pnpm evaluate:context-board-quality -- \
   --previous-build task_previous
 ```
 
-The Board evaluator resolves exactly one
+The retained v2 Board evaluator resolves exactly one
 `context/.../builds/<build-id>/` subtree and never uses artifacts from a
-sibling build. It independently verifies:
+sibling build. It still expects retired source-challenge and task-evaluation artifacts,
+so use it only with a compatible historical artifact set. It verifies:
 
 - immutable artifact references and SHA-256 byte bindings;
 - the certified release, publication plan, evidence checkpoint, newest source
@@ -161,8 +174,9 @@ The filesystem evaluator proves retained-artifact consistency. It does not
 replace the PostgreSQL publication-transaction test, the worker lease/fencing
 tests, a real interruption/resume test, or API/MCP retrieval tests.
 
-Passing the Board evaluator is necessary but not sufficient for a parity claim.
-Final acceptance also requires representative end-to-end runs, a real
+Passing the retained evaluator on a compatible historical artifact set is not evidence
+that a page-oriented candidate is accepted. Final acceptance requires representative
+end-to-end runs, a real
 interruption/resume test, retrieval through API and MCP, and human inspection
 that the maintenance questions are material rather than trivial. Production
 acceptance samples immutable Board-owned document titles and requires exact
