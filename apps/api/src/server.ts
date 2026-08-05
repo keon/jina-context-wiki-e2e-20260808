@@ -3791,6 +3791,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, { accepted: true, replay: completed.replayed, terminal: completed.terminal });
       return;
     }
+    // Lease ownership and artifact verification below are decided from this
+    // instance's snapshot. Another instance may have committed the claim, so a
+    // stale snapshot here would silently skip verification and record the
+    // completion without a result digest. loadNewer makes this a version check.
+    // Release identity is verified first so a stale release generation is
+    // still rejected before any Board state is read.
+    await verifyLegacyWorkerClaimRelease(workerRelease);
+    await reload();
     const terminalOutcome: "done" | "failed" = outcome === "done" ? "done" : "failed";
     const outboxId = entityId<"board_outbox_message">(messageId) as BoardOutboxMessageId;
     const boardTaskId = entityId<"task">(taskId) as TaskId;
