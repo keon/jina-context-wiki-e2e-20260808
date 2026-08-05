@@ -39,6 +39,7 @@ import { GraphApiClient } from "./graph-client.js";
 import {
   acceptBackfill,
   authorizeInternal,
+  authorizeSchedule,
   completeReview,
   prepareReview,
   recordReviewEvent,
@@ -1519,7 +1520,7 @@ export function createApp(config: AppConfig): Hono {
   });
   app.post("/internal/installations/backfill", (c) => acceptBackfill(c, config, billing));
   app.post("/internal/schedules/billing-retry", async (c) => {
-    authorizeInternal(c, config);
+    await authorizeSchedule(c, config);
     const body = await c.req.json().catch(() => ({}));
     const workflow = await admitScheduledBillingRetry(body);
     return c.json({ accepted: true, workflow_id: workflow.id, replayed: workflow.replayed }, 202);

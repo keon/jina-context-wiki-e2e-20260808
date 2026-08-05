@@ -9,6 +9,16 @@ export type AppConfig = {
   auth: AuthConfig;
   billing: BillingConfig;
   graph?: GraphConfig;
+  schedulerOidc?: SchedulerOidcConfig;
+};
+
+/**
+ * When set, Cloud Scheduler authenticates with a Google-signed OIDC identity
+ * token instead of a copy of the internal API token stored in the job resource.
+ */
+type SchedulerOidcConfig = {
+  audience: string;
+  email: string;
 };
 
 export type GraphConfig = {
@@ -76,7 +86,18 @@ export function loadConfig(env = process.env): AppConfig {
     auth: parseAuthConfig(env),
     billing: parseBillingConfig(env, dashboardUrl),
     graph: parseGraphConfig(env),
+    ...(parseSchedulerOidcConfig(env) ? { schedulerOidc: parseSchedulerOidcConfig(env) } : {}),
   };
+}
+
+function parseSchedulerOidcConfig(env: NodeJS.ProcessEnv): SchedulerOidcConfig | undefined {
+  const audience = optionalEnv(env, "JINA_SCHEDULER_OIDC_AUDIENCE");
+  const email = optionalEnv(env, "JINA_SCHEDULER_OIDC_EMAIL");
+  if (!audience && !email) return undefined;
+  if (!audience || !email) {
+    throw new Error("JINA_SCHEDULER_OIDC_AUDIENCE and JINA_SCHEDULER_OIDC_EMAIL must be configured together");
+  }
+  return { audience, email };
 }
 
 function parseGraphConfig(env: NodeJS.ProcessEnv): GraphConfig | undefined {

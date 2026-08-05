@@ -6,6 +6,7 @@ import type { AppConfig } from "./config.js";
 import type { BillingService } from "./billing.js";
 import { normalizeDecimalLiteral } from "./billing-math.js";
 import { ApiError } from "./errors.js";
+import { looksLikeJwt, verifyGoogleIdToken } from "./google-oidc.js";
 import { getOpenAiModelPricing, type OpenAiModelPrice } from "./model-settings.js";
 import {
   completeReviewRun,
@@ -763,6 +764,26 @@ export function authorizeInternal(c: Context, config: AppConfig): void {
   if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
     throw new ApiError(401, "invalid internal token");
   }
+}
+
+/**
+ * Schedule endpoints accept a Google-signed OIDC identity token when scheduler
+ * OIDC is configured, so Cloud Scheduler never stores a copy of the internal
+ * API token in its job resource. The internal bearer keeps working for
+ * operators and for deployments that have not switched the scheduler yet.
+ */
+export async function authorizeSchedule(c: Context, config: AppConfig): Promise<void> {
+  const authorization = c.req.header("authorization") ?? "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+  if (config.schedulerOidc && token && looksLikeJwt(token)) {
+    try {
+      await verifyGoogleIdToken(token, config.schedulerOidc);
+      return;
+    } catch {
+      // Fall through to the internal bearer; either credential is sufficient.
+    }
+  }
+  authorizeInternal(c, config);
 }
 
 function requiredParam(c: Context, name: string): string {
