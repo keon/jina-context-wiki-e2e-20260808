@@ -109,6 +109,7 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingCloudBuild, /IMAGE_TAG=\$\{_IMAGE_TAG\}/);
   assert.match(stagingCloudBuild, /JINA_CONTEXT_TENANT_ID=\$\{_JINA_CONTEXT_TENANT_ID\}/);
   assert.match(stagingCloudBuild, /org\.opencontainers\.image\.revision=\$\{_SOURCE_SHA\}/);
+  assert.match(stagingCloudBuild, /dynamicSubstitutions: true/);
   assert.match(
     stagingCloudBuild,
     /serviceAccount: projects\/jina-staging-20260802\/serviceAccounts\/jina-cloud-build-staging@jina-staging-20260802\.iam\.gserviceaccount\.com/
