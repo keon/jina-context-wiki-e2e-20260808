@@ -1,0 +1,60 @@
+name: CI
+
+# Full-repository gate. validate-platform.yml is path-filtered to a few
+# workspaces, which left changes to most packages, deploy scripts, and the
+# cloudbuild configs with no CI at all. This workflow mirrors
+# scripts/cloud-build-ci.sh so merges are gated on the same checks the
+# release build runs.
+
+on:
+  pull_request:
+  push:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: jina_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d jina_test"
+          --health-interval 1s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      # DATABASE_URL enables the product migration smoke test; TEST_DATABASE_URL
+      # un-skips the db/api integration suites that silently skip without it.
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/jina_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/jina_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
+      - uses: actions/setup-node@v4
+        with:
+          # Same major the deploy images run on.
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm --filter @jina/api build
+      - run: pnpm --filter @jina/api migrate:product
+        name: Product migration smoke test
+      - run: pnpm test
+        env:
+          DATABASE_URL: ""
+      - run: pnpm audit --prod --audit-level=high
+      - run: pnpm --filter @jina/dashboard build
+      - run: pnpm --filter @jina/admin build
