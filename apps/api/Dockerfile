@@ -1,4 +1,6 @@
-FROM mirror.gcr.io/library/node:26-bookworm-slim AS build
+# Build on the same Node major the runtime stage uses so compiled output and
+# native/optional dependencies are installed under the version that runs them.
+FROM mirror.gcr.io/library/node:22-bookworm-slim AS build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
