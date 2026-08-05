@@ -3339,6 +3339,27 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             const candidate = findOutboxMessage(intakeState.board, messageId);
             const candidateTask = candidate ? findTask(intakeState.board, candidate.taskId) : undefined;
             if (!candidate || !candidateTask || !topics.includes(candidate.topic)) continue;
+            if (isTerminalTaskStatus(candidateTask.status)) {
+              // A message whose task is already terminal (superseded, canceled, failed)
+              // can never complete; leasing it would burn a full worker run per poll.
+              intakeState = {
+                ...intakeState,
+                board: appendEvent(
+                  markOutboxDispatched(intakeState.board, candidate.id, nowIso()),
+                  "task.terminal_outbox_retired",
+                  nowIso(),
+                  candidateTask.id,
+                  {
+                    messageId: candidate.id,
+                    attempt: candidate.payload.attempt,
+                    previousStatus: candidate.status,
+                    taskStatus: candidateTask.status,
+                    topic: candidate.topic
+                  }
+                )
+              };
+              continue;
+            }
             if (
               candidate.topic === contextWorkflowBoardTopics.snapshot &&
               intakeState.board.outbox.some((message) => {

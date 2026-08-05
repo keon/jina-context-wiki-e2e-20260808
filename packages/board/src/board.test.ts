@@ -20,6 +20,7 @@ import {
   transitionBoardTask,
   type BoardState
 } from "./reducer.js";
+import { supersedeEpochTasks } from "./supersession.js";
 import { canTransition } from "./transitions.js";
 
 test("transition policy follows task kind instead of an extension type name", () => {
@@ -1029,4 +1030,103 @@ test("operator batch retry atomically reopens parallel failures and their shared
     })
   );
   assert.deepEqual(findTask(exhaustedState, leftId), findTask(state, leftId));
+});
+
+test("epoch supersession retires undispatched outbox messages so workers cannot claim dead work", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+  const oldTaskId = entityId<"task">("supersede-old");
+  const leasedTaskId = entityId<"task">("supersede-leased");
+  const currentTaskId = entityId<"task">("supersede-current");
+  const doneTaskId = entityId<"task">("supersede-done");
+  const baseTask = {
+    type: "review_pass",
+    title: "review",
+    assigneeRole: "review_agent",
+    required: true,
+    attempt: 1,
+    createdAt: now,
+    updatedAt: now,
+    kind: "dispatchable",
+    dispatchTopic: "run-review",
+    metadata: { repository: "acme/app" }
+  } as const;
+  const state: BoardState = {
+    tasks: [
+      { ...baseTask, id: oldTaskId, status: "queued", dedupeKey: "old:1", epoch: 1 },
+      { ...baseTask, id: leasedTaskId, status: "in_progress", dedupeKey: "leased:1", epoch: 1 },
+      { ...baseTask, id: doneTaskId, status: "done", dedupeKey: "done:1", epoch: 1 },
+      { ...baseTask, id: currentTaskId, status: "queued", dedupeKey: "current:2", epoch: 2 }
+    ],
+    dependencies: [],
+    events: [],
+    outbox: [
+      {
+        id: entityId<"board_outbox_message">("supersede-message-pending"),
+        taskId: oldTaskId,
+        topic: "run-review",
+        idempotencyKey: "old:1",
+        status: "pending",
+        payload: { taskId: oldTaskId, attempt: 1 },
+        createdAt: now
+      },
+      {
+        id: entityId<"board_outbox_message">("supersede-message-leased"),
+        taskId: leasedTaskId,
+        topic: "run-review",
+        idempotencyKey: "leased:1",
+        status: "leased",
+        payload: { taskId: leasedTaskId, attempt: 1 },
+        createdAt: now,
+        leaseId: "lease",
+        writeFenceToken: "fence",
+        leasedAt: now,
+        leaseExpiresAt: "2026-01-01T00:01:00.000Z"
+      },
+      {
+        id: entityId<"board_outbox_message">("supersede-message-dispatched"),
+        taskId: doneTaskId,
+        topic: "run-review",
+        idempotencyKey: "done:1",
+        status: "dispatched",
+        payload: { taskId: doneTaskId, attempt: 1 },
+        createdAt: now,
+        dispatchedAt: now
+      },
+      {
+        id: entityId<"board_outbox_message">("supersede-message-current"),
+        taskId: currentTaskId,
+        topic: "run-review",
+        idempotencyKey: "current:2",
+        status: "pending",
+        payload: { taskId: currentTaskId, attempt: 1 },
+        createdAt: now
+      }
+    ]
+  };
+
+  const supersededAt = "2026-01-01T00:02:00.000Z";
+  const next = supersedeEpochTasks(state, 2, supersededAt, (task) => task.metadata.repository === "acme/app");
+
+  assert.equal(findTask(next, oldTaskId)?.status, "superseded");
+  assert.equal(findTask(next, leasedTaskId)?.status, "superseded");
+  assert.equal(findTask(next, doneTaskId)?.status, "done");
+  assert.equal(findTask(next, currentTaskId)?.status, "queued");
+
+  const outboxByTask = new Map(next.outbox.map((message) => [message.taskId, message]));
+  assert.equal(outboxByTask.get(oldTaskId)?.status, "dispatched");
+  assert.equal(outboxByTask.get(leasedTaskId)?.status, "dispatched");
+  assert.equal(outboxByTask.get(leasedTaskId)?.leaseId, undefined);
+  assert.equal(outboxByTask.get(currentTaskId)?.status, "pending");
+
+  const retirements = next.events.filter((event) => event.type === "task.superseded_outbox_retired");
+  assert.deepEqual(retirements.map((event) => event.taskId).sort(), [leasedTaskId, oldTaskId].sort());
+
+  const claimed = leaseNextOutboxMessage(next, {
+    topics: ["run-review"],
+    leaseId: "next-lease",
+    writeFenceToken: "next-fence",
+    now: "2026-01-01T00:03:00.000Z",
+    expiresAt: "2026-01-01T00:04:00.000Z"
+  });
+  assert.equal(claimed?.message.taskId, currentTaskId);
 });
