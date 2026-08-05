@@ -141,9 +141,17 @@ Historical fixture: `omxyz/jina-board-staging-e2e-20260804#1` at
   digest `372ea6ccb6db1872a9a801336e594101b3c415f5590e74787ce2686ea4c1ced0`.
 - The signed-in staging dashboard rendered the completed review, four findings,
   exact head SHA, current Context release, all five pages, verified citations,
-  and the separately published causal graph. A summary-counter defect discovered
-  during visual verification was corrected so durable Board `done` stages count
-  as completed stages.
+  and the Task Board. Vercel deployment `mhtNwh67HeaUjota39oZxwEonuE4` corrected
+  the summary counter so durable Board `done` stages count as completed; the
+  accepted PR now renders `8/8 stages` and `5/5 pages`.
+- The dedicated staging endpoint separately admitted causal build
+  `task_635bdcc9512fb7b919236f7fc9d8f9bf` for
+  `omxyz/jina-context-graph-e2e@54d9f8aabe93870ed7f25a6fee0942da171dbee4`.
+  Its aggregate, history snapshot, derivation, and publication tasks all
+  completed; release `cir_9150a315f4cc6a0753aba26e12ef7eae` records complete
+  26-commit history, one issue, and two causal links. The three worker attempts
+  exported trace/span pairs and the dashboard renders `3/3 stages` plus the
+  relationship map.
 
 This record is an acceptance recheck of an existing fixture, not authorization
 to create another `omxyz` pull request. A fresh staging-only PR admission remains
