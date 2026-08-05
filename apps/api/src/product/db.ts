@@ -59,8 +59,12 @@ export function productDatabaseConfig(environment: NodeJS.ProcessEnv = process.e
   return connectionString ? { connectionString } : undefined;
 }
 
-export function databaseConfigured(): boolean {
-  return pool !== undefined || productDatabaseConfig() !== undefined;
+export function databaseConfigured(environment: NodeJS.ProcessEnv = process.env): boolean {
+  // Mounting a shared pool reuses connections; it does not enable product
+  // persistence by itself. The explicit product database configuration remains
+  // the feature boundary, which also keeps no-database app instances isolated
+  // from an earlier app that warmed this module-level pool in the same process.
+  return productDatabaseConfig(environment) !== undefined;
 }
 
 export function getPool(): pg.Pool {
