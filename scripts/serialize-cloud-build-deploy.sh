@@ -21,11 +21,29 @@ if [[ -z "${trigger_id}" || -z "${current_create_time}" ]]; then
 fi
 
 while true; do
-  older_builds="$(gcloud builds list \
+  builds_json="$(gcloud builds list \
     --project="${GCP_PROJECT_ID}" \
     --region="${GCP_CLOUD_BUILD_REGION}" \
-    --filter="buildTriggerId=${trigger_id} AND createTime<${current_create_time} AND (status=QUEUED OR status=PENDING OR status=WORKING)" \
-    --format='value(id)')"
+    --limit=100 \
+    --format=json)"
+  older_builds="$(BUILDS_JSON="${builds_json}" \
+    TRIGGER_ID="${trigger_id}" \
+    CURRENT_BUILD_ID="${CLOUD_BUILD_ID}" \
+    CURRENT_CREATE_TIME="${current_create_time}" \
+    python3 -c '
+import json
+import os
+
+active = {"QUEUED", "PENDING", "WORKING"}
+for build in json.loads(os.environ["BUILDS_JSON"]):
+    if (
+        build.get("id") != os.environ["CURRENT_BUILD_ID"]
+        and build.get("buildTriggerId") == os.environ["TRIGGER_ID"]
+        and build.get("createTime", "") < os.environ["CURRENT_CREATE_TIME"]
+        and build.get("status") in active
+    ):
+        print(build["id"])
+')"
   if [[ -z "${older_builds}" ]]; then
     printf 'Cloud Build %s owns the staging deployment lane\n' "${CLOUD_BUILD_ID}"
     exit 0

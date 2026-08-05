@@ -114,9 +114,9 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
     stagingCloudBuild,
     /serviceAccount: projects\/jina-staging-20260802\/serviceAccounts\/jina-cloud-build-staging@jina-staging-20260802\.iam\.gserviceaccount\.com/
   );
-  assert.match(stagingSerialization, /buildTriggerId=\$\{trigger_id\}/);
-  assert.match(stagingSerialization, /createTime<\$\{current_create_time\}/);
-  assert.match(stagingSerialization, /status=QUEUED OR status=PENDING OR status=WORKING/);
+  assert.match(stagingSerialization, /build\.get\("buildTriggerId"\) == os\.environ\["TRIGGER_ID"\]/);
+  assert.match(stagingSerialization, /build\.get\("createTime", ""\) < os\.environ\["CURRENT_CREATE_TIME"\]/);
+  assert.match(stagingSerialization, /active = \{"QUEUED", "PENDING", "WORKING"\}/);
   assert.match(deploymentDocs, /`jina-staging-deploy`/);
   assert.doesNotMatch(deploymentDocs, /\.github\/workflows\/deploy-staging\.yml/);
 });

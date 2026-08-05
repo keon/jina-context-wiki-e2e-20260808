@@ -49,6 +49,7 @@ required_deployer_roles=(
   roles/logging.logWriter
   roles/run.admin
   roles/secretmanager.secretAccessor
+  roles/secretmanager.viewer
   roles/serviceusage.serviceUsageConsumer
   roles/storage.objectViewer
 )
