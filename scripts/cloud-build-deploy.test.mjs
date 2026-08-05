@@ -45,8 +45,8 @@ const postgresStateStore = await readFile("packages/db/src/postgres-json-state-s
 const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
 const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
 const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
-const stagingWorkflow = await readFile(".github/workflows/deploy-staging.yml", "utf8");
-const stagingCloudBuild = await readFile("cloudbuild.staging-images.yaml", "utf8");
+const stagingSerialization = await readFile("scripts/serialize-cloud-build-deploy.sh", "utf8");
+const stagingCloudBuild = await readFile("cloudbuild.staging.yaml", "utf8");
 
 async function withFakeGcloud(source, callback) {
   const directory = await mkdtemp(join(tmpdir(), "jina-deploy-gcloud-"));
@@ -77,6 +77,7 @@ test("production deployment shell is syntactically valid", async () => {
 
 test("staging uses one v2 database connection and one migration job", async () => {
   await execFileAsync("bash", ["-n", "scripts/deploy-staging.sh"]);
+  await execFileAsync("bash", ["-n", "scripts/serialize-cloud-build-deploy.sh"]);
   assert.match(stagingDeployment, /JINA_PRODUCT_DATABASE_MODE=shared/);
   assert.match(stagingDeployment, /migration_job="jina-v2-migrate-staging"/);
   assert.match(stagingDeployment, /--args=dist\/product\/migrate-all\.js,--install-roles/);
@@ -93,21 +94,30 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /deploy-staging-causal-graph\.sh/);
   assert.doesNotMatch(stagingDeployment, /gcloud services enable/);
   assert.match(stagingDeployment, /Cloud Scheduler API must be enabled as a staging platform prerequisite/);
+  assert.match(stagingDeployment, /trap rollback_failed_staging_release EXIT/);
+  assert.match(stagingDeployment, /restore_causal_release_control/);
+  assert.match(stagingDeployment, /restore_revision "\$\{api_service\}" "\$\{previous_api_revision\}"/);
+  assert.match(stagingDeployment, /restore_revision "\$\{context_worker_service\}" "\$\{previous_context_revision\}"/);
+  assert.match(stagingDeployment, /restore_revision "\$\{task_worker_service\}" "\$\{previous_task_revision\}"/);
+  assert.match(stagingDeployment, /restore_revision "\$\{causal_worker_service\}" "\$\{previous_causal_revision\}"/);
   for (const topic of LEGACY_TOPICS) assert.doesNotMatch(stagingDeployment, new RegExp(topic));
 });
 
 test("staging branch pushes deploy one immutable coordinated release", () => {
-  assert.match(stagingWorkflow, /push:\n\s+branches:\n\s+- staging/);
-  assert.doesNotMatch(stagingWorkflow, /branches:\n(?:\s+- .*\n)*\s+- main/);
-  assert.match(stagingWorkflow, /environment: Staging/);
-  assert.match(stagingWorkflow, /id-token: write/);
-  assert.match(stagingWorkflow, /group: deploy-staging\n\s+#[\s\S]+?cancel-in-progress: false/);
-  assert.match(stagingWorkflow, /IMAGE_TAG: staging-\$\{\{ github\.sha \}\}/);
-  assert.match(stagingWorkflow, /ref: \$\{\{ github\.sha \}\}/);
-  assert.match(stagingWorkflow, /cloudbuild\.staging-images\.yaml/);
-  assert.match(stagingWorkflow, /_SOURCE_SHA=\$\{GITHUB_SHA\}/);
-  assert.match(stagingWorkflow, /bash scripts\/deploy-staging\.sh/);
+  assert.match(stagingCloudBuild, /id: serialize-deployment[\s\S]+?scripts\/serialize-cloud-build-deploy\.sh/);
+  assert.match(stagingCloudBuild, /id: deploy-staging[\s\S]+?scripts\/deploy-staging\.sh/);
+  assert.match(stagingCloudBuild, /IMAGE_TAG=\$\{_IMAGE_TAG\}/);
+  assert.match(stagingCloudBuild, /JINA_CONTEXT_TENANT_ID=\$\{_JINA_CONTEXT_TENANT_ID\}/);
   assert.match(stagingCloudBuild, /org\.opencontainers\.image\.revision=\$\{_SOURCE_SHA\}/);
+  assert.match(
+    stagingCloudBuild,
+    /serviceAccount: projects\/jina-staging-20260802\/serviceAccounts\/jina-cloud-build-staging@jina-staging-20260802\.iam\.gserviceaccount\.com/
+  );
+  assert.match(stagingSerialization, /buildTriggerId=\$\{trigger_id\}/);
+  assert.match(stagingSerialization, /createTime<\$\{current_create_time\}/);
+  assert.match(stagingSerialization, /status=QUEUED OR status=PENDING OR status=WORKING/);
+  assert.match(deploymentDocs, /`jina-staging-deploy`/);
+  assert.doesNotMatch(deploymentDocs, /\.github\/workflows\/deploy-staging\.yml/);
 });
 
 test("production compute, images, artifacts, and shared database are co-located in us-east1", () => {

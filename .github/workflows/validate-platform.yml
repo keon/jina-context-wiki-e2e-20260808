@@ -13,9 +13,8 @@ on:
       - scripts/check-staging-readiness.sh
       - scripts/deploy-staging.sh
       - scripts/deploy-staging-causal-graph.sh
-      - cloudbuild.staging-images.yaml
+      - cloudbuild.staging.yaml
       - pnpm-lock.yaml
-      - .github/workflows/deploy-staging.yml
       - .github/workflows/validate-platform.yml
 
 permissions:

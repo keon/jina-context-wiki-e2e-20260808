@@ -70,16 +70,41 @@ steps:
       - push
       - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/worker:${_IMAGE_TAG}
 
+  - id: serialize-deployment
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:563.0.0
+    waitFor: [push-api, push-worker]
+    entrypoint: bash
+    args: [scripts/serialize-cloud-build-deploy.sh]
+    env:
+      - GCP_PROJECT_ID=$PROJECT_ID
+      - GCP_CLOUD_BUILD_REGION=${_CLOUD_BUILD_REGION}
+      - CLOUD_BUILD_ID=$BUILD_ID
+
+  - id: deploy-staging
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:563.0.0
+    waitFor: [serialize-deployment]
+    entrypoint: bash
+    args: [scripts/deploy-staging.sh]
+    env:
+      - GCP_PROJECT_ID=$PROJECT_ID
+      - GCP_REGION=us-east1
+      - IMAGE_TAG=${_IMAGE_TAG}
+      - JINA_CONTEXT_TENANT_ID=${_JINA_CONTEXT_TENANT_ID}
+      - JINA_ARTIFACT_REGISTRY_REPOSITORY=${_ARTIFACT_REPOSITORY}
+
 images:
   - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/api:${_IMAGE_TAG}
   - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/worker:${_IMAGE_TAG}
 
 substitutions:
   _ARTIFACT_REPOSITORY: jina-staging
+  _CLOUD_BUILD_REGION: us-central1
   _IMAGE_TAG: manual-staging
   _SOURCE_SHA: manual
+  _JINA_CONTEXT_TENANT_ID: "00000000-0000-4000-8000-000000000000"
 
-timeout: 3600s
+timeout: 7200s
+queueTtl: 21600s
 serviceAccount: projects/jina-staging-20260802/serviceAccounts/jina-cloud-build-staging@jina-staging-20260802.iam.gserviceaccount.com
 options:
   logging: CLOUD_LOGGING_ONLY

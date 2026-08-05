@@ -9,36 +9,44 @@ releases and projections are relational. All are executed by `apps/worker`. The
 portable Daytona review runtime lives in `packages/review-agent`. The customer
 dashboard deploys from `apps/dashboard`.
 
-Every push to `staging` runs `.github/workflows/deploy-staging.yml` in the branch-restricted
-GitHub `Staging` environment. The workflow authenticates through Workload Identity,
-builds and validates immutable API/worker images with `cloudbuild.staging-images.yaml`,
-tags them `staging-<full merge SHA>`, and passes that tag plus the environment's
-UUID-valued `JINA_CONTEXT_TENANT_ID` to `scripts/deploy-staging.sh`. Deployments use
-non-canceling concurrency: a newer push waits rather than interrupting a coordinated
-rollout. The script is fail-closed on any resource, service account, secret, database,
-tenant, bucket, URL, or image tag that is not explicitly staging-scoped. The coordinated
-staging deploy also invokes the isolated
+Every push to `staging` starts the `jina-staging-deploy` Cloud Build trigger in the
+isolated `jina-staging-20260802` project. The trigger follows the same source-bound model
+as production: it checks out the event SHA, runs `cloudbuild.staging.yaml`, validates the
+repository, builds immutable API/worker images tagged `staging-<full merge SHA>`, and
+passes that tag plus its UUID-valued `_JINA_CONTEXT_TENANT_ID` substitution to
+`scripts/deploy-staging.sh`. The build waits for any older active invocation of the same
+trigger before deployment, so overlapping pushes cannot interleave cutovers. The script
+is fail-closed on any resource, service account, secret, database, tenant, bucket, URL,
+or image tag that is not explicitly staging-scoped. If a post-cutover step fails, it
+restores the exact prior API, Context, task, and causal revisions and reactivates the
+prior causal release credential. The coordinated staging deploy also invokes the isolated
 `scripts/deploy-staging-causal-graph.sh` lane with that same image tag, preventing the
 unified API and causal worker from drifting across an artifact-protocol change. The
 staging deploy installs the Board-recorded 15-minute billing retry schedule and the
 OpenTelemetry sidecars, including the causal worker's release-gated sidecar. Production continues to use the
 coordinated `cloudbuild.yaml` path below.
 
-For an operator rerun, dispatch `Deploy Staging` from the `staging` ref. Manual image
-builds remain supported by choosing an immutable tag containing `staging`, submitting
-`cloudbuild.staging-images.yaml`, and passing the same tag to `scripts/deploy-staging.sh`.
-The Workload Identity principal impersonates
-`jina-api-staging-deployer@jina-staging-20260802.iam.gserviceaccount.com`. That account
-requires project-level `roles/cloudbuild.builds.editor` and `roles/cloudscheduler.admin`,
-plus `roles/secretmanager.secretVersionAdder` only on
-`jina-staging-causal-graph-worker-release-credential` and `roles/storage.objectCreator`
-only on `gs://jina-staging-20260802_cloudbuild`. The bucket grant permits immutable
-source uploads without read, overwrite, or delete access. Cloud Scheduler is a platform
-prerequisite; application deployment verifies that its API is enabled but does not
-grant itself service-usage administration.
+For an operator rerun, invoke the source-bound trigger with the exact audited staging SHA:
+
+```sh
+release_sha="$(git rev-parse origin/staging)"
+gcloud builds triggers run jina-staging-deploy \
+  --project=jina-staging-20260802 \
+  --region=us-central1 \
+  --sha="${release_sha}"
+```
+
+The build and deployment identity is
+`jina-cloud-build-staging@jina-staging-20260802.iam.gserviceaccount.com`; staging does not
+use a GitHub Actions deployment identity or GitHub environment secrets. The account has
+the project deployment roles checked by `scripts/check-staging-readiness.sh`, plus
+`roles/secretmanager.secretVersionAdder` only on
+`jina-staging-causal-graph-worker-release-credential`. Cloud Scheduler is a platform
+prerequisite; application deployment verifies that its API is enabled but does not grant
+itself service-usage administration.
 
 Before a staging deploy, run `scripts/check-staging-readiness.sh`. It verifies the
-staging-only GitHub configuration, Cloud SQL runtime state, migration job, secrets,
+staging-only Cloud Build trigger, Cloud SQL runtime state, migration job, secrets,
 services, domain mappings, dashboard projects, and causal-worker sidecar contract.
 After deploy, follow `docs/STAGING_PR_E2E.md`; a green health check or review alone
 is not sufficient acceptance because the exact-head Context release and its PageIndex
