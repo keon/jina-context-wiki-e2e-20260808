@@ -91,8 +91,7 @@ if jq -e \
       .repositoryEventConfig.push.branch == "^staging$" and
       .serviceAccount == $service_account and
       (.approvalConfig.approvalRequired // false) == false and
-      .substitutions._IMAGE_TAG == "staging-$COMMIT_SHA" and
-      .substitutions._SOURCE_SHA == "$COMMIT_SHA"
+      (.substitutions | keys) == ["_JINA_CONTEXT_TENANT_ID"]
     ' <<<"${trigger_json}" >/dev/null; then
   pass "${trigger_name} deploys every staging push through cloudbuild.staging.yaml"
 else

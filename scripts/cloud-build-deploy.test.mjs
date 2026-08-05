@@ -106,10 +106,10 @@ test("staging uses one v2 database connection and one migration job", async () =
 test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingCloudBuild, /id: serialize-deployment[\s\S]+?scripts\/serialize-cloud-build-deploy\.sh/);
   assert.match(stagingCloudBuild, /id: deploy-staging[\s\S]+?scripts\/deploy-staging\.sh/);
-  assert.match(stagingCloudBuild, /IMAGE_TAG=\$\{_IMAGE_TAG\}/);
+  assert.match(stagingCloudBuild, /IMAGE_TAG=staging-\$COMMIT_SHA/);
   assert.match(stagingCloudBuild, /JINA_CONTEXT_TENANT_ID=\$\{_JINA_CONTEXT_TENANT_ID\}/);
-  assert.match(stagingCloudBuild, /org\.opencontainers\.image\.revision=\$\{_SOURCE_SHA\}/);
-  assert.match(stagingCloudBuild, /dynamicSubstitutions: true/);
+  assert.match(stagingCloudBuild, /org\.opencontainers\.image\.revision=\$COMMIT_SHA/);
+  assert.doesNotMatch(stagingCloudBuild, /_IMAGE_TAG|_SOURCE_SHA|dynamicSubstitutions/);
   assert.match(
     stagingCloudBuild,
     /serviceAccount: projects\/jina-staging-20260802\/serviceAccounts\/jina-cloud-build-staging@jina-staging-20260802\.iam\.gserviceaccount\.com/
