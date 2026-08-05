@@ -856,7 +856,13 @@ test("a newer PR delivery queues behind leased work without settling or cancelin
   const webhookSecret = "supersession-settlement-retry-secret";
   const firstHead = "1".repeat(40);
   const secondHead = "2".repeat(40);
-  const old = createContextBoardBuild(createEmptyBoardState(), {
+  const old = createContextWorkflowBoardBuild(createEmptyBoardState(), {
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-page-workflow-1",
+    validatorVersion: "context-page-validator-1",
+    pageIndexVersion: "pageindex-local-1",
+    executionProfileDigest: "f".repeat(64),
     tenantId,
     repository,
     ref: "pull/88/head",
@@ -866,21 +872,23 @@ test("a newer PR delivery queues behind leased work without settling or cancelin
     trigger: "pull_request",
     now: NOW
   });
+  const oldBuild = findTask(old.state, old.buildTaskId);
+  assert.ok(oldBuild);
   const modelTaskId = entityId<"task">("supersession-settlement-model-task");
   let board = addContextTask(old.state, {
     id: modelTaskId,
-    type: contextBoardTaskTypes.researchPlan,
+    type: contextWorkflowBoardTaskTypes.planner,
     kind: "dispatchable",
     title: "Leased model work from the superseded build",
     assigneeRole: "context-agent",
     dedupeKey: "supersession-settlement:model-task",
-    dispatchTopic: contextBoardTopics.researchPlan,
+    dispatchTopic: contextWorkflowBoardTopics.planner,
     parentTaskId: old.buildTaskId,
-    metadata: contextMetadata(tenantId, repository, old.buildTaskId)
+    metadata: { ...oldBuild.metadata, contextBuildId: old.buildTaskId }
   });
   board = reduceBoard(board, NOW);
   const leased = leaseNextOutboxMessage(board, {
-    topics: [contextBoardTopics.researchPlan],
+    topics: [contextWorkflowBoardTopics.planner],
     taskIds: [modelTaskId],
     leaseId: "supersession-settlement-lease",
     writeFenceToken: "supersession-settlement-fence",

@@ -117,8 +117,14 @@ const DIAGNOSTIC_HEADINGS: readonly (readonly [RegExp, keyof MarkdownDiagnostics
  */
 const LINK_PATTERN = /\[((?:\\[^\n]|`[^`\n]*`|[^\]\\\n])*)\]\(([^)\s]+)\)/g;
 
+/** Rendered reference links (`[label][id]`, `[label][]`, and `[id]`). */
+const REFERENCE_LINK_PATTERN = /\[((?:\\[^\n]|`[^`\n]*`|[^\]\\\n])*)\](?:\[([^\]\n]*)\])?/g;
+
+/** CommonMark link definitions, retaining only the identifier and destination. */
+const REFERENCE_DEFINITION_PATTERN = /^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]+)>|([^\s]+))/gm;
+
 /** `#L120-L128` or `#L120`, the anchor GitHub uses, so a link is clickable there too. */
-const LINE_RANGE_PATTERN = /^#L(\d+)(?:-L(\d+))?$/;
+const LINE_RANGE_PATTERN = /^#L(\d+)(?:(?:-|%2D)L?(\d+))?$/i;
 /** A common agent/research notation that is normalized to the public `#L` form. */
 const TRAILING_LINE_RANGE_PATTERN = /:(\d+)(?:-(\d+))?$/;
 
@@ -840,10 +846,19 @@ function materialClaimIdentity(
 export function normalizeMarkdownEvidenceTargets(source: string): string {
   return source.replace(LINK_PATTERN, (whole, label: string, target: string) => {
     if (/^https:\/\/github\.com\//i.test(target)) return whole;
-    const lineFragment = /#L\d+(?:-L\d+)?$/.exec(target);
+    const fragmentIndex = target.lastIndexOf("#");
+    const lineFragment = fragmentIndex >= 0 ? LINE_RANGE_PATTERN.exec(target.slice(fragmentIndex)) : undefined;
     if (lineFragment) {
-      const path = normalizedRepositoryWorkspacePath(target.slice(0, lineFragment.index));
-      return normalizedEvidenceLink(whole, label, target, `${path}${lineFragment[0]}`);
+      const path = normalizedRepositoryWorkspacePath(target.slice(0, fragmentIndex));
+      const startLine = Number(lineFragment[1]);
+      const endLine = lineFragment[2] === undefined ? startLine : Number(lineFragment[2]);
+      if (startLine < 1 || endLine < startLine) return whole;
+      return normalizedEvidenceLink(
+        whole,
+        label,
+        target,
+        `${path}#L${startLine}${lineFragment[2] === undefined ? "" : `-L${endLine}`}`
+      );
     }
     const range = TRAILING_LINE_RANGE_PATTERN.exec(target);
     if (!range) return whole;
@@ -886,7 +901,23 @@ function normalizedRepositoryWorkspacePath(value: string): string {
 }
 
 function isDocumentTarget(target: string): boolean {
-  return target.endsWith(".md") || target.includes(".md#");
+  const fragmentIndex = target.lastIndexOf("#");
+  if (fragmentIndex >= 0 && LINE_RANGE_PATTERN.test(target.slice(fragmentIndex))) return false;
+  return target.toLowerCase().endsWith(".md") || target.toLowerCase().includes(".md#");
+}
+
+function normalizedReferenceIdentifier(value: string): string {
+  return value.replace(/\\(.)/g, "$1").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function markdownReferenceDefinitions(source: string): ReadonlyMap<string, string> {
+  const definitions = new Map<string, string>();
+  for (const match of source.matchAll(REFERENCE_DEFINITION_PATTERN)) {
+    const identifier = normalizedReferenceIdentifier(match[1] ?? "");
+    const target = match[2] ?? match[3];
+    if (identifier && target && !definitions.has(identifier)) definitions.set(identifier, target);
+  }
+  return definitions;
 }
 
 /**
@@ -902,11 +933,26 @@ export function unlinkMarkdownDocumentTargets(
 ): string {
   const fromPath = documentPathFromFile(fromDocumentPath);
   const omitted = new Set([...omittedDocumentPaths].map(documentPathFromFile));
-  return source.replace(LINK_PATTERN, (whole, label: string, target: string, offset: number) => {
+  const definitions = markdownReferenceDefinitions(source);
+  const inlineUnlinked = source.replace(LINK_PATTERN, (whole, label: string, target: string, offset: number) => {
     if (!isRenderedMarkdownLink(source, offset) || !isDocumentTarget(target)) return whole;
     const resolved = resolveDocumentLink(fromPath, target);
     return resolved && omitted.has(resolved) ? label : whole;
   });
+  return inlineUnlinked.replace(
+    REFERENCE_LINK_PATTERN,
+    (whole, label: string, explicitIdentifier: string | undefined, offset: number) => {
+      const following = inlineUnlinked[offset + whole.length];
+      if (following === "(" || following === ":" || !isRenderedMarkdownLink(inlineUnlinked, offset)) return whole;
+      const identifier = normalizedReferenceIdentifier(
+        explicitIdentifier === undefined || explicitIdentifier === "" ? label : explicitIdentifier
+      );
+      const target = definitions.get(identifier);
+      if (!target || !isDocumentTarget(target)) return whole;
+      const resolved = resolveDocumentLink(fromPath, target);
+      return resolved && omitted.has(resolved) ? label : whole;
+    }
+  );
 }
 
 export function parseMarkdownDocument(documentPath: string, source: string): ParsedMarkdownDocument {
@@ -1121,8 +1167,9 @@ export function documentPathFromFile(relativePath: string): string {
  */
 export function resolveDocumentLink(fromDocumentPath: string, target: string): string | undefined {
   const withoutAnchor = target.split("#")[0] ?? target;
-  const segments = fromDocumentPath.split("/").slice(0, -1);
-  for (const segment of withoutAnchor.split("/")) {
+  const rootRelative = withoutAnchor.startsWith("/");
+  const segments = rootRelative ? [] : fromDocumentPath.split("/").slice(0, -1);
+  for (const segment of withoutAnchor.replace(/^\/+/, "").split("/")) {
     if (segment === "" || segment === ".") continue;
     if (segment === "..") {
       if (segments.length === 0) return undefined;
