@@ -127,8 +127,7 @@ function ingestPullRequest(
     ...(webhook.sender?.id !== undefined ? { senderGithubUserId: webhook.sender.id } : {}),
     ...(webhook.sender?.login ? { senderLogin: webhook.sender.login } : {}),
     ...(webhook.sender?.accountType ? { senderAccountType: webhook.sender.accountType } : {}),
-    needsExternalContext: false,
-    includePublication: false
+    needsExternalContext: false
   });
   board = applyPrReviewPlan(board, plan, {
     actor: githubActor(webhook, options.deliveryId),

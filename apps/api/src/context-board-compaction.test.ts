@@ -141,8 +141,7 @@ test("terminal epoch history compaction drops settled review subtrees but keeps 
     pullRequestNumber: 7,
     headSha: "a".repeat(40),
     epoch: 1,
-    needsExternalContext: false,
-    includePublication: false
+    needsExternalContext: false
   });
   state = applyPrReviewPlan(state, supersededPlan, {
     actor: { type: "system", id: "test" },
@@ -154,8 +153,7 @@ test("terminal epoch history compaction drops settled review subtrees but keeps 
     pullRequestNumber: 7,
     headSha: "b".repeat(40),
     epoch: 2,
-    needsExternalContext: false,
-    includePublication: false
+    needsExternalContext: false
   });
   state = applyPrReviewPlan(state, activePlan, {
     actor: { type: "system", id: "test" },
