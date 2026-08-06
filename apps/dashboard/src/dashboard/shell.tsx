@@ -363,56 +363,55 @@ function Sidebar({
         </button>
       </div>
 
-      {!settingsMode ? (
-        <button
-          type="button"
-          className="nav__item sidebar__search"
-          data-label="Search"
-          aria-label="Search"
-          onClick={onOpenSearch}
-        >
-          <SearchIcon />
-          <span className="nav__label">Search</span>
-          <kbd className="sidebar__shortcut">⌘ K</kbd>
-        </button>
-      ) : null}
+      <div className={`sidebar__viewport${settingsMode ? " sidebar__viewport--settings" : ""}`}>
+        <div className="sidebar__panel sidebar__panel--work" aria-hidden={settingsMode}>
+          <button
+            type="button"
+            className="nav__item sidebar__search"
+            data-label="Search"
+            aria-label="Search"
+            onClick={onOpenSearch}
+          >
+            <SearchIcon />
+            <span className="nav__label">Search</span>
+            <kbd className="sidebar__shortcut">⌘ K</kbd>
+          </button>
+          <nav className="nav sidebar__pane" aria-label="Dashboard navigation">
+            {primaryItems.map((item) => (
+              <SidebarNavLink key={item.key} item={item} section={section} onNavigate={onNavigate} />
+            ))}
+          </nav>
+          <div className="sidebar__spacer" />
+        </div>
 
-      {settingsMode ? (
-        <nav className="nav sidebar__pane sidebar__pane--settings" aria-label="Settings navigation">
-          <SettingsNavGroup
-            label="Personal"
-            items={PERSONAL_SETTINGS_NAV_ITEMS}
-            section={section}
-            onNavigate={onNavigate}
-          />
-          <SettingsNavGroup
-            label={`Organization · ${selected?.login ?? "Workspace"}`}
-            items={ORGANIZATION_NAV_ITEMS}
-            section={section}
-            onNavigate={onNavigate}
-          />
-        </nav>
-      ) : (
-        <nav className="nav sidebar__pane" aria-label="Dashboard navigation">
-          {primaryItems.map((item) => (
-            <SidebarNavLink key={item.key} item={item} section={section} onNavigate={onNavigate} />
-          ))}
-        </nav>
-      )}
-
-      <div className="sidebar__spacer" />
-      {settingsMode ? (
-        <Link
-          className="sidebar-settings__work-link"
-          href="/reviews"
-          onClick={onNavigate}
-          aria-label="Back to work"
-          data-label="Back to work"
-        >
-          <BackIcon />
-          <span>Back to work</span>
-        </Link>
-      ) : null}
+        <div className="sidebar__panel sidebar__panel--settings" aria-hidden={!settingsMode}>
+          <nav className="nav sidebar__pane" aria-label="Settings navigation">
+            <SettingsNavGroup
+              label="Personal"
+              items={PERSONAL_SETTINGS_NAV_ITEMS}
+              section={section}
+              onNavigate={onNavigate}
+            />
+            <SettingsNavGroup
+              label={`Organization · ${selected?.login ?? "Workspace"}`}
+              items={ORGANIZATION_NAV_ITEMS}
+              section={section}
+              onNavigate={onNavigate}
+            />
+          </nav>
+          <div className="sidebar__spacer" />
+          <Link
+            className="sidebar-settings__work-link"
+            href="/reviews"
+            onClick={onNavigate}
+            aria-label="Back to work"
+            data-label="Back to work"
+          >
+            <BackIcon />
+            <span>Back to work</span>
+          </Link>
+        </div>
+      </div>
       <AccountMenu
         viewer={viewer}
         authLoading={authLoading}
