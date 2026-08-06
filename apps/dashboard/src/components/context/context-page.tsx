@@ -365,7 +365,9 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
         </p>
       ) : null}
 
-      {!selected ? (
+      {view === "wiki" && !wikiRepository ? (
+        <RepositoryPicker repositories={repositoryOptions} onSelect={selectWikiRepository} />
+      ) : !selected ? (
         <KnowledgePlaceholder
           kind={view}
           title="No workspace selected"
@@ -384,8 +386,6 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
             </button>
           }
         />
-      ) : view === "wiki" && !wikiRepository ? (
-        <RepositoryPicker repositories={repositoryOptions} onSelect={selectWikiRepository} />
       ) : scopes.length === 0 ? (
         <KnowledgePlaceholder
           kind={view}

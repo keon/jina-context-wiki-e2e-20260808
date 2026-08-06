@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { jsonResponse, renderComponent } from "../../testing/render.tsx";
+import { jsonResponse, renderComponent, renderWithQueryClient } from "../../testing/render.tsx";
 import type { ContextRelease } from "../../lib/types.ts";
 import { ContextSearch } from "./context-browser.tsx";
-import { RepositoryPicker } from "./context-page.tsx";
+import { ContextPage, RepositoryPicker } from "./context-page.tsx";
 
 function release(repository: string, id: string): ContextRelease {
   return {
@@ -32,6 +32,13 @@ test("repository picker gates the Wiki behind explicit card selection", () => {
   assert.equal(screen.getByRole("link", { name: /Add repo/ }).getAttribute("href"), "/integrations");
   fireEvent.click(screen.getByRole("button", { name: /ecommerce-dashboard/ }));
   assert.equal(selected, "daniel/ecommerce-dashboard");
+});
+
+test("wiki shows the repository picker when no workspace is available", () => {
+  renderWithQueryClient(<ContextPage />);
+
+  assert.equal(screen.getByRole("link", { name: /Add repo/ }).getAttribute("href"), "/integrations");
+  assert.equal(screen.queryByText("No workspace selected"), null);
 });
 
 test("workspace search queries each repository release and labels merged results", async () => {
