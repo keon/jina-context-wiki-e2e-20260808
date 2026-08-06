@@ -21,21 +21,24 @@ if [[ -z "${trigger_id}" || -z "${current_create_time}" ]]; then
 fi
 
 while true; do
-  builds_json="$(gcloud builds list \
+  # Stream the response over stdin. Cloud Build records can contain enough
+  # metadata to exceed Linux's argv/environment limit if the JSON is exported
+  # as an environment variable before starting Python.
+  older_builds="$(gcloud builds list \
     --project="${GCP_PROJECT_ID}" \
     --region="${GCP_CLOUD_BUILD_REGION}" \
     --limit=100 \
-    --format=json)"
-  older_builds="$(BUILDS_JSON="${builds_json}" \
+    --format=json | \
     TRIGGER_ID="${trigger_id}" \
     CURRENT_BUILD_ID="${CLOUD_BUILD_ID}" \
     CURRENT_CREATE_TIME="${current_create_time}" \
     python3 -c '
 import json
 import os
+import sys
 
 active = {"QUEUED", "PENDING", "WORKING"}
-for build in json.loads(os.environ["BUILDS_JSON"]):
+for build in json.load(sys.stdin):
     if (
         build.get("id") != os.environ["CURRENT_BUILD_ID"]
         and build.get("buildTriggerId") == os.environ["TRIGGER_ID"]
