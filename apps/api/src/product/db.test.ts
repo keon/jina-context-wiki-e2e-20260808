@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Pool } from "pg";
 
-import { productDatabaseConfig, productDatabaseConnectionString } from "./db.js";
+import {
+  configureProductDatabasePool,
+  databaseConfigured,
+  getPool,
+  productDatabaseConfig,
+  productDatabaseConnectionString,
+} from "./db.js";
 
 test("the absorbed product database uses its namespaced URL instead of the Context database URL", () => {
   assert.equal(
@@ -54,4 +61,13 @@ test("shared mode fails closed when any v2 credential is missing", () => {
     () => productDatabaseConfig({ JINA_PRODUCT_DATABASE_MODE: "surprise" }),
     /Unsupported JINA_PRODUCT_DATABASE_MODE/,
   );
+});
+
+test("a mounted shared pool reuses connections without silently enabling product persistence", () => {
+  const sharedPool = {} as Pool;
+  configureProductDatabasePool(sharedPool);
+
+  assert.equal(databaseConfigured({}), false);
+  assert.equal(databaseConfigured({ DATABASE_URL: "postgresql://localhost/jina_product" }), true);
+  assert.equal(getPool(), sharedPool);
 });

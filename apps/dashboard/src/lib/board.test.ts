@@ -79,6 +79,61 @@ test("Context and causal graph builds keep independent current requests", () => 
   );
 });
 
+test("a stage whose build task is not on the page stays on the board while it runs", () => {
+  const tasks = [
+    task({
+      id: "orphan-stage",
+      type: "write-context-page",
+      status: "in_progress",
+      metadata: { tenantId: "t", repository: "o/r", ref: "main", requestKey: "req-1" }
+    })
+  ];
+  const { current, history } = partitionBoardTasks(tasks);
+  assert.deepEqual(
+    current.map((item) => item.id),
+    ["orphan-stage"]
+  );
+  assert.deepEqual(history, []);
+});
+
+test("an orphaned stage still falls to history once it is superseded", () => {
+  const tasks = [
+    task({
+      id: "orphan-stage",
+      type: "write-context-page",
+      status: "superseded",
+      metadata: { tenantId: "t", repository: "o/r", ref: "main", requestKey: "req-1" }
+    })
+  ];
+  const { current, history } = partitionBoardTasks(tasks);
+  assert.deepEqual(current, []);
+  assert.deepEqual(
+    history.map((item) => item.id),
+    ["orphan-stage"]
+  );
+});
+
+test("a build task missing tenantId does not hide its own stages", () => {
+  const tasks = [
+    task({
+      id: "root",
+      type: "build-context",
+      createdAt: "2026-01-01T00:00:00Z",
+      metadata: { repository: "o/r", ref: "main", requestKey: "req-1" }
+    }),
+    task({
+      id: "stage",
+      type: "write-context-page",
+      status: "in_progress",
+      metadata: { tenantId: "t", repository: "o/r", ref: "main", requestKey: "req-1" }
+    })
+  ];
+  assert.deepEqual(
+    partitionBoardTasks(tasks).current.map((item) => item.id),
+    ["root", "stage"]
+  );
+});
+
 test("filterBoardTasks combines query and facet filters", () => {
   const tasks = [
     task({ id: "a", title: "Review PR", type: "review", assigneeRole: "agent", metadata: { repository: "o/r" } }),

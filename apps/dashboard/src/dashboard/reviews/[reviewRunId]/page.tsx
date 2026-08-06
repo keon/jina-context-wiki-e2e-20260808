@@ -1,6 +1,6 @@
 "use client";
 
-import { use } from "react";
+import { use, useMemo } from "react";
 import {
   Badge,
   BackLink,
@@ -52,8 +52,8 @@ export default function ReviewRunPage({ params }: { params: Promise<{ reviewRunI
   const { reviewRunId } = use(params);
   const decodedReviewRunId = decodeURIComponent(reviewRunId);
   const { data, loading } = useDashboard();
-  const fallbackRun = (data?.review_runs ?? []).find((item) => item.review_run_id === decodedReviewRunId);
-  const { run, loading: detailLoading, error: detailError } = useReviewRunDetail(decodedReviewRunId, fallbackRun);
+  // The run from the list is seeded into the detail read itself (see useReviewRunDetail).
+  const { run, loading: detailLoading, error: detailError } = useReviewRunDetail(decodedReviewRunId);
 
   if (!run) {
     return (
@@ -61,6 +61,8 @@ export default function ReviewRunPage({ params }: { params: Promise<{ reviewRunI
         <BackLink href="/reviews">Reviews</BackLink>
         {(loading && !data) || detailLoading ? (
           <div className="notice">Loading review run...</div>
+        ) : detailError ? (
+          <div className="notice notice--bad">{detailError}</div>
         ) : (
           <div className="notice notice--bad">Review run not found.</div>
         )}
@@ -68,7 +70,13 @@ export default function ReviewRunPage({ params }: { params: Promise<{ reviewRunI
     );
   }
 
-  const work = buildReviewWork(run);
+  return <ReviewRunDetail run={run} detailError={detailError} />;
+}
+
+function ReviewRunDetail({ run, detailError }: { run: ReviewRun; detailError: string | null | undefined }) {
+  // Deep normalization over every review event — recompute only when the run changes,
+  // not on each dashboard poll that re-renders this page.
+  const work = useMemo(() => buildReviewWork(run), [run]);
 
   return (
     <article className="detail">
@@ -166,7 +174,7 @@ function McpActivity({ events }: { events: ReviewEvent[] }) {
 
 function RunActions({ run, work }: { run: ReviewRun; work: ReviewWork }) {
   const result = runResult(run);
-  const links: Array<{ href: string | undefined; label: string }> = [];
+  const links: { href: string | undefined; label: string }[] = [];
   links.push({ href: run.pull_request.html_url, label: "GitHub PR" });
   links.push({ href: result?.github_comment_url, label: "PR context" });
   links.push({ href: result?.github_check_run_url, label: "Check run" });
@@ -313,7 +321,7 @@ function RuntimeTasks({ review }: { review: RuntimeReviewWork | undefined }) {
     <section id="runtime-tasks" className="section">
       <div className="section__title section__title--row">
         <span>Runtime Tasks</span>
-        <span className="panel__count">{review.tasksCount}</span>
+        <span className="section__count">{review.tasksCount}</span>
       </div>
       <div className="section__body">
         {review.tasks.length === 0 ? (
@@ -428,7 +436,7 @@ function IssuesSection({ findings }: { findings: ReviewWorkFinding[] }) {
     <section id="issues" className="section">
       <div className="section__title section__title--row">
         <span>Issues</span>
-        <span className="panel__count">{findings.length}</span>
+        <span className="section__count">{findings.length}</span>
       </div>
       <div className="section__body">
         {findings.length === 0 ? (
@@ -691,7 +699,7 @@ function DisclosureListBlock({
   items,
 }: {
   label: string;
-  items: Array<{ title: string; details: string[] }>;
+  items: { title: string; details: string[] }[];
 }) {
   return (
     <div className="review-block">

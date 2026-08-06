@@ -1,4 +1,7 @@
-FROM mirror.gcr.io/library/node:26-bookworm-slim AS build
+# Must track the distroless runtime tag below. Building on a newer major than
+# the one that runs in production lets a Node API that only exists on the build
+# image pass typecheck, build, and tests, then fail at container start.
+FROM mirror.gcr.io/library/node:22-bookworm-slim AS build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH

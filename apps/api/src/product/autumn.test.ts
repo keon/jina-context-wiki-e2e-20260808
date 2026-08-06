@@ -16,17 +16,17 @@ function autumnConfig(): BillingConfig {
   };
 }
 
-type FetchCall = {
+interface FetchCall {
   url: string;
   init: RequestInit | undefined;
-};
+}
 
 function withStubbedFetch(
   responder: () => Partial<Response> & { ok: boolean },
   run: () => Promise<void>,
 ): Promise<void> {
   const original = globalThis.fetch;
-  globalThis.fetch = (async () => responder() as Response) as typeof fetch;
+  globalThis.fetch = (async () => responder() as Response);
   return run().finally(() => {
     globalThis.fetch = original;
   });
@@ -41,7 +41,7 @@ function withCapturedFetch(
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ url: String(input), init });
     return responder() as Response;
-  }) as typeof fetch;
+  });
   return run(calls).finally(() => {
     globalThis.fetch = original;
   });
@@ -69,14 +69,14 @@ test("ensureCustomer uses Autumn get_or_create and sends the API version header"
       await client.ensureCustomer("cust-1", "Tenant One", "cus_123");
 
       assert.equal(calls.length, 1);
-      assert.equal(calls[0]!.url, "https://api.useautumn.com/v1/customers.get_or_create");
-      assert.equal(calls[0]!.init?.method, "POST");
-      assert.deepEqual(requestJson(calls[0]!), {
+      assert.equal(calls[0].url, "https://api.useautumn.com/v1/customers.get_or_create");
+      assert.equal(calls[0].init?.method, "POST");
+      assert.deepEqual(requestJson(calls[0]), {
         customer_id: "cust-1",
         name: "Tenant One",
         stripe_id: "cus_123",
       });
-      assert.equal(requestHeaders(calls[0]!)["x-api-version"], "2.3.0");
+      assert.equal(requestHeaders(calls[0])["x-api-version"], "2.3.0");
     },
   );
 });
@@ -93,7 +93,7 @@ test("ensureCustomer tags the customer with tenant metadata (org vs personal dif
         github_login: "Pistachio-Wallet",
       });
 
-      assert.deepEqual(requestJson(calls[0]!), {
+      assert.deepEqual(requestJson(calls[0]), {
         customer_id: "org-tenant-1",
         name: "Pistachio-Wallet (org)",
         metadata: {
@@ -118,8 +118,8 @@ test("updateCustomer repairs an existing customer's name and tenant metadata", a
         github_login: "Metopian",
       });
 
-      assert.equal(calls[0]!.url, "https://api.useautumn.com/v1/customers.update");
-      assert.deepEqual(requestJson(calls[0]!), {
+      assert.equal(calls[0].url, "https://api.useautumn.com/v1/customers.update");
+      assert.deepEqual(requestJson(calls[0]), {
         customer_id: "org-tenant-1",
         name: "Metopian (org)",
         metadata: {
@@ -141,8 +141,8 @@ test("checkoutUrl uses Autumn billing.attach and accepts payment_url", async () 
       const url = await client.checkoutUrl("cust-1", "overage_credits");
 
       assert.equal(url, "https://checkout.stripe.com/session/abc");
-      assert.equal(calls[0]!.url, "https://api.useautumn.com/v1/billing.attach");
-      assert.deepEqual(requestJson(calls[0]!), {
+      assert.equal(calls[0].url, "https://api.useautumn.com/v1/billing.attach");
+      assert.deepEqual(requestJson(calls[0]), {
         customer_id: "cust-1",
         plan_id: "overage_credits",
         redirect_mode: "always",
@@ -159,7 +159,7 @@ test("checkoutUrl sends the configured success_url so Stripe returns to the dash
     async (calls) => {
       await client.checkoutUrl("cust-1", "startup");
       assert.equal(
-        (requestJson(calls[0]!) as Record<string, unknown>).success_url,
+        (requestJson(calls[0]) as Record<string, unknown>).success_url,
         "https://app.usejina.com/billing?checkout=success",
       );
     },
@@ -183,8 +183,8 @@ test("getCustomer uses customers.get and reads the active non-add-on subscriptio
     }),
     async (calls) => {
       assert.deepEqual(await client.getCustomer("cust-1"), { planId: "startup" });
-      assert.equal(calls[0]!.url, "https://api.useautumn.com/v1/customers.get");
-      assert.deepEqual(requestJson(calls[0]!), { customer_id: "cust-1" });
+      assert.equal(calls[0].url, "https://api.useautumn.com/v1/customers.get");
+      assert.deepEqual(requestJson(calls[0]), { customer_id: "cust-1" });
     },
   );
 });
@@ -257,7 +257,7 @@ test("check() on a 2xx missing 'allowed' throws RETRYABLE (never coerces to a fa
       await assert.rejects(
         client.check("cust-1", "jina_credits"),
         (error: unknown) =>
-          error instanceof AutumnError && error.retryable === true && /allowed/.test(error.message),
+          error instanceof AutumnError && error.retryable === true && error.message.includes('allowed'),
       );
     },
   );
@@ -284,7 +284,7 @@ test("check() on a 2xx with a present-but-non-numeric balance.remaining throws R
       await assert.rejects(
         client.check("cust-1", "jina_credits"),
         (error: unknown) =>
-          error instanceof AutumnError && error.retryable === true && /balance\.remaining/.test(error.message),
+          error instanceof AutumnError && error.retryable === true && error.message.includes('balance.remaining'),
       );
     },
   );

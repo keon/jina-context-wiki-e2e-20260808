@@ -44,22 +44,22 @@ const MIN_INTERVAL_SECONDS = 1;
 const MAX_INTERVAL_SECONDS = 60;
 const DEFAULT_INTERVAL_SECONDS = 5;
 
-export type UsercodeResponse = {
+export interface UsercodeResponse {
   deviceAuthId: string;
   userCode: string;
   intervalSeconds: number;
   expiresAtMs: number | null;
-};
+}
 
-export type StoredCodexDeviceFlow = {
+export interface StoredCodexDeviceFlow {
   version: 1;
   flowId: string;
   tenantId: string;
   startedAtMs: number;
   start: UsercodeResponse;
-};
+}
 
-export type CodexConnectTelemetryEvent = {
+export interface CodexConnectTelemetryEvent {
   event:
     | "flow_started"
     | "flow_resumed"
@@ -79,20 +79,20 @@ export type CodexConnectTelemetryEvent = {
   elapsed_ms?: number;
   attempt?: number;
   visibility?: "visible" | "hidden";
-};
+}
 
 export type PollStatus = "success" | "pending" | "error";
 
-export type CodeSuccess = {
+export interface CodeSuccess {
   authorizationCode: string;
   codeVerifier: string;
-};
+}
 
-export type OAuthTokens = {
+export interface OAuthTokens {
   idToken: string;
   accessToken: string;
   refreshToken: string;
-};
+}
 
 /** Clamp a raw interval (seconds) into the sane 1..60 range, defaulting on garbage. */
 export function boundedInterval(raw: unknown): number {

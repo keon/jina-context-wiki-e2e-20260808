@@ -285,11 +285,21 @@ export function CodexConnection({
 }
 
 /**
- * Centered modal (capy "Connect Codex" replica) that hosts the device-code handshake. A dimmed
- * backdrop covers the page; the dialog is centered. An active sign-in is intentionally not
- * dismissible by backdrop click or Escape — cancellation is an explicit action. The
- * body is either the numbered device-code steps + manual fallback (not yet connected) or an
- * in-place connected success state — the transition happens without leaving the modal.
+ * Centered modal (capy "Connect Codex" replica) that hosts the device-code handshake.
+ *
+ * It is a native `<dialog>` opened with `showModal()`, not a `role="dialog"` div: the browser
+ * then owns the focus trap, the Escape key, `inert` on the rest of the page, the top-layer
+ * stacking and the `::backdrop` scrim. The hand-rolled version declared `aria-modal="true"`
+ * and delivered none of those — Tab walked straight out into the page behind it.
+ *
+ * Dismissing (×, Escape, backdrop click) is deliberately NON-destructive and therefore always
+ * available: the device flow is persisted per tenant and resumes on reopen, so closing only
+ * puts the window away. Abandoning the handshake is the separate, explicit "Cancel sign-in"
+ * action, which is what clears the stored flow.
+ *
+ * The body is either the numbered device-code steps + manual fallback (not yet connected) or an
+ * in-place connected success state — the transition happens without leaving the modal. Head and
+ * footer are siblings of the body, so only the body scrolls when the content is tall.
  */
 function CodexConnectModal({
   info,
@@ -314,53 +324,88 @@ function CodexConnectModal({
 }) {
   const reconnecting = freshReconnect || (info.configured && info.reconnect_required);
   const connected = codexModalCanDismiss(info.configured, info.reconnect_required === true);
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const titleRef = useRef<HTMLHeadingElement | null>(null);
+
+  // The parent mounts this component only while the modal is open, so opening is a mount effect.
+  // Initial focus lands on the heading rather than on the first control: nothing in here should
+  // be one stray Enter away from firing, and the title is what should be announced first. On
+  // unmount the dialog is closed and focus returns to whatever opened it.
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!dialog.open) dialog.showModal();
+    titleRef.current?.focus();
+    return () => {
+      if (dialog.open) dialog.close();
+      if (opener?.isConnected) opener.focus();
+    };
+  }, []);
 
   return (
-    <div className="codex-modal" role="dialog" aria-modal="true" aria-labelledby="codex-modal-title">
-      <div className="codex-modal__backdrop" aria-hidden="true" />
-      <div className="codex-modal__dialog">
-        {connected ? (
-          <button type="button" className="codex-modal__close" aria-label="Close" onClick={onClose}>
-            <CloseGlyph />
-          </button>
-        ) : null}
-        <div className="codex-modal__head">
-          <h2 id="codex-modal-title" className="codex-modal__title">
+    <dialog
+      ref={dialogRef}
+      className="codex-modal"
+      aria-labelledby="codex-modal-title"
+      aria-describedby="codex-modal-subtitle"
+      // Escape. `preventDefault` hands the close to React so the parent state stays the source
+      // of truth for whether the modal is mounted.
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      // A click that lands on the dialog element itself is a click on the backdrop; anything
+      // inside the content targets a child.
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <header className="codex-modal__head">
+        <div className="codex-modal__heading">
+          <h2 id="codex-modal-title" className="codex-modal__title" ref={titleRef} tabIndex={-1}>
             {reconnecting ? "Reconnect Codex" : "Connect Codex"}
           </h2>
-          <p className="codex-modal__subtitle">Route OpenAI models through your ChatGPT subscription</p>
+          <p id="codex-modal-subtitle" className="codex-modal__subtitle">
+            Route OpenAI models through your ChatGPT subscription
+          </p>
         </div>
-        <div className="codex-modal__body">
-          {connected ? (
-            <CodexConnectedPanel info={info} busy={busy} onDisconnect={onDisconnect} />
-          ) : (
-            <>
-              {reconnecting ? (
-                <div className="notice notice--bad">
-                  Your saved Codex sign-in expired. Sign in again to resume reviews on your ChatGPT subscription.
-                </div>
-              ) : null}
-              {/* Primary path: integrated device-code flow — no local `codex login` needed. */}
-              <CodexDeviceFlow onConnected={onConnected} />
-
-              {/* Fallback for users whose org blocks device auth, or who prefer to paste credentials. */}
-              <CodexManualFallback busy={busy} error={error} onConnect={onManualConnect} />
-
-              <p className="codex-modal__note cell-meta">
-                Connecting uses your ChatGPT subscription for reviews of PRs you author. This is an unofficial
-                integration and may stop working if OpenAI changes their auth.
-              </p>
-              <div className="codex-modal__footer">
-                <button type="button" className="btn btn--sm btn--ghost" onClick={onCancel}>
-                  Cancel sign-in
-                </button>
-                <span className="cell-meta">You can safely switch tabs while this stays open.</span>
+        <button type="button" className="btn btn--sm btn--ghost codex-modal__close" aria-label="Close" onClick={onClose}>
+          <CloseGlyph />
+        </button>
+      </header>
+      <div className="codex-modal__body">
+        {connected ? (
+          <CodexConnectedPanel info={info} busy={busy} onDisconnect={onDisconnect} />
+        ) : (
+          <>
+            {reconnecting ? (
+              <div className="notice notice--bad">
+                Your saved Codex sign-in expired. Sign in again to resume reviews on your ChatGPT subscription.
               </div>
-            </>
-          )}
-        </div>
+            ) : null}
+            {/* Primary path: integrated device-code flow — no local `codex login` needed. */}
+            <CodexDeviceFlow onConnected={onConnected} />
+
+            {/* Fallback for users whose org blocks device auth, or who prefer to paste credentials. */}
+            <CodexManualFallback busy={busy} error={error} onConnect={onManualConnect} />
+
+            <p className="codex-modal__note">
+              Connecting uses your ChatGPT subscription for reviews of PRs you author. This is an unofficial
+              integration and may stop working if OpenAI changes their auth.
+            </p>
+          </>
+        )}
       </div>
-    </div>
+      {connected ? null : (
+        <footer className="codex-modal__footer">
+          <span className="cell-meta">You can safely switch tabs while this stays open.</span>
+          <button type="button" className="btn btn--sm btn--ghost" onClick={onCancel}>
+            Cancel sign-in
+          </button>
+        </footer>
+      )}
+    </dialog>
   );
 }
 
@@ -411,7 +456,7 @@ function CodexManualFallback({
     <div className="codex-fallback">
       <button
         type="button"
-        className="codex-fallback__toggle"
+        className="btn btn--sm btn--ghost codex-fallback__toggle"
         aria-expanded={showManual}
         onClick={() => setShowManual((prev) => !prev)}
       >
@@ -690,7 +735,8 @@ function CodexDeviceFlow({ onConnected }: { onConnected: (info: CodexHarnessInfo
         return;
       }
       attempt += 1;
-      let status: "success" | "pending" | "error" = "pending";
+      // Every path out of the try/catch below assigns this before it is read.
+      let status: "success" | "pending" | "error";
       let code: { authorizationCode: string; codeVerifier: string } | null = null;
       let httpStatus: number | undefined;
       try {
@@ -785,52 +831,49 @@ function CodexDeviceFlow({ onConnected }: { onConnected: (info: CodexHarnessInfo
 
   return (
     <div className="codex-device">
+      {/* Each <li> emits exactly the flex children the stylesheet lays out: text, then its one
+          action. The step number is a CSS counter on the <ol>, so it cannot drift from DOM order
+          and no lane is reserved for markup that isn't here. */}
       <ol className="codex-steps">
         <li className="codex-step">
-          <div className="codex-step__body">
-            <span className="codex-step__text">Enable device code authorization in your security settings:</span>
-            {settingsHref ? (
-              <a className="btn btn--sm btn--ghost codex-step__action" href={settingsHref} target="_blank" rel="noreferrer">
-                Security settings ↗
-              </a>
-            ) : null}
+          <p className="codex-step__text">Enable device code authorization in your security settings</p>
+          {settingsHref ? (
+            <a className="btn btn--sm codex-step__action" href={settingsHref} target="_blank" rel="noreferrer">
+              Security settings ↗
+            </a>
+          ) : null}
+        </li>
+        <li className="codex-step">
+          <p className="codex-step__text">Copy this code</p>
+          <div className="codex-code">
+            <code className="codex-code__value">{info.userCode}</code>
+            <button
+              type="button"
+              className="btn btn--sm codex-code__copy"
+              aria-label={copied ? "Copied" : "Copy code"}
+              onClick={() => copyCode(info.userCode)}
+            >
+              {copied ? <CheckSmallGlyph /> : <CopyGlyph />}
+              {copied ? "Copied" : "Copy"}
+            </button>
           </div>
         </li>
         <li className="codex-step">
-          <div className="codex-step__body">
-            <span className="codex-step__text">Copy this code:</span>
-            <div className="codex-code-box">
-              <code className="codex-code-box__value">{info.userCode}</code>
-              <button
-                type="button"
-                className="codex-copy"
-                aria-label={copied ? "Copied" : "Copy code"}
-                onClick={() => copyCode(info.userCode)}
-              >
-                {copied ? <CheckSmallGlyph /> : <CopyGlyph />}
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
-          </div>
-        </li>
-        <li className="codex-step">
-          <div className="codex-step__body">
-            <span className="codex-step__text">Open the verification page and paste the code:</span>
-            {verifyHref ? (
-              <a
-                className="btn btn--sm btn--ghost codex-step__action"
-                href={verifyHref}
-                target="_blank"
-                rel="noreferrer"
-                onClick={() => report(flow, { event: "verification_opened", stage: "ui" })}
-              >
-                Verification page ↗
-              </a>
-            ) : null}
-          </div>
+          <p className="codex-step__text">Open the verification page and paste the code</p>
+          {verifyHref ? (
+            <a
+              className="btn btn--sm codex-step__action"
+              href={verifyHref}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => report(flow, { event: "verification_opened", stage: "ui" })}
+            >
+              Verification page ↗
+            </a>
+          ) : null}
         </li>
       </ol>
-      <div className="codex-device__waiting">
+      <div className="codex-device__waiting" role="status">
         <span className="codex-spinner" aria-hidden="true" />
         Waiting for authentication…
       </div>
@@ -856,7 +899,7 @@ function CodexDeviceFlow({ onConnected }: { onConnected: (info: CodexHarnessInfo
           ) : null}
         </div>
       ) : null}
-      <p className="codex-device__note cell-meta">
+      <p className="codex-device__note">
         Still spinning? Enable <strong>Device code authorization for Codex</strong> in your ChatGPT
         security settings <em>first</em> (step 1), then enter the code on the verification page —
         approval silently fails if that setting is off.

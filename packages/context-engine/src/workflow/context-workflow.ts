@@ -7,7 +7,12 @@ import {
   type TaskId,
   type TaskTypeDefinition
 } from "@jina/board";
-import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
+import {
+  contextWorkflowBoardTopics,
+  entityId,
+  type ContextWorkflowWorkerTopic,
+  type IsoTimestamp
+} from "@jina/shared-kernel";
 import { fingerprint, isFullCommitSha, normalizeIsoTime, normalizeRepository } from "../domain/fingerprint.js";
 import type { DerivationDetail } from "../derive/verbosity.js";
 import {
@@ -31,14 +36,8 @@ export const contextWorkflowBoardTaskTypes = {
 export type ContextWorkflowBoardTaskType =
   (typeof contextWorkflowBoardTaskTypes)[keyof typeof contextWorkflowBoardTaskTypes];
 
-export const contextWorkflowBoardTopics = {
-  snapshot: "run-context-input-snapshot",
-  planner: "run-context-page-plan",
-  page: "run-context-page-build",
-  publication: "run-context-publication"
-} as const;
-
-export type ContextWorkflowBoardTopic = (typeof contextWorkflowBoardTopics)[keyof typeof contextWorkflowBoardTopics];
+export { contextWorkflowBoardTopics };
+export type ContextWorkflowBoardTopic = ContextWorkflowWorkerTopic;
 
 export const contextWorkflowBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] = [
   definition(contextWorkflowBoardTaskTypes.build, "aggregate", "system", "Coordinates one Context release."),

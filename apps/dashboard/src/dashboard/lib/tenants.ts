@@ -9,25 +9,25 @@ export type TenantType = "User" | "Organization";
 export type TenantRole = "admin" | "member";
 
 /** A tenant the viewer belongs to, as returned by GET /dashboard/tenants. */
-export type ViewerTenant = {
+export interface ViewerTenant {
   tenant_id: string;
   login: string;
   type: TenantType;
   role: TenantRole;
   clerk_organization_id?: string;
-};
+}
 
 /**
  * The active tenant exposed through the tenant context. `null` (absent) means
  * legacy personal behavior — the pages fall back to the viewer-scoped routes.
  */
-export type SelectedTenant = {
+export interface SelectedTenant {
   tenantId: string;
   login: string;
   type: TenantType;
   role: TenantRole;
   clerkOrganizationId?: string;
-};
+}
 
 /** localStorage key holding the last-selected tenant id (persists the switcher choice). */
 export const TENANT_STORAGE_KEY = "jina.dashboard.tenant";
@@ -152,7 +152,7 @@ export function isTenantWritable(selected: SelectedTenant | null): boolean {
  *  KEEP IN SYNC with api/src/codex-harness.ts HARNESS_MODELS (and trigger runtime-review HARNESS_MODELS):
  *  a slug the API accepts but this list omits is silently normalized to null (Codex default) here, so a
  *  GPT-5.6 pin saved elsewhere would display as "Codex default". */
-export const HARNESS_MODEL_OPTIONS: Array<{ value: string | null; label: string }> = [
+export const HARNESS_MODEL_OPTIONS: { value: string | null; label: string }[] = [
   { value: null, label: "Codex default" },
   { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
   { value: "gpt-5.6-terra", label: "GPT-5.6 Terra" },

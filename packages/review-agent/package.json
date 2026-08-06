@@ -18,8 +18,8 @@
     "@daytona/sdk": "^0.203.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
-    "tsx": "^4.19.2",
-    "typescript": "^5.8.0"
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.5",
+    "typescript": "^6.0.3"
   }
 }

@@ -82,8 +82,8 @@ test("parseUsageRequestBody accepts a well-formed body and keeps cost as a strin
   assert.equal(parsed.sandbox_id, "sbx-1");
   assert.equal(parsed.key_source, "managed");
   assert.equal(parsed.usage_records.length, 1);
-  assert.equal(parsed.usage_records[0]!.cost, "0.0123");
-  assert.equal(typeof parsed.usage_records[0]!.cost, "string");
+  assert.equal(parsed.usage_records[0].cost, "0.0123");
+  assert.equal(typeof parsed.usage_records[0].cost, "string");
 });
 
 // The trigger types already admit key_source "harness" (native/own-harness usage); the parser must
@@ -173,7 +173,7 @@ test("parseUsageRequestBody accepts valid decimals, integer tokens, and absent o
   const parsed = parseUsageRequestBody(
     withRecord({ request_seq: 0, cost: "12", upstream_inference_cost: "0.00012345", prompt_tokens: 10, cached_tokens: 0 }),
   );
-  const record = parsed.usage_records[0]!;
+  const record = parsed.usage_records[0];
   assert.equal(record.request_seq, 0);
   assert.equal(record.cost, "12");
   assert.equal(record.upstream_inference_cost, "0.00012345");
@@ -185,24 +185,24 @@ test("parseUsageRequestBody accepts valid decimals, integer tokens, and absent o
 
 test("parseUsageRequestBody treats an empty-string cost as absent (backward compatible)", () => {
   const parsed = parseUsageRequestBody(withRecord({ cost: "" }));
-  assert.equal(parsed.usage_records[0]!.cost, undefined);
+  assert.equal(parsed.usage_records[0].cost, undefined);
 });
 
 /* ---------- FINDING 5: the proxy preserves wire literals — exponent notation must not 400 --- */
 
 test("parseUsageRequestBody accepts scientific-notation cost literals, normalized exactly (FINDING 5)", () => {
-  assert.equal(parseUsageRequestBody(withRecord({ cost: "1e-7" })).usage_records[0]!.cost, "0.0000001");
-  assert.equal(parseUsageRequestBody(withRecord({ cost: "2.5E-6" })).usage_records[0]!.cost, "0.0000025");
-  assert.equal(parseUsageRequestBody(withRecord({ cost: "1.23456789012e2" })).usage_records[0]!.cost, "123.456789012");
+  assert.equal(parseUsageRequestBody(withRecord({ cost: "1e-7" })).usage_records[0].cost, "0.0000001");
+  assert.equal(parseUsageRequestBody(withRecord({ cost: "2.5E-6" })).usage_records[0].cost, "0.0000025");
+  assert.equal(parseUsageRequestBody(withRecord({ cost: "1.23456789012e2" })).usage_records[0].cost, "123.456789012");
   assert.equal(
-    parseUsageRequestBody(withRecord({ upstream_inference_cost: "1.5e-7" })).usage_records[0]!.upstream_inference_cost,
+    parseUsageRequestBody(withRecord({ upstream_inference_cost: "1.5e-7" })).usage_records[0].upstream_inference_cost,
     "0.00000015",
   );
 });
 
 test("parseUsageRequestBody keeps full precision beyond 8 fractional digits (numeric(18,8) rounds on insert)", () => {
   // No truncation here — 0.0123456789012 has 13 fractional digits and is passed through intact.
-  assert.equal(parseUsageRequestBody(withRecord({ cost: "1.23456789012e-2" })).usage_records[0]!.cost, "0.0123456789012");
+  assert.equal(parseUsageRequestBody(withRecord({ cost: "1.23456789012e-2" })).usage_records[0].cost, "0.0123456789012");
 });
 
 test("parseUsageRequestBody still rejects malformed exponent literals (FINDING 5)", () => {
@@ -380,7 +380,7 @@ test("getOpenAiModelPricing returns {} when the catalog is unavailable, else the
 
 function withStubbedFetch(response: Partial<Response> & { ok: boolean }, run: () => Promise<void>): Promise<void> {
   const original = globalThis.fetch;
-  globalThis.fetch = (async () => response as Response) as typeof fetch;
+  globalThis.fetch = (async () => response as Response);
   return run().finally(() => {
     globalThis.fetch = original;
   });
@@ -558,7 +558,7 @@ test("policyFromRow clamps a negative infra credit charge to the platform defaul
   assert.equal(policy.infra_credits_per_run, PLATFORM_BILLING_POLICY.infra_credits_per_run);
   const logged = errors.entries.find((e) => e[0] === "billing_policy_invalid");
   assert.ok(logged, "billing_policy_invalid logged");
-  const fields = logged![1] as Record<string, unknown>;
+  const fields = logged[1] as Record<string, unknown>;
   assert.equal(fields.tenant_id, "tenant-1");
   assert.equal(fields.field, "infra_credits_per_run");
   assert.equal(fields.value, -100);

@@ -8,24 +8,24 @@
  * the API (e.g. "0.15", "10.000000") and must be formatted for display rather
  * than parsed to floats for math. Either field may be null when unpriced.
  */
-type ModelPricing = {
+interface ModelPricing {
   prompt_per_1m: string | null;
   completion_per_1m: string | null;
-};
+}
 
 /**
  * A model in the platform catalog. `context_length` and `pricing` are optional
  * because they were added by a later API revision (PR #145) — older API builds
  * omit them, so every consumer must degrade gracefully when they're absent.
  */
-export type CatalogModel = {
+export interface CatalogModel {
   id: string;
   name: string;
   context_length?: number | null;
   pricing?: ModelPricing | null;
-};
+}
 
-export type ModelSettings = {
+export interface ModelSettings {
   planner_model: string | null;
   investigation_model: string | null;
   review_model: string | null;
@@ -36,7 +36,7 @@ export type ModelSettings = {
   context_effort: ReasoningEffort | null;
   review_fallback_policy: FallbackPolicy;
   context_fallback_policy: FallbackPolicy;
-};
+}
 
 export type ReasoningEffort = "low" | "medium" | "high";
 export type FallbackPolicy = "fail_notify" | "managed";

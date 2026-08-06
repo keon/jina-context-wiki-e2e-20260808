@@ -24,6 +24,44 @@ test("uses the dedicated product token when Context and review workers have sepa
   assert.equal(config.internalApiToken, "product-token");
 });
 
+test("review Board pipeline selection defaults v1 and validates canary configuration", () => {
+  assert.deepEqual(loadConfig(baseEnv()).reviewBoardPipeline, {
+    mode: "v1",
+    v2Repositories: new Set(),
+  });
+  assert.deepEqual(
+    loadConfig(
+      baseEnv({
+        JINA_REVIEW_BOARD_PIPELINE_MODE: "allowlist",
+        JINA_REVIEW_BOARD_V2_REPOSITORIES: "Acme/Example, omxyz/jina",
+      }),
+    ).reviewBoardPipeline,
+    { mode: "allowlist", v2Repositories: new Set(["acme/example", "omxyz/jina"]) },
+  );
+  assert.equal(
+    loadConfig(baseEnv({ JINA_REVIEW_BOARD_PIPELINE_MODE: "v2" })).reviewBoardPipeline.mode,
+    "v2",
+  );
+  assert.throws(
+    () => loadConfig(baseEnv({ JINA_REVIEW_BOARD_PIPELINE_MODE: "unknown" })),
+    /must be paused, v1, v2, or allowlist/,
+  );
+  assert.throws(
+    () => loadConfig(baseEnv({ JINA_REVIEW_BOARD_PIPELINE_MODE: "allowlist" })),
+    /must not be empty/,
+  );
+  assert.throws(
+    () =>
+      loadConfig(
+        baseEnv({
+          JINA_REVIEW_BOARD_PIPELINE_MODE: "allowlist",
+          JINA_REVIEW_BOARD_V2_REPOSITORIES: "not-a-repository",
+        }),
+      ),
+    /invalid repository/,
+  );
+});
+
 test("uses DASHBOARD_URL as the default credentialed dashboard origin", () => {
   const config = loadConfig(baseEnv({ NODE_ENV: "development", DASHBOARD_URL: "https://app.example.com/" }));
 

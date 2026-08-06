@@ -1,10 +1,10 @@
 "use client";
 
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CodexConnection } from "../components/codex-connection";
 import { Badge } from "../components/ui";
 import { apiUrl } from "../lib/api";
-import { normalizeCodexHarnessInfo, type CodexHarnessInfo } from "../lib/codex-harness";
 import {
   FALLBACK_STAGE_DEFAULTS,
   formatContextLength,
@@ -21,35 +21,49 @@ import {
   type ModelSettings,
   type ReasoningEffort,
 } from "../lib/openrouter";
+import { CONFIG_STALE_TIME_MS, DashboardRequestError } from "../lib/query-client";
+import { tenantQueryKey, type TenantQueryKey } from "../lib/query-keys";
 import { isTenantWritable, type SelectedTenant } from "../lib/tenants";
-import { useTenant, useTenantFence } from "../providers";
+import { useCodexHarness, useTenant, useTenantFence, useTenantQueryScope } from "../providers";
 
 type ModelProvider = "codex" | "byok" | "managed";
 type ReviewTriggerMode = "every_commit" | "first_commit" | "manual_only";
 type PageState = "loading" | "ready" | "unavailable";
-type SaveState = { kind: "idle" | "saving" | "saved" | "error"; message?: string };
+interface SaveState { kind: "idle" | "saving" | "saved" | "error"; message?: string }
 
-const PROVIDERS: Array<{ value: ModelProvider; title: string; description: string; mark: string }> = [
+/** The four reads the page needs, resolved together so it has one loading state. */
+interface ModelConfig {
+  provider: ModelProvider;
+  settings: ModelSettings;
+  trigger: ReviewTriggerMode;
+  catalog: CatalogModel[];
+  defaults: StageDefaults;
+}
+
+const PROVIDERS: { value: ModelProvider; title: string; description: string; mark: string }[] = [
   { value: "codex", title: "Codex", description: "Use your ChatGPT subscription for reviews you author.", mark: "CX" },
   { value: "byok", title: "Your API keys", description: "Route through credentials configured in Integrations.", mark: "BY" },
   { value: "managed", title: "Jina managed", description: "Use managed models billed as workspace credits.", mark: "JM" },
 ];
 
-const STAGES: Array<{
+const STAGES: {
   modelKey: "planner_model" | "investigation_model" | "review_model" | "context_model";
   defaultKey: keyof StageDefaults;
   effortKey: "planner_effort" | "investigation_effort" | "review_effort" | "context_effort";
   title: string;
   description: string;
   defaultEffort: ReasoningEffort;
-}> = [
+}[] = [
   { modelKey: "planner_model", defaultKey: "planner", effortKey: "planner_effort", title: "Planning", description: "Maps the review into focused investigation areas.", defaultEffort: "medium" },
   { modelKey: "investigation_model", defaultKey: "investigation", effortKey: "investigation_effort", title: "Investigation", description: "Runs the agents that inspect code and evidence.", defaultEffort: "medium" },
   { modelKey: "review_model", defaultKey: "review", effortKey: "review_effort", title: "Final review", description: "Writes the published review and inline findings.", defaultEffort: "medium" },
   { modelKey: "context_model", defaultKey: "context", effortKey: "context_effort", title: "Context generation", description: "Builds and refreshes repository context.", defaultEffort: "low" },
 ];
 
-const TRIGGERS: Array<{ value: ReviewTriggerMode; title: string; description: string }> = [
+/** Stable identity so the catalog filter is not recomputed while the read is in flight. */
+const EMPTY_CATALOG: CatalogModel[] = [];
+
+const TRIGGERS: { value: ReviewTriggerMode; title: string; description: string }[] = [
   { value: "every_commit", title: "Every update", description: "Review when a pull request opens and after every push." },
   { value: "first_commit", title: "First commit only", description: "Review when a pull request opens, without push reruns." },
   { value: "manual_only", title: "Manual only", description: "Review only when @usejina is mentioned in a comment." },
@@ -84,82 +98,75 @@ function normalizeTrigger(value: unknown): ReviewTriggerMode {
 }
 
 async function readJson(url: string, signal: AbortSignal): Promise<unknown> {
-  const response = await fetch(url, { credentials: "include", cache: "no-store", signal });
-  if (!response.ok) throw new Error(`Request failed (${response.status})`);
+  // No `cache: "no-store"`: these responses carry `cache-control: no-cache` + an ETag, so the default
+  // cache mode still revalidates every time, just conditionally (304 instead of a full body).
+  const response = await fetch(url, { credentials: "include", signal });
+  if (!response.ok) throw new DashboardRequestError(response.status, `Request failed (${response.status})`);
   return response.json();
 }
 
 export default function ModelsPage() {
   const { selected } = useTenant();
   const isCurrentTenant = useTenantFence();
+  const scope = useTenantQueryScope();
+  const queryClient = useQueryClient();
+  // The Codex harness status is read once, above the shell, and shared with the shell's reconnect
+  // banner: it is viewer-scoped, so this page and the banner were fetching the same thing in the
+  // same tick. `harnessReady` keeps the credential card from flashing "not connected" while it loads.
+  const { harness, ready: harnessReady, setHarness, reload: reloadHarness } = useCodexHarness();
   const writable = isTenantWritable(selected);
-  const [pageState, setPageState] = useState<PageState>("loading");
-  const [reloadVersion, setReloadVersion] = useState(0);
   const [provider, setProvider] = useState<ModelProvider>("managed");
   const [settings, setSettings] = useState<ModelSettings>(() => normalizeModelSettings(null));
   const [trigger, setTrigger] = useState<ReviewTriggerMode>("every_commit");
-  const [catalog, setCatalog] = useState<CatalogModel[]>([]);
-  const [defaults, setDefaults] = useState<StageDefaults>({ ...FALLBACK_STAGE_DEFAULTS });
-  const [harness, setHarness] = useState<CodexHarnessInfo>({ configured: false });
   const [codexOpenRequest, setCodexOpenRequest] = useState(0);
   const [query, setQuery] = useState("");
   const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
   const clearStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const configKey: TenantQueryKey = tenantQueryKey("model-config", scope);
+  const configQuery = useQuery<ModelConfig>({
+    queryKey: configKey,
+    queryFn: async ({ signal }) => {
+      const [providerData, settingsData, catalogData, triggerData] = await Promise.all([
+        readJson(modelProviderUrl(selected), signal),
+        readJson(modelSettingsUrl(selected), signal),
+        readJson(apiUrl("/dashboard/models"), signal),
+        readJson(reviewTriggerUrl(selected), signal),
+      ]);
+      const providerRecord = providerData as { provider?: unknown };
+      const catalogRecord = catalogData as { models?: unknown; defaults?: unknown };
+      const triggerRecord = triggerData as { mode?: unknown };
+      return {
+        provider: normalizeProvider(providerRecord?.provider),
+        settings: normalizeModelSettings(settingsData),
+        trigger: normalizeTrigger(triggerRecord?.mode),
+        catalog: Array.isArray(catalogRecord?.models) ? (catalogRecord.models as CatalogModel[]) : [],
+        defaults: normalizeStageDefaults(catalogRecord?.defaults) ?? { ...FALLBACK_STAGE_DEFAULTS },
+      };
+    },
+    staleTime: CONFIG_STALE_TIME_MS,
+  });
+
+  const config = configQuery.data;
+  const catalog = config?.catalog ?? EMPTY_CATALOG;
+  const defaults = config?.defaults ?? FALLBACK_STAGE_DEFAULTS;
+  const pageState: PageState = configQuery.isError ? "unavailable" : config === undefined ? "loading" : "ready";
+
+  // Adopt each answer the API gives, without the reset that used to run in the
+  // effect body: that discarded the save status of a write still in flight (and
+  // with it the Save button's state) every time this component re-rendered for
+  // an unrelated reason. `config` keeps its identity across a refresh that
+  // returns the same routing, so this only fires on a real change.
   useEffect(() => {
-    const requestTenantId = selected?.tenantId ?? null;
-    const controller = new AbortController();
-    setPageState("loading");
-    setSaveState({ kind: "idle" });
-    void Promise.all([
-      readJson(modelProviderUrl(selected), controller.signal),
-      readJson(modelSettingsUrl(selected), controller.signal),
-      readJson(apiUrl("/dashboard/models"), controller.signal),
-      readJson(reviewTriggerUrl(selected), controller.signal),
-    ])
-      .then(([providerData, settingsData, catalogData, triggerData]) => {
-        if (controller.signal.aborted || !isCurrentTenant(requestTenantId)) return;
-        const providerRecord = providerData as { provider?: unknown };
-        const catalogRecord = catalogData as { models?: unknown; defaults?: unknown };
-        const triggerRecord = triggerData as { mode?: unknown };
-        setProvider(normalizeProvider(providerRecord?.provider));
-        setSettings(normalizeModelSettings(settingsData));
-        setCatalog(Array.isArray(catalogRecord?.models) ? (catalogRecord.models as CatalogModel[]) : []);
-        setDefaults(normalizeStageDefaults(catalogRecord?.defaults) ?? { ...FALLBACK_STAGE_DEFAULTS });
-        setTrigger(normalizeTrigger(triggerRecord?.mode));
-        setPageState("ready");
-      })
-      .catch(() => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) setPageState("unavailable");
-      });
-    return () => controller.abort();
-  }, [selected, reloadVersion, isCurrentTenant]);
+    if (!config) return;
+    setProvider(config.provider);
+    setSettings(config.settings);
+    setTrigger(config.trigger);
+  }, [config]);
 
   useEffect(() => () => {
     if (clearStatusTimer.current) clearTimeout(clearStatusTimer.current);
   }, []);
-
-  useEffect(() => {
-    const requestTenantId = selected?.tenantId ?? null;
-    const controller = new AbortController();
-    fetch(apiUrl("/dashboard/integrations"), {
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then((response) => (response.ok ? response.json() : undefined))
-      .then((data: Record<string, unknown> | undefined) => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
-          setHarness(normalizeCodexHarnessInfo(data?.codex_harness));
-        }
-      })
-      .catch(() => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
-          setHarness({ configured: false });
-        }
-      });
-    return () => controller.abort();
-  }, [selected, isCurrentTenant]);
 
   const markSaving = () => {
     if (clearStatusTimer.current) clearTimeout(clearStatusTimer.current);
@@ -172,6 +179,12 @@ export default function ModelsPage() {
   };
 
   const markError = (message: string) => setSaveState({ kind: "error", message });
+
+  // Keep the cached read in step with an accepted write so a later refresh (or a
+  // return to this page) cannot resurrect the pre-save value.
+  const adoptConfig = (patch: Partial<ModelConfig>) => {
+    queryClient.setQueryData<ModelConfig>(configKey, (current) => (current ? { ...current, ...patch } : current));
+  };
 
   const saveProvider = async (next: ModelProvider) => {
     if (!writable || saveState.kind === "saving") return;
@@ -190,7 +203,9 @@ export default function ModelsPage() {
       if (!response.ok) throw new Error("Provider could not be saved.");
       const body = (await response.json()) as { provider?: unknown };
       if (!isCurrentTenant(requestTenantId)) return;
-      setProvider(normalizeProvider(body.provider));
+      const saved = normalizeProvider(body.provider);
+      setProvider(saved);
+      adoptConfig({ provider: saved });
       markSaved();
     } catch (error) {
       if (!isCurrentTenant(requestTenantId)) return;
@@ -217,6 +232,7 @@ export default function ModelsPage() {
       const saved = normalizeModelSettings(await response.json());
       if (!isCurrentTenant(requestTenantId)) return;
       setSettings(saved);
+      adoptConfig({ settings: saved });
       markSaved();
     } catch (error) {
       if (!isCurrentTenant(requestTenantId)) return;
@@ -242,7 +258,9 @@ export default function ModelsPage() {
       if (!response.ok) throw new Error("Review behavior could not be saved.");
       const body = (await response.json()) as { mode?: unknown };
       if (!isCurrentTenant(requestTenantId)) return;
-      setTrigger(normalizeTrigger(body.mode));
+      const saved = normalizeTrigger(body.mode);
+      setTrigger(saved);
+      adoptConfig({ trigger: saved });
       markSaved();
     } catch (error) {
       if (!isCurrentTenant(requestTenantId)) return;
@@ -269,14 +287,27 @@ export default function ModelsPage() {
         </div>
       </header>
 
-      {pageState === "loading" ? (
-        <ModelsState title="Loading model configuration" detail="Checking routing, defaults, and available models." />
-      ) : pageState === "unavailable" ? (
+      {pageState === "unavailable" ? (
         <ModelsState
           title="Models are temporarily unavailable"
           detail="Your saved routing has not been changed. Retry when the dashboard service is reachable."
-          action={<button type="button" className="btn btn--primary" onClick={() => setReloadVersion((version) => version + 1)}>Retry</button>}
+          action={
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => {
+                // The button also asks the harness provider to re-read, so a retry
+                // never leaves a stale "not configured" behind.
+                void configQuery.refetch();
+                reloadHarness();
+              }}
+            >
+              Retry
+            </button>
+          }
         />
+      ) : pageState === "loading" || !harnessReady ? (
+        <ModelsState title="Loading model configuration" detail="Checking routing, defaults, and available models." />
       ) : (
         <>
           <section className="model-v2-panel">

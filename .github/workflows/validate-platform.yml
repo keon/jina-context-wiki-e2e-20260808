@@ -9,6 +9,11 @@ on:
       - packages/db/**
       - packages/observability/**
       - packages/review-agent/**
+      - scripts/cloud-build-deploy.test.mjs
+      - scripts/check-staging-readiness.sh
+      - scripts/deploy-staging.sh
+      - scripts/deploy-staging-causal-graph.sh
+      - cloudbuild.staging.yaml
       - pnpm-lock.yaml
       - .github/workflows/validate-platform.yml
 
@@ -16,6 +21,15 @@ permissions:
   contents: read
 
 jobs:
+  deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --test scripts/cloud-build-deploy.test.mjs scripts/deploy-staging-causal-graph.test.mjs
+
   api:
     runs-on: ubuntu-latest
     services:

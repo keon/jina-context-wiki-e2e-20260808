@@ -701,16 +701,32 @@ test("client abort during request upload records a usage-missing row without cra
         }
       });
       req.on("error", () => {});
-      req.write('{"model":"m","padding":"');
-      // Give the proxy a beat to start reading, then hang up mid-upload.
-      setTimeout(() => {
-        req.destroy();
-        resolve();
-      }, 20);
+      req.on("close", resolve);
+      // Start the abort timer only after Node has handed the partial request to
+      // the socket. Resolving on the client-side close avoids racing flush()
+      // against req.destroy() itself on a loaded CI host.
+      req.write('{"model":"m","padding":"', () => {
+        setTimeout(() => req.destroy(), 20);
+      });
     });
 
     const started = Date.now();
-    const records = await withTimeout(proxy.flush({ timeoutMs: 1_000 }), 5_000, "flush hung after upload abort");
+    const records = await withTimeout(
+      (async () => {
+        // The TCP close and the server-side IncomingMessage abort are separate
+        // event-loop turns. Polling flush keeps the test about the proxy's
+        // bounded settlement guarantee without assuming a 20 ms scheduler.
+        while (true) {
+          const captured = await proxy.flush({ timeoutMs: 1_000 });
+          if (captured.length > 0 || Date.now() - started >= 4_000) {
+            return captured;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      })(),
+      5_000,
+      "flush hung after upload abort"
+    );
     assert.equal(Date.now() - started < 4_000, true);
     assert.equal(records.length, 1);
     assert.equal(records[0].operation, "agent");

@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import { Hono } from "hono";
-import type { Context, Next } from "hono";
+import type { Context, MiddlewareHandler, Next } from "hono";
 import { cors } from "hono/cors";
+import { etag, RETAINED_304_HEADERS } from "hono/etag";
 
 import {
   githubCallback,
@@ -39,8 +40,10 @@ import { GraphApiClient } from "./graph-client.js";
 import {
   acceptBackfill,
   authorizeInternal,
+  authorizeSchedule,
   completeReview,
   prepareReview,
+  reconcileReviewTerminal,
   recordReviewEvent,
   recordReviewUsage,
   resolveIntegrations,
@@ -56,7 +59,7 @@ import {
 } from "./model-settings.js";
 import { openRouterOAuthCallback, startOpenRouterOAuth } from "./openrouter-oauth.js";
 import { buildDashboard } from "./records.js";
-import { ReviewOrchestratorDispatcher } from "./review-dispatcher.js";
+import { ProductBoardWorkflowAdmitter } from "./product-board-workflow-admitter.js";
 import {
   connectGithubInstallationToTenant,
   createJinaOrganization,
@@ -104,7 +107,7 @@ import type { DashboardSession as Session } from "./auth.js";
 const FLOW_ID_LOG_VALUE = /^[a-zA-Z0-9_-]{8,80}$/;
 
 export function createApp(config: AppConfig): Hono {
-  const reviewDispatcher = new ReviewOrchestratorDispatcher();
+  const boardWorkflowAdmitter = new ProductBoardWorkflowAdmitter({ pipeline: config.reviewBoardPipeline });
   const billing = createBillingService(config);
   const graphs = new GraphApiClient(config.graph);
   const app = new Hono();
@@ -132,6 +135,48 @@ export function createApp(config: AppConfig): Hono {
   app.onError((error, c) => jsonError(c, error));
   app.use("/dashboard/*", dashboardCors);
   app.use("/auth/*", dashboardCors);
+
+  // The dashboard re-fetches these GET routes on a 2.5-15s timer (apps/dashboard/src/lib/poll.ts),
+  // and most polls observe no change. Tagging the response lets the browser HTTP cache turn an
+  // unchanged poll into a bodyless 304 revalidation instead of a full payload transfer.
+  //
+  // Semantics match the legacy server's `jsonCacheable` (apps/api/src/server.ts): a strong ETag
+  // derived from the exact serialized body, plus `cache-control: no-cache` so the browser always
+  // revalidates rather than serving a stale body out of cache.
+  //
+  // Hono's default 304 header allowlist keeps only the caching headers, which would drop the
+  // credentialed CORS headers dashboardCors set on the way in. A 304 without
+  // access-control-allow-origin is blocked by the browser, so the poll would fail instead of
+  // revalidating; Set-Cookie is retained for the same "never lose a header the 200 would have
+  // carried" reason.
+  const revalidationMiddleware = etag({
+    retainedHeaders: [
+      ...RETAINED_304_HEADERS,
+      "access-control-allow-origin",
+      "access-control-allow-credentials",
+      "access-control-expose-headers",
+      "set-cookie",
+    ],
+  });
+  // Typed as `MiddlewareHandler` rather than `(c: Context, next: Next)` like its
+  // neighbours: this one forwards `c` to hono's own `etag()`, whose parameter is
+  // narrower than a bare `Context`, and the looser annotation makes that call an
+  // unsafe argument.
+  const dashboardRevalidation: MiddlewareHandler = async (c, next) => {
+    // GET only. Mutations must never be tagged, and only a GET response body is worth buffering to
+    // hash. The one cookie-setting GET on this surface (the OpenRouter OAuth callback) answers with
+    // a bodyless 302, which the ETag middleware skips on its own.
+    if (c.req.method !== "GET") return next();
+    return revalidationMiddleware(c, async () => {
+      await next();
+      // Set while the real response is still current: the ETag middleware post-processes after this
+      // returns, and `cache-control` has to already be present to survive onto the 304.
+      if (!c.res.headers.has("set-cookie")) {
+        c.res.headers.set("cache-control", "no-cache");
+      }
+    });
+  };
+  app.use("/dashboard/*", dashboardRevalidation);
 
   // FINDING 1 (credentialed CSRF): every credentialed, state-changing dashboard route must reject a
   // cross-site forgery. With SameSite=None cookies a cross-site `text/plain` "simple request" carries
@@ -1433,7 +1478,7 @@ export function createApp(config: AppConfig): Hono {
     const rawBody = await c.req.text();
     const response = await handleGithubWebhook({
       config,
-      trigger: reviewDispatcher,
+      board: boardWorkflowAdmitter,
       headers: c.req.raw.headers,
       rawBody,
       billing,
@@ -1455,6 +1500,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post("/internal/reviews/prepare", (c) => prepareReview(c, config, billing));
+  app.post("/internal/reviews/reconcile-terminal", (c) => reconcileReviewTerminal(c, config, billing));
   app.post("/internal/reviews/manual-runs", async (c) => {
     authorizeInternal(c, config);
     const body = (await c.req.json().catch(() => undefined)) as Record<string, unknown> | undefined;
@@ -1519,8 +1565,8 @@ export function createApp(config: AppConfig): Hono {
   });
   app.post("/internal/installations/backfill", (c) => acceptBackfill(c, config, billing));
   app.post("/internal/schedules/billing-retry", async (c) => {
-    authorizeInternal(c, config);
-    const body = await c.req.json().catch(() => ({}));
+    await authorizeSchedule(c, config);
+    const body: unknown = await c.req.json().catch(() => ({}));
     const workflow = await admitScheduledBillingRetry(body);
     return c.json({ accepted: true, workflow_id: workflow.id, replayed: workflow.replayed }, 202);
   });
@@ -1706,7 +1752,15 @@ async function requireTenantMembership(
       await refreshGithubTenantAdminMembership(session.user.id, tenantId, session.userId);
     }
   }
-  return role as TenantRole;
+  return role!;
+}
+
+function containsControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0)!;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 function numberQuery(value: string | undefined): number | undefined {
@@ -1745,7 +1799,7 @@ export function parseJinaOrganizationName(value: unknown): string {
   if (!value.trim()) {
     throw new ApiError(400, "organization name is required");
   }
-  if (/[\u0000-\u001f\u007f]/.test(value)) {
+  if (containsControlCharacters(value)) {
     throw new ApiError(400, "organization name cannot contain control characters");
   }
   const name = value.trim().replace(/[ \t]+/g, " ");

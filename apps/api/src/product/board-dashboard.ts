@@ -245,6 +245,7 @@ function dashboardTaskStatus(status: string): string {
     case "retry_wait":
       return "queued";
     case "leased":
+    case "waiting_external":
       return "in_progress";
     case "succeeded":
       return "done";

@@ -1,0 +1,26 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // This package ships source rather than a build artifact — both apps list it
+    // in `transpilePackages`, so nothing here is compiled to dist. The config
+    // exists so the type-aware lint rules and `tsc --noEmit` can see the files.
+    "noEmit": true,
+    // The repo writes explicit `.ts`/`.tsx` extensions in relative imports;
+    // nothing is emitted here, so the specifier reaches the bundler unchanged.
+    "allowImportingTsExtensions": true,
+    "lib": ["dom", "dom.iterable", "ES2022"],
+    // The classic transform, and every component here imports React explicitly
+    // to match. Nothing compiles this config's output — Next transpiles the
+    // source under each app's own settings, automatic runtime included — so the
+    // readers are the type-aware lint rules and the test runner. The runner
+    // (tsx) applies a tsconfig only to files beneath it, so when an *app's*
+    // suite renders a shared primitive these files get esbuild's default, which
+    // is the classic transform. Sources that carry their own React import work
+    // under either, which is the only arrangement that holds for all three.
+    "jsx": "react",
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts", "testing/**/*.ts", "testing/**/*.tsx"]
+}

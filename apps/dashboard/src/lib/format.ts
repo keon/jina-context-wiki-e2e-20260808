@@ -8,8 +8,15 @@ export function humanize(value: unknown): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+/** Shared sentinel for a value the UI cannot render as itself. */
+const ABSENT = "–";
+
 export function formatTime(value: string | undefined | null): string {
-  return value ? new Date(value).toLocaleString() : "–";
+  if (!value) return ABSENT;
+  const parsed = new Date(value);
+  // An unparseable timestamp otherwise reaches the UI as the literal string
+  // "Invalid Date"; fall back to the same sentinel absence already uses.
+  return Number.isNaN(parsed.getTime()) ? ABSENT : parsed.toLocaleString();
 }
 
 export function formatValue(value: unknown): string {
@@ -23,7 +30,10 @@ export function formatValue(value: unknown): string {
 
 export function relativeTime(value: string | undefined | null): string {
   if (!value) return "Never";
-  const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000));
+  const parsed = new Date(value).getTime();
+  // Without this an unparseable timestamp renders as "NaNs ago".
+  if (Number.isNaN(parsed)) return ABSENT;
+  const seconds = Math.max(0, Math.round((Date.now() - parsed) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;

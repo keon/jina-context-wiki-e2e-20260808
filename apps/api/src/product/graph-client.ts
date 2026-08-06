@@ -19,7 +19,7 @@ import {
  */
 const citationDetailLimit = 25;
 
-export type GraphSummary = {
+export interface GraphSummary {
   id: string;
   repository: string;
   versionLabel: string;
@@ -28,35 +28,35 @@ export type GraphSummary = {
   summary: string;
   nodeCount: number;
   edgeCount: number;
-};
+}
 
-export type GraphNode = {
+export interface GraphNode {
   id: string;
   kind: string;
   label: string;
   description: string;
   path?: string;
   evidence: string[];
-};
+}
 
-export type GraphEdge = {
+export interface GraphEdge {
   id: string;
   source: string;
   target: string;
   predicate: string;
-  plane: "code" | "knowledge" | string;
+  plane: string;
   confidence?: number;
   qualifiers?: Record<string, string | number | boolean>;
   why?: string;
   evidence: string[];
-};
+}
 
 export type GraphDetail = GraphSummary & {
   nodes: GraphNode[];
   edges: GraphEdge[];
 };
 
-export type GraphCitation = {
+export interface GraphCitation {
   kind: "code" | "commit_change" | "assertion" | "observation" | "entity";
   id: string;
   repository: string;
@@ -64,39 +64,39 @@ export type GraphCitation = {
   path?: string;
   startLine?: number;
   endLine?: number;
-};
+}
 
-export type GraphQueryResult = {
+export interface GraphQueryResult {
   graphId: string;
   answer: string;
-  claims: Array<{ text: string; citations: GraphCitation[] }>;
+  claims: { text: string; citations: GraphCitation[] }[];
   highlightedNodeIds: string[];
   highlightedEdgeIds: string[];
   incomplete: boolean;
   notes: string[];
-};
+}
 
-type GraphRepository = {
+interface GraphRepository {
   name: string;
   defaultBranch: string;
   graphId?: string;
   indexing: boolean;
-};
+}
 
-export type GraphListResult = {
+export interface GraphListResult {
   graphs: GraphSummary[];
   graphVersions: GraphSummary[];
   repositories: GraphRepository[];
   indexingRepositories: string[];
-};
+}
 
 export type TenantWorkOverview = DashboardWorkOverview;
 
-type GraphRepositoryAccess = { name: string; defaultBranch: string };
+interface GraphRepositoryAccess { name: string; defaultBranch: string }
 
 /** A knowledge document as the context page lists it. */
 /** A build in flight, and the pages it has finished so far. */
-export type ContextBuildProgress = {
+export interface ContextBuildProgress {
   buildId: string;
   repository: string;
   ref: string;
@@ -127,9 +127,9 @@ export type ContextBuildProgress = {
     updatedAt: string;
   }[];
   updatedAt?: string;
-};
+}
 
-export type ContextBuildSummary = {
+export interface ContextBuildSummary {
   id: string;
   repository: string;
   ref: string;
@@ -145,17 +145,17 @@ export type ContextBuildSummary = {
   stages: ContextBuildProgress["stages"];
   createdAt: string;
   updatedAt: string;
-};
+}
 
-export type ContextBuildCancellation = {
+export interface ContextBuildCancellation {
   accepted: true;
   buildId: string;
   status: string;
   canceled: boolean;
   changed: boolean;
-};
+}
 
-export type ContextDocumentSummary = {
+export interface ContextDocumentSummary {
   id: string;
   releaseId: string;
   logicalId: string;
@@ -168,9 +168,9 @@ export type ContextDocumentSummary = {
   reviewStatus: string;
   commitSha?: string;
   createdAt: string;
-};
+}
 
-type ContextDocumentCitation = {
+interface ContextDocumentCitation {
   sourceType?: string;
   sourceId?: string;
   repository?: string;
@@ -178,7 +178,7 @@ type ContextDocumentCitation = {
   path?: string;
   startLine?: number;
   endLine?: number;
-};
+}
 
 export type ContextDocumentDetail = ContextDocumentSummary & {
   bodyMarkdown: string;
@@ -189,22 +189,22 @@ export type ContextDocumentDetail = ContextDocumentSummary & {
   priorRevisionId?: string;
 };
 
-type RequestContext = {
+interface RequestContext {
   tenantId: string;
   installationId?: number;
   repositories: readonly GraphRepositoryAccess[];
-};
+}
 
-export type DashboardGraphBuildInput = {
+export interface DashboardGraphBuildInput {
   repository: string;
   snapshotFirst?: boolean;
   requestKey: string;
   metadata: Readonly<Record<string, string | number>>;
-};
+}
 
-type DelegatedToken = { secret: string; tokenId: string; renewAt: number };
+interface DelegatedToken { secret: string; tokenId: string; renewAt: number }
 
-type ContextRelease = {
+interface ContextRelease {
   id: string;
   repository: string;
   ref: string;
@@ -212,9 +212,9 @@ type ContextRelease = {
   createdAt: string;
   publishedAt?: string;
   contextStatus: "available" | "partial" | "unavailable";
-};
+}
 
-type ContextCatalogDocument = {
+interface ContextCatalogDocument {
   id: string;
   logicalId: string;
   revisionId: string;
@@ -222,9 +222,9 @@ type ContextCatalogDocument = {
   title: string;
   summary: string;
   citations: ContextCatalogCitation[];
-};
+}
 
-type ContextCatalogCitation = {
+interface ContextCatalogCitation {
   claim: string;
   citationId?: string;
   claimSpan?: string;
@@ -237,7 +237,7 @@ type ContextCatalogCitation = {
     startLine?: number;
     endLine?: number;
   };
-};
+}
 
 /** Renew this far before expiry so a request never races the boundary. */
 const delegatedTokenRenewalMarginMs = 60_000;

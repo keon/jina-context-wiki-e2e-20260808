@@ -1,0 +1,217 @@
+/**
+ * The one place a colour is allowed to be written down.
+ *
+ * Both web apps import this file; nothing else should contain a hex code, an
+ * rgb()/rgba() literal, or a raw radius. Product stylesheets reference tokens
+ * through var(), so retheming happens here and nowhere else. Before this
+ * existed the two apps each carried their own copy of the same twenty tokens
+ * and drifted apart.
+ *
+ * Palette: a cool near-black canvas, borders that read as separation rather
+ * than as lines, one indigo accent carrying every interactive affordance, and
+ * tight radii. Type is set in a narrow range with negative tracking.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces, coolest to warmest. `canvas` is the page; every panel sits above
+     it by a step small enough to read as depth rather than as a colour change. */
+  --canvas: #08090a;
+  --sidebar: #08090a;
+  --surface: #101113;
+  --surface-raised: #16181a;
+  --surface-hover: #1c1e21;
+  --surface-selected: #23262a;
+  --surface-inset: #050506;
+
+  /* Borders are deliberately faint. `line-strong` is for a focused or hovered
+     control, not for ordinary structure. */
+  --line-subtle: rgba(255, 255, 255, 0.06);
+  --line: rgba(255, 255, 255, 0.09);
+  --line-strong: rgba(255, 255, 255, 0.15);
+
+  /* Four text weights. `ink` is body copy; `ink-strong` is reserved for
+     headings and the single most important value in a row. */
+  --ink: #e3e4e6;
+  --ink-strong: #f7f8f8;
+  --ink-muted: #9ca0a8;
+  --ink-subtle: #6f737b;
+  /* Text on a light or saturated plate — an avatar, a brand mark, a filled
+     status glyph. Without it those callers reach for a surface token, which is
+     a background doing a foreground's job. */
+  --ink-inverse: #101113;
+
+  /* One accent. Primary actions, selection, focus, and links all use it, which
+     is what makes an interface feel like one product rather than several. */
+  --accent: #5e6ad2;
+  --accent-hover: #6e79db;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(94, 106, 210, 0.14);
+  --accent-border: rgba(94, 106, 210, 0.32);
+
+  /* Status hues, desaturated so a dense table of them stays readable. */
+  --positive: #4cb782;
+  --caution: #f2b341;
+  --negative: #eb5757;
+  --informative: #4ea7fc;
+  --positive-soft: rgba(76, 183, 130, 0.14);
+  --caution-soft: rgba(242, 179, 65, 0.14);
+  --negative-soft: rgba(235, 87, 87, 0.14);
+  --informative-soft: rgba(78, 167, 252, 0.14);
+
+  /* Status tones for badges, notices, and verdict chips. The `-fg` step is
+     lightened so status text clears AA on its own soft background. */
+  --ok-fg: #63ce97;
+  --ok-bg: var(--positive-soft);
+  --ok-border: rgba(76, 183, 130, 0.3);
+  --warn-fg: #f5c563;
+  --warn-bg: var(--caution-soft);
+  --warn-border: rgba(242, 179, 65, 0.3);
+  --bad-fg: #f27a7a;
+  --bad-bg: var(--negative-soft);
+  --bad-border: rgba(235, 87, 87, 0.3);
+  --info-fg: #7fbefd;
+  --info-bg: var(--informative-soft);
+  --info-border: rgba(78, 167, 252, 0.3);
+  /* The tone the ok/warn/bad/info set was missing: a badge or chip that is
+     stating a fact rather than a status. Without it the base `.badge` had to
+     borrow a surface token to do a tone token's job. */
+  --neutral-fg: var(--ink-muted);
+  --neutral-bg: rgba(255, 255, 255, 0.05);
+  --neutral-border: var(--line-subtle);
+
+  --tooltip-bg: #23262a;
+  --tooltip-fg: #f7f8f8;
+
+  /* Dims the page behind a modal or an open mobile drawer. Five sites across
+     the two apps each carried their own alpha, spanning 0.60 to 0.68 — close
+     enough to look like drift rather than intent. */
+  --scrim: rgba(0, 0, 0, 0.62);
+
+  /* Sticky headers and toolbars. Deliberately translucent: these sit over
+     scrolling content with a backdrop-filter, which an opaque fill would make
+     pointless. */
+  --chrome-bg: color-mix(in srgb, var(--canvas) 94%, transparent);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Tight radii. Anything larger reads as friendly rather than precise. */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  /* The Geist variables are set by next/font in the dashboard. Admin has no
+     font dependency, so each var() carries its own fallback rather than
+     invalidating the whole declaration when the variable is absent. */
+  --font-sans:
+    var(--font-geist-sans, ui-sans-serif), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono, ui-monospace), SFMono-Regular, Menlo, Consolas, monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+
+  /* Shadows are tight and dark rather than wide and soft: on a near-black
+     canvas a large blur reads as haze, not elevation. */
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.16);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6);
+
+  --sidebar-width: 260px;
+  --sidebar-collapsed-width: 56px;
+  --header-height: 52px;
+  --content-max: 1600px;
+  --page-max: 1380px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--canvas);
+}
+
+body {
+  min-width: 320px;
+  min-height: 100dvh;
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  letter-spacing: -0.011em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin-top: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--ink-strong);
+  font-weight: 510;
+  letter-spacing: -0.02em;
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-selected) transparent;
+}

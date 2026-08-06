@@ -42,55 +42,45 @@ sequenceDiagram
     API->>PG: Commit evidence checkpoint
     W->>B: Complete snapshot task
 
-    B->>W: Lease research-plan task
-    W->>C: Discover bounded repository-specific research
-    C-->>W: Artifact-backed research work specifications
-    W->>B: Add research tasks and publication-plan join
-    par Independent research tasks
-        B->>W: Lease subject research
+    B->>W: Lease plan-context-pages
+    W->>C: Discover bounded research assignments
+    C-->>W: Research plan
+    loop Validated subject assignments
         W->>C: Inspect checkpoint source and history
         C-->>W: Evidence-grounded report
         W->>GCS: Store immutable report
-        W->>B: Complete research task with artifact digest/reference
     end
-
-    B->>W: Lease publication-plan task
     W->>C: Synthesize engineering-documentation tree
     C-->>W: Page work specifications and maintenance-task catalog
-    W->>B: Add one aggregate per page plus final gates
+    W->>GCS: Store immutable publication plan
+    W->>B: Complete planner and add one task per affected page
 
-    par Independent page aggregates
-        B->>W: Lease write-context-page
+    par Independent build-context-page tasks
+        B->>W: Lease one page task
         W->>C: Write one page from bounded evidence packets
         C-->>W: Markdown page
         W->>API: Validate identity, ranges, exact anchors, and structure
         API->>GCS: Store immutable page checkpoint
-        W->>B: Complete writer task
-        B->>W: Lease independent audit-context-page
         W->>C: Audit exact claim spans against supplied evidence
         alt Unsupported claim
             C-->>W: Citation findings
             W->>GCS: Store audit artifact
-            W->>B: Add repair and replacement-audit tasks atomically
+            W->>C: Repair once and run replacement audit
+            W->>GCS: Store repair and audit checkpoints
+            W->>B: Complete page with accepted or omitted disposition
         else Every claim supported
-            W->>B: Complete page audit
+            W->>B: Complete page with accepted disposition
         end
     end
 
-    B->>W: Lease source challenge and context-only task evaluation
-    W->>GCS: Store digest-bound findings and attempts
-    B->>W: Lease certification for unchanged complete snapshot
     B->>W: Lease fenced publish-context-release
-    W->>API: Submit certified bytes under task/attempt/lease/write fence
-    API->>PG: Atomically publish complete immutable release
-    API->>GCS: Store release bundle
-    B->>W: Lease index-context-release
-    W->>PI: Build hierarchy from published derived Markdown
+    W->>W: Resolve accepted, retained-prior, and omitted pages
+    W->>PI: Build hierarchy from validated derived Markdown
     PI-->>W: Deterministic nodes
-    W->>GCS: Store immutable PageIndex tree
-    W->>API: Attach tree under task/attempt/lease/write fence
-    API->>PG: Idempotently attach hierarchy to published release
-    W->>B: Complete PageIndex task
+    W->>GCS: Store release bundle and PageIndex tree
+    W->>API: Submit release under task/attempt/lease/write fence
+    API->>PG: Atomically publish release and hierarchy
+    W->>B: Complete publication task
     B->>B: Complete root build
 ```
 
@@ -125,12 +115,12 @@ sequenceDiagram
     B->>W: Snapshot exact commit and bounded provider history
     W->>API: Resolve latest eligible release for the same ref
     API-->>W: Prior derived pages and citations
-    B->>W: Lease bounded research/page tasks
+    B->>W: Lease planner, then independent page tasks
     W->>C: Prior context + current snapshot + changed history
     C->>C: Investigate affected and newly discovered subjects
     C-->>W: Research, page, audit, or repair artifact
-    W->>B: Complete task; expand or join the graph
-    B->>W: Certify, atomically publish, then index the complete successor
+    W->>B: Complete task with immutable checkpoints
+    B->>W: Build PageIndex and atomically publish the successor
 ```
 
 ## Deterministic search without answer generation

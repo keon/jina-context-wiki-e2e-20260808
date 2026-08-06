@@ -1,0 +1,62 @@
+/* A degraded read must not share the empty state's geometry: a reader has to be
+   able to tell "nothing is there" from "we could not find out". Left-aligned,
+   tinted, and carrying a marker glyph, against the empty state's calm centred
+   copy. */
+
+.error {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: var(--space-4) 18px;
+  border: 1px solid var(--bad-border);
+  border-left: 3px solid var(--negative);
+  border-radius: var(--radius-lg);
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+  text-align: left;
+}
+
+.error p {
+  margin: 0;
+}
+
+.error ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.error li {
+  margin-top: 2px;
+}
+
+/* Inside a bordered section card the alert spans the full width, so it keeps
+   only the rule that separates it from the heading above. */
+.flush {
+  border-top: 1px solid var(--bad-border);
+  border-right: 0;
+  border-bottom: 0;
+  border-radius: 0;
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--bad-fg);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.title::before {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--negative);
+  color: var(--ink-inverse);
+  content: "!";
+  font-size: var(--text-xs);
+  font-weight: 700;
+}

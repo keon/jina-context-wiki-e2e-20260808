@@ -1,6 +1,7 @@
 "use client";
 
 import { contextBuildProgressUrl } from "../../dashboard/lib/context.ts";
+import { completedContextStageCount } from "../../lib/context-builds.ts";
 import { contextFailureText } from "../../lib/context-failures.ts";
 import { formatTime, humanize, shortId } from "../../lib/format.ts";
 import { usePoll } from "../../lib/poll.ts";
@@ -13,12 +14,9 @@ export function BuildCheckpoints({
 }: {
   readonly build: ContextBuildSummary;
   readonly tenantId: string;
-  readonly release?: ContextRelease;
+  readonly release?: ContextRelease | undefined;
 }) {
-  const progress = usePoll<ContextBuildProgressResponse>(
-    contextBuildProgressUrl({ tenantId }, build.id),
-    5_000
-  );
+  const progress = usePoll<ContextBuildProgressResponse>(contextBuildProgressUrl({ tenantId }, build.id), 5_000);
   const current = progress.data?.buildId === build.id ? progress.data : undefined;
   const pages = current?.pages ?? [];
   const stages = current?.stages ?? build.stages;
@@ -48,7 +46,7 @@ export function BuildCheckpoints({
         <div className="knowledge-build__summary">
           {stages.length ? (
             <span>
-              {stages.filter((stage) => stage.status === "completed").length}/{stages.length} stages
+              {completedContextStageCount(stages)}/{stages.length} stages
             </span>
           ) : null}
           {pages.length ? (

@@ -12,6 +12,10 @@ result, and writes one declared Markdown output. The host independently checks
 the package name, commit binding, canonical result bytes, envelope digest,
 model usage, output digest, snapshot identity, and sandbox cleanup.
 
+This proves the low-level agent-stage boundary used by checkpointed planner and page
+phases. It does not prove that an internal phase name is a claimable Board topic; the
+active queue exposes only snapshot, planner, page, and publication topics.
+
 ## Authentication boundary
 
 The Daytona API credential is accepted only through `DAYTONA_API_KEY`. The

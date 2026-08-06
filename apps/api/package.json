@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc -b && tsc -p tsconfig.product.json",
     "typecheck": "tsc -b && tsc -p tsconfig.product.json --noEmit",
-    "lint": "eslint . --ignore-pattern src/product --max-warnings 0",
+    "lint": "eslint . --max-warnings 0",
     "test": "pnpm build && node --test --test-concurrency=1 dist/*.test.js dist/product/*.test.js",
     "dev": "pnpm build && JINA_ENABLE_DEV_ENDPOINTS=true JINA_SIMULATE_RUNS=true node dist/dev-server.js",
     "start": "node dist/dev-server.js",
@@ -17,22 +17,21 @@
     "sync:webhook": "node dist/product/sync-github-webhook.js"
   },
   "dependencies": {
-    "@clerk/backend": "^3.15.0",
-    "@hono/node-server": "^2.0.12",
+    "@clerk/backend": "^3.15.1",
+    "@hono/node-server": "^2.1.0",
     "@jina/board": "workspace:*",
     "@jina/context-engine": "workspace:*",
     "@jina/db": "workspace:*",
     "@jina/github": "workspace:*",
     "@jina/observability": "workspace:*",
-    "@jina/review": "workspace:*",
     "@jina/shared-kernel": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "hono": "^4.12.33",
-    "pg": "^8.13.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "hono": "^4.13.0",
+    "pg": "^8.22.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
-    "@types/pg": "^8.11.10"
+    "@types/node": "^26.1.2",
+    "@types/pg": "^8.20.4"
   }
 }

@@ -19,18 +19,25 @@ export type {
   BoardAdmissionDependency,
   BoardAdmissionResult,
   BoardAdmissionTask,
+  ExistingBoardAdmission,
   BoardTaskStatus,
   BoardWorkflowStatus
 } from "./board/repository.js";
 export { RelationalBoardReleaseRejectedError, RelationalBoardWorkerRepository } from "./board/worker-repository.js";
 export type {
+  BeginRelationalBoardEffectInput,
   ClaimedRelationalBoardTask,
   ClaimRelationalBoardTaskInput,
   CompleteRelationalBoardTaskInput,
   FailRelationalBoardTaskInput,
   RelationalBoardFenceInput,
+  RelationalBoardEffectReceipt,
+  RelationalBoardEffectStatus,
   RelationalBoardDependencyResult,
   RelationalBoardMutationResult,
+  RescheduleExternalRelationalBoardTaskInput,
+  RetryRelationalBoardEffectInput,
+  WaitExternalRelationalBoardTaskInput,
   RetryRelationalBoardTaskInput
 } from "./board/worker-repository.js";
 export {

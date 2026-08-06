@@ -17,6 +17,13 @@ import { ContextMarkdown } from "./context-markdown.tsx";
 
 type BrowserMode = "document" | "search" | "changes";
 
+/**
+ * Upper bound on rendered index entries. A large release publishes thousands of
+ * pages; the remainder is reported in the header count and an explicit note
+ * rather than dropped silently.
+ */
+const PAGE_RENDER_LIMIT = 200;
+
 export function ContextBrowser({
   release,
   releases,
@@ -97,6 +104,9 @@ export function ContextBrowser({
     );
   }, [documents, filter]);
 
+  const renderedDocuments =
+    visibleDocuments.length > PAGE_RENDER_LIMIT ? visibleDocuments.slice(0, PAGE_RENDER_LIMIT) : visibleDocuments;
+
   function openDocument(id: string) {
     setSelectedId(id);
     setMode("document");
@@ -120,7 +130,11 @@ export function ContextBrowser({
         <header className="knowledge-index__header">
           <div>
             <strong>Pages</strong>
-            <span>{documents.length}</span>
+            <span>
+              {visibleDocuments.length === documents.length
+                ? documents.length
+                : `${visibleDocuments.length} of ${documents.length}`}
+            </span>
           </div>
           <label className="knowledge-search">
             <SearchIcon />
@@ -133,7 +147,7 @@ export function ContextBrowser({
           </label>
         </header>
         <nav className="knowledge-index__list" aria-label="Wiki pages">
-          {visibleDocuments.map((item) => (
+          {renderedDocuments.map((item) => (
             <button
               type="button"
               key={item.id}
@@ -150,6 +164,11 @@ export function ContextBrowser({
           {catalog.data === undefined ? <IndexSkeleton /> : null}
           {catalog.data !== undefined && visibleDocuments.length === 0 ? (
             <p className="knowledge-index__empty">{filter ? "No matching pages." : "No pages published."}</p>
+          ) : null}
+          {renderedDocuments.length < visibleDocuments.length ? (
+            <p className="knowledge-index__empty">
+              {`Showing ${renderedDocuments.length} of ${visibleDocuments.length} pages — filter to reach the rest.`}
+            </p>
           ) : null}
         </nav>
       </aside>

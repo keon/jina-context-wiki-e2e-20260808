@@ -1,15 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { HistoryInspector } from "../../components/history/history-inspector.tsx";
-import { HistoryList } from "../../components/history/history-table.tsx";
-import { filteredHistoryEvents, historyEventContext } from "../../components/history/history-events.tsx";
+import { HISTORY_RENDER_LIMIT, HistoryList } from "../../components/history/history-table.tsx";
+import { buildHistoryEventRows, filterHistoryEventRows } from "../../components/history/history-events.tsx";
 import { uniqueValues } from "../../lib/board.ts";
 import { humanize } from "../../lib/format.ts";
 import { usePoll } from "../../lib/poll.ts";
 import { tenantDashboardApiUrl } from "../../lib/operations-api.ts";
-import type { OverviewResponse } from "../../lib/types.ts";
+import type { BoardEvent, BoardTask, OverviewResponse } from "../../lib/types.ts";
+
 import { useTenant } from "../../dashboard/providers.tsx";
+
+const NO_EVENTS: readonly BoardEvent[] = [];
+const NO_TASKS: readonly BoardTask[] = [];
 
 function FilterSelect({
   id,
@@ -45,7 +49,9 @@ function FilterSelect({
 
 export default function HistoryPage() {
   const { selected } = useTenant();
-  const { data } = usePoll<OverviewResponse>(selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "");
+  const { data, online, refresh } = usePoll<OverviewResponse>(
+    selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : ""
+  );
   const [query, setQuery] = useState("");
   const [type, setType] = useState("");
   const [actor, setActor] = useState("");
@@ -53,22 +59,61 @@ export default function HistoryPage() {
   const [date, setDate] = useState("");
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
-  const boardEvents = data?.events ?? [];
-  const tasks = data?.board.tasks ?? [];
-  const typeOptions = uniqueValues(boardEvents.map((event) => event.type));
-  const actorOptions = uniqueValues(boardEvents.map((event) => historyEventContext(event, tasks).actor));
-  const repositoryOptions = uniqueValues(boardEvents.map((event) => historyEventContext(event, tasks).repository));
-  const events = filteredHistoryEvents(boardEvents, tasks, {
-    query,
-    type: typeOptions.includes(type) ? type : "",
-    actor: actorOptions.includes(actor) ? actor : "",
-    repository: repositoryOptions.includes(repository) ? repository : "",
-    date
-  });
-  const effectiveSelectedId = events.some((event) => event.id === selectedEventId)
+  const boardEvents = data?.events ?? NO_EVENTS;
+  // `?.board?.` rather than `?.board.`: a 200 whose body does not carry a board
+  // is not a board with no tasks, but it must not be a blank page either — the
+  // dereference threw and took the whole route down. /board already reads the
+  // same payload this way.
+  const tasks = data?.board?.tasks ?? NO_TASKS;
+
+  // One O(events) derivation shared by the filter options, the filter pass, and
+  // the rendered rows. `usePoll` only replaces `data` when the payload actually
+  // changed, so this survives the 24 polls a minute and every keystroke.
+  const rows = useMemo(() => buildHistoryEventRows(boardEvents, tasks), [boardEvents, tasks]);
+  const typeOptions = useMemo(() => uniqueValues(rows.map((row) => row.event.type)), [rows]);
+  const actorOptions = useMemo(() => uniqueValues(rows.map((row) => row.context.actor)), [rows]);
+  const repositoryOptions = useMemo(() => uniqueValues(rows.map((row) => row.context.repository)), [rows]);
+
+  const effectiveType = typeOptions.includes(type) ? type : "";
+  const effectiveActor = actorOptions.includes(actor) ? actor : "";
+  const effectiveRepository = repositoryOptions.includes(repository) ? repository : "";
+  const filtered = Boolean(query.trim() || effectiveType || effectiveActor || effectiveRepository || date);
+
+  const visibleRows = useMemo(
+    () =>
+      filterHistoryEventRows(rows, {
+        query,
+        type: effectiveType,
+        actor: effectiveActor,
+        repository: effectiveRepository,
+        date
+      }),
+    [rows, query, effectiveType, effectiveActor, effectiveRepository, date]
+  );
+
+  const effectiveSelectedId = visibleRows.some((row) => row.event.id === selectedEventId)
     ? selectedEventId
-    : (events[0]?.id ?? null);
-  const selectedEvent = events.find((event) => event.id === effectiveSelectedId) ?? null;
+    : (visibleRows[0]?.event.id ?? null);
+  const selectedRow = visibleRows.find((row) => row.event.id === effectiveSelectedId) ?? null;
+
+  // `data === undefined` with no completed request yet is "not loaded", not "empty";
+  // `online === false` with nothing loaded is a failed endpoint, not "empty".
+  const status = data !== undefined ? "ready" : online === false ? "unavailable" : "loading";
+  const truncated = visibleRows.length > HISTORY_RENDER_LIMIT;
+  const retry = useCallback(() => void refresh(), [refresh]);
+
+  // With no workspace resolved there is no endpoint to poll, so the request is
+  // never issued and `data`/`online` both stay undefined — which the status
+  // ternary above would read as "loading" forever.
+  if (!selected) {
+    return (
+      <div className="page-placeholder" role="status">
+        <h1 className="sr-only">Run history</h1>
+        <strong>No workspace selected</strong>
+        <p>Select a workspace from the sidebar to read its activity.</p>
+      </div>
+    );
+  }
 
   return (
     <section className="run-history-page" id="history-page">
@@ -134,16 +179,24 @@ export default function HistoryPage() {
             <span />
           </div>
           <HistoryList
-            events={events}
-            tasks={tasks}
+            rows={visibleRows}
+            status={status}
+            filtered={filtered}
             selectedEventId={effectiveSelectedId}
             onSelect={setSelectedEventId}
+            onRetry={retry}
           />
           <footer className="run-history-list-footer">
-            {`${events.length} ${events.length === 1 ? "event" : "events"}`}
+            {status === "loading"
+              ? "Loading activity…"
+              : status === "unavailable"
+                ? "Activity history could not be loaded."
+                : truncated
+                  ? `Showing the ${HISTORY_RENDER_LIMIT} most recent of ${visibleRows.length} events — narrow the filters to reach older activity.`
+                  : `${visibleRows.length} ${visibleRows.length === 1 ? "event" : "events"}`}
           </footer>
         </section>
-        <HistoryInspector event={selectedEvent} tasks={tasks} />
+        <HistoryInspector row={selectedRow} />
       </div>
     </section>
   );

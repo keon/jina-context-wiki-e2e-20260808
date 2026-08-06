@@ -23,17 +23,8 @@ Development uses in-memory stores unless PostgreSQL configuration is supplied. P
 requires PostgreSQL, `INTERNAL_API_TOKEN`, `CONTEXT_API_TOKEN`, and either fixed or
 shared-database tenancy configuration.
 
-To exercise the separate local PR-review harness:
-
-```sh
-pnpm review:pr owner/repo 123 --dry-run
-pnpm review:pr owner/repo 123
-pnpm review:pr owner/repo 123 --harness codex-cli
-pnpm review:pr owner/repo 123 --post
-```
-
-The harness needs `gh` and `OPENROUTER_API_KEY`. Its local trace and usage model are
-separate from the deployed worker.
+Review quality experiments use the same `@jina/review-agent` runtime as deployed
+workers; see [`evals/review/README.md`](evals/review/README.md).
 
 ## Runtime
 
@@ -48,9 +39,9 @@ GitHub event
 
 The board is the orchestrator. A cross-instance PostgreSQL transaction lock protects each
 snapshot mutation, and lease/write fences prevent a stale worker from committing.
-Ordinary task leases are 30 minutes. Context stages use a 75-minute lease so one
-60-minute Cloud Run request, the worker's 62-minute operation deadline, and a separate
-10-minute terminal-completion deadline remain ordered safely.
+Context claims use a renewable lease (five minutes in the production deployment) and a
+one-minute heartbeat. Long-running sandbox work retains authority by renewal; a dead
+worker becomes reclaimable, and any late completion is rejected by its write fence.
 Opened PRs create a review workflow and one executable review pass. Opened issues create
 manual triage tasks.
 Signed branch pushes create a current-ref context build fenced by the event head SHA,
@@ -70,11 +61,12 @@ The generic Board orchestrates the complete Context workflow:
    frontier, ACL state, and citation evidence. It no longer builds a parser graph or a
    raw-source search corpus.
 2. Codex creates repository-specific Markdown context from the checkpoint and prior
-   release. Dynamic research, planning, specialist writing, source challenge, and
-   context-only criticism run as durable Board tasks.
-3. Each finished page and gate result is stored as a digest-addressed checkpoint. Retries
-   resume from valid work, while the previously published release remains current until
-   the complete successor passes certification and publishes atomically.
+   release. One durable planner task checkpoints research planning, bounded subject
+   research, and publication planning; independent durable page tasks checkpoint writing,
+   citation audit, and at most one repair/audit cycle.
+3. Each page returns an explicit accepted, retained-prior, or omitted disposition. The
+   publication task validates those dispositions, builds PageIndex, and atomically advances
+   the release; retries reuse digest-addressed phase checkpoints.
 4. Only citation-valid derived context enters exact, lexical, and hierarchy projections.
    Raw source and provider observations remain evidence and can never be returned as
    context.
@@ -114,10 +106,9 @@ context transaction explicitly activates its capability with `SET LOCAL ROLE`. R
 membership excludes the wildcard `jina_context_admin` role; tenant administration uses a
 strictly RLS-scoped capability.
 Cloud Run sizing is controlled by `cloudbuild.yaml` and validated by the deployment
-script. Context workers use a 62-minute operation timeout, a 10-minute terminal
-completion timeout, and the 75-minute context lease described above. Production
-acceptance exercises a real repository build, HTTP search, and all four MCP context tools
-before a release passes.
+script. Context worker stage budgets and terminal-completion deadlines are bounded
+independently from the renewable Board lease. Production acceptance exercises a real
+repository build, HTTP search, and all four MCP context tools before a release passes.
 
 Webhook-triggered private-repository builds carry the GitHub installation ID and mint a
 short-lived, installation-scoped token for ingestion. Manual builds may pass
@@ -134,26 +125,27 @@ apps/api/             product/review API, webhooks, billing, Board, Context, MCP
 apps/api/product-migrations/ product and review schema
 apps/admin/           tenant-wide context health UI
 apps/dashboard/       single customer dashboard, operations, and Context workspace
-apps/worker/          review and context-stage workers
-apps/workflows/       local review CLI and deterministic simulation
+apps/docs/            customer documentation application
+apps/worker/          review, Context, control, and causal-graph workers
 packages/review-agent/   portable Daytona review runtime used by Board workers
-evals/review/    review evaluation datasets and tools
+evals/review/         review evaluation datasets and tools
 packages/board/       generic tasks, dependencies, commands, reducer
 packages/context-engine/ evidence, derived context, releases, retrieval
 packages/db/          PostgreSQL stores, context adapters, migrations
 packages/github/      webhook verification and parsing
 packages/daytona/     isolated Board-stage context workers
-packages/ai/          review harnesses and model clients
 packages/observability/ structured logging, traces, live metrics
+packages/shared-kernel/ shared IDs, timestamps, and queue-topic wire contracts
 ```
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Architecture simplification and cutover gates](docs/ARCHITECTURE_SIMPLIFICATION.md)
 - [Agentic context derivation](docs/AGENTIC_DERIVATION.md)
 - [Context quality benchmark](docs/CONTEXT_QUALITY_BENCHMARK.md)
 - [Daytona Board-stage acceptance](docs/CONTEXT_DAYTONA_BOARD_STAGE_ACCEPTANCE.md)
-- [Exhausted-page remediation](docs/CONTEXT_PAGE_REMEDIATION.md)
+- [Retired multi-topic Context remediation](docs/CONTEXT_PAGE_REMEDIATION.md)
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
 - [Deployment](docs/DEPLOYMENT.md)

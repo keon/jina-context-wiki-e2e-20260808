@@ -8,7 +8,7 @@ import {
 } from "./github-app.js";
 
 test("listInstallationRepositories paginates the exact GitHub App installation repository set", async () => {
-  const requests: Array<{ url: string; authorization: string | null }> = [];
+  const requests: { url: string; authorization: string | null }[] = [];
   const firstPage = Array.from({ length: 100 }, (_, index) => ({
     full_name: `omxyz/repo-${String(index).padStart(3, "0")}`,
     default_branch: index === 0 ? "trunk" : "main",

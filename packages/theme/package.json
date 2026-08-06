@@ -1,0 +1,17 @@
+{
+  "name": "@jina/theme",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./theme.css": "./theme.css",
+    "./tokens": "./tokens.ts"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "test": "node --test --import tsx tokens.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.20.6"
+  }
+}

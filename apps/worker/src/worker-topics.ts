@@ -1,56 +1,37 @@
-export const CONTEXT_BOARD_TOPICS = [
-  "run-context-input-snapshot",
-  "run-context-page-plan",
-  "run-context-page-build",
-  "run-context-publication"
-] as const;
+import {
+  causalGraphWorkerTopics,
+  configuredReviewRunTopicMode,
+  contextWorkflowWorkerTopics,
+  controlBoardWorkerTopics,
+  reviewBoardWorkerTopics,
+  supportedWorkerTopics,
+  type CausalGraphWorkerTopic,
+  type ControlBoardWorkerTopic,
+  type ContextWorkflowWorkerTopic,
+  type EmbeddedContextStageTopic,
+  type ReviewBoardWorkerTopic,
+  type ReviewRunTopicMode,
+  type SupportedWorkerTopic,
+  type WorkerTopic
+} from "@jina/shared-kernel";
 
-/** Internal implementation stages executed inside one durable Context task. */
-const _INTERNAL_CONTEXT_STAGE_TOPICS = [
-  "run-context-research-plan",
-  "run-context-research",
-  "run-context-publication-plan",
-  "run-context-page-write",
-  "run-context-page-audit",
-  "run-context-page-repair",
-  "run-context-source-challenge",
-  "run-context-task-evaluation",
-  "run-context-gap-repair",
-  "run-context-certification",
-  "run-context-pageindex"
-] as const;
+export const CONTEXT_BOARD_TOPICS = contextWorkflowWorkerTopics;
+export const CAUSAL_GRAPH_TOPICS = causalGraphWorkerTopics;
+export const REVIEW_BOARD_TOPICS = reviewBoardWorkerTopics;
+export const CONTROL_BOARD_TOPICS = controlBoardWorkerTopics;
+export const SUPPORTED_WORKER_TOPICS = supportedWorkerTopics;
+export { configuredReviewRunTopicMode };
 
-export const CAUSAL_GRAPH_TOPICS = [
-  "run-causal-graph-history",
-  "run-causal-graph-derive",
-  "run-causal-graph-publication"
-] as const;
-
-export const REVIEW_BOARD_TOPICS = [
-  "prepare-review",
-  "summary-review",
-  "runtime-review",
-  "finalize-review",
-  "publish-review",
-  "settle-review"
-] as const;
-
-export const CONTROL_BOARD_TOPICS = ["github-installation-backfill", "billing-retry"] as const;
-
-export const SUPPORTED_WORKER_TOPICS = [
-  "run-review",
-  ...REVIEW_BOARD_TOPICS,
-  ...CONTROL_BOARD_TOPICS,
-  ...CONTEXT_BOARD_TOPICS,
-  ...CAUSAL_GRAPH_TOPICS
-] as const;
-
-export type ContextWorkerTopic = (typeof CONTEXT_BOARD_TOPICS)[number];
-export type InternalContextStageTopic = (typeof _INTERNAL_CONTEXT_STAGE_TOPICS)[number];
-export type CausalGraphWorkerTopic = (typeof CAUSAL_GRAPH_TOPICS)[number];
-export type ReviewBoardWorkerTopic = (typeof REVIEW_BOARD_TOPICS)[number];
-export type ControlBoardWorkerTopic = (typeof CONTROL_BOARD_TOPICS)[number];
-export type WorkerTopic = (typeof SUPPORTED_WORKER_TOPICS)[number] | InternalContextStageTopic;
+export type ContextWorkerTopic = ContextWorkflowWorkerTopic;
+export type {
+  CausalGraphWorkerTopic,
+  ControlBoardWorkerTopic,
+  EmbeddedContextStageTopic,
+  ReviewBoardWorkerTopic,
+  ReviewRunTopicMode,
+  SupportedWorkerTopic,
+  WorkerTopic
+};
 export type WorkerClaimMode = "enabled" | "paused";
 
 export function configuredWorkerClaimMode(value: string | undefined): WorkerClaimMode {
@@ -70,8 +51,13 @@ export function configuredWorkerPreferredRepository(value: string | undefined): 
   return repository;
 }
 
-export function configuredWorkerTopics(value: string | undefined): WorkerTopic[] {
-  const requested = (value ?? "run-review")
+export function configuredWorkerTopics(
+  value: string | undefined,
+  options: { readonly allowLegacyReview?: boolean; readonly reviewRunTopicMode?: ReviewRunTopicMode } = {}
+): SupportedWorkerTopic[] {
+  // A task worker with no explicit specialization runs the current relational
+  // review/control Board. Context workers always set WORKER_TOPICS explicitly.
+  const requested = (value ?? [...REVIEW_BOARD_TOPICS, ...CONTROL_BOARD_TOPICS].join(","))
     .split(/[|,]/)
     .map((topic) => topic.trim())
     .filter(Boolean);
@@ -81,8 +67,13 @@ export function configuredWorkerTopics(value: string | undefined): WorkerTopic[]
   if (unknown.length > 0) {
     throw new Error(`WORKER_TOPICS contains unsupported topics: ${unknown.join(", ")}`);
   }
+  const reviewRunTopicMode =
+    options.reviewRunTopicMode ?? configuredReviewRunTopicMode(undefined, options.allowLegacyReview === true);
+  if (requested.includes("run-review") && reviewRunTopicMode === "disabled") {
+    throw new Error("run-review requires JINA_REVIEW_RUN_TOPIC_MODE=legacy or relational");
+  }
   if (requested.length === 0) throw new Error("WORKER_TOPICS must contain at least one topic");
-  return [...new Set(requested as WorkerTopic[])];
+  return [...new Set(requested as SupportedWorkerTopic[])];
 }
 
 /**

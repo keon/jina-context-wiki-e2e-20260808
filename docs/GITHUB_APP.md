@@ -164,13 +164,13 @@ curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   "${JINA_API_URL}/board"
 ```
 
-For a push, verify that the Board root, snapshot, dynamic agent tasks, certification,
-publication, and PageIndex tasks refer to the expected repository/ref; that the snapshot
-task carries the expected GitHub installation ID; and that it records the event's full head
-SHA only if it still matches the fetched remote head. An immutable release returned by
-`/context/releases` must use that same commit. The context catalog should include an
-agent-derived change summary cited to the checkpoint commit and changed paths when the
-evidence supports one.
+For a push, verify that the page-oriented Board root, snapshot, planner, page tasks, and
+publication task refer to the expected repository/ref; that the snapshot task carries
+the expected GitHub installation ID; and that it records the event's full head SHA only
+if it still matches the fetched remote head. Publication includes PageIndex construction.
+An immutable release returned by `/context/releases` must use that same commit. The
+context catalog should include an agent-derived change summary cited to the checkpoint
+commit and changed paths when the evidence supports one.
 
 GitHub's App settings show delivery response status and support redelivery.
 

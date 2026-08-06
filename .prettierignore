@@ -8,3 +8,5 @@ pnpm-lock.yaml
 next-env.d.ts
 apps/dashboard/src/dashboard/
 apps/api/src/product/
+# Exact upstream bytes pinned and verified by trigger/source-manifest.json.
+trigger/

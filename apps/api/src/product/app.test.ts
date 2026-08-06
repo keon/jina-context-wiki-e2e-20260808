@@ -42,6 +42,7 @@ function testConfig(overrides: { dashboardAllowedOrigins?: AppConfig["dashboardA
       managedAiFeatureId: "managed_ai_access",
       enforce: "off",
     },
+    reviewBoardPipeline: { mode: "v1", v2Repositories: new Set() },
   };
 }
 
@@ -422,7 +423,7 @@ test("an in-flight access refresh cannot recreate a session after logout", async
       return Response.json([]);
     }
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
+  });
   await saveSession(session);
   try {
     const refresh = app.request("/dashboard/session/refresh", {
@@ -729,4 +730,106 @@ test("POST tenant GitHub installation requires JSON before authentication", asyn
     body: "{}",
   });
   assert.equal(res.status, 415);
+});
+
+/* -------------------------- dashboard ETag revalidation --------------------------------------- */
+// apps/dashboard/src/lib/poll.ts re-fetches these routes every 2.5-15s. Tagging the responses lets an
+// unchanged poll come back as a bodyless 304 instead of a full payload, matching the legacy server's
+// jsonCacheable semantics (strong ETag over the exact body + cache-control: no-cache).
+
+test("GET dashboard responses carry a strong ETag and cache-control: no-cache", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/integrations", { method: "GET" });
+  assert.equal(res.status, 200);
+  const tag = res.headers.get("etag");
+  assert.ok(tag, "expected an etag header on a polled GET route");
+  assert.match(tag, /^"[^"]+"$/, "expected a strong (non-weak, quoted) etag");
+  assert.equal(res.headers.get("cache-control"), "no-cache");
+});
+
+test("a matching if-none-match revalidates to a 304 with an empty body", async () => {
+  const app = createApp(testConfig());
+  const first = await app.request("/dashboard/integrations", { method: "GET" });
+  const tag = first.headers.get("etag");
+  assert.ok(tag);
+
+  const revalidated = await app.request("/dashboard/integrations", {
+    method: "GET",
+    headers: { "if-none-match": tag },
+  });
+  assert.equal(revalidated.status, 304);
+  assert.equal(revalidated.headers.get("etag"), tag);
+  assert.equal(revalidated.headers.get("cache-control"), "no-cache");
+  assert.equal(await revalidated.text(), "", "a 304 must not carry a body");
+});
+
+test("a stale if-none-match returns the full 200 payload", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/integrations", {
+    method: "GET",
+    headers: { "if-none-match": '"not-the-current-tag"' },
+  });
+  assert.equal(res.status, 200);
+  assert.notEqual(res.headers.get("etag"), '"not-the-current-tag"');
+  assert.deepEqual(await res.json(), {
+    openrouter: { configured: false },
+    openai: { configured: false },
+    anthropic: { configured: false },
+    codex_harness: { configured: false },
+    codex_harness_model: null,
+  });
+});
+
+test("a changed payload produces a different ETag and does not 304", async () => {
+  const appA = createApp({ ...testConfig(), githubAppInstallUrl: "https://github.com/apps/jina-a" });
+  const appB = createApp({ ...testConfig(), githubAppInstallUrl: "https://github.com/apps/jina-b" });
+
+  const a = await appA.request("/dashboard/me", { method: "GET" });
+  const b = await appB.request("/dashboard/me", { method: "GET" });
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  const tagA = a.headers.get("etag");
+  const tagB = b.headers.get("etag");
+  assert.ok(tagA);
+  assert.ok(tagB);
+  assert.notEqual(await a.text(), await b.text(), "fixture configs must produce different payloads");
+  assert.notEqual(tagA, tagB, "a changed payload must produce a different etag");
+
+  // A client holding the old tag gets the new payload, not a 304.
+  const stale = await appB.request("/dashboard/me", {
+    method: "GET",
+    headers: { "if-none-match": tagA },
+  });
+  assert.equal(stale.status, 200);
+  assert.equal(stale.headers.get("etag"), tagB);
+});
+
+test("a 304 keeps the credentialed CORS headers the 200 would have carried", async () => {
+  const app = createApp(testConfig());
+  const first = await app.request("/dashboard/integrations", {
+    method: "GET",
+    headers: { origin: "https://dash.example" },
+  });
+  const tag = first.headers.get("etag");
+  assert.ok(tag);
+  assert.equal(first.headers.get("access-control-allow-origin"), "https://dash.example");
+
+  const revalidated = await app.request("/dashboard/integrations", {
+    method: "GET",
+    headers: { origin: "https://dash.example", "if-none-match": tag },
+  });
+  assert.equal(revalidated.status, 304);
+  // Without these a browser rejects the 304 outright and the poll fails instead of revalidating.
+  assert.equal(revalidated.headers.get("access-control-allow-origin"), "https://dash.example");
+  assert.equal(revalidated.headers.get("access-control-allow-credentials"), "true");
+});
+
+test("mutating routes are not tagged and are never revalidated away", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/billing/topup", {
+    method: "POST",
+    headers: { "if-none-match": "*" },
+  });
+  assert.equal(res.status, 409, "if-none-match must not short-circuit a POST");
+  assert.equal(res.headers.get("etag"), null);
 });

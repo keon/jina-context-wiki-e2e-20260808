@@ -34,23 +34,23 @@ export async function createInstallationAccessToken(installationId: number): Pro
   return body.token;
 }
 
-export type InstallationRepositoryAccess = {
+export interface InstallationRepositoryAccess {
   name: string;
   defaultBranch: string;
   githubRepoId?: number;
   owner?: string;
   repositoryName?: string;
   private?: boolean;
-};
+}
 
-export type GithubAppInstallation = {
+export interface GithubAppInstallation {
   id: number;
   account: {
     id: number;
     login: string;
     type: string;
   };
-};
+}
 
 /**
  * Verify that a setup_url installation id belongs to this GitHub App. GitHub

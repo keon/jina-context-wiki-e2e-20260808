@@ -11,7 +11,14 @@ import {
   type TaskId,
   type TaskTypeDefinition
 } from "@jina/board";
-import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
+import {
+  causalGraphBoardTopics,
+  contextWorkflowBoardTopics,
+  entityId,
+  internalContextStageTopics,
+  type CausalGraphWorkerTopic,
+  type IsoTimestamp
+} from "@jina/shared-kernel";
 import { fingerprint, isFullCommitSha, normalizeIsoTime, normalizeRepository } from "../domain/fingerprint.js";
 import { isDerivationDetail, type DerivationDetail } from "../derive/verbosity.js";
 import {
@@ -44,19 +51,19 @@ export const contextBoardTaskTypes = {
 export type ContextBoardTaskType = (typeof contextBoardTaskTypes)[keyof typeof contextBoardTaskTypes];
 
 export const contextBoardTopics = {
-  snapshot: "run-context-input-snapshot",
-  researchPlan: "run-context-research-plan",
-  research: "run-context-research",
-  publicationPlan: "run-context-publication-plan",
-  pageWrite: "run-context-page-write",
-  pageAudit: "run-context-page-audit",
-  pageRepair: "run-context-page-repair",
-  sourceChallenge: "run-context-source-challenge",
-  taskEvaluation: "run-context-task-evaluation",
-  gapRepair: "run-context-gap-repair",
-  certification: "run-context-certification",
-  publication: "run-context-publication",
-  pageIndex: "run-context-pageindex"
+  snapshot: contextWorkflowBoardTopics.snapshot,
+  researchPlan: internalContextStageTopics.researchPlan,
+  research: internalContextStageTopics.research,
+  publicationPlan: internalContextStageTopics.publicationPlan,
+  pageWrite: internalContextStageTopics.pageWrite,
+  pageAudit: internalContextStageTopics.pageAudit,
+  pageRepair: internalContextStageTopics.pageRepair,
+  sourceChallenge: internalContextStageTopics.sourceChallenge,
+  taskEvaluation: internalContextStageTopics.taskEvaluation,
+  gapRepair: internalContextStageTopics.gapRepair,
+  certification: internalContextStageTopics.certification,
+  publication: contextWorkflowBoardTopics.publication,
+  pageIndex: internalContextStageTopics.pageIndex
 } as const;
 
 export type ContextBoardTopic = (typeof contextBoardTopics)[keyof typeof contextBoardTopics];
@@ -72,13 +79,8 @@ export type CausalGraphBoardTaskType = (typeof causalGraphBoardTaskTypes)[keyof 
 
 export type BoardWorkTaskType = ContextBoardTaskType | CausalGraphBoardTaskType;
 
-export const causalGraphBoardTopics = {
-  snapshot: "run-causal-graph-history",
-  derive: "run-causal-graph-derive",
-  publication: "run-causal-graph-publication"
-} as const;
-
-export type CausalGraphBoardTopic = (typeof causalGraphBoardTopics)[keyof typeof causalGraphBoardTopics];
+export { causalGraphBoardTopics };
+export type CausalGraphBoardTopic = CausalGraphWorkerTopic;
 
 export const contextBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] = [
   definition(

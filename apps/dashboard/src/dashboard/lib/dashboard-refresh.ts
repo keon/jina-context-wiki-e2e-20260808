@@ -1,4 +1,4 @@
-export type DashboardReloadOptions = { background?: boolean };
+export interface DashboardReloadOptions { background?: boolean }
 
 export function shouldShowDashboardLoading(options: DashboardReloadOptions): boolean {
   return options.background !== true;

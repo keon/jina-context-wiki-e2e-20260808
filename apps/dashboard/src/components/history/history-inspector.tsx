@@ -1,19 +1,12 @@
 "use client";
 
 import { clampConfidence, eventLabel, formatTime, humanize } from "../../lib/format.ts";
-import type { BoardEvent, BoardTask } from "../../lib/types.ts";
-import { historyEventConfidence, historyEventContext, historyEventExplanation } from "./history-events.tsx";
+import { historyEventConfidence, historyEventExplanation, type HistoryEventRow } from "./history-events.tsx";
 
 /** Side inspector describing the provenance of the selected history event. */
 
-export function HistoryInspector({
-  event,
-  tasks
-}: {
-  readonly event: BoardEvent | null;
-  readonly tasks: readonly BoardTask[];
-}) {
-  if (!event) {
+export function HistoryInspector({ row }: { readonly row: HistoryEventRow | null }) {
+  if (!row) {
     return (
       <aside className="run-history-detail" id="history-details" aria-live="polite">
         <div className="run-history-detail__empty">
@@ -23,7 +16,7 @@ export function HistoryInspector({
       </aside>
     );
   }
-  const context = historyEventContext(event, tasks);
+  const { event, context } = row;
   const confidence = historyEventConfidence(event);
   const confidencePercent = confidence === undefined ? undefined : Math.round(clampConfidence(confidence) * 100);
   const payload = event.payload;
@@ -39,7 +32,7 @@ export function HistoryInspector({
     ["Actor", humanize(context.actor)],
     ["Repository", context.repository],
     ["Source task", context.task?.title || "Board event"],
-    ["Sequence", String(event.seq)]
+    ["Sequence", event.seq === undefined ? "—" : String(event.seq)]
   ];
   return (
     <aside className="run-history-detail" id="history-details" aria-live="polite">

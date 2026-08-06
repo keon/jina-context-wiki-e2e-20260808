@@ -7,6 +7,7 @@ import {
   Badge,
   BackLink,
   DetailHeader,
+  EmptyState,
   ExternalLink,
 } from "../../../../components/ui";
 import { getScenarioLineageRuns } from "../../../../lib/api";
@@ -49,13 +50,13 @@ export default function ScenarioPage({
   const { reviewRunId, scenarioId } = use(params);
   const decodedReviewRunId = decodeURIComponent(reviewRunId);
   const { data, loading } = useDashboard();
-  const fallbackRun = data?.review_runs.find((item) => item.review_run_id === decodedReviewRunId);
+  // The run from the list is seeded into the detail read itself (see useReviewRunDetail).
   const {
     run,
     loading: detailLoading,
     error: detailError,
     loaded: detailLoaded,
-  } = useReviewRunDetail(decodedReviewRunId, fallbackRun);
+  } = useReviewRunDetail(decodedReviewRunId);
 
   if ((loading && !data) || (detailLoading && !detailLoaded)) {
     return <div className="notice">Loading scenario context…</div>;
@@ -311,7 +312,7 @@ export default function ScenarioPage({
                   <StepVerdicts steps={simulation.steps} />
                 </>
               ) : (
-                <div className="empty">No simulation or judge details recorded.</div>
+                <EmptyState>No simulation or judge details recorded.</EmptyState>
               )}
             </section>
           </section>
@@ -352,7 +353,7 @@ function ScenarioSimulationRuns({
   currentRun: ReviewRun;
   currentScenario: ParsedScenario;
 }) {
-  type Entry = { run: ReviewRun; scenario: ParsedScenario; sim: ScenarioSimulationScenario };
+  interface Entry { run: ReviewRun; scenario: ParsedScenario; sim: ScenarioSimulationScenario }
   // Group strictly by the stable lineage_key — i.e. the *same target scenario*
   // retried across review runs. Without a lineage_key (e.g. no simulation result
   // yet) we cannot tell scenarios apart, so we do not group: showing positional,
@@ -434,11 +435,11 @@ function ScenarioSimulationRuns({
               className={`sim-run${current ? " sim-run--current" : ""}`}
               href={scenarioPath(run.review_run_id, scenario.id)}
             >
-              <span className={`badge${tone ? ` badge--${tone}` : ""}`}>{sim?.status ?? "no sim"}</span>
+              <Badge tone={tone}>{sim?.status ?? "no sim"}</Badge>
               <span className="cell-mono">{shortSha(run.pull_request.head_sha)}</span>
               <span className="cell-meta">{formatDate(run.created_at)}</span>
               <span className="sim-run__verdict">{sim?.final_verdict ?? "—"}</span>
-              {current ? <span className="badge">current</span> : null}
+              {current ? <Badge>current</Badge> : null}
             </Link>
           );
         })}
@@ -447,7 +448,7 @@ function ScenarioSimulationRuns({
   );
 }
 
-function TrailRow({ entry, sim }: { entry: ScenarioTrailEntry; sim?: ScenarioSimulationStep }) {
+function TrailRow({ entry, sim }: { entry: ScenarioTrailEntry; sim?: ScenarioSimulationStep | undefined }) {
   return (
     <div className="trail__row">
       <span className="trail__marker">{entry.marker}</span>
@@ -457,7 +458,7 @@ function TrailRow({ entry, sim }: { entry: ScenarioTrailEntry; sim?: ScenarioSim
         {entry.detail ? <code>{entry.detail}</code> : null}
         {sim ? (
           <div className="trail__sim">
-            <span className={`badge badge--${simStepTone(sim)}`}>{sim.step_status}</span>
+            <Badge tone={simStepTone(sim)}>{sim.step_status}</Badge>
             <span className="cell-meta">{sim.consensus_reached ? "consensus" : "no consensus"}</span>
             {sim.rounds !== undefined ? (
               <span className="cell-meta">{sim.rounds} round{sim.rounds === 1 ? "" : "s"}</span>
@@ -506,7 +507,7 @@ function StepEvidence({ step }: { step: ScenarioSimulationStep }) {
 }
 
 function stepNumberFromMarker(marker: string): number | undefined {
-  const match = marker.match(/^step (\d+)$/);
+  const match = /^step (\d+)$/.exec(marker);
   return match ? Number(match[1]) : undefined;
 }
 
@@ -559,7 +560,7 @@ function ArtifactGroup({ title, files, emptyText }: { title: string; files: stri
     <div>
       <div className="split__title">{title}</div>
       {files.length === 0 ? (
-        <div className="empty">{emptyText}</div>
+        <EmptyState>{emptyText}</EmptyState>
       ) : (
         <ul className="file-list">
           {files.map((file) => (
@@ -608,10 +609,10 @@ function ScenarioTrail({
 
   if (trailRows.length === 0 && orphanRows.length === 0) {
     return (
-      <div className="empty">
+      <EmptyState>
         No steps were recorded for this scenario. Re-run the review with the latest worker to generate step-by-step
         scenarios.
-      </div>
+      </EmptyState>
     );
   }
 
@@ -619,7 +620,7 @@ function ScenarioTrail({
     <div className="sim-detail">
       {simulation ? (
         <div className="sim-detail__summary">
-          <span className={`badge badge--${simulationStatusTone(simulation.status)}`}>{simulation.status}</span>
+          <Badge tone={simulationStatusTone(simulation.status)}>{simulation.status}</Badge>
           <span hidden>Verdict: {simulation.final_verdict}</span>
           <span>Confidence: {Math.round(simulation.confidence * 100)}%</span>
           <span>
@@ -639,7 +640,7 @@ function ScenarioTrail({
 
 function EventTimeline({ events }: { events: ReviewEvent[] }) {
   if (events.length === 0) {
-    return <div className="empty">No events recorded.</div>;
+    return <EmptyState>No events recorded.</EmptyState>;
   }
 
   return (

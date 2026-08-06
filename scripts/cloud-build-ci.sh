@@ -9,10 +9,15 @@ pnpm typecheck
 pnpm lint
 if [[ -n "${DATABASE_URL:-}" ]]; then
   pnpm --filter @jina/api build
-  pnpm --filter @jina/api migrate:product
+  # Runtime migrations must run before product ones (0030 depends on them).
+  pnpm --filter @jina/api exec node dist/product/migrate-all.js
   unset DATABASE_URL
 fi
 pnpm test
+node scripts/verify-trigger-source-manifest.mjs
+npm ci --prefix trigger
+npm run typecheck --prefix trigger
+npm test --prefix trigger
 pnpm audit --prod --audit-level=high
 
 # Cloud Build deploys these exact-SHA Cloud Run bundles with the backend and

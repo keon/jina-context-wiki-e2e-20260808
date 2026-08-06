@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { contextBuildUrl, contextRepositoriesUrl } from "../../dashboard/lib/context.ts";
 import { isTenantWritable } from "../../dashboard/lib/tenants.ts";
@@ -10,8 +11,17 @@ import { operationsApiUrl, tenantDashboardApiUrl } from "../../lib/operations-ap
 import { usePoll } from "../../lib/poll.ts";
 import type { ContextBuildListResponse, ContextBuildSummary, ContextRelease } from "../../lib/types.ts";
 import { BuildCheckpoints } from "./build-checkpoints.tsx";
-import { ContextBrowser } from "./context-browser.tsx";
 import { IssueGraphBrowser } from "./issue-graph-browser.tsx";
+
+/**
+ * The wiki reader pulls in react-markdown/remark-gfm (~40KB gzipped of
+ * unified/micromark). This component also serves /causal-graph, which never
+ * renders it, so it is fetched only once a published wiki release is shown.
+ */
+const ContextBrowser = dynamic(() => import("./context-browser.tsx").then((module) => module.ContextBrowser), {
+  ssr: false,
+  loading: () => <KnowledgeLoading />
+});
 
 type ContextView = "wiki" | "causal-graph";
 interface Repository {
@@ -269,7 +279,10 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
           ) : null}
 
           {view === "causal-graph" && repository && ref ? (
+            /* Keyed on the viewed scope so switching repository/ref resets the browser,
+               while build progress ticks leave the user's filter and selection intact. */
             <IssueGraphBrowser
+              key={`${selected.tenantId}\0${repository}\0${ref}`}
               repository={repository}
               ref={ref}
               build={graphBuild}

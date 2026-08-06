@@ -1,14 +1,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { contextWorkflowBoardTaskTypeDefinitions } from "@jina/context-engine";
+import { contextWorkflowBoardTaskTypeDefinitions, contextWorkflowBoardTopics } from "@jina/context-engine";
 
-const CONTEXT_BOARD_WORKER_TOPICS = [
-  "run-context-input-snapshot",
-  "run-context-page-plan",
-  "run-context-page-build",
-  "run-context-publication"
-] as const;
+const CONTEXT_BOARD_WORKER_TOPICS = Object.values(contextWorkflowBoardTopics);
 const REQUIRED_RELEASE_TASK_TYPES = ["publish-context-release"] as const;
 const TERMINAL_TASK_STATUSES = new Set(["done", "canceled", "failed", "superseded"]);
 const CONTEXT_WORKER_TASK_TYPES = new Set(

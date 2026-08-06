@@ -278,7 +278,7 @@ test(
         "select user_id from user_integrations where github_user_id = $1",
         [githubUserId],
       );
-      assert.equal(integration.rows[0]!.user_id, userId);
+      assert.equal(integration.rows[0].user_id, userId);
 
       const now = new Date().toISOString();
       const session: DashboardSession = {
@@ -297,7 +297,7 @@ test(
         "select user_id from dashboard_sessions where id = $1",
         [sessionId],
       );
-      assert.equal(storedSession.rows[0]!.user_id, userId);
+      assert.equal(storedSession.rows[0].user_id, userId);
       assert.equal((await getSession(sessionId))!.userId, userId);
 
       // An old-revision session can be backfilled in place; the new reader

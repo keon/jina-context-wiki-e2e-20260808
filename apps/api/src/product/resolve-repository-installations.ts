@@ -9,25 +9,25 @@ import { INTERNAL_USER_TRANSITION_LOCK_KEY } from "./internal-user.js";
 
 type ResolutionClient = Pick<pg.PoolClient, "query">;
 
-type RepositoryCandidate = {
+interface RepositoryCandidate {
   id: string;
   tenant_id: string;
   github_repo_id: string;
-};
+}
 
-type InstallationCandidate = {
+interface InstallationCandidate {
   id: string;
   tenant_id: string;
   github_installation_id: string;
-};
+}
 
-export type RepositoryInstallationResolutionReport = {
+export interface RepositoryInstallationResolutionReport {
   candidates: number;
   resolved: number;
   unresolved: number;
   ambiguous: number;
   deletedInstallations: number;
-};
+}
 
 type InstallationRepositoryLister = (
   installationId: number,
@@ -95,6 +95,7 @@ export async function resolveRepositoryInstallations(
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(
         `could not inspect GitHub installation ${installation.github_installation_id}: ${message}`,
+        { cause: error },
       );
     }
     if (visible === undefined) {
@@ -147,7 +148,7 @@ export async function resolveRepositoryInstallations(
       `update repositories
        set installation_id = $2
        where id = $1`,
-      [repository.id, matches[0]!.id],
+      [repository.id, matches[0].id],
     );
     resolved += 1;
   }

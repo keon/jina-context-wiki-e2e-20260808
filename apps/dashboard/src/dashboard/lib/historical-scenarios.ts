@@ -3,19 +3,19 @@ import type { ReviewRun } from "./types";
 
 export type ScenarioRisk = "high" | "medium" | "low" | "unknown";
 
-export type ParsedScenario = {
+export interface ParsedScenario {
   id: string;
-  sourceId?: string;
+  sourceId?: string | undefined;
   index: number;
   risk: ScenarioRisk;
   title: string;
-  summary?: string;
+  summary?: string | undefined;
   steps: string[];
   expectedOutcomes: string[];
-  expectedResult?: string;
-  context?: string;
+  expectedResult?: string | undefined;
+  context?: string | undefined;
   preconditions: string[];
-  rationale?: string;
+  rationale?: string | undefined;
   surface: string[];
   riskTypes: string[];
   evidenceSources: string[];
@@ -23,7 +23,7 @@ export type ParsedScenario = {
   symbols: string[];
   relevantPaths: string[];
   markdown: string;
-};
+}
 
 const scenarioLinePattern = /^\s*-\s\[(?:\s?|x|X)\]\s*(.+)$/;
 const riskPattern = /\[risk:\s*(high|medium|low)\]/i;
@@ -185,13 +185,13 @@ function scenarioFromJson(value: unknown, index: number): ParsedScenario | undef
 
 function scenarioMarkdown(input: {
   title: string;
-  summary?: string;
+  summary?: string | undefined;
   risk: ScenarioRisk;
   relevantPaths: string[];
   preconditions: string[];
   steps: string[];
   expectedOutcome: string[];
-  rationale?: string;
+  rationale?: string | undefined;
 }): string {
   const paths = input.relevantPaths.length > 0 ? input.relevantPaths.join(", ") : "not specified";
   const lines = [`- [ ] [risk: ${input.risk}] ${input.title}${input.summary ? ` - ${input.summary}` : ""}. Relevant paths: ${paths}.`];
@@ -230,7 +230,7 @@ function stringList(value: unknown): string[] {
 }
 
 function riskFromLine(line: string): ScenarioRisk {
-  return coerceRisk(line.match(riskPattern)?.[1]);
+  return coerceRisk((riskPattern.exec(line))?.[1]);
 }
 
 function titleFromLine(line: string, index: number): string {
@@ -246,7 +246,7 @@ function titleFromLine(line: string, index: number): string {
 }
 
 function relevantPathsFromLine(line: string): string[] {
-  const raw = line.match(relevantPathsPattern)?.[1];
+  const raw = (relevantPathsPattern.exec(line))?.[1];
   if (!raw) {
     return [];
   }
@@ -260,8 +260,8 @@ function relevantPathsFromLine(line: string): string[] {
 function scenarioDetails(lines: string[]): {
   preconditions: string[];
   steps: string[];
-  expectedResult?: string;
-  context?: string;
+  expectedResult?: string | undefined;
+  context?: string | undefined;
 } {
   const preconditions: string[] = [];
   const steps: string[] = [];
@@ -304,14 +304,14 @@ function scenarioDetails(lines: string[]): {
       continue;
     }
 
-    const numberedStep = trimmed.match(numberedStepPattern)?.[1];
+    const numberedStep = (numberedStepPattern.exec(trimmed))?.[1];
     if (numberedStep && section) {
       if (section === "steps") steps.push(numberedStep.trim());
       else preconditions.push(numberedStep.trim());
       continue;
     }
 
-    const bulletStep = trimmed.match(bulletStepPattern)?.[1];
+    const bulletStep = (bulletStepPattern.exec(trimmed))?.[1];
     if (bulletStep && section) {
       if (section === "steps") steps.push(bulletStep.trim());
       else preconditions.push(bulletStep.trim());
@@ -327,7 +327,7 @@ function scenarioDetails(lines: string[]): {
 }
 
 function labelValue(value: string): { label: string; value: string } | undefined {
-  const match = value.match(/^([A-Za-z ]+):\s*(.*)$/);
+  const match = /^([A-Za-z ]+):\s*(.*)$/.exec(value);
   if (!match) {
     return undefined;
   }
