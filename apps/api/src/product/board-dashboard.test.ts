@@ -6,7 +6,7 @@ import {
   projectRelationalBoardDashboard,
 } from "./board-dashboard.js";
 
-test("relational Board projection maps review work into live dashboard columns and traceable history", () => {
+test("relational Board projection maps external waits into live dashboard progress and traceable history", () => {
   const overview = projectRelationalBoardDashboard({
     workflows: [
       {
@@ -32,7 +32,7 @@ test("relational Board projection maps review work into live dashboard columns a
         parent_task_id: null,
         task_type: "runtime-review",
         topic: "runtime-review",
-        status: "leased",
+        status: "waiting_external",
         attempt_count: 2,
         required: true,
         created_at: "2026-08-04T10:00:00.000Z",

@@ -1,3 +1,5 @@
+import type { ReviewBoardPipelineSelection } from "./review-board-admission.js";
+
 export interface AppConfig {
   port: number;
   githubWebhookSecret: string;
@@ -10,6 +12,7 @@ export interface AppConfig {
   billing: BillingConfig;
   graph?: GraphConfig;
   schedulerOidc?: SchedulerOidcConfig;
+  reviewBoardPipeline: ReviewBoardPipelineSelection;
 }
 
 /**
@@ -86,8 +89,33 @@ export function loadConfig(env = process.env): AppConfig {
     auth: parseAuthConfig(env),
     billing: parseBillingConfig(env, dashboardUrl),
     graph: parseGraphConfig(env),
+    reviewBoardPipeline: parseReviewBoardPipelineSelection(env),
     ...(parseSchedulerOidcConfig(env) ? { schedulerOidc: parseSchedulerOidcConfig(env) } : {}),
   };
+}
+
+function parseReviewBoardPipelineSelection(
+  env: NodeJS.ProcessEnv,
+): ReviewBoardPipelineSelection {
+  const rawMode = optionalEnv(env, "JINA_REVIEW_BOARD_PIPELINE_MODE") ?? "v1";
+  if (rawMode !== "paused" && rawMode !== "v1" && rawMode !== "v2" && rawMode !== "allowlist") {
+    throw new Error("JINA_REVIEW_BOARD_PIPELINE_MODE must be paused, v1, v2, or allowlist");
+  }
+  const repositories = new Set(
+    (env.JINA_REVIEW_BOARD_V2_REPOSITORIES ?? "")
+      .split(",")
+      .map((repository) => repository.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  for (const repository of repositories) {
+    if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository)) {
+      throw new Error(`JINA_REVIEW_BOARD_V2_REPOSITORIES contains invalid repository ${repository}`);
+    }
+  }
+  if (rawMode === "allowlist" && repositories.size === 0) {
+    throw new Error("JINA_REVIEW_BOARD_V2_REPOSITORIES must not be empty in allowlist mode");
+  }
+  return { mode: rawMode, v2Repositories: repositories };
 }
 
 function parseSchedulerOidcConfig(env: NodeJS.ProcessEnv): SchedulerOidcConfig | undefined {

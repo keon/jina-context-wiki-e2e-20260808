@@ -1,5 +1,6 @@
 import {
   causalGraphWorkerTopics,
+  configuredReviewRunTopicMode,
   contextWorkflowWorkerTopics,
   controlBoardWorkerTopics,
   reviewBoardWorkerTopics,
@@ -9,6 +10,7 @@ import {
   type ContextWorkflowWorkerTopic,
   type EmbeddedContextStageTopic,
   type ReviewBoardWorkerTopic,
+  type ReviewRunTopicMode,
   type SupportedWorkerTopic,
   type WorkerTopic
 } from "@jina/shared-kernel";
@@ -18,6 +20,7 @@ export const CAUSAL_GRAPH_TOPICS = causalGraphWorkerTopics;
 export const REVIEW_BOARD_TOPICS = reviewBoardWorkerTopics;
 export const CONTROL_BOARD_TOPICS = controlBoardWorkerTopics;
 export const SUPPORTED_WORKER_TOPICS = supportedWorkerTopics;
+export { configuredReviewRunTopicMode };
 
 export type ContextWorkerTopic = ContextWorkflowWorkerTopic;
 export type {
@@ -25,6 +28,7 @@ export type {
   ControlBoardWorkerTopic,
   EmbeddedContextStageTopic,
   ReviewBoardWorkerTopic,
+  ReviewRunTopicMode,
   SupportedWorkerTopic,
   WorkerTopic
 };
@@ -49,7 +53,7 @@ export function configuredWorkerPreferredRepository(value: string | undefined): 
 
 export function configuredWorkerTopics(
   value: string | undefined,
-  options: { readonly allowLegacyReview?: boolean } = {}
+  options: { readonly allowLegacyReview?: boolean; readonly reviewRunTopicMode?: ReviewRunTopicMode } = {}
 ): SupportedWorkerTopic[] {
   // A task worker with no explicit specialization runs the current relational
   // review/control Board. Context workers always set WORKER_TOPICS explicitly.
@@ -63,8 +67,10 @@ export function configuredWorkerTopics(
   if (unknown.length > 0) {
     throw new Error(`WORKER_TOPICS contains unsupported topics: ${unknown.join(", ")}`);
   }
-  if (requested.includes("run-review") && options.allowLegacyReview !== true) {
-    throw new Error("run-review requires JINA_LEGACY_REVIEW_PIPELINE_ENABLED=true");
+  const reviewRunTopicMode =
+    options.reviewRunTopicMode ?? configuredReviewRunTopicMode(undefined, options.allowLegacyReview === true);
+  if (requested.includes("run-review") && reviewRunTopicMode === "disabled") {
+    throw new Error("run-review requires JINA_REVIEW_RUN_TOPIC_MODE=legacy or relational");
   }
   if (requested.length === 0) throw new Error("WORKER_TOPICS must contain at least one topic");
   return [...new Set(requested as SupportedWorkerTopic[])];

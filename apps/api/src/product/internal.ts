@@ -10,7 +10,6 @@ import { looksLikeJwt, verifyGoogleIdToken } from "./google-oidc.js";
 import { getOpenAiModelPricing, type OpenAiModelPrice } from "./model-settings.js";
 import {
   completeReviewRun,
-  createReviewRun,
   EMPTY_MODEL_SETTINGS,
   getModelSettingsForRun,
   getOrCreateContextExecutionProfile,
@@ -25,7 +24,11 @@ import {
   reconcileReviewRunBillingKeySource,
   recordInstallation,
   recordReviewEvent as storeRecordReviewEvent,
+  prepareReviewRun,
   reopenBlockedReviewRun,
+  reconcileBoardReviewTerminal,
+  ReviewDispatchNotBoundError,
+  ReviewDispatchProvenanceError,
   resolveIntegrationKeysForRun,
   ReviewRunNotFoundError,
   type InstallationRepository,
@@ -52,38 +55,50 @@ export async function prepareReview(c: Context, config: AppConfig, billing?: Bil
   const repository = objectAt(payload, ["repository"]);
   const pullRequest = objectAt(payload, ["pull_request"]);
 
-  const reviewRunId = await createReviewRun({
-    triggerRunId,
-    idempotencyKey: stringValue(body.idempotency_key) ?? stringAt(payload, ["review_idempotency_key"]),
-    deliveryId: stringAt(payload, ["delivery_id"]),
-    sourceEvent: stringAt(payload, ["source_event"]),
-    triggerSource: stringAt(payload, ["trigger"]),
-    installationId: numberAt(payload, ["github_installation_id"]),
-    account: {
-      id: numberAt(repository, ["owner_id"]),
-      login: stringAt(repository, ["owner"]),
-      type: stringAt(repository, ["owner_type"]),
-    },
-    repository: {
-      githubRepoId: numberAt(repository, ["github_repo_id"]),
-      owner: stringAt(repository, ["owner"]),
-      name: stringAt(repository, ["name"]),
-      fullName: stringAt(repository, ["full_name"]),
-      defaultBranch: stringAt(repository, ["default_branch"]),
-      private: booleanAt(repository, ["private"]),
-    },
-    pullRequest: {
-      number: numberAt(pullRequest, ["number"]),
-      title: stringAt(pullRequest, ["title"]),
-      htmlUrl: stringAt(pullRequest, ["html_url"]),
-      author: stringAt(pullRequest, ["author"]),
-      headSha: stringAt(pullRequest, ["head_sha"]),
-      baseSha: stringAt(pullRequest, ["base_sha"]),
-      headRef: stringAt(pullRequest, ["head_ref"]),
-      baseRef: stringAt(pullRequest, ["base_ref"]),
-      draft: booleanAt(pullRequest, ["draft"]),
-    },
-  });
+  let reviewRunId: string;
+  try {
+    reviewRunId = await prepareReviewRun({
+      triggerRunId,
+      idempotencyKey: stringValue(body.idempotency_key) ?? stringAt(payload, ["review_idempotency_key"]),
+      deliveryId: stringAt(payload, ["delivery_id"]),
+      sourceEvent: stringAt(payload, ["source_event"]),
+      triggerSource: stringAt(payload, ["trigger"]),
+      orchestrationPayload: payload,
+      installationId: numberAt(payload, ["github_installation_id"]),
+      account: {
+        id: numberAt(repository, ["owner_id"]),
+        login: stringAt(repository, ["owner"]),
+        type: stringAt(repository, ["owner_type"]),
+      },
+      repository: {
+        githubRepoId: numberAt(repository, ["github_repo_id"]),
+        owner: stringAt(repository, ["owner"]),
+        name: stringAt(repository, ["name"]),
+        fullName: stringAt(repository, ["full_name"]),
+        defaultBranch: stringAt(repository, ["default_branch"]),
+        private: booleanAt(repository, ["private"]),
+      },
+      pullRequest: {
+        number: numberAt(pullRequest, ["number"]),
+        title: stringAt(pullRequest, ["title"]),
+        htmlUrl: stringAt(pullRequest, ["html_url"]),
+        author: stringAt(pullRequest, ["author"]),
+        headSha: stringAt(pullRequest, ["head_sha"]),
+        baseSha: stringAt(pullRequest, ["base_sha"]),
+        headRef: stringAt(pullRequest, ["head_ref"]),
+        baseRef: stringAt(pullRequest, ["base_ref"]),
+        draft: booleanAt(pullRequest, ["draft"]),
+      },
+    });
+  } catch (error) {
+    if (error instanceof ReviewDispatchNotBoundError) {
+      throw new ApiError(503, "review dispatch is not bound yet", { code: "review_dispatch_not_bound" });
+    }
+    if (error instanceof ReviewDispatchProvenanceError) {
+      throw new ApiError(409, "review dispatch provenance check failed", { code: "review_dispatch_conflict" });
+    }
+    throw error;
+  }
 
   // Resolve per-tenant model selection for this run. A lookup failure must never fail
   // prepare — fall back to all-null (platform defaults) with a warning.
@@ -119,6 +134,62 @@ export async function prepareReview(c: Context, config: AppConfig, billing?: Bil
   console.info("prepared_review_run", { review_run_id: reviewRunId, trigger_run_id: triggerRunId });
 
   return c.json({ ok: true, review_run_id: reviewRunId, model_settings: modelSettings, message: "review run accepted" });
+}
+
+export async function reconcileReviewTerminal(
+  c: Context,
+  config: AppConfig,
+  billing?: BillingService,
+): Promise<Response> {
+  authorizeInternal(c, config);
+  const body = await readJson(c);
+  const boardWorkflowId = stringValue(body.board_workflow_id);
+  const triggerRunId = stringValue(body.trigger_run_id);
+  const providerStatus = stringValue(body.provider_status);
+  const diagnostic = stringValue(body.diagnostic)?.slice(0, 2_000);
+  if (!boardWorkflowId || !triggerRunId || !providerStatus || !diagnostic) {
+    throw new ApiError(
+      400,
+      "board_workflow_id, trigger_run_id, provider_status, and diagnostic are required",
+    );
+  }
+  const status = reviewTerminalProductStatus(providerStatus);
+  if (!status) throw new ApiError(400, "provider_status is not a failed terminal Trigger status");
+  let result: Awaited<ReturnType<typeof reconcileBoardReviewTerminal>>;
+  try {
+    result = await reconcileBoardReviewTerminal({
+      boardWorkflowId,
+      triggerRunId,
+      providerStatus,
+      status,
+      diagnostic,
+    });
+  } catch (error) {
+    if (error instanceof ReviewDispatchProvenanceError) {
+      throw new ApiError(409, "review dispatch provenance check failed", {
+        code: "review_dispatch_conflict",
+      });
+    }
+    throw error;
+  }
+  if (result.outcome === "updated" && result.reviewRunId && billing) {
+    await billing.settleReviewOutcome(result.reviewRunId, status);
+  }
+  console.info("reconciled_review_terminal", {
+    board_workflow_id: boardWorkflowId,
+    trigger_run_id: triggerRunId,
+    provider_status: providerStatus,
+    outcome: result.outcome,
+  });
+  return c.json({ ok: true, outcome: result.outcome });
+}
+
+export function reviewTerminalProductStatus(value: string): "failed" | "canceled" | undefined {
+  if (value === "CANCELED") return "canceled";
+  if (["FAILED", "CRASHED", "SYSTEM_FAILURE", "EXPIRED", "TIMED_OUT"].includes(value)) {
+    return "failed";
+  }
+  return undefined;
 }
 
 /**

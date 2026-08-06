@@ -244,3 +244,32 @@ create index board_effect_receipts_reconcile
   on jina_runtime.board_effect_receipts (status,updated_at,idempotency_key)
   where status in ('started','failed','ambiguous');
 `;
+
+/**
+ * Adds a durable, non-leased wait state for Board tasks whose external effect
+ * is still running. Migration 0001 is checksummed and must remain byte-stable.
+ */
+export const BOARD_RUNTIME_MIGRATION_0002_SQL = `
+alter table jina_runtime.board_tasks
+  drop constraint board_tasks_status_check,
+  drop constraint board_tasks_check;
+
+alter table jina_runtime.board_tasks
+  add constraint board_tasks_status_check
+    check (status in (
+      'blocked','queued','leased','retry_wait','waiting_external',
+      'succeeded','failed','canceled','superseded'
+    )),
+  add constraint board_tasks_available_at_check
+    check ((status in ('queued','retry_wait','waiting_external')) = (available_at is not null));
+
+drop index jina_runtime.board_tasks_ready;
+
+create index board_tasks_ready
+  on jina_runtime.board_tasks (topic,priority desc,available_at,created_at,id)
+  where status in ('queued','retry_wait','waiting_external');
+
+create unique index board_effect_receipts_provider_identity
+  on jina_runtime.board_effect_receipts (provider,provider_id)
+  where provider_id is not null;
+`;

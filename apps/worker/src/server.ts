@@ -147,12 +147,30 @@ import {
 import { runtimeWorkerId } from "./worker-identity.js";
 import { GcsReviewArtifactStore, decodeReviewTaskResult, encodeReviewTaskResult } from "./review-artifacts.js";
 import {
+  REVIEW_TRIGGER_EFFECT_TYPE,
+  REVIEW_TRIGGER_EFFECT_VERSION,
+  REVIEW_TRIGGER_PROVIDER,
+  compactCompletedReviewResult,
+  createTriggerReviewClient,
+  matchingReviewTriggerReceipt,
+  parseRelationalReviewTaskMetadata,
+  reviewTriggerEffectIdempotencyKey,
+  triggerReviewPollIntervalMs,
+  triggerReviewRunStatusKind,
+  triggerRunDiagnostic,
+  type RelationalReviewTaskMetadata,
+  type TriggerReviewClient,
+  type TriggerReviewEffectReceipt,
+  type TriggerReviewRun
+} from "./trigger-review-bridge.js";
+import {
   CONTEXT_BOARD_TOPICS,
   CONTROL_BOARD_TOPICS,
   CAUSAL_GRAPH_TOPICS,
   REVIEW_BOARD_TOPICS,
   SUPPORTED_WORKER_TOPICS,
   configuredWorkerClaimMode,
+  configuredReviewRunTopicMode,
   configuredWorkerPreferredRepository,
   configuredWorkerTopics,
   requiresBoardAgentExecutor,
@@ -265,11 +283,7 @@ interface BillingRetryWorkerMetadata {
 }
 
 interface WorkMetadataByTopic {
-  readonly "run-review": {
-    readonly tenantId: string;
-    readonly repository: string;
-    readonly pullRequestNumber: number;
-  };
+  readonly "run-review": LegacyReviewWorkerMetadata | RelationalReviewTaskMetadata;
   readonly "prepare-review": ReviewBoardWorkerMetadata;
   readonly "summary-review": ReviewBoardWorkerMetadata;
   readonly "runtime-review": ReviewBoardWorkerMetadata;
@@ -329,6 +343,12 @@ interface WorkMetadataByTopic {
   readonly "run-causal-graph-publication": ContextBoardWorkerMetadata;
 }
 
+interface LegacyReviewWorkerMetadata {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly pullRequestNumber: number;
+}
+
 type ExecutableWorkerTopic = SupportedWorkerTopic | EmbeddedContextStageTopic;
 
 type ClaimedWork<T extends ExecutableWorkerTopic = ExecutableWorkerTopic> = T extends ExecutableWorkerTopic
@@ -361,6 +381,29 @@ type WorkResult =
       readonly outcome: "failed";
       readonly reason: string;
       readonly failureCategory: WorkerFailureCategory;
+    }
+  | {
+      readonly outcome: "waiting_external";
+      readonly operation: "provider_handoff" | "reschedule";
+      readonly transitionId: string;
+      readonly effectIdempotencyKey: string;
+      readonly providerId: string;
+      readonly providerStatus?: string;
+      readonly nextCheckAt: string;
+      readonly requestDigest?: string;
+      readonly resultDigest?: string;
+    }
+  | {
+      readonly outcome: "effect_retry";
+      readonly transitionId: string;
+      readonly effectIdempotencyKey: string;
+      readonly effectType: string;
+      readonly effectVersion: number;
+      readonly provider: string;
+      readonly requestDigest: string;
+      readonly receiptStatus: "failed" | "ambiguous";
+      readonly diagnostic: string;
+      readonly failureCategory: WorkerFailureCategory;
     };
 
 interface LeaseExecutionState {
@@ -390,6 +433,13 @@ class LeaseLostError extends Error {
   }
 }
 
+class ReviewEffectStartUncertainError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewEffectStartUncertainError";
+  }
+}
+
 const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-worker" });
 const openTelemetry = startOpenTelemetry({
   serviceName: process.env.K_SERVICE ?? "jina-worker",
@@ -405,9 +455,16 @@ const port = Number(process.env.PORT ?? 8080);
 const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
 const token = requiredEnv("INTERNAL_API_TOKEN");
 const productInternalToken = process.env.JINA_PRODUCT_INTERNAL_API_TOKEN?.trim() || token;
+const reviewRunTopicMode = configuredReviewRunTopicMode(
+  process.env.JINA_REVIEW_RUN_TOPIC_MODE,
+  process.env.JINA_LEGACY_REVIEW_PIPELINE_ENABLED === "true"
+);
 const topics = configuredWorkerTopics(process.env.WORKER_TOPICS, {
-  allowLegacyReview: process.env.JINA_LEGACY_REVIEW_PIPELINE_ENABLED === "true"
+  reviewRunTopicMode
 });
+const triggerReviewClient: TriggerReviewClient | undefined =
+  reviewRunTopicMode === "relational" && topics.includes("run-review") ? createTriggerReviewClient() : undefined;
+const reviewTriggerPollMs = triggerReviewPollIntervalMs(process.env.JINA_REVIEW_TRIGGER_POLL_INTERVAL_MS);
 const claimMode = configuredWorkerClaimMode(process.env.JINA_WORKER_CLAIM_MODE);
 const preferredRepository = configuredWorkerPreferredRepository(process.env.WORKER_PREFERRED_REPOSITORY);
 const workerRuntime = configuredWorkerRuntimeIdentity();
@@ -605,7 +662,7 @@ async function claim(): Promise<ClaimedWork<SupportedWorkerTopic> | undefined> {
 }
 
 async function execute(work: ClaimedWork<SupportedWorkerTopic>): Promise<void> {
-  const metadata = work.task.metadata as Record<string, unknown>;
+  const metadata = work.task.metadata as unknown as Record<string, unknown>;
   const traceId = typeof metadata.traceId === "string" ? metadata.traceId : undefined;
   const spanId = typeof metadata.spanId === "string" ? metadata.spanId : undefined;
   await withOpenTelemetrySpan({
@@ -627,7 +684,7 @@ async function execute(work: ClaimedWork<SupportedWorkerTopic>): Promise<void> {
       });
       await executeClaimedWork(work);
       const outcome = lastWork?.outcome ?? "unknown";
-      const success = outcome === "done";
+      const success = outcome === "done" || outcome === "waiting_external";
       span.addEvent("board.task.finished", {
         "jina.board.task.outcome": outcome,
         ...(lastWork?.failureCategory ? { "jina.board.task.failure_category": lastWork.failureCategory } : {})
@@ -649,7 +706,7 @@ async function executeClaimedWork(work: ClaimedWork<SupportedWorkerTopic>): Prom
     : undefined;
   activeModelUsageObserved = false;
   const startedAt = Date.now();
-  const startedMetadata = work.task.metadata as Record<string, unknown>;
+  const startedMetadata = work.task.metadata as unknown as Record<string, unknown>;
   logger.info(`${work.message.topic} started for task ${work.task.id}`, {
     event: "stage.started",
     workerId,
@@ -691,6 +748,9 @@ async function executeClaimedWork(work: ClaimedWork<SupportedWorkerTopic>): Prom
   try {
     result = await executeTopic(work);
   } catch (error) {
+    if (error instanceof ReviewEffectStartUncertainError) {
+      lease.lostReason = error.message;
+    }
     if (!lease.lostReason) {
       const reason = errorMessage(error).slice(0, 2_000);
       const failureCategory = workerFailureCategory(reason);
@@ -751,7 +811,9 @@ async function executeClaimedWork(work: ClaimedWork<SupportedWorkerTopic>): Prom
       topic: work.message.topic,
       outcome: result.outcome,
       finishedAt: new Date().toISOString(),
-      ...(result.outcome === "failed" || result.outcome === "retry" ? { failureCategory: result.failureCategory } : {})
+      ...(result.outcome === "failed" || result.outcome === "retry" || result.outcome === "effect_retry"
+        ? { failureCategory: result.failureCategory }
+        : {})
     };
     logStageOutcome(work, startedAt, result);
   } finally {
@@ -769,7 +831,7 @@ function logStageOutcome(
   result: WorkResult | undefined,
   failureReason?: string
 ): void {
-  const metadata = work.task.metadata as Record<string, unknown>;
+  const metadata = work.task.metadata as unknown as Record<string, unknown>;
   const durationMs = Date.now() - startedAt;
   const base = {
     workerId,
@@ -800,17 +862,19 @@ function logStageOutcome(
   metrics.observe("worker.stage.duration_ms", durationMs, { topic: work.message.topic });
   const reason =
     failureReason ??
-    (result?.outcome === "failed" || result?.outcome === "retry"
-      ? result.reason
+    (result?.outcome === "failed" || result?.outcome === "retry" || result?.outcome === "effect_retry"
+      ? result.outcome === "effect_retry"
+        ? result.diagnostic
+        : result.reason
       : result === undefined
         ? "unknown"
         : undefined);
   if (reason !== undefined) {
     const failureCategory =
-      result?.outcome === "retry" || result?.outcome === "failed"
+      result?.outcome === "retry" || result?.outcome === "failed" || result?.outcome === "effect_retry"
         ? result.failureCategory
         : workerFailureCategory(reason);
-    const outcome = result?.outcome === "retry" ? "retry" : "failed";
+    const outcome = result?.outcome === "retry" || result?.outcome === "effect_retry" ? "retry" : "failed";
     metrics.count("worker.tasks", {
       topic: work.message.topic,
       outcome,
@@ -829,12 +893,20 @@ function logStageOutcome(
     }
     return;
   }
-  metrics.count("worker.tasks", { topic: work.message.topic, outcome: "done" });
-  stageLogger.info(`${work.message.topic} completed for task ${work.task.id}`, {
-    event: "stage.completed",
-    ...base,
-    ...(result?.outcome === "done" && typeof result.result?.effect === "string" ? { effect: result.result.effect } : {})
-  });
+  const healthyOutcome = result?.outcome === "waiting_external" ? "waiting_external" : "done";
+  metrics.count("worker.tasks", { topic: work.message.topic, outcome: healthyOutcome });
+  stageLogger.info(
+    result?.outcome === "waiting_external"
+      ? `${work.message.topic} waiting on external run for task ${work.task.id}`
+      : `${work.message.topic} completed for task ${work.task.id}`,
+    {
+      event: result?.outcome === "waiting_external" ? "stage.waiting_external" : "stage.completed",
+      ...base,
+      ...(result?.outcome === "done" && typeof result.result?.effect === "string"
+        ? { effect: result.result.effect }
+        : {})
+    }
+  );
 }
 
 type TopicHandler<T extends SupportedWorkerTopic> = (work: ClaimedWork<T>) => Promise<Record<string, unknown>>;
@@ -857,10 +929,13 @@ const topicHandlers = {
   "run-causal-graph-history": runCausalGraphHistory,
   "run-causal-graph-derive": runCausalGraphDerive,
   "run-causal-graph-publication": runCausalGraphPublication,
-  "run-review": runReview
+  "run-review": runLegacyReview
 } satisfies TopicHandlers;
 
 async function executeTopic<T extends SupportedWorkerTopic>(work: ClaimedWork<T>): Promise<WorkResult> {
+  if (work.topic === "run-review" && reviewRunTopicMode === "relational") {
+    return runRelationalReview(work);
+  }
   // Indexing a mapped function registry loses the key/parameter correlation;
   // the exhaustive `satisfies` check above proves it once for every entry.
   const handler = topicHandlers[work.topic] as unknown as TopicHandler<T>;
@@ -3807,7 +3882,270 @@ async function productInternalJson<T = Record<string, unknown>>(path: string, bo
   return (await response.json()) as T;
 }
 
-async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string, unknown>> {
+async function runRelationalReview(work: ClaimedWork<"run-review">): Promise<WorkResult> {
+  if (!("workflowId" in work.task.metadata)) {
+    throw new Error("legacy run-review work reached the relational Trigger bridge");
+  }
+  const metadata = work.task.metadata;
+  const client = triggerReviewClient;
+  if (!client) throw new Error("Trigger client is not configured for relational run-review work");
+  const effectIdempotencyKey = reviewTriggerEffectIdempotencyKey(metadata.workflowId);
+  let receipt = matchingReviewTriggerReceipt(metadata);
+
+  if (receipt?.status === "succeeded") {
+    if (!receipt.providerId) throw new Error("succeeded Trigger dispatch receipt is missing providerId");
+    return observeRelationalReview(work, metadata, client, receipt.providerId, effectIdempotencyKey);
+  }
+
+  try {
+    receipt = await beginReviewTriggerEffect(work, metadata, effectIdempotencyKey);
+  } catch (error) {
+    throw new ReviewEffectStartUncertainError(
+      `Trigger effect-start acknowledgement is uncertain: ${errorMessage(error).slice(0, 1_000)}`
+    );
+  }
+  if (receipt.status === "succeeded") {
+    if (!receipt.providerId) throw new Error("replayed Trigger dispatch receipt is missing providerId");
+    return observeRelationalReview(work, metadata, client, receipt.providerId, effectIdempotencyKey);
+  }
+
+  let handle: { readonly id: string };
+  try {
+    assertLeaseOwned();
+    handle = await client.trigger(metadata.triggerTaskIdentifier, metadata.triggerPayload, metadata.triggerOptions);
+    assertLeaseOwned();
+  } catch (error) {
+    const failure = triggerDispatchFailure(error);
+    return {
+      outcome: "effect_retry",
+      transitionId: reviewTransitionId(work, "dispatch-failed"),
+      effectIdempotencyKey,
+      effectType: REVIEW_TRIGGER_EFFECT_TYPE,
+      effectVersion: REVIEW_TRIGGER_EFFECT_VERSION,
+      provider: REVIEW_TRIGGER_PROVIDER,
+      requestDigest: metadata.requestDigest,
+      receiptStatus: failure.ambiguous ? "ambiguous" : "failed",
+      diagnostic: failure.diagnostic,
+      failureCategory: failure.ambiguous ? "api_transport" : "worker_execution"
+    };
+  }
+  const providerId = handle.id?.trim();
+  if (!providerId) {
+    return {
+      outcome: "effect_retry",
+      transitionId: reviewTransitionId(work, "dispatch-invalid"),
+      effectIdempotencyKey,
+      effectType: REVIEW_TRIGGER_EFFECT_TYPE,
+      effectVersion: REVIEW_TRIGGER_EFFECT_VERSION,
+      provider: REVIEW_TRIGGER_PROVIDER,
+      requestDigest: metadata.requestDigest,
+      receiptStatus: "failed",
+      diagnostic: "Trigger dispatch returned no run ID",
+      failureCategory: "worker_execution"
+    };
+  }
+  metrics.count("review_trigger_dispatch_total", { outcome: "accepted" });
+  return {
+    outcome: "waiting_external",
+    operation: "provider_handoff",
+    transitionId: reviewTransitionId(work, "provider-handoff"),
+    effectIdempotencyKey,
+    providerId,
+    providerStatus: "TRIGGERED",
+    nextCheckAt: reviewNextCheckAt(reviewTriggerPollMs),
+    requestDigest: metadata.requestDigest,
+    resultDigest: createHash("sha256").update(providerId, "utf8").digest("hex")
+  };
+}
+
+async function beginReviewTriggerEffect(
+  work: ClaimedWork<"run-review">,
+  metadata: RelationalReviewTaskMetadata,
+  effectIdempotencyKey: string
+): Promise<TriggerReviewEffectReceipt> {
+  const response = await sendReplayableWorkerMutation(
+    "/internal/worker/effects/start",
+    {
+      ...workerFence(work),
+      transitionId: reviewTransitionId(work, "effect-start"),
+      effectIdempotencyKey,
+      effectType: REVIEW_TRIGGER_EFFECT_TYPE,
+      effectVersion: REVIEW_TRIGGER_EFFECT_VERSION,
+      provider: REVIEW_TRIGGER_PROVIDER,
+      requestDigest: metadata.requestDigest,
+      metadata: { trigger_task_id: metadata.triggerTaskIdentifier }
+    },
+    contextCompletionTimeoutMs,
+    work.task.id
+  );
+  const body = (await response.json()) as unknown;
+  if (!isRecord(body) || !isRecord(body.effectReceipt)) {
+    throw new Error("effect-start response did not contain an effect receipt");
+  }
+  return reviewEffectReceiptFromResponse(body.effectReceipt, metadata.requestDigest);
+}
+
+async function observeRelationalReview(
+  work: ClaimedWork<"run-review">,
+  metadata: RelationalReviewTaskMetadata,
+  client: TriggerReviewClient,
+  providerId: string,
+  effectIdempotencyKey: string
+): Promise<WorkResult> {
+  let run: TriggerReviewRun;
+  try {
+    assertLeaseOwned();
+    run = await client.retrieve(providerId);
+    assertLeaseOwned();
+  } catch (error) {
+    metrics.count("review_trigger_poll_total", { status: "transport_error", outcome: "rescheduled" });
+    logger.warn("Trigger review poll failed; rescheduling", {
+      event: "review.trigger_poll_rescheduled",
+      workerId,
+      taskId: work.task.id,
+      workflowId: metadata.workflowId,
+      failureCategory: workerFailureCategory(errorMessage(error))
+    });
+    return externalReviewWait(work, effectIdempotencyKey, providerId, "POLL_ERROR", reviewTriggerPollMs);
+  }
+  if (run.id !== providerId) throw new Error("Trigger retrieve returned a different run ID");
+  const kind = triggerReviewRunStatusKind(run.status);
+  metrics.count("review_trigger_poll_total", { status: run.status, outcome: kind });
+  if (kind === "nonterminal") {
+    return externalReviewWait(work, effectIdempotencyKey, providerId, run.status, reviewTriggerPollMs);
+  }
+  if (kind === "completed") {
+    return { outcome: "done", result: compactCompletedReviewResult(run, metadata) };
+  }
+
+  const diagnostic = triggerRunDiagnostic(run);
+  let reconciliation: Record<string, unknown>;
+  try {
+    reconciliation = await productInternalJson("/internal/reviews/reconcile-terminal", {
+      board_workflow_id: metadata.workflowId,
+      trigger_run_id: providerId,
+      provider_status: run.status,
+      diagnostic
+    });
+    const outcome = reconciliation.outcome;
+    if (
+      reconciliation.ok !== true ||
+      (outcome !== "updated" && outcome !== "already_terminal" && outcome !== "no_row")
+    ) {
+      throw new Error("product reconciliation returned no durable acknowledgement");
+    }
+  } catch (error) {
+    logger.warn("Trigger terminal review reconciliation failed; rescheduling", {
+      event: "review.trigger_reconciliation_rescheduled",
+      workerId,
+      taskId: work.task.id,
+      workflowId: metadata.workflowId,
+      providerStatus: run.status,
+      failureCategory: workerFailureCategory(errorMessage(error))
+    });
+    return externalReviewWait(
+      work,
+      effectIdempotencyKey,
+      providerId,
+      `${run.status}_RECONCILE_PENDING`,
+      Math.min(300_000, reviewTriggerPollMs * 2)
+    );
+  }
+  return {
+    outcome: "failed",
+    reason: `Trigger review run ${run.status}: ${diagnostic}`.slice(0, 2_000),
+    failureCategory: "worker_execution"
+  };
+}
+
+function externalReviewWait(
+  work: ClaimedWork<"run-review">,
+  effectIdempotencyKey: string,
+  providerId: string,
+  providerStatus: string,
+  delayMs: number
+): WorkResult {
+  return {
+    outcome: "waiting_external",
+    operation: "reschedule",
+    transitionId: reviewTransitionId(work, "poll-reschedule"),
+    effectIdempotencyKey,
+    providerId,
+    providerStatus,
+    nextCheckAt: reviewNextCheckAt(delayMs)
+  };
+}
+
+function workerFence(work: ClaimedWork): Record<string, unknown> {
+  return {
+    messageId: work.message.id,
+    leaseId: work.message.leaseId,
+    taskId: work.task.id,
+    ...(work.message.attempt === undefined ? {} : { attempt: work.message.attempt }),
+    ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken })
+  };
+}
+
+function reviewTransitionId(work: ClaimedWork<"run-review">, action: string): string {
+  return `review:${work.message.leaseId}:${action}`;
+}
+
+function reviewNextCheckAt(delayMs: number): string {
+  return new Date(Date.now() + delayMs).toISOString();
+}
+
+function reviewEffectReceiptFromResponse(
+  value: Record<string, unknown>,
+  requestDigest: string
+): TriggerReviewEffectReceipt {
+  const status = requiredString(value.status, "effect receipt status");
+  if (status !== "started" && status !== "succeeded" && status !== "failed" && status !== "ambiguous") {
+    throw new Error("effect receipt status is unsupported");
+  }
+  const receipt = {
+    idempotencyKey: requiredString(value.idempotencyKey, "effect receipt idempotencyKey"),
+    effectType: requiredString(value.effectType, "effect receipt effectType"),
+    effectVersion: requiredPositiveInteger(value.effectVersion, "effect receipt effectVersion"),
+    provider: requiredString(value.provider, "effect receipt provider"),
+    status,
+    requestDigest: requiredString(value.requestDigest, "effect receipt requestDigest"),
+    ...(typeof value.providerId === "string" && value.providerId.trim() ? { providerId: value.providerId.trim() } : {}),
+    metadata: isRecord(value.metadata) ? value.metadata : {}
+  } satisfies TriggerReviewEffectReceipt;
+  if (
+    receipt.effectType !== REVIEW_TRIGGER_EFFECT_TYPE ||
+    receipt.effectVersion !== REVIEW_TRIGGER_EFFECT_VERSION ||
+    receipt.provider !== REVIEW_TRIGGER_PROVIDER ||
+    receipt.requestDigest !== requestDigest
+  ) {
+    throw new Error("effect-start response returned a different Trigger dispatch receipt");
+  }
+  return receipt;
+}
+
+function triggerDispatchFailure(error: unknown): { readonly ambiguous: boolean; readonly diagnostic: string } {
+  const value = isRecord(error) ? error : undefined;
+  const response = isRecord(value?.response) ? value.response : undefined;
+  const status =
+    typeof value?.status === "number"
+      ? value.status
+      : typeof response?.status === "number"
+        ? response.status
+        : undefined;
+  const definiteClientFailure =
+    status !== undefined && status >= 400 && status < 500 && ![408, 409, 425, 429].includes(status);
+  return {
+    ambiguous: !definiteClientFailure,
+    diagnostic: `Trigger dispatch ${definiteClientFailure ? "rejected" : "acceptance uncertain"}${
+      status ? ` (${status})` : ""
+    }: ${errorMessage(error)}`.slice(0, 2_000)
+  };
+}
+
+async function runLegacyReview(work: ClaimedWork<"run-review">): Promise<Record<string, unknown>> {
+  if ("workflowId" in work.task.metadata) {
+    throw new Error("relational run-review work reached the legacy review executor");
+  }
   const { repository, pullRequestNumber } = work.task.metadata;
   const [pullRequest, diff] = await Promise.all([
     githubJson(`/repos/${repository}/pulls/${pullRequestNumber}`),
@@ -3875,10 +4213,12 @@ async function renew(work: ClaimedWork): Promise<void> {
 }
 
 async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
+  const modelCompletionOutcome =
+    result.outcome === "waiting_external" || result.outcome === "effect_retry" ? "failed" : result.outcome;
   const modelUsage =
     BOARD_MODEL_TOPICS.has(work.topic) && activeModelUsage
       ? boardAgentModelUsageForCompletion({
-          outcome: result.outcome,
+          outcome: modelCompletionOutcome,
           observed: activeModelUsageObserved,
           usage: activeModelUsage
         })
@@ -3886,16 +4226,35 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
   if (result.outcome === "done" && BOARD_MODEL_TOPICS.has(work.topic) && !modelUsage) {
     throw new Error("model-backed task completed without an exact usage accumulator");
   }
-  const completionBody = {
+  const fence = {
     messageId: work.message.id,
     leaseId: work.message.leaseId,
     taskId: work.task.id,
     ...(work.message.attempt === undefined ? {} : { attempt: work.message.attempt }),
-    ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken }),
-    ...(modelUsage ? { modelUsage } : {}),
-    ...result
+    ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken })
   };
+  const path =
+    result.outcome === "waiting_external"
+      ? "/internal/worker/wait-external"
+      : result.outcome === "effect_retry"
+        ? "/internal/worker/effects/retry"
+        : "/internal/worker/complete";
+  const mutationBody =
+    result.outcome === "waiting_external"
+      ? { ...fence, ...result, outcome: undefined }
+      : result.outcome === "effect_retry"
+        ? { ...fence, ...result, outcome: undefined }
+        : { ...fence, ...(modelUsage ? { modelUsage } : {}), ...result };
   const timeoutMs = isDurableBoardTopic(work.topic) ? contextCompletionTimeoutMs : workerApiTimeoutMs;
+  await sendReplayableWorkerMutation(path, mutationBody, timeoutMs, work.task.id);
+}
+
+async function sendReplayableWorkerMutation(
+  path: string,
+  body: Readonly<Record<string, unknown>>,
+  timeoutMs: number,
+  taskId: string
+): Promise<Response> {
   // The API replays completions idempotently via the dispatched lease receipt,
   // so an ambiguous outcome (network failure, timeout, 5xx) is retried with the
   // identical request rather than released — a release after a committed
@@ -3903,13 +4262,14 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
   for (let sendAttempt = 1; ; sendAttempt += 1) {
     let response: Response;
     try {
-      response = await apiRequest("/internal/worker/complete", completionBody, timeoutMs);
+      response = await apiRequest(path, body, timeoutMs);
     } catch (error) {
       if (sendAttempt >= completionSendAttempts) throw error;
-      logger.warn("worker completion send failed; retrying", {
-        event: "worker.completion_send_retry",
+      logger.warn("worker mutation send failed; retrying", {
+        event: "worker.mutation_send_retry",
         workerId,
-        taskId: work.task.id,
+        taskId,
+        path,
         sendAttempt,
         ...errorLogFields(error)
       });
@@ -3917,25 +4277,30 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
       continue;
     }
     if (response.status === 409) {
-      throw new LeaseLostError(`completion rejected after lease loss: ${await boundedFailureDetail(response)}`);
+      throw new LeaseLostError(`worker mutation rejected after lease loss: ${await boundedFailureDetail(response)}`);
     }
     if (!response.ok) {
       const detail = await boundedFailureDetail(response);
       if (response.status >= 500 && sendAttempt < completionSendAttempts) {
-        logger.warn("worker completion send failed; retrying", {
-          event: "worker.completion_send_retry",
+        logger.warn("worker mutation send failed; retrying", {
+          event: "worker.mutation_send_retry",
           workerId,
-          taskId: work.task.id,
+          taskId,
+          path,
           sendAttempt,
           status: response.status
         });
         await delay(completionRetryDelayMs * 2 ** (sendAttempt - 1));
         continue;
       }
-      throw new Error(`completion failed with ${response.status}: ${detail}`);
+      throw new Error(
+        path === "/internal/worker/complete"
+          ? `completion failed with ${response.status}: ${detail}`
+          : `worker mutation ${path} failed with ${response.status}: ${detail}`
+      );
     }
     recordApiSuccess();
-    return;
+    return response;
   }
 }
 
@@ -4117,6 +4482,13 @@ function parseClaimedWork(value: unknown): ClaimedWork<SupportedWorkerTopic> {
   const taskId = requiredString(value.task.id, "claim task id");
   const metadata = value.task.metadata;
   if (topic === "run-review") {
+    if (reviewRunTopicMode === "relational") {
+      return {
+        topic,
+        message: { ...message, topic },
+        task: { id: taskId, metadata: parseRelationalReviewTaskMetadata(metadata) }
+      };
+    }
     return {
       topic,
       message: { ...message, topic },
@@ -4353,10 +4725,13 @@ function isControlBoardTopic(topic: string): topic is ControlBoardWorkerTopic {
   return CONTROL_BOARD_TOPICS.includes(topic as ControlBoardWorkerTopic);
 }
 
-function isDurableBoardTopic(
-  topic: string
-): topic is ContextWorkerTopic | CausalGraphWorkerTopic | ReviewBoardWorkerTopic | ControlBoardWorkerTopic {
-  return isBoardTopic(topic) || isReviewBoardTopic(topic) || isControlBoardTopic(topic);
+function isDurableBoardTopic(topic: string): topic is SupportedWorkerTopic {
+  return (
+    isBoardTopic(topic) ||
+    isReviewBoardTopic(topic) ||
+    isControlBoardTopic(topic) ||
+    (reviewRunTopicMode === "relational" && topic === "run-review")
+  );
 }
 
 function boardWorkMetadata(

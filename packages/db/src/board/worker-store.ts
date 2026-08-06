@@ -2,13 +2,17 @@ import type { Pool, PoolClient } from "pg";
 
 import {
   RelationalBoardWorkerRepository,
+  type BeginRelationalBoardEffectInput,
   type ClaimedRelationalBoardTask,
   type ClaimRelationalBoardTaskInput,
   type CompleteRelationalBoardTaskInput,
   type FailRelationalBoardTaskInput,
   type RelationalBoardFenceInput,
   type RelationalBoardMutationResult,
-  type RetryRelationalBoardTaskInput
+  type RescheduleExternalRelationalBoardTaskInput,
+  type RetryRelationalBoardEffectInput,
+  type RetryRelationalBoardTaskInput,
+  type WaitExternalRelationalBoardTaskInput
 } from "./worker-repository.js";
 
 export interface RelationalBoardWorkerReleaseIdentity {
@@ -54,6 +58,34 @@ export class PostgresRelationalBoardWorkerStore {
     releaseIdentity?: RelationalBoardWorkerReleaseIdentity
   ): Promise<RelationalBoardMutationResult> {
     return this.guardedMutation(releaseIdentity, (client) => this.repository.releaseAttempt(client, input));
+  }
+
+  beginEffect(
+    input: BeginRelationalBoardEffectInput,
+    releaseIdentity?: RelationalBoardWorkerReleaseIdentity
+  ): Promise<RelationalBoardMutationResult> {
+    return this.guardedMutation(releaseIdentity, (client) => this.repository.beginEffectAttempt(client, input));
+  }
+
+  waitExternal(
+    input: WaitExternalRelationalBoardTaskInput,
+    releaseIdentity?: RelationalBoardWorkerReleaseIdentity
+  ): Promise<RelationalBoardMutationResult> {
+    return this.guardedMutation(releaseIdentity, (client) => this.repository.waitExternalAttempt(client, input));
+  }
+
+  rescheduleExternal(
+    input: RescheduleExternalRelationalBoardTaskInput,
+    releaseIdentity?: RelationalBoardWorkerReleaseIdentity
+  ): Promise<RelationalBoardMutationResult> {
+    return this.guardedMutation(releaseIdentity, (client) => this.repository.rescheduleExternalWait(client, input));
+  }
+
+  retryEffect(
+    input: RetryRelationalBoardEffectInput,
+    releaseIdentity?: RelationalBoardWorkerReleaseIdentity
+  ): Promise<RelationalBoardMutationResult> {
+    return this.guardedMutation(releaseIdentity, (client) => this.repository.failOrRetryEffectAttempt(client, input));
   }
 
   complete(

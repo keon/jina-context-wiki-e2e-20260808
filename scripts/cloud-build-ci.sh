@@ -14,6 +14,10 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
   unset DATABASE_URL
 fi
 pnpm test
+node scripts/verify-trigger-source-manifest.mjs
+npm ci --prefix trigger
+npm run typecheck --prefix trigger
+npm test --prefix trigger
 pnpm audit --prod --audit-level=high
 
 # Cloud Build deploys these exact-SHA Cloud Run bundles with the backend and

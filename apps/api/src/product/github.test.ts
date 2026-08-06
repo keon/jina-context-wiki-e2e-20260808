@@ -6,7 +6,7 @@ import { handleGithubWebhook, verifyGithubSignature } from "./github.js";
 import type { AppConfig } from "./config.js";
 import { ApiError } from "./errors.js";
 import { parseJinaReviewCommand, type ReviewCommandGithub } from "./review-command.js";
-import type { DispatchOptions } from "./workflow-dispatcher.js";
+import type { DispatchOptions } from "./board-admission-contract.js";
 import { reviewTaskTriggerControl } from "./review-task-routing.js";
 
 test("verifies GitHub sha256 signatures", () => {
@@ -30,7 +30,7 @@ test("ignores check_run requested actions without triggering a task", async () =
 
   const response = await handleGithubWebhook({
     config: testConfig(),
-    trigger: trigger,
+    board: trigger,
     headers: signedHeaders(body, "check_run"),
     rawBody: body,
   });
@@ -52,7 +52,7 @@ test("ignores pull_request actions when review trigger task is disabled", async 
 
     const response = await handleGithubWebhook({
       config: testConfig(),
-      trigger: trigger,
+      board: trigger,
       headers: signedHeaders(body, "pull_request"),
       rawBody: body,
     });
@@ -77,7 +77,7 @@ test("triggers review task for the allowlisted repo while the default switch is 
 
     const response = await handleGithubWebhook({
       config: testConfig(),
-      trigger: trigger,
+      board: trigger,
       headers: signedHeaders(body, "pull_request"),
       rawBody: body,
     });
@@ -104,7 +104,7 @@ test("triggers review task when review trigger task is enabled", async () => {
 
     const response = await handleGithubWebhook({
       config: testConfig(),
-      trigger: trigger,
+      board: trigger,
       headers: signedHeaders(body, "pull_request"),
       rawBody: body,
     });
@@ -128,7 +128,7 @@ test("synchronize triggers a review under the default every_commit mode", async 
     const body = JSON.stringify(pullRequestPayload({ action: "synchronize", repositoryFullName: "other/example" }));
     const response = await handleGithubWebhook({
       config: testConfig(),
-      trigger: trigger,
+      board: trigger,
       headers: signedHeaders(body, "pull_request"),
       rawBody: body,
     });
@@ -146,7 +146,7 @@ test("manual_only blocks every automatic pull request review action", async () =
     const body = JSON.stringify(pullRequestPayload({ action }));
     const response = await handleGithubWebhook({
       config: testConfig(),
-      trigger: trigger,
+      board: trigger,
       headers: signedHeaders(body, "pull_request"),
       rawBody: body,
       reviewTriggerModeForInstallation: async (installationId) => {
@@ -178,7 +178,7 @@ test("triggers the review task even when the billing gate is advisory (FINDING 2
 
   const response = await handleGithubWebhook({
     config: testConfig(),
-    trigger: trigger,
+    board: trigger,
     headers: signedHeaders(body, "pull_request"),
     rawBody: body,
     billing,
@@ -219,7 +219,7 @@ test("installation suspension and deletion dispatch lifecycle backfills", async 
     });
     const response = await handleGithubWebhook({
       config: testConfig(),
-      trigger: trigger,
+      board: trigger,
       headers: signedHeaders(body, "installation"),
       rawBody: body,
       installationLifecycleUpdater: async (installationId, lifecycle) => {
@@ -242,7 +242,7 @@ test("manual_only still allows authorized @usejina PR comments", async () => {
   const body = JSON.stringify(commentPayload("issue_comment", "@usejina do another round of review. be strict"));
   const response = await handleGithubWebhook({
     config: testConfig(),
-    trigger: trigger,
+    board: trigger,
     headers: signedHeaders(body, "issue_comment"),
     rawBody: body,
     reviewCommandGithub: github,
@@ -271,7 +271,7 @@ test("redelivery of one comment stays idempotent after the PR head changes", asy
   const body = JSON.stringify(commentPayload("issue_comment", "@usejina"));
   const dispatch = () => handleGithubWebhook({
     config: testConfig(),
-    trigger: trigger,
+    board: trigger,
     headers: signedHeaders(body, "issue_comment"),
     rawBody: body,
     reviewCommandGithub: github,
@@ -300,7 +300,7 @@ test("inline @usejina replies stay scoped to the parent Jina issue", async () =>
   ));
   const response = await handleGithubWebhook({
     config: testConfig(),
-    trigger: trigger,
+    board: trigger,
     headers: signedHeaders(body, "pull_request_review_comment"),
     rawBody: body,
     reviewCommandGithub: github,
@@ -333,7 +333,7 @@ test("inline scope requires a valid issue marker from this GitHub App", async ()
     github.appSlug = appSlug;
     const body = JSON.stringify(commentPayload("pull_request_review_comment", "@usejina\n\nUse retry tests."));
     await handleGithubWebhook({
-      config: testConfig(), trigger: trigger, headers: signedHeaders(body, "pull_request_review_comment"),
+      config: testConfig(), board: trigger, headers: signedHeaders(body, "pull_request_review_comment"),
       rawBody: body, reviewCommandGithub: github,
     });
     assert.equal(trigger.calls[0]?.payload.review_instructions, "Use retry tests.");
@@ -346,7 +346,7 @@ test("an unavailable inline parent is ignored without failing the webhook", asyn
   github.parentError = new ApiError(404, "parent missing");
   const body = JSON.stringify(commentPayload("pull_request_review_comment", "@usejina"));
   const response = await handleGithubWebhook({
-    config: testConfig(), trigger: trigger, headers: signedHeaders(body, "pull_request_review_comment"),
+    config: testConfig(), board: trigger, headers: signedHeaders(body, "pull_request_review_comment"),
     rawBody: body, reviewCommandGithub: github,
   });
   assert.equal(response.accepted, false);
@@ -358,7 +358,7 @@ test("over-limit @usejina instructions are rejected instead of partially applied
   const trigger = new FakeTrigger();
   const body = JSON.stringify(commentPayload("issue_comment", `@usejina\n${"a".repeat(8_001)}`));
   const response = await handleGithubWebhook({
-    config: testConfig(), trigger: trigger, headers: signedHeaders(body, "issue_comment"),
+    config: testConfig(), board: trigger, headers: signedHeaders(body, "issue_comment"),
     rawBody: body, reviewCommandGithub: new FakeReviewGithub(),
   });
   assert.equal(response.accepted, false);
@@ -373,7 +373,7 @@ test("@usejina requires write permission", async () => {
   const body = JSON.stringify(commentPayload("issue_comment", "@usejina"));
   const response = await handleGithubWebhook({
     config: testConfig(),
-    trigger: trigger,
+    board: trigger,
     headers: signedHeaders(body, "issue_comment"),
     rawBody: body,
     reviewCommandGithub: github,
@@ -387,7 +387,7 @@ test("@usejina requires write permission", async () => {
 class FakeTrigger {
   readonly calls: { taskIdentifier: string; payload: Record<string, unknown>; options: DispatchOptions }[] = [];
 
-  async triggerTask(taskIdentifier: string, payload: unknown, options: DispatchOptions) {
+  async admitBoardWorkflow(taskIdentifier: string, payload: unknown, options: DispatchOptions) {
     this.calls.push({ taskIdentifier, payload: payload as Record<string, unknown>, options });
     return { id: `run-${this.calls.length}` };
   }
@@ -509,6 +509,7 @@ function testConfig(): AppConfig {
       managedAiFeatureId: "managed_ai_access",
       enforce: "off",
     },
+    reviewBoardPipeline: { mode: "v1", v2Repositories: new Set() },
   };
 }
 

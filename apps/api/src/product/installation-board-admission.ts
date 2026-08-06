@@ -5,7 +5,7 @@ import { activeTraceparent, parseTraceparent } from "@jina/observability";
 
 import { ApiError } from "./errors.js";
 import { withTransaction } from "./db.js";
-import type { DispatchOptions } from "./workflow-dispatcher.js";
+import type { DispatchOptions } from "./board-admission-contract.js";
 
 export const INSTALLATION_BACKFILL_TASK_ID = "github-installation-backfill";
 const INSTALLATION_BACKFILL_PIPELINE_VERSION = "github_installation_backfill.board.v1";

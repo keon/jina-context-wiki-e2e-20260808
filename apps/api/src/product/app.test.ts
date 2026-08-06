@@ -42,6 +42,7 @@ function testConfig(overrides: { dashboardAllowedOrigins?: AppConfig["dashboardA
       managedAiFeatureId: "managed_ai_access",
       enforce: "off",
     },
+    reviewBoardPipeline: { mode: "v1", v2Repositories: new Set() },
   };
 }
 

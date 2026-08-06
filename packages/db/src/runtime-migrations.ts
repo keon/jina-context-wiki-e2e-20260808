@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { Pool, PoolClient } from "pg";
 
-import { BOARD_RUNTIME_MIGRATION_0001_SQL } from "./board/schema.js";
+import { BOARD_RUNTIME_MIGRATION_0001_SQL, BOARD_RUNTIME_MIGRATION_0002_SQL } from "./board/schema.js";
 
 interface RuntimeMigration {
   readonly version: number;
@@ -15,6 +15,11 @@ const RUNTIME_MIGRATIONS: readonly RuntimeMigration[] = [
     version: 1,
     name: "relational_board",
     sql: BOARD_RUNTIME_MIGRATION_0001_SQL
+  },
+  {
+    version: 2,
+    name: "relational_board_external_wait",
+    sql: BOARD_RUNTIME_MIGRATION_0002_SQL
   }
 ];
 

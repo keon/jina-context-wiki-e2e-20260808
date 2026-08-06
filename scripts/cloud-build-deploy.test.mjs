@@ -91,6 +91,21 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--min-instances=3/);
   assert.match(stagingDeployment, /--max-instances=10/);
   assert.match(stagingDeployment, /--max-instances=5/);
+  assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
+  assert.match(stagingDeployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
+  assert.match(stagingDeployment, /TRIGGER_SECRET_KEY=\$\{review_trigger_secret\}:latest/);
+  assert.match(
+    stagingDeployment,
+    /Relational run-review remains blocked: deploy-staging\.sh does not yet activate a task-worker release credential/
+  );
+  assert.match(stagingDeployment, /review_topics="run-review\|github-installation-backfill\|billing-retry"/);
+  assert.match(
+    stagingDeployment,
+    /review_topics="prepare-review\|summary-review\|runtime-review\|finalize-review\|publish-review\|settle-review\|github-installation-backfill\|billing-retry"/
+  );
+  assert.doesNotMatch(stagingDeployment, /JINA_LEGACY_REVIEW_PIPELINE_ENABLED/);
+  assert.doesNotMatch(deployment, /JINA_LEGACY_REVIEW_PIPELINE_ENABLED/);
+  assert.match(deployment, /JINA_REVIEW_RUN_TOPIC_MODE=legacy/);
   assert.match(stagingDeployment, /deploy-staging-causal-graph\.sh/);
   assert.doesNotMatch(stagingDeployment, /gcloud services enable/);
   assert.match(stagingDeployment, /Cloud Scheduler API must be enabled as a staging platform prerequisite/);

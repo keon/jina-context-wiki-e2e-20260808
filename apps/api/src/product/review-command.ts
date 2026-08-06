@@ -4,7 +4,7 @@ import { createInstallationAccessToken } from "./github-app.js";
 import type { WebhookResponse } from "./github.js";
 import { githubJson, type GithubPullRequest } from "./github-client.js";
 import { REVIEW_TASK_ID } from "./review-task-routing.js";
-import type { DispatchOptions, WorkflowDispatcher } from "./workflow-dispatcher.js";
+import type { BoardWorkflowAdmitter, DispatchOptions } from "./board-admission-contract.js";
 
 const REVIEW_COMMAND = "@usejina";
 const REVIEW_COMMAND_PATTERN = /(^|[^A-Za-z0-9_-])@usejina(?![A-Za-z0-9_-])/i;
@@ -56,7 +56,7 @@ export function parseJinaReviewCommand(body: string): JinaReviewCommand | undefi
 
 export async function handleReviewCommand(input: {
   event: "issue_comment" | "pull_request_review_comment";
-  trigger: WorkflowDispatcher;
+  board: BoardWorkflowAdmitter;
   deliveryId: string;
   payload: Record<string, unknown>;
   action?: string;
@@ -153,7 +153,7 @@ export async function handleReviewCommand(input: {
       manualCommandTag,
     ],
   };
-  const run = await input.trigger.triggerTask(REVIEW_TASK_ID, {
+  const run = await input.board.admitBoardWorkflow(REVIEW_TASK_ID, {
     delivery_id: input.deliveryId,
     review_idempotency_key: idempotencyKey,
     source_event: input.event,
@@ -192,6 +192,7 @@ export async function handleReviewCommand(input: {
     action: input.action,
     task_id: REVIEW_TASK_ID,
     run_id: run.id,
+    workflow_id: run.id,
   };
 }
 

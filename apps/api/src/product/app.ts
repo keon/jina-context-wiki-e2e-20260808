@@ -43,6 +43,7 @@ import {
   authorizeSchedule,
   completeReview,
   prepareReview,
+  reconcileReviewTerminal,
   recordReviewEvent,
   recordReviewUsage,
   resolveIntegrations,
@@ -58,7 +59,7 @@ import {
 } from "./model-settings.js";
 import { openRouterOAuthCallback, startOpenRouterOAuth } from "./openrouter-oauth.js";
 import { buildDashboard } from "./records.js";
-import { ReviewOrchestratorDispatcher } from "./review-dispatcher.js";
+import { ProductBoardWorkflowAdmitter } from "./product-board-workflow-admitter.js";
 import {
   connectGithubInstallationToTenant,
   createJinaOrganization,
@@ -106,7 +107,7 @@ import type { DashboardSession as Session } from "./auth.js";
 const FLOW_ID_LOG_VALUE = /^[a-zA-Z0-9_-]{8,80}$/;
 
 export function createApp(config: AppConfig): Hono {
-  const reviewDispatcher = new ReviewOrchestratorDispatcher();
+  const boardWorkflowAdmitter = new ProductBoardWorkflowAdmitter({ pipeline: config.reviewBoardPipeline });
   const billing = createBillingService(config);
   const graphs = new GraphApiClient(config.graph);
   const app = new Hono();
@@ -1477,7 +1478,7 @@ export function createApp(config: AppConfig): Hono {
     const rawBody = await c.req.text();
     const response = await handleGithubWebhook({
       config,
-      trigger: reviewDispatcher,
+      board: boardWorkflowAdmitter,
       headers: c.req.raw.headers,
       rawBody,
       billing,
@@ -1499,6 +1500,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post("/internal/reviews/prepare", (c) => prepareReview(c, config, billing));
+  app.post("/internal/reviews/reconcile-terminal", (c) => reconcileReviewTerminal(c, config, billing));
   app.post("/internal/reviews/manual-runs", async (c) => {
     authorizeInternal(c, config);
     const body = (await c.req.json().catch(() => undefined)) as Record<string, unknown> | undefined;

@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  ReviewOrchestratorDispatcher,
-  reviewRunInputFromDispatch,
-} from "./review-dispatcher.js";
+  ProductBoardWorkflowAdmitter,
+  reviewBoardInputFromArrival,
+} from "./product-board-workflow-admitter.js";
 import { REVIEW_TASK_ID } from "./review-task-routing.js";
-import type { DispatchOptions } from "./workflow-dispatcher.js";
+import type { DispatchOptions } from "./board-admission-contract.js";
 
 const OPTIONS: DispatchOptions = {
   idempotencyKey: "review:456:123:42:head-sha-1:code_review",
@@ -44,7 +44,7 @@ const PAYLOAD = {
 
 test("durably admits a review to Board", async () => {
   const admitted: unknown[] = [];
-  const dispatcher = new ReviewOrchestratorDispatcher({
+  const dispatcher = new ProductBoardWorkflowAdmitter({
     admit: async (input) => {
       admitted.push(input);
       return {
@@ -57,15 +57,44 @@ test("durably admits a review to Board", async () => {
       };
     },
   });
-  assert.deepEqual(await dispatcher.triggerTask(REVIEW_TASK_ID, PAYLOAD, OPTIONS), {
+  assert.deepEqual(await dispatcher.admitBoardWorkflow(REVIEW_TASK_ID, PAYLOAD, OPTIONS), {
     id: "board-workflow-1",
   });
   assert.equal(admitted.length, 1);
 });
 
+test("configured v2 admission receives the exact normalized arrival and Trigger options", async () => {
+  const admitted: unknown[] = [];
+  const dispatcher = new ProductBoardWorkflowAdmitter({
+    pipeline: { mode: "v2", v2Repositories: new Set() },
+    dependencies: {
+      admitReview: async (arrival, selection) => {
+        admitted.push({ arrival, selection });
+        return {
+          tenantId: "tenant-1",
+          workflowId: "board-workflow-v2",
+          traceId: "a".repeat(32),
+          replayed: false,
+          taskIds: ["review-task"],
+        };
+      },
+    },
+  });
+  assert.deepEqual(await dispatcher.admitBoardWorkflow(REVIEW_TASK_ID, PAYLOAD, OPTIONS), {
+    id: "board-workflow-v2",
+  });
+  const entry = admitted[0] as {
+    arrival: { triggerPayload: unknown; triggerOptions: unknown };
+    selection: { mode: string };
+  };
+  assert.strictEqual(entry.arrival.triggerPayload, PAYLOAD);
+  assert.strictEqual(entry.arrival.triggerOptions, OPTIONS);
+  assert.equal(entry.selection.mode, "v2");
+});
+
 test("admits installation backfill to Board", async () => {
   const admitted: unknown[] = [];
-  const dispatcher = new ReviewOrchestratorDispatcher({
+  const dispatcher = new ProductBoardWorkflowAdmitter({
     admit: async () => {
       throw new Error("unexpected review admission");
     },
@@ -80,22 +109,22 @@ test("admits installation backfill to Board", async () => {
   };
   const options = { idempotencyKey: "installation-backfill:456:delivery-installation-1" };
   assert.deepEqual(
-    await dispatcher.triggerTask("github-installation-backfill", payload, options),
+    await dispatcher.admitBoardWorkflow("github-installation-backfill", payload, options),
     { id: "installation-workflow-1" },
   );
   assert.deepEqual(admitted, [{ payload, options }]);
 });
 
 test("refuses unknown workflows instead of failing over to another orchestrator", async () => {
-  const dispatcher = new ReviewOrchestratorDispatcher();
+  const dispatcher = new ProductBoardWorkflowAdmitter();
   await assert.rejects(
-    () => dispatcher.triggerTask("unknown-workflow", {}, {}),
+    () => dispatcher.admitBoardWorkflow("unknown-workflow", {}, {}),
     /Unsupported Board workflow/,
   );
 });
 
 test("review dispatch parser preserves the exact product review identity", () => {
-  assert.deepEqual(reviewRunInputFromDispatch(PAYLOAD, OPTIONS), {
+  assert.deepEqual(reviewBoardInputFromArrival(PAYLOAD, OPTIONS), {
     idempotencyKey: OPTIONS.idempotencyKey,
     deliveryId: "delivery-1",
     sourceEvent: "pull_request",

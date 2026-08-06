@@ -10,6 +10,7 @@ import {
   keySourceDrifted,
   parseUsageRequestBody,
   resolveIntegrations,
+  reviewTerminalProductStatus,
   runPrepareBillingGate,
   settleIfTerminalRun,
   type InstallationBackfillStore,
@@ -252,6 +253,16 @@ test("botStatusFor preserves existing running and failed behavior", () => {
   assert.equal(botStatusFor("summary_review_started"), "running");
   assert.equal(botStatusFor("failed"), "failed");
   assert.equal(botStatusFor("static_review_failed"), "failed");
+});
+
+test("Trigger terminal failures map narrowly to product failure statuses", () => {
+  assert.equal(reviewTerminalProductStatus("CANCELED"), "canceled");
+  for (const status of ["FAILED", "CRASHED", "SYSTEM_FAILURE", "EXPIRED", "TIMED_OUT"]) {
+    assert.equal(reviewTerminalProductStatus(status), "failed", status);
+  }
+  for (const status of ["COMPLETED", "EXECUTING", "WAITING", "unknown"]) {
+    assert.equal(reviewTerminalProductStatus(status), undefined, status);
+  }
 });
 
 test("botStatusFor keeps best-effort progress comment failures non-fatal", () => {
