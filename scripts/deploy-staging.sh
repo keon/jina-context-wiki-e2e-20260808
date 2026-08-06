@@ -52,6 +52,41 @@ github_app_private_key_secret="jina-staging-github-app-private-key"
 github_clone_token_secret="jina-staging-github-clone-token"
 openai_secret="jina-staging-openai-api-key"
 causal_release_credential_secret="jina-staging-causal-graph-worker-release-credential"
+review_trigger_secret="${JINA_REVIEW_TRIGGER_SECRET:-jina-staging-trigger-secret-key}"
+review_board_pipeline_mode="${JINA_REVIEW_BOARD_PIPELINE_MODE:-v1}"
+review_board_v2_repositories="${JINA_REVIEW_BOARD_V2_REPOSITORIES:-}"
+require_worker_release_gate="${JINA_REQUIRE_WORKER_RELEASE_GATE:-false}"
+
+case "${review_board_pipeline_mode}" in
+  paused)
+    review_topics="github-installation-backfill|billing-retry"
+    review_run_topic_mode="disabled"
+    ;;
+  v1)
+    review_topics="prepare-review|summary-review|runtime-review|finalize-review|publish-review|settle-review|github-installation-backfill|billing-retry"
+    review_run_topic_mode="disabled"
+    ;;
+  v2)
+    review_topics="run-review|github-installation-backfill|billing-retry"
+    review_run_topic_mode="relational"
+    ;;
+  allowlist)
+    printf 'Staging allowlist mode requires separate v1 and v2 task-worker claim lanes; refusing a mixed-topic worker\n' >&2
+    exit 2
+    ;;
+  *)
+    printf 'JINA_REVIEW_BOARD_PIPELINE_MODE must be paused, v1, v2, or allowlist\n' >&2
+    exit 2
+    ;;
+esac
+if [[ "${review_run_topic_mode}" == "relational" && "${require_worker_release_gate}" != "true" ]]; then
+  printf 'Relational run-review is blocked until staging enables the worker release gate and credential\n' >&2
+  exit 2
+fi
+if [[ "${review_run_topic_mode}" == "relational" ]]; then
+  printf 'Relational run-review remains blocked: deploy-staging.sh does not yet activate a task-worker release credential\n' >&2
+  exit 2
+fi
 
 required_staging_values=(
   "${project}"
@@ -290,7 +325,13 @@ else
     --wait
 fi
 
-api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=false~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=20000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
+api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=${require_worker_release_gate}~JINA_REVIEW_BOARD_PIPELINE_MODE=${review_board_pipeline_mode}~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=20000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
+if [[ -n "${review_board_v2_repositories}" ]]; then
+  api_env+="~JINA_REVIEW_BOARD_V2_REPOSITORIES=${review_board_v2_repositories}"
+fi
+if [[ "${review_run_topic_mode}" == "relational" ]]; then
+  api_env+="~JINA_REVIEW_RUN_TOPIC_MODE=relational"
+fi
 if [[ -n "${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT:-}" ]]; then
   api_env+="~JINA_SCHEDULER_OIDC_AUDIENCE=https://api.staging.usejina.com/internal/schedules/billing-retry~JINA_SCHEDULER_OIDC_EMAIL=${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT}"
 fi
@@ -468,9 +509,12 @@ gcloud run services update-traffic "${context_worker_service}" \
   --to-latest \
   --quiet
 
-review_topics="prepare-review|summary-review|runtime-review|finalize-review|publish-review|settle-review|github-installation-backfill|billing-retry"
 task_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~DASHBOARD_URL=https://app.staging.usejina.com~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${review_topics}~JINA_REVIEW_GCS_BUCKET=${review_artifact_bucket}~JINA_GRAPH_MCP_ENABLED=true~DAYTONA_RUN_TIMEOUT_SECONDS=3600~DAYTONA_SETUP_TIMEOUT_SECONDS=300~DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS=120~DAYTONA_SANDBOX_IMAGE=node:22-bookworm~DAYTONA_SANDBOX_CPU=4~DAYTONA_SANDBOX_MEMORY=8~DAYTONA_SANDBOX_DISK=10~REVIEW_CODEX_MODEL=openai/gpt-5.6-luna~REVIEW_CODEX_EFFORT=medium~RUNTIME_PLANNER_MODEL=openai/gpt-5.6-sol~RUNTIME_AGENT_MODEL=openai/gpt-5.6-luna~RUNTIME_MENTAL_TRACE_MODEL=openai/gpt-5.6-luna"
 task_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,OPENAI_API_KEY=${openai_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
+if [[ "${review_run_topic_mode}" == "relational" ]]; then
+  task_env+="~JINA_REVIEW_RUN_TOPIC_MODE=relational"
+  task_secrets+=",TRIGGER_SECRET_KEY=${review_trigger_secret}:latest"
+fi
 gcloud --quiet run deploy "${task_worker_service}" \
   --project="${project}" \
   --region="${region}" \

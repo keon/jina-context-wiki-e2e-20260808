@@ -61,6 +61,14 @@ export interface CreatedReviewRun {
   triggerRunId?: string;
 }
 
+export interface ResolvedReviewScope {
+  readonly tenantId: string;
+  readonly repositoryId: string;
+  readonly pullRequestId?: string;
+  readonly headSha: string;
+  readonly idempotencyKey: string;
+}
+
 export interface InstallationRepository {
   githubRepoId?: number;
   owner?: string;
@@ -108,69 +116,207 @@ export async function createReviewRun(input: CreateReviewRunInput): Promise<stri
   return result.id;
 }
 
+const REVIEW_BOARD_WORKFLOW_TYPE = "pr_review";
+const REVIEW_BOARD_V1_PIPELINE = "pr_review.board.v1";
+const REVIEW_BOARD_V2_PIPELINE = "pr_review.board.v2";
+const REVIEW_TRIGGER_EFFECT_TYPE = "trigger.review.dispatch";
+const REVIEW_TRIGGER_EFFECT_VERSION = 1;
+const REVIEW_TRIGGER_PROVIDER = "trigger.dev";
+
+function reviewTriggerEffectKey(workflowId: string): string {
+  return `trigger-review:${workflowId}`;
+}
+
+function receiptClosesPrepare(metadata: unknown): boolean {
+  return Boolean(
+    metadata &&
+      typeof metadata === "object" &&
+      !Array.isArray(metadata) &&
+      (metadata as Record<string, unknown>).prepare_closed === true,
+  );
+}
+
+export async function prepareReviewRun(input: CreateReviewRunInput): Promise<string> {
+  return withTransaction(async (client) => {
+    const scope = await resolveReviewScopeWithClient(client, input);
+    await lockReviewRequestKeyWithClient(client, scope.tenantId, scope.idempotencyKey);
+    const workflowRows = await client.query<{
+      workflow_id: string;
+      workflow_type: string;
+      pipeline_version: string;
+    }>(
+      `select id workflow_id,workflow_type,pipeline_version
+       from jina_runtime.board_workflows
+       where tenant_id=$1 and dedupe_key=$2
+       for update`,
+      [scope.tenantId, scope.idempotencyKey],
+    );
+    if (workflowRows.rows.length === 0) {
+      return (await createReviewRunWithClient(client, input)).id;
+    }
+    if (workflowRows.rows.length !== 1) {
+      throw new ReviewDispatchProvenanceError("review request resolves to multiple Board workflows");
+    }
+    const workflow = workflowRows.rows[0]!;
+    if (workflow.workflow_type !== REVIEW_BOARD_WORKFLOW_TYPE) {
+      throw new ReviewDispatchProvenanceError(
+        `Board workflow ${workflow.workflow_id} is not a review workflow`,
+      );
+    }
+
+    const triggerRunId = input.triggerRunId?.trim();
+    if (workflow.pipeline_version === REVIEW_BOARD_V1_PIPELINE) {
+      const legacyRows = await client.query<{
+        id: string;
+        trigger_run_id: string | null;
+      }>(
+        `select id,trigger_run_id
+         from review_runs
+         where idempotency_key=$1
+           and tenant_id=$2::uuid
+           and orchestrator='board'
+           and board_workflow_id=$3
+         for update`,
+        [scope.idempotencyKey, scope.tenantId, workflow.workflow_id],
+      );
+      if (legacyRows.rows.length !== 1) {
+        throw new ReviewDispatchProvenanceError(
+          `v1 Board workflow ${workflow.workflow_id} does not resolve to exactly one Board-owned review run`,
+        );
+      }
+      const legacy = legacyRows.rows[0]!;
+      if (legacy.trigger_run_id && triggerRunId && legacy.trigger_run_id !== triggerRunId) {
+        throw new ReviewDispatchProvenanceError(`review run ${legacy.id} belongs to another Trigger run`);
+      }
+      if (triggerRunId && !legacy.trigger_run_id) {
+        await client.query(
+          `update review_runs set trigger_run_id=$2,updated_at=now() where id=$1`,
+          [legacy.id, triggerRunId],
+        );
+      }
+      return legacy.id;
+    }
+
+    if (workflow.pipeline_version !== REVIEW_BOARD_V2_PIPELINE) {
+      throw new ReviewDispatchProvenanceError(
+        `Board workflow ${workflow.workflow_id} does not use a supported review pipeline`,
+      );
+    }
+    if (!triggerRunId) {
+      throw new ReviewDispatchProvenanceError("Board-owned prepare requires trigger_run_id");
+    }
+
+    const taskRows = await client.query<{
+      task_id: string;
+      request_digest: string | null;
+    }>(
+      `select id task_id,metadata->>'request_digest' request_digest
+       from jina_runtime.board_tasks
+       where workflow_id=$1
+         and task_type='review'
+         and topic='run-review'
+         and metadata->>'trigger_task_id'='review'
+         and metadata->'trigger_payload'=$2::jsonb
+       for update`,
+      [workflow.workflow_id, JSON.stringify(input.orchestrationPayload ?? null)],
+    );
+    if (taskRows.rows.length !== 1 || !taskRows.rows[0]?.request_digest) {
+      throw new ReviewDispatchProvenanceError("Board review dispatch payload does not match prepare payload");
+    }
+    const task = taskRows.rows[0];
+    const receipt = (
+      await client.query<{
+        idempotency_key: string;
+        status: string;
+        provider_id: string | null;
+        authority_record_id: string | null;
+        metadata: unknown;
+      }>(
+        `select idempotency_key,status,provider_id,authority_record_id,metadata
+         from jina_runtime.board_effect_receipts
+         where idempotency_key=$1
+           and workflow_id=$2
+           and task_id=$3
+           and effect_type=$4
+           and effect_version=$5
+           and provider=$6
+           and request_digest=$7
+         for update`,
+        [
+          reviewTriggerEffectKey(workflow.workflow_id),
+          workflow.workflow_id,
+          task.task_id,
+          REVIEW_TRIGGER_EFFECT_TYPE,
+          REVIEW_TRIGGER_EFFECT_VERSION,
+          REVIEW_TRIGGER_PROVIDER,
+          task.request_digest,
+        ],
+      )
+    ).rows[0];
+    if (!receipt) {
+      throw new ReviewDispatchProvenanceError("Board review dispatch receipt is missing");
+    }
+    if (receiptClosesPrepare(receipt.metadata)) {
+      throw new ReviewDispatchProvenanceError(
+        "Trigger run became terminal before review prepare committed",
+      );
+    }
+    if (!receipt.provider_id) throw new ReviewDispatchNotBoundError();
+    if (receipt.status !== "succeeded" || receipt.provider_id !== triggerRunId) {
+      throw new ReviewDispatchProvenanceError("Trigger run does not own the Board review dispatch receipt");
+    }
+
+    const review = await createReviewRunWithClient(client, input);
+    if (!review.created && review.orchestrator !== "board") {
+      throw new ReviewDispatchProvenanceError(`review run ${review.id} is already owned by Trigger`);
+    }
+    if (review.triggerRunId && review.triggerRunId !== triggerRunId) {
+      throw new ReviewDispatchProvenanceError(`review run ${review.id} belongs to another Trigger run`);
+    }
+    if (review.boardWorkflowId && review.boardWorkflowId !== workflow.workflow_id) {
+      throw new ReviewDispatchProvenanceError(`review run ${review.id} belongs to another Board workflow`);
+    }
+    await bindReviewRunToBoardWithClient(client, {
+      reviewRunId: review.id,
+      tenantId: scope.tenantId,
+      workflowId: workflow.workflow_id,
+    });
+    const authority = await client.query(
+      `update jina_runtime.board_effect_receipts
+          set authority_record_id=$2,updated_at=clock_timestamp()
+        where idempotency_key=$1
+          and (authority_record_id is null or authority_record_id=$2)
+        returning idempotency_key`,
+      [receipt.idempotency_key, review.id],
+    );
+    if (authority.rowCount !== 1) {
+      throw new ReviewDispatchProvenanceError("Board review dispatch receipt belongs to another authority record");
+    }
+    return review.id;
+  });
+}
+
+export class ReviewDispatchNotBoundError extends Error {
+  constructor() {
+    super("Board review dispatch has not persisted its Trigger run ID yet");
+    this.name = "ReviewDispatchNotBoundError";
+  }
+}
+
+export class ReviewDispatchProvenanceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewDispatchProvenanceError";
+  }
+}
+
 export async function createReviewRunWithClient(
   client: pg.PoolClient,
   input: CreateReviewRunInput,
 ): Promise<CreatedReviewRun> {
-  const githubRepoId = input.repository.githubRepoId;
-  const repoOwner = input.repository.owner ?? input.repository.fullName?.split("/")[0];
-  const repoName = input.repository.name ?? input.repository.fullName?.split("/")[1];
-  if (!githubRepoId || !repoOwner || !repoName) {
-    throw new Error("review run is missing repository identity");
-  }
-
-  const tenantId = await resolveTenantId(client, {
-    installationId: input.installationId,
-    accountId: input.account?.id,
-    accountLogin: input.account?.login ?? repoOwner,
-    accountType: input.account?.type ?? "Organization",
-  });
-
-  let installationRecordId: string | undefined;
-  if (input.installationId) {
-    installationRecordId = await upsertInstallation(client, tenantId, input.installationId, input.account);
-  }
-
-  const repositoryId = await upsertRepository(client, {
-    tenantId,
-    installationRecordId,
-    githubRepoId,
-    owner: repoOwner,
-    name: repoName,
-    defaultBranch: input.repository.defaultBranch,
-    private: input.repository.private,
-  });
-
-  let pullRequestId: string | undefined;
-  if (typeof input.pullRequest.number === "number" && input.pullRequest.headSha) {
-    pullRequestId = await upsertPullRequest(client, {
-      tenantId,
-      repositoryId,
-      number: input.pullRequest.number,
-      title: input.pullRequest.title,
-      author: input.pullRequest.author,
-      headSha: input.pullRequest.headSha,
-      baseSha: input.pullRequest.baseSha,
-      headRef: input.pullRequest.headRef,
-      baseRef: input.pullRequest.baseRef,
-      htmlUrl: input.pullRequest.htmlUrl,
-      draft: input.pullRequest.draft,
-    });
-  }
-
-  const headSha = input.pullRequest.headSha;
-  if (!headSha) {
-    // head_sha is NOT NULL and is the basis for dedupe; never persist an empty placeholder.
-    throw new Error("review run is missing pull request head_sha");
-  }
-
-  // Prefer a caller-provided logical idempotency key. Trigger run ids are a
-  // fallback for legacy task shapes, but retryable workflows should pass a key
-  // derived from repository + PR + head so retry attempts reuse the same row.
-  const idempotencyKey =
-    input.idempotencyKey ??
-    input.triggerRunId ??
-    `review:${input.installationId ?? "none"}:${githubRepoId}:${input.pullRequest.number ?? "none"}:${headSha}:code_review`;
+  const scope = await resolveReviewScopeWithClient(client, input);
+  await lockReviewRequestKeyWithClient(client, scope.tenantId, scope.idempotencyKey);
+  const { tenantId, repositoryId, pullRequestId, headSha, idempotencyKey } = scope;
 
   const inserted = await client.query<{ id: string; tenant_id: string }>(
     `insert into review_runs
@@ -245,6 +391,89 @@ export async function createReviewRunWithClient(
   };
 }
 
+export async function resolveReviewScopeWithClient(
+  client: pg.PoolClient,
+  input: CreateReviewRunInput,
+): Promise<ResolvedReviewScope> {
+  const githubRepoId = input.repository.githubRepoId;
+  const repoOwner = input.repository.owner ?? input.repository.fullName?.split("/")[0];
+  const repoName = input.repository.name ?? input.repository.fullName?.split("/")[1];
+  if (!githubRepoId || !repoOwner || !repoName) {
+    throw new Error("review run is missing repository identity");
+  }
+
+  const tenantId = await resolveTenantId(client, {
+    installationId: input.installationId,
+    accountId: input.account?.id,
+    accountLogin: input.account?.login ?? repoOwner,
+    accountType: input.account?.type ?? "Organization",
+  });
+
+  let installationRecordId: string | undefined;
+  if (input.installationId) {
+    installationRecordId = await upsertInstallation(client, tenantId, input.installationId, input.account);
+  }
+
+  const repositoryId = await upsertRepository(client, {
+    tenantId,
+    installationRecordId,
+    githubRepoId,
+    owner: repoOwner,
+    name: repoName,
+    defaultBranch: input.repository.defaultBranch,
+    private: input.repository.private,
+  });
+
+  let pullRequestId: string | undefined;
+  if (typeof input.pullRequest.number === "number" && input.pullRequest.headSha) {
+    pullRequestId = await upsertPullRequest(client, {
+      tenantId,
+      repositoryId,
+      number: input.pullRequest.number,
+      title: input.pullRequest.title,
+      author: input.pullRequest.author,
+      headSha: input.pullRequest.headSha,
+      baseSha: input.pullRequest.baseSha,
+      headRef: input.pullRequest.headRef,
+      baseRef: input.pullRequest.baseRef,
+      htmlUrl: input.pullRequest.htmlUrl,
+      draft: input.pullRequest.draft,
+    });
+  }
+
+  const headSha = input.pullRequest.headSha;
+  if (!headSha) {
+    // head_sha is NOT NULL and is the basis for dedupe; never persist an empty placeholder.
+    throw new Error("review run is missing pull request head_sha");
+  }
+
+  // Prefer a caller-provided logical idempotency key. Trigger run ids are a
+  // fallback for legacy task shapes, but retryable workflows should pass a key
+  // derived from repository + PR + head so retry attempts reuse the same row.
+  const idempotencyKey =
+    input.idempotencyKey ??
+    input.triggerRunId ??
+    `review:${input.installationId ?? "none"}:${githubRepoId}:${input.pullRequest.number ?? "none"}:${headSha}:code_review`;
+
+  return {
+    tenantId,
+    repositoryId,
+    ...(pullRequestId ? { pullRequestId } : {}),
+    headSha,
+    idempotencyKey,
+  };
+}
+
+export async function lockReviewRequestKeyWithClient(
+  client: pg.PoolClient,
+  tenantId: string,
+  idempotencyKey: string,
+): Promise<void> {
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+    `${tenantId}:${idempotencyKey}`,
+  ]);
+}
+
 export async function listManualReviewRuns(scopeTag: string): Promise<{
   runs: { tags: string[]; createdAt: string }[];
 }> {
@@ -288,6 +517,201 @@ export async function bindReviewRunToBoardWithClient(
   if (bound.rowCount !== 1) {
     throw new Error(`review run ${input.reviewRunId} could not be bound to Board workflow ${input.workflowId}`);
   }
+}
+
+export type BoardReviewTerminalReconciliationOutcome = "updated" | "already_terminal" | "no_row";
+
+export async function reconcileBoardReviewTerminal(input: {
+  readonly boardWorkflowId: string;
+  readonly triggerRunId: string;
+  readonly providerStatus: string;
+  readonly status: "failed" | "canceled";
+  readonly diagnostic: string;
+}): Promise<{
+  readonly outcome: BoardReviewTerminalReconciliationOutcome;
+  readonly reviewRunId?: string;
+}> {
+  return withTransaction(async (client) => {
+    const identityRows = await client.query<{
+      tenant_id: string;
+      dedupe_key: string;
+      task_id: string;
+      request_digest: string | null;
+    }>(
+      `select workflow.tenant_id,workflow.dedupe_key,task.id task_id,
+              task.metadata->>'request_digest' request_digest
+       from jina_runtime.board_workflows workflow
+       join jina_runtime.board_tasks task on task.workflow_id=workflow.id
+       where workflow.id=$1
+         and workflow.workflow_type=$2
+         and workflow.pipeline_version=$3
+         and task.task_type='review'
+         and task.topic='run-review'
+         and task.metadata->>'trigger_task_id'='review'`,
+      [input.boardWorkflowId, REVIEW_BOARD_WORKFLOW_TYPE, REVIEW_BOARD_V2_PIPELINE],
+    );
+    if (identityRows.rows.length !== 1 || !identityRows.rows[0]?.request_digest) {
+      throw new ReviewDispatchProvenanceError(
+        "terminal reconciliation does not resolve to exactly one v2 Board review task",
+      );
+    }
+    const identity = identityRows.rows[0];
+    await lockReviewRequestKeyWithClient(client, identity.tenant_id, identity.dedupe_key);
+
+    const lockedIdentity = await client.query<{
+      task_id: string;
+      request_digest: string | null;
+    }>(
+      `select task.id task_id,task.metadata->>'request_digest' request_digest
+       from jina_runtime.board_workflows workflow
+       join jina_runtime.board_tasks task on task.workflow_id=workflow.id
+       where workflow.id=$1
+         and workflow.tenant_id=$2
+         and workflow.dedupe_key=$3
+         and workflow.workflow_type=$4
+         and workflow.pipeline_version=$5
+         and task.id=$6
+         and task.task_type='review'
+         and task.topic='run-review'
+         and task.metadata->>'trigger_task_id'='review'
+       for update of workflow,task`,
+      [
+        input.boardWorkflowId,
+        identity.tenant_id,
+        identity.dedupe_key,
+        REVIEW_BOARD_WORKFLOW_TYPE,
+        REVIEW_BOARD_V2_PIPELINE,
+        identity.task_id,
+      ],
+    );
+    if (
+      lockedIdentity.rows.length !== 1 ||
+      lockedIdentity.rows[0]?.request_digest !== identity.request_digest
+    ) {
+      throw new ReviewDispatchProvenanceError("Board review identity changed during terminal reconciliation");
+    }
+
+    const receiptRows = await client.query<{
+      idempotency_key: string;
+      status: string;
+      provider_id: string | null;
+      authority_record_id: string | null;
+    }>(
+      `select idempotency_key,status,provider_id,authority_record_id
+       from jina_runtime.board_effect_receipts
+       where idempotency_key=$1
+         and workflow_id=$2
+         and task_id=$3
+         and effect_type=$4
+         and effect_version=$5
+         and provider=$6
+         and request_digest=$7
+       for update`,
+      [
+        reviewTriggerEffectKey(input.boardWorkflowId),
+        input.boardWorkflowId,
+        identity.task_id,
+        REVIEW_TRIGGER_EFFECT_TYPE,
+        REVIEW_TRIGGER_EFFECT_VERSION,
+        REVIEW_TRIGGER_PROVIDER,
+        identity.request_digest,
+      ],
+    );
+    if (receiptRows.rows.length !== 1) {
+      throw new ReviewDispatchProvenanceError("Board review dispatch receipt is missing");
+    }
+    const receipt = receiptRows.rows[0]!;
+    if (receipt.status !== "succeeded" || receipt.provider_id !== input.triggerRunId) {
+      throw new ReviewDispatchProvenanceError(
+        "terminal Trigger run does not own the Board review dispatch receipt",
+      );
+    }
+
+    const candidates = await client.query<{
+      id: string;
+      orchestrator: "trigger" | "board";
+      board_workflow_id: string | null;
+      trigger_run_id: string | null;
+      status: string;
+    }>(
+      `select id,orchestrator,board_workflow_id,trigger_run_id,status
+       from review_runs
+       where board_workflow_id=$1 or trigger_run_id=$2
+       for update`,
+      [input.boardWorkflowId, input.triggerRunId],
+    );
+    if (candidates.rows.length === 0) {
+      if (receipt.authority_record_id) {
+        throw new ReviewDispatchProvenanceError(
+          "Board review dispatch receipt names an authority record that does not exist",
+        );
+      }
+      const closed = await client.query(
+        `update jina_runtime.board_effect_receipts
+            set metadata=coalesce(metadata,'{}'::jsonb) || jsonb_build_object(
+                  'prepare_closed',true,
+                  'terminal_provider_status',$2::text,
+                  'terminal_observed_at',clock_timestamp()
+                ),
+                updated_at=clock_timestamp()
+          where idempotency_key=$1
+          returning idempotency_key`,
+        [receipt.idempotency_key, input.providerStatus],
+      );
+      if (closed.rowCount !== 1) {
+        throw new ReviewDispatchProvenanceError("Board review dispatch receipt could not close prepare");
+      }
+      return { outcome: "no_row" };
+    }
+    const matching = candidates.rows.filter(
+      (row) =>
+        row.orchestrator === "board" &&
+        row.board_workflow_id === input.boardWorkflowId &&
+        row.trigger_run_id === input.triggerRunId,
+    );
+    if (matching.length !== 1 || candidates.rows.length !== 1) {
+      throw new ReviewDispatchProvenanceError(
+        "terminal reconciliation identities do not resolve to exactly one Board-owned review run",
+      );
+    }
+    const review = matching[0]!;
+    if (receipt.authority_record_id !== review.id) {
+      throw new ReviewDispatchProvenanceError(
+        "Board review dispatch receipt does not name the reconciled authority record",
+      );
+    }
+    if (isTerminalReviewRunStatus(review.status)) {
+      return { outcome: "already_terminal", reviewRunId: review.id };
+    }
+    const botStatus = input.status === "canceled" ? "canceled" : "failed";
+    const updated = await client.query<{ id: string }>(
+      `update review_runs
+          set status=$2,bot_status=$3,error=$4,finished_at=now(),updated_at=now()
+        where id=$1 and status <> all($5)
+        returning id`,
+      [review.id, input.status, botStatus, input.diagnostic.slice(0, 2_000), TERMINAL_RUN_STATUSES],
+    );
+    if (updated.rowCount !== 1) {
+      return { outcome: "already_terminal", reviewRunId: review.id };
+    }
+    await client.query(
+      `insert into review_run_events (review_run_id,status,payload_json,trigger_run_id)
+       values ($1,'review_terminal_reconciled',$2::jsonb,$3)`,
+      [
+        review.id,
+        JSON.stringify({
+          schema_version: 1,
+          board_workflow_id: input.boardWorkflowId,
+          provider: "trigger.dev",
+          provider_status: input.providerStatus,
+          product_status: input.status,
+          diagnostic: input.diagnostic.slice(0, 2_000),
+        }),
+        input.triggerRunId,
+      ],
+    );
+    return { outcome: "updated", reviewRunId: review.id };
+  });
 }
 
 // Statuses that represent a finished run. Once a run reaches one, later non-terminal

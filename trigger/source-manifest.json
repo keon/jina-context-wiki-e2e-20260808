@@ -1,0 +1,199 @@
+{
+  "schema_version": 1,
+  "source_repository": "https://github.com/omxyz/jina-simulation",
+  "source_commit": "322f42b5cb6d7cc3af3e4ae346b98c222aa7a822",
+  "source_subdirectory": "trigger",
+  "deployment_scope": "review-only",
+  "registered_task_ids": [
+    "review",
+    "review-summary",
+    "review-runtime"
+  ],
+  "excluded_trigger_entrypoints": [
+    "trigger/src/trigger/billing-retry.ts",
+    "trigger/src/trigger/installation-backfill.ts",
+    "trigger/src/trigger/scheduled-review-scan.ts"
+  ],
+  "files": [
+    {
+      "path": "trigger/package-lock.json",
+      "sha256": "f6480ec5861af9ce61bd28bee550bb66ae5ed3fd9d53a63047cd787f996a22b7"
+    },
+    {
+      "path": "trigger/package.json",
+      "sha256": "79a3e475a908f214ddfc333b4e8dc4a448b9a56fcec08dd6bec1faf092cd3507"
+    },
+    {
+      "path": "trigger/src/daytona/openrouter-proxy.test.ts",
+      "sha256": "ee5614bca05d30e3e6b78bb36706c51162bcb30eb53e482c93604d6e92a162f0"
+    },
+    {
+      "path": "trigger/src/daytona/openrouter-proxy.ts",
+      "sha256": "eff6d59b7d4b6e54f89abd23947876701a962eb0738f0ffb8f3ac27e7eb29f97"
+    },
+    {
+      "path": "trigger/src/daytona/review-session.test.ts",
+      "sha256": "602efbec081415bd82de6cca637dee33c34c69281522116d7b5fa4544dde03e2"
+    },
+    {
+      "path": "trigger/src/daytona/review-session.ts",
+      "sha256": "70367412c3a0e4b28a9723faee2b3a69db9aa9f2f87d9e0c18f467486991320d"
+    },
+    {
+      "path": "trigger/src/daytona/worker-manifest.ts",
+      "sha256": "75f0693d30380b3d53bd511b2506e656cdd08d8a76935eb6b09ac5f989714058"
+    },
+    {
+      "path": "trigger/src/review/codex-review.ts",
+      "sha256": "cc7964571a7cbeb8e26cf860c2d4571d2f55e9c45098ca61c09be039bf1c5068"
+    },
+    {
+      "path": "trigger/src/review/diff-anchors.test.ts",
+      "sha256": "6c2661c4906e351db60616f9080fcf8e32226de0235c5f7602ab200f68b6d669"
+    },
+    {
+      "path": "trigger/src/review/diff-anchors.ts",
+      "sha256": "e4b2b16155dda00983b23d685c5a1085e85ebb1c9d44ab985bc84a61e5997794"
+    },
+    {
+      "path": "trigger/src/review/jina-instructions.test.ts",
+      "sha256": "1cfe25fb75c969ce6f9beec0100935a8dea198dda30941771b004b120019da6c"
+    },
+    {
+      "path": "trigger/src/review/jina-instructions.ts",
+      "sha256": "365a51f31415c89d86682802213fded61eae2f2fe01218a2eb18c930d7988129"
+    },
+    {
+      "path": "trigger/src/review/log.test.ts",
+      "sha256": "74cf7ffa5d391335ffbbcdda953308821bcc6f37964ad7894db37525c696332d"
+    },
+    {
+      "path": "trigger/src/review/log.ts",
+      "sha256": "44d7628414648fc968e036a07c1c789cc8a6f59a7ec4cd18a5d80a30233fc167"
+    },
+    {
+      "path": "trigger/src/review/progress-comment.test.ts",
+      "sha256": "04bb18e43762c70f765e8f38346f6d012b1bec357de3bce3bca0a851bb09dd62"
+    },
+    {
+      "path": "trigger/src/review/progress-comment.ts",
+      "sha256": "9546fef95ad19541946e56ddff1fbb3dd847ac691202fcbd25127b4e9691cb95"
+    },
+    {
+      "path": "trigger/src/review/provider-keys.test.ts",
+      "sha256": "15201abf5e9599057184adf5ee8f7ab828f659aa24f5939a7c5a43b4e331a8c1"
+    },
+    {
+      "path": "trigger/src/review/provider-keys.ts",
+      "sha256": "c87e6f01846a5d839b714637076bdae2b6e39d2d314ef653aa2b17ccc3b9cafc"
+    },
+    {
+      "path": "trigger/src/review/runtime-stage.test.ts",
+      "sha256": "dc8584525e8204fada2b0634d3da3dc7c5186145204772a268b2646da066adab"
+    },
+    {
+      "path": "trigger/src/review/runtime-stage.ts",
+      "sha256": "bc95d8bc518d44dddb43c423020d783ef2fba256023e3ec3939bd6d49e6cc797"
+    },
+    {
+      "path": "trigger/src/review/summary-stage.ts",
+      "sha256": "e171c6f657310286ff39b79c5b69d1e48e1ee43f64d7fb0e834858ae73e07335"
+    },
+    {
+      "path": "trigger/src/review/workflow.test.ts",
+      "sha256": "5afc3d312d005ceac43b50addd21c40c5c42fd5d02eb275400021ca525e0031e"
+    },
+    {
+      "path": "trigger/src/review/workflow.ts",
+      "sha256": "dfe2c8b78ae62963ac259b84d8b2fa1426e05e983d6b49aa7a01d9f51cafcdae"
+    },
+    {
+      "path": "trigger/src/runtime-review/github.test.ts",
+      "sha256": "b9e1e706c5d6e5ed96d4da7cf1e9c651511bc3b8b4864d700b40f6783a8b81a9"
+    },
+    {
+      "path": "trigger/src/runtime-review/github.ts",
+      "sha256": "0b21a0e74c0f7f3a1e80475eab36fa6fd0967fb52cee1caad089c47214006403"
+    },
+    {
+      "path": "trigger/src/runtime-review/index.test.ts",
+      "sha256": "9a4f6f6785fce90c80d1373487e7da42e58efbbf0a4c664dcdce7620776bd19e"
+    },
+    {
+      "path": "trigger/src/runtime-review/index.ts",
+      "sha256": "f0b4c76a704b151b414f260d5ec43466128b8420823f6378463bda02aea33f45"
+    },
+    {
+      "path": "trigger/src/shared/api.test.ts",
+      "sha256": "b3e408eb59f9e0b82294f95041318b52e4bb25516539594f22f2c3ca7ba834ef"
+    },
+    {
+      "path": "trigger/src/shared/api.ts",
+      "sha256": "721502ba1dfd39823ec44776882103e0444c7b4bbf99017e16ae62b73c4cc014"
+    },
+    {
+      "path": "trigger/src/shared/cleanup.test.ts",
+      "sha256": "15031440034217662764d2d2004b960f2941dca8130914299acb7fe0a9ae8a73"
+    },
+    {
+      "path": "trigger/src/shared/format.test.ts",
+      "sha256": "8d39eda068d7b84d864cb0617dc806b101c47134cc6639e209cf4856609844ea"
+    },
+    {
+      "path": "trigger/src/shared/format.ts",
+      "sha256": "1805fb0ea67f149294f4034038a17b2e1df2725bf3a413a4135a447420bd9fb5"
+    },
+    {
+      "path": "trigger/src/shared/github.test.ts",
+      "sha256": "51c37e709f28527a025994196529bf372db8a0373e7784555e7948f7c5be49ac"
+    },
+    {
+      "path": "trigger/src/shared/github.ts",
+      "sha256": "9268eae335132901e7ceff3621c70ae1afe742fbc48a7d59eb9e60b078beefca"
+    },
+    {
+      "path": "trigger/src/shared/jina-graph.test.ts",
+      "sha256": "e42bf79e360f5e5ad7f4bf25a28e7ecb56a6a6097390be973b6a2bf8137e09bf"
+    },
+    {
+      "path": "trigger/src/shared/jina-graph.ts",
+      "sha256": "ce60f20b7d9140bb6e4b2b468e48f3bd64fc1bbeab06aa6bab28dea4d5e2286d"
+    },
+    {
+      "path": "trigger/src/shared/utils.test.ts",
+      "sha256": "a1a4e0c223349213fe7922ed31732af34aae208e7e76f870c675ce89ca66bad9"
+    },
+    {
+      "path": "trigger/src/shared/utils.ts",
+      "sha256": "835afacc085fa91adaf58cf336ffd6db8f3e6fb84c3034022280a146fdc32e90"
+    },
+    {
+      "path": "trigger/src/trigger-config.test.ts",
+      "sha256": "42a56f734a2be763bceee2b198073e56fcea3a897cdbb8e8cb4f72527239feab"
+    },
+    {
+      "path": "trigger/src/trigger/review-runtime.ts",
+      "sha256": "5a91a10dd7b451b9c3595fd493ec5c6be126be06e04d6c899d8d9430e6e0a723"
+    },
+    {
+      "path": "trigger/src/trigger/review-summary.ts",
+      "sha256": "d70f5b8c33d8e36478dc3ca71fe885b675e607d1be0b2c8e156b3691ea7f1247"
+    },
+    {
+      "path": "trigger/src/trigger/review.test.ts",
+      "sha256": "2860d2c2daa853a2f5a60949b9c4e1939308ba56dd639228a951c3abfb504a61"
+    },
+    {
+      "path": "trigger/src/trigger/review.ts",
+      "sha256": "36c2df7b913feb89fc794c6143ef2405cd6fba2bf45208ad2a885fbdf957d3c1"
+    },
+    {
+      "path": "trigger/trigger.config.ts",
+      "sha256": "f1ab73f907724c5b01662f774c89be6902e24d55e9bad632ed374306b33ffde0"
+    },
+    {
+      "path": "trigger/tsconfig.json",
+      "sha256": "4a6ac815f9c31eb3c5e78c5bb7a842580e1452c8fc53748321545af38dd99d11"
+    }
+  ]
+}

@@ -6,7 +6,15 @@ export type BoardWorkflowStatus =
   "shadow" | "queued" | "running" | "superseding" | "succeeded" | "failed" | "canceled" | "superseded";
 
 export type BoardTaskStatus =
-  "blocked" | "queued" | "leased" | "retry_wait" | "succeeded" | "failed" | "canceled" | "superseded";
+  | "blocked"
+  | "queued"
+  | "leased"
+  | "retry_wait"
+  | "waiting_external"
+  | "succeeded"
+  | "failed"
+  | "canceled"
+  | "superseded";
 
 export interface BoardAdmissionTask {
   readonly id?: string;
@@ -61,6 +69,14 @@ export interface BoardAdmissionResult {
   readonly taskIds: readonly string[];
 }
 
+export interface ExistingBoardAdmission extends BoardAdmissionResult {
+  readonly workflowType: string;
+  readonly pipelineVersion: string;
+  readonly subjectType: string;
+  readonly subjectId: string;
+  readonly concurrencyKey: string;
+}
+
 interface ExistingWorkflowRow {
   readonly id: string;
   readonly workflow_type: string;
@@ -72,6 +88,36 @@ interface ExistingWorkflowRow {
 }
 
 export class RelationalBoardRepository {
+  async findAdmissionByDedupe(
+    client: PoolClient,
+    input: { readonly tenantId: string; readonly dedupeKey: string }
+  ): Promise<ExistingBoardAdmission | undefined> {
+    const existing = await client.query<ExistingWorkflowRow>(
+      `select id,workflow_type,pipeline_version,subject_type,subject_id,concurrency_key,trace_id
+       from jina_runtime.board_workflows
+       where tenant_id=$1 and dedupe_key=$2
+       for update`,
+      [input.tenantId, input.dedupeKey]
+    );
+    const workflow = existing.rows[0];
+    if (!workflow) return undefined;
+    const tasks = await client.query<{ id: string }>(
+      "select id from jina_runtime.board_tasks where workflow_id=$1 order by created_at,id",
+      [workflow.id]
+    );
+    return {
+      workflowId: workflow.id,
+      workflowType: workflow.workflow_type,
+      pipelineVersion: workflow.pipeline_version,
+      subjectType: workflow.subject_type,
+      subjectId: workflow.subject_id,
+      concurrencyKey: workflow.concurrency_key,
+      traceId: workflow.trace_id,
+      replayed: true,
+      taskIds: tasks.rows.map((task) => task.id)
+    };
+  }
+
   async admitWorkflow(client: PoolClient, input: AdmitBoardWorkflowInput): Promise<BoardAdmissionResult> {
     const normalized = normalizeAdmission(input);
     const inserted = await client.query<{ id: string; trace_id: string }>(
@@ -223,35 +269,27 @@ export class RelationalBoardRepository {
   }
 
   private async replayedAdmission(client: PoolClient, input: NormalizedBoardAdmission): Promise<BoardAdmissionResult> {
-    const existing = await client.query<ExistingWorkflowRow>(
-      `select id,workflow_type,pipeline_version,subject_type,subject_id,concurrency_key,trace_id
-       from jina_runtime.board_workflows
-       where tenant_id=$1 and dedupe_key=$2
-       for update`,
-      [input.tenantId, input.dedupeKey]
-    );
-    const workflow = existing.rows[0];
+    const workflow = await this.findAdmissionByDedupe(client, {
+      tenantId: input.tenantId,
+      dedupeKey: input.dedupeKey
+    });
     if (!workflow) {
       throw new Error("Board workflow dedupe conflict disappeared during admission");
     }
     if (
-      workflow.workflow_type !== input.workflowType ||
-      workflow.pipeline_version !== input.pipelineVersion ||
-      workflow.subject_type !== input.subjectType ||
-      workflow.subject_id !== input.subjectId ||
-      workflow.concurrency_key !== input.concurrencyKey
+      workflow.workflowType !== input.workflowType ||
+      workflow.pipelineVersion !== input.pipelineVersion ||
+      workflow.subjectType !== input.subjectType ||
+      workflow.subjectId !== input.subjectId ||
+      workflow.concurrencyKey !== input.concurrencyKey
     ) {
-      throw new BoardAdmissionConflictError(workflow.id);
+      throw new BoardAdmissionConflictError(workflow.workflowId);
     }
-    const tasks = await client.query<{ id: string }>(
-      "select id from jina_runtime.board_tasks where workflow_id=$1 order by created_at,id",
-      [workflow.id]
-    );
     return {
-      workflowId: workflow.id,
-      traceId: workflow.trace_id,
+      workflowId: workflow.workflowId,
+      traceId: workflow.traceId,
       replayed: true,
-      taskIds: tasks.rows.map((task) => task.id)
+      taskIds: workflow.taskIds
     };
   }
 }

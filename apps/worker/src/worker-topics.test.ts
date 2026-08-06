@@ -5,6 +5,7 @@ import {
   CAUSAL_GRAPH_TOPICS,
   CONTEXT_BOARD_TOPICS,
   REVIEW_BOARD_TOPICS,
+  configuredReviewRunTopicMode,
   configuredWorkerClaimMode,
   configuredWorkerPreferredRepository,
   configuredWorkerTopics,
@@ -42,8 +43,17 @@ test("worker topics reject every legacy Context executor route", () => {
 });
 
 test("the legacy review queue requires an explicit compatibility gate", () => {
-  assert.throws(() => configuredWorkerTopics("run-review"), /JINA_LEGACY_REVIEW_PIPELINE_ENABLED/);
+  assert.throws(() => configuredWorkerTopics("run-review"), /JINA_REVIEW_RUN_TOPIC_MODE/);
   assert.deepEqual(configuredWorkerTopics("run-review", { allowLegacyReview: true }), ["run-review"]);
+  assert.deepEqual(configuredWorkerTopics("run-review", { reviewRunTopicMode: "relational" }), ["run-review"]);
+});
+
+test("run-review semantic mode is explicit with a legacy compatibility fallback", () => {
+  assert.equal(configuredReviewRunTopicMode(undefined), "disabled");
+  assert.equal(configuredReviewRunTopicMode(undefined, true), "legacy");
+  assert.equal(configuredReviewRunTopicMode(" legacy "), "legacy");
+  assert.equal(configuredReviewRunTopicMode("relational"), "relational");
+  assert.throws(() => configuredReviewRunTopicMode("v2"), /must be legacy or relational/);
 });
 
 test("every Context topic requires the production Board executor preflight", () => {

@@ -142,7 +142,7 @@ const DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 * 60 * 1000;
 const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = supportedWorkerTopics;
-const RELATIONAL_BOARD_TOPICS = new Set<string>([...reviewBoardWorkerTopics, ...controlBoardWorkerTopics]);
+const BASE_RELATIONAL_BOARD_TOPICS = new Set<string>([...reviewBoardWorkerTopics, ...controlBoardWorkerTopics]);
 const CONTEXT_BOARD_TOPICS = new Set<string>(Object.values(contextWorkflowBoardTopics));
 const CAUSAL_GRAPH_TOPICS = new Set<string>(Object.values(causalGraphBoardTopics));
 const MODEL_BOARD_TOPICS = new Set<string>([
@@ -237,8 +237,19 @@ export interface ApiServerConfig {
   /** Relational workflow adapter used only by the versioned review topics. */
   readonly relationalBoardWorkerStore?: Pick<
     PostgresRelationalBoardWorkerStore,
-    "claim" | "renew" | "release" | "complete" | "retry" | "fail"
+    | "claim"
+    | "renew"
+    | "release"
+    | "beginEffect"
+    | "waitExternal"
+    | "rescheduleExternal"
+    | "retryEffect"
+    | "complete"
+    | "retry"
+    | "fail"
   >;
+  /** Reclassifies run-review only after the persisted legacy topic has drained. */
+  readonly relationalReviewTopicEnabled?: boolean;
   /** Test/embedding override. Production uses the structured service logger. */
   readonly logger?: Logger;
   /** Dashboard and review API handler mounted into the single Jina server. */
@@ -453,6 +464,8 @@ function publicApiToken(token: ApiTokenRecord): Record<string, unknown> {
 
 /** Creates the HTTP API without binding a port. */
 export function createApiServer(config: ApiServerConfig = {}): Server {
+  const relationalBoardTopics = new Set(BASE_RELATIONAL_BOARD_TOPICS);
+  if (config.relationalReviewTopicEnabled) relationalBoardTopics.add("run-review");
   const contextWorkerLeaseMs = config.contextWorkerLeaseMs ?? DEFAULT_CONTEXT_WORKER_LEASE_MS;
   if (!Number.isSafeInteger(contextWorkerLeaseMs) || contextWorkerLeaseMs <= 0) {
     throw new Error("contextWorkerLeaseMs must be a positive safe integer");
@@ -2522,6 +2535,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await completeWork(request, response, principal.tenantId);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/worker/effects/start") {
+      await beginEffectWork(request, response);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/worker/effects/retry") {
+      await retryEffectWork(request, response);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/worker/wait-external") {
+      await waitExternalWork(request, response);
+      return;
+    }
 
     json(response, 404, { error: "not found" });
   }
@@ -3213,7 +3238,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     topics: readonly string[]
   ): void {
     if (!workerIdentity) return;
-    const expectedService = topics.every((topic) => topic === "run-review" || RELATIONAL_BOARD_TOPICS.has(topic))
+    const expectedService = topics.every((topic) => topic === "run-review" || relationalBoardTopics.has(topic))
       ? "jina-task-worker"
       : topics.every((topic) => CONTEXT_BOARD_TOPICS.has(topic))
         ? "jina-context-worker"
@@ -3289,8 +3314,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const workerIdentity = workerRelease ?? workerRuntime;
     const claimRelease = workerRelease ? { ...workerRelease, requireClaimAdmission: true as const } : undefined;
     requireWorkerServiceForTopics(workerIdentity, topics);
-    if (topics.some((topic) => RELATIONAL_BOARD_TOPICS.has(topic))) {
-      if (!topics.every((topic) => RELATIONAL_BOARD_TOPICS.has(topic))) {
+    if (topics.some((topic) => relationalBoardTopics.has(topic))) {
+      if (!topics.every((topic) => relationalBoardTopics.has(topic))) {
         throw invalidRequest("relational Board topics cannot be mixed with legacy Board topics in one claim");
       }
       const store = requireRelationalBoardWorkerStore();
@@ -3331,7 +3356,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                   traceId: claimed.traceId,
                   spanId: claimed.spanId,
                   workflowMetadata: claimed.workflowMetadata,
-                  dependencyResults: claimed.dependencyResults
+                  dependencyResults: claimed.dependencyResults,
+                  effectReceipts: claimed.effectReceipts
                 }
               }
             }
@@ -3595,7 +3621,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const workerRelease = workerReleaseGuard(body);
     const messageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
-    if (isRelationalReviewDelivery(messageId)) {
+    if (isRelationalBoardDelivery(messageId)) {
       const renewed = await relationalBoardCall(() =>
         requireRelationalBoardWorkerStore().renew(
           {
@@ -3712,7 +3738,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const body = parseJsonObject(await readRawBody(request));
     const workerRelease = workerReleaseGuard(body);
     const rawMessageId = requiredString(body.messageId, "messageId");
-    if (isRelationalReviewDelivery(rawMessageId)) {
+    if (isRelationalBoardDelivery(rawMessageId)) {
       const released = await relationalBoardCall(() =>
         requireRelationalBoardWorkerStore().release(
           {
@@ -3783,6 +3809,124 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, { accepted: true });
   }
 
+  async function beginEffectWork(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const workerRelease = workerReleaseGuard(body);
+    const messageId = requiredString(body.messageId, "messageId");
+    if (!isRelationalBoardDelivery(messageId)) throw invalidRequest("effects require a relational Board delivery");
+    const metadata = body.metadata === undefined ? {} : requiredRecord(body.metadata, "metadata");
+    const started = await relationalBoardCall(() =>
+      requireRelationalBoardWorkerStore().beginEffect(
+        {
+          deliveryId: messageId,
+          leaseId: requiredString(body.leaseId, "leaseId"),
+          writeFenceToken: requiredString(body.writeFenceToken, "writeFenceToken"),
+          transitionId: requiredString(body.transitionId, "transitionId"),
+          effectIdempotencyKey: requiredString(body.effectIdempotencyKey, "effectIdempotencyKey"),
+          effectType: requiredString(body.effectType, "effectType"),
+          effectVersion: requiredPositiveInteger(body.effectVersion, "effectVersion"),
+          provider: requiredString(body.provider, "provider"),
+          requestDigest: requiredSha256(body.requestDigest, "requestDigest"),
+          metadata
+        },
+        workerRelease ? relationalReleaseIdentity(workerRelease) : undefined
+      )
+    );
+    if (!started.accepted) throw staleLease();
+    json(response, 200, {
+      accepted: true,
+      replayed: started.replayed,
+      effectReceipt: started.effectReceipt
+    });
+  }
+
+  async function retryEffectWork(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const workerRelease = workerReleaseGuard(body);
+    const messageId = requiredString(body.messageId, "messageId");
+    if (!isRelationalBoardDelivery(messageId)) throw invalidRequest("effects require a relational Board delivery");
+    const receiptStatus = requiredString(body.receiptStatus, "receiptStatus");
+    if (receiptStatus !== "failed" && receiptStatus !== "ambiguous") {
+      throw invalidRequest("receiptStatus must be failed or ambiguous");
+    }
+    const failureCategory = workerFailureCategory(body.failureCategory);
+    const attempt = requiredPositiveInteger(body.attempt, "attempt");
+    const retried = await relationalBoardCall(() =>
+      requireRelationalBoardWorkerStore().retryEffect(
+        {
+          deliveryId: messageId,
+          leaseId: requiredString(body.leaseId, "leaseId"),
+          writeFenceToken: requiredString(body.writeFenceToken, "writeFenceToken"),
+          transitionId: requiredString(body.transitionId, "transitionId"),
+          effectIdempotencyKey: requiredString(body.effectIdempotencyKey, "effectIdempotencyKey"),
+          effectType: requiredString(body.effectType, "effectType"),
+          effectVersion: requiredPositiveInteger(body.effectVersion, "effectVersion"),
+          provider: requiredString(body.provider, "provider"),
+          requestDigest: requiredSha256(body.requestDigest, "requestDigest"),
+          metadata: {},
+          receiptStatus,
+          failureCategory,
+          diagnostic: (optionalString(body.diagnostic) ?? "external dispatch failed").slice(0, 4_096),
+          retryDelayMs: relationalRetryDelayMs(attempt)
+        },
+        workerRelease ? relationalReleaseIdentity(workerRelease) : undefined
+      )
+    );
+    if (!retried.accepted) throw staleLease();
+    json(response, 200, {
+      accepted: true,
+      replayed: retried.replayed,
+      terminal: retried.terminal,
+      effectReceipt: retried.effectReceipt
+    });
+  }
+
+  async function waitExternalWork(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const workerRelease = workerReleaseGuard(body);
+    const messageId = requiredString(body.messageId, "messageId");
+    if (!isRelationalBoardDelivery(messageId))
+      throw invalidRequest("external wait requires a relational Board delivery");
+    const operation = requiredString(body.operation, "operation");
+    const fence = {
+      deliveryId: messageId,
+      leaseId: requiredString(body.leaseId, "leaseId"),
+      writeFenceToken: requiredString(body.writeFenceToken, "writeFenceToken"),
+      transitionId: requiredString(body.transitionId, "transitionId"),
+      effectIdempotencyKey: requiredString(body.effectIdempotencyKey, "effectIdempotencyKey"),
+      providerId: requiredString(body.providerId, "providerId"),
+      ...(optionalString(body.providerStatus)
+        ? { providerStatus: optionalString(body.providerStatus)!.slice(0, 128) }
+        : {}),
+      nextCheckAt: requiredTimestamp(body.nextCheckAt, "nextCheckAt")
+    };
+    const releaseIdentity = workerRelease ? relationalReleaseIdentity(workerRelease) : undefined;
+    const waiting = await relationalBoardCall(() => {
+      if (operation === "provider_handoff") {
+        return requireRelationalBoardWorkerStore().waitExternal(
+          {
+            ...fence,
+            requestDigest: requiredSha256(body.requestDigest, "requestDigest"),
+            ...(body.resultDigest === undefined
+              ? {}
+              : { resultDigest: requiredSha256(body.resultDigest, "resultDigest") })
+          },
+          releaseIdentity
+        );
+      }
+      if (operation === "reschedule") {
+        return requireRelationalBoardWorkerStore().rescheduleExternal(fence, releaseIdentity);
+      }
+      throw invalidRequest("operation must be provider_handoff or reschedule");
+    });
+    if (!waiting.accepted) throw staleLease();
+    json(response, 200, {
+      accepted: true,
+      replayed: waiting.replayed,
+      effectReceipt: waiting.effectReceipt
+    });
+  }
+
   async function completeWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const workerRelease = workerReleaseGuard(body);
@@ -3803,7 +3947,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const failureCategory = outcome === "done" ? undefined : workerFailureCategory(body.failureCategory);
     const retryable =
       outcome === "retry" && failureCategory !== undefined && RETRYABLE_WORKER_FAILURE_CATEGORIES.has(failureCategory);
-    if (isRelationalReviewDelivery(messageId)) {
+    if (isRelationalBoardDelivery(messageId)) {
       const store = requireRelationalBoardWorkerStore();
       const fence = { deliveryId: messageId, leaseId, writeFenceToken };
       const releaseIdentity = workerRelease ? relationalReleaseIdentity(workerRelease) : undefined;
@@ -6240,7 +6384,7 @@ function safeResultPayload(value: unknown): Record<string, unknown> {
   );
 }
 
-function isRelationalReviewDelivery(value: string): boolean {
+function isRelationalBoardDelivery(value: string): boolean {
   return /^outbox_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}_[1-9][0-9]*$/i.test(value);
 }
 
@@ -6314,6 +6458,9 @@ const METRICS_ROUTES = new Set([
   "/internal/worker/renew",
   "/internal/worker/release",
   "/internal/worker/complete",
+  "/internal/worker/effects/start",
+  "/internal/worker/effects/retry",
+  "/internal/worker/wait-external",
   "/internal/observability"
 ]);
 
@@ -6425,6 +6572,23 @@ function firstHeader(value: string | readonly string[] | undefined): string | un
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) throw invalidRequest(`${field} is required`);
   return value.trim();
+}
+
+function requiredRecord(value: unknown, field: string): Record<string, unknown> {
+  if (!isRecord(value)) throw invalidRequest(`${field} must be a JSON object`);
+  return value;
+}
+
+function requiredSha256(value: unknown, field: string): string {
+  const digest = requiredString(value, field).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(digest)) throw invalidRequest(`${field} must be a SHA-256 digest`);
+  return digest;
+}
+
+function requiredTimestamp(value: unknown, field: string): string {
+  const parsed = new Date(requiredString(value, field));
+  if (!Number.isFinite(parsed.getTime())) throw invalidRequest(`${field} must be an ISO-8601 timestamp`);
+  return parsed.toISOString();
 }
 
 function requiredDerivationProgressDocumentPath(value: unknown, field: string): string {

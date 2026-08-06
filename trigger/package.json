@@ -1,0 +1,23 @@
+{
+  "name": "jina-code-review-trigger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "trigger dev",
+    "deploy": "trigger deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@daytona/sdk": "^0.187.0",
+    "@trigger.dev/sdk": "^4.0.0",
+    "busboy": "^1.6.0"
+  },
+  "devDependencies": {
+    "@trigger.dev/build": "^4.0.0",
+    "trigger.dev": "^4.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.0"
+  }
+}

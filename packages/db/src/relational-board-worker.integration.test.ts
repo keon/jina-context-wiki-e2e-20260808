@@ -212,7 +212,267 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
   }
 });
 
-async function claim(pool: Pool, worker: RelationalBoardWorkerRepository, topics: readonly string[]) {
+test(
+  "relational Board external effects wait without holding a lease and replay lost responses",
+  { skip: !databaseUrl },
+  async () => {
+    const pool = new Pool({
+      connectionString: databaseUrl,
+      application_name: "jina-relational-board-external-wait-test",
+      max: 2
+    });
+    const admission = new RelationalBoardRepository();
+    const worker = new RelationalBoardWorkerRepository();
+    const tenantId = "tenant-external-wait";
+    const workflowId = randomUUID();
+    const taskId = randomUUID();
+    const effectKey = `trigger-review:${workflowId}`;
+    const requestDigest = digest("exact-trigger-request");
+
+    try {
+      await pool.query("drop schema if exists jina_runtime cascade");
+      await pool.query(JINA_RUNTIME_SCHEMA_SQL);
+      await applyRuntimeMigrations(pool);
+      await inTransaction(pool, (client) =>
+        admission.admitWorkflow(client, {
+          workflowId,
+          tenantId,
+          workflowType: "pr_review",
+          pipelineVersion: "pr_review.board.v2",
+          subjectType: "github_pull_request",
+          subjectId: "321:9:head-sha",
+          dedupeKey: "review:321:9:head-sha",
+          concurrencyKey: "review:321:9:head-sha",
+          triggerType: "webhook",
+          tasks: [
+            {
+              id: taskId,
+              taskType: "review",
+              topic: "run-review",
+              status: "queued",
+              maxAttempts: 2
+            }
+          ]
+        })
+      );
+
+      const first = await claim(pool, worker, ["run-review"], tenantId);
+      assert.ok(first);
+      const startInput = {
+        ...fence(first),
+        transitionId: `${first.attemptId}:effect-start`,
+        effectIdempotencyKey: effectKey,
+        effectType: "trigger.review.dispatch",
+        effectVersion: 1,
+        provider: "trigger.dev",
+        requestDigest,
+        metadata: { trigger_task_id: "review" }
+      } as const;
+      const started = await inTransaction(pool, (client) => worker.beginEffectAttempt(client, startInput));
+      assert.equal(started.accepted, true);
+      assert.equal(started.replayed, false);
+      assert.equal(started.effectReceipt?.status, "started");
+      const startResponseLossReplay = await inTransaction(pool, (client) =>
+        worker.beginEffectAttempt(client, startInput)
+      );
+      assert.equal(startResponseLossReplay.accepted, true);
+      assert.equal(startResponseLossReplay.replayed, true);
+
+      const waitInput = {
+        ...fence(first),
+        transitionId: `${first.attemptId}:provider-handoff`,
+        effectIdempotencyKey: effectKey,
+        requestDigest,
+        providerId: "run_trigger_external_wait_12345678",
+        providerStatus: "QUEUED",
+        nextCheckAt: new Date(Date.now() + 60_000).toISOString()
+      } as const;
+      const waiting = await inTransaction(pool, (client) => worker.waitExternalAttempt(client, waitInput));
+      assert.equal(waiting.accepted, true);
+      assert.equal(waiting.effectReceipt?.status, "succeeded");
+      assert.equal(waiting.effectReceipt?.providerId, waitInput.providerId);
+      const waitResponseLossReplay = await inTransaction(pool, (client) =>
+        worker.waitExternalAttempt(client, waitInput)
+      );
+      assert.equal(waitResponseLossReplay.accepted, true);
+      assert.equal(waitResponseLossReplay.replayed, true);
+
+      const durableWait = await pool.query<{
+        status: string;
+        current_attempt_id: string | null;
+        attempt_count: number;
+      }>("select status,current_attempt_id,attempt_count from jina_runtime.board_tasks where id=$1", [taskId]);
+      assert.deepEqual(durableWait.rows[0], {
+        status: "waiting_external",
+        current_attempt_id: null,
+        attempt_count: 1
+      });
+      assert.equal(await claim(pool, worker, ["run-review"], tenantId), undefined);
+      await pool.query("update jina_runtime.board_tasks set available_at=clock_timestamp() where id=$1", [taskId]);
+
+      const poll = await claim(pool, worker, ["run-review"], tenantId);
+      assert.ok(poll);
+      assert.equal(poll.attempt, 1);
+      assert.equal(poll.claim, 2);
+      assert.equal(poll.effectReceipts[0]?.providerId, waitInput.providerId);
+      const rescheduleInput = {
+        ...fence(poll),
+        transitionId: `${poll.attemptId}:poll-reschedule`,
+        effectIdempotencyKey: effectKey,
+        providerId: waitInput.providerId,
+        providerStatus: "EXECUTING",
+        nextCheckAt: new Date(Date.now() + 60_000).toISOString()
+      } as const;
+      assert.equal(
+        (await inTransaction(pool, (client) => worker.rescheduleExternalWait(client, rescheduleInput))).accepted,
+        true
+      );
+      const rescheduleReplay = await inTransaction(pool, (client) =>
+        worker.rescheduleExternalWait(client, rescheduleInput)
+      );
+      assert.equal(rescheduleReplay.accepted, true);
+      assert.equal(rescheduleReplay.replayed, true);
+
+      const staleMutation = await inTransaction(pool, (client) =>
+        worker.beginEffectAttempt(client, {
+          ...startInput,
+          transitionId: `${first.attemptId}:stale-new-transition`
+        })
+      );
+      assert.equal(staleMutation.accepted, false);
+
+      await pool.query("update jina_runtime.board_tasks set available_at=clock_timestamp() where id=$1", [taskId]);
+      const finalPoll = await claim(pool, worker, ["run-review"], tenantId);
+      assert.ok(finalPoll);
+      assert.equal(finalPoll.attempt, 1);
+      assert.equal(finalPoll.claim, 3);
+      assert.equal((await complete(pool, worker, finalPoll, "trigger-completed")).accepted, true);
+
+      const terminal = await pool.query<{ workflow_status: string; task_status: string; attempt_count: number }>(
+        `select
+         (select status from jina_runtime.board_workflows where id=$1) workflow_status,
+         (select status from jina_runtime.board_tasks where id=$2) task_status,
+         (select attempt_count from jina_runtime.board_tasks where id=$2) attempt_count`,
+        [workflowId, taskId]
+      );
+      assert.deepEqual(terminal.rows[0], {
+        workflow_status: "succeeded",
+        task_status: "succeeded",
+        attempt_count: 1
+      });
+
+      const retryWorkflowId = randomUUID();
+      const retryTaskId = randomUUID();
+      const retryEffectKey = `trigger-review:${retryWorkflowId}`;
+      await inTransaction(pool, (client) =>
+        admission.admitWorkflow(client, {
+          workflowId: retryWorkflowId,
+          tenantId,
+          workflowType: "pr_review",
+          pipelineVersion: "pr_review.board.v2",
+          subjectType: "github_pull_request",
+          subjectId: "321:10:head-sha",
+          dedupeKey: "review:321:10:head-sha",
+          concurrencyKey: "review:321:10:head-sha",
+          triggerType: "webhook",
+          tasks: [
+            {
+              id: retryTaskId,
+              taskType: "review",
+              topic: "run-review",
+              status: "queued",
+              maxAttempts: 2
+            }
+          ]
+        })
+      );
+      const dispatch = await claim(pool, worker, ["run-review"], tenantId);
+      assert.ok(dispatch);
+      const retryStart = {
+        ...fence(dispatch),
+        transitionId: `${dispatch.attemptId}:effect-start`,
+        effectIdempotencyKey: retryEffectKey,
+        effectType: "trigger.review.dispatch",
+        effectVersion: 1,
+        provider: "trigger.dev",
+        requestDigest,
+        metadata: {}
+      } as const;
+      assert.equal(
+        (await inTransaction(pool, (client) => worker.beginEffectAttempt(client, retryStart))).accepted,
+        true
+      );
+      const ambiguousInput = {
+        ...retryStart,
+        transitionId: `${dispatch.attemptId}:effect-ambiguous`,
+        receiptStatus: "ambiguous" as const,
+        failureCategory: "provider_timeout",
+        diagnostic: "request acceptance is unknown",
+        retryDelayMs: 0
+      };
+      const ambiguous = await inTransaction(pool, (client) => worker.failOrRetryEffectAttempt(client, ambiguousInput));
+      assert.equal(ambiguous.accepted, true);
+      assert.equal(ambiguous.terminal, false);
+      assert.equal(ambiguous.effectReceipt?.status, "ambiguous");
+      const ambiguousReplay = await inTransaction(pool, (client) =>
+        worker.failOrRetryEffectAttempt(client, ambiguousInput)
+      );
+      assert.equal(ambiguousReplay.accepted, true);
+      assert.equal(ambiguousReplay.replayed, true);
+
+      const retryDispatch = await claim(pool, worker, ["run-review"], tenantId);
+      assert.ok(retryDispatch);
+      assert.equal(retryDispatch.attempt, 2);
+      assert.equal(retryDispatch.effectReceipts[0]?.status, "ambiguous");
+      const reopened = await inTransaction(pool, (client) =>
+        worker.beginEffectAttempt(client, {
+          ...retryStart,
+          ...fence(retryDispatch),
+          transitionId: `${retryDispatch.attemptId}:effect-reopen`
+        })
+      );
+      assert.equal(reopened.accepted, true);
+      assert.equal(reopened.effectReceipt?.status, "started");
+      const exhausted = await inTransaction(pool, (client) =>
+        worker.failOrRetryEffectAttempt(client, {
+          ...retryStart,
+          ...fence(retryDispatch),
+          transitionId: `${retryDispatch.attemptId}:effect-failed`,
+          receiptStatus: "failed",
+          failureCategory: "provider_rejected",
+          diagnostic: "definite failure",
+          retryDelayMs: 0
+        })
+      );
+      assert.equal(exhausted.accepted, true);
+      assert.equal(exhausted.terminal, true);
+      assert.equal(exhausted.effectReceipt?.status, "failed");
+
+      const failedState = await pool.query<{ workflow_status: string; task_status: string; receipt_status: string }>(
+        `select
+         (select status from jina_runtime.board_workflows where id=$1) workflow_status,
+         (select status from jina_runtime.board_tasks where id=$2) task_status,
+         (select status from jina_runtime.board_effect_receipts where idempotency_key=$3) receipt_status`,
+        [retryWorkflowId, retryTaskId, retryEffectKey]
+      );
+      assert.deepEqual(failedState.rows[0], {
+        workflow_status: "failed",
+        task_status: "failed",
+        receipt_status: "failed"
+      });
+    } finally {
+      await pool.query("drop schema if exists jina_runtime cascade").catch(() => undefined);
+      await pool.end();
+    }
+  }
+);
+
+async function claim(
+  pool: Pool,
+  worker: RelationalBoardWorkerRepository,
+  topics: readonly string[],
+  tenantId = "tenant-worker-lifecycle"
+) {
   return inTransaction(pool, (client) =>
     worker.claimTask(client, {
       topics,
@@ -221,7 +481,7 @@ async function claim(pool: Pool, worker: RelationalBoardWorkerRepository, topics
       workerRelease: "review-board-test",
       workerRevision: "revision-test",
       leaseDurationMs: 60_000,
-      tenantId: "tenant-worker-lifecycle"
+      tenantId
     })
   );
 }

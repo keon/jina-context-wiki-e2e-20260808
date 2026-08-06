@@ -4,6 +4,17 @@
  * only one process.
  */
 export const legacyReviewWorkerTopic = "run-review" as const;
+export type ReviewRunTopicMode = "disabled" | "legacy" | "relational";
+
+export function configuredReviewRunTopicMode(
+  value: string | undefined,
+  legacyCompatibilityEnabled = false
+): ReviewRunTopicMode {
+  const normalized = value?.trim();
+  if (!normalized) return legacyCompatibilityEnabled ? "legacy" : "disabled";
+  if (normalized === "legacy" || normalized === "relational") return normalized;
+  throw new Error("JINA_REVIEW_RUN_TOPIC_MODE must be legacy or relational when set");
+}
 
 export const reviewBoardTopics = {
   prepare: "prepare-review",

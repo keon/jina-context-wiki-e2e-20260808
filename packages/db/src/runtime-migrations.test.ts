@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { BOARD_RUNTIME_MIGRATION_0001_SQL } from "./board/schema.js";
+import { BOARD_RUNTIME_MIGRATION_0001_SQL, BOARD_RUNTIME_MIGRATION_0002_SQL } from "./board/schema.js";
 
 /**
  * Runtime migrations are checksummed: applyRuntimeMigrations recomputes the
@@ -22,6 +22,12 @@ const FROZEN_RUNTIME_MIGRATION_CHECKSUMS = [
     name: "relational_board",
     sql: BOARD_RUNTIME_MIGRATION_0001_SQL,
     sha256: "46509479db2d284de26a08de49ff4fef927703d8910be601c40ae80438be9919"
+  },
+  {
+    version: 2,
+    name: "relational_board_external_wait",
+    sql: BOARD_RUNTIME_MIGRATION_0002_SQL,
+    sha256: "92604ffa0a01c2057b543b00cb038d160593749b06abc2090c25efd1eb09d98f"
   }
 ] as const;
 

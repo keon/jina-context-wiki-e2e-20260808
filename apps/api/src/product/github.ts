@@ -10,7 +10,7 @@ import {
   updateGithubInstallationLifecycle,
   type ReviewTriggerMode,
 } from "./store.js";
-import type { DispatchOptions, WorkflowDispatcher } from "./workflow-dispatcher.js";
+import type { BoardWorkflowAdmitter, DispatchOptions } from "./board-admission-contract.js";
 import type { AppConfig } from "./config.js";
 import { INSTALLATION_BACKFILL_TASK_ID } from "./installation-board-admission.js";
 
@@ -22,12 +22,13 @@ export interface WebhookResponse {
   action?: string;
   task_id?: string;
   run_id?: string;
+  workflow_id?: string;
   ignored_reason?: string;
 }
 
 export async function handleGithubWebhook(input: {
   config: AppConfig;
-  trigger: WorkflowDispatcher;
+  board: BoardWorkflowAdmitter;
   headers: Headers;
   rawBody: string;
   billing?: BillingService;
@@ -62,7 +63,7 @@ export async function handleGithubWebhook(input: {
   if (event === "pull_request") {
     return handlePullRequest({
       config: input.config,
-      trigger: input.trigger,
+      board: input.board,
       deliveryId,
       payload,
       action,
@@ -82,7 +83,7 @@ export async function handleGithubWebhook(input: {
     }
     return handleInstallationEvent({
       config: input.config,
-      trigger: input.trigger,
+      board: input.board,
       event,
       deliveryId,
       payload,
@@ -93,7 +94,7 @@ export async function handleGithubWebhook(input: {
   if (event === "issue_comment" || event === "pull_request_review_comment") {
     return handleReviewCommand({
       event,
-      trigger: input.trigger,
+      board: input.board,
       deliveryId,
       payload,
       action,
@@ -127,7 +128,7 @@ export function verifyGithubSignature(secret: string, body: string | Buffer, sig
 
 async function handlePullRequest(input: {
   config: AppConfig;
-  trigger: WorkflowDispatcher;
+  board: BoardWorkflowAdmitter;
   deliveryId: string;
   payload: JsonObject;
   action?: string;
@@ -248,19 +249,20 @@ async function handlePullRequest(input: {
     ttl: "30m",
   };
 
-  const run = await input.trigger.triggerTask(REVIEW_TASK_ID, triggerPayload, options);
+  const run = await input.board.admitBoardWorkflow(REVIEW_TASK_ID, triggerPayload, options);
   return {
     accepted: true,
     event: "pull_request",
     action: input.action,
     task_id: REVIEW_TASK_ID,
     run_id: run.id,
+    workflow_id: run.id,
   };
 }
 
 async function handleInstallationEvent(input: {
   config: AppConfig;
-  trigger: WorkflowDispatcher;
+  board: BoardWorkflowAdmitter;
   event: "installation" | "installation_repositories";
   deliveryId: string;
   payload: JsonObject;
@@ -308,7 +310,7 @@ async function handleInstallationEvent(input: {
     trigger: "webhook",
   };
 
-  const run = await input.trigger.triggerTask(INSTALLATION_BACKFILL_TASK_ID, triggerPayload, {
+  const run = await input.board.admitBoardWorkflow(INSTALLATION_BACKFILL_TASK_ID, triggerPayload, {
     idempotencyKey,
     concurrencyKey: `installation:${installationId}`,
     tags: [`installation:${installationId}`, "task:backfill"],
@@ -321,6 +323,7 @@ async function handleInstallationEvent(input: {
     action,
     task_id: INSTALLATION_BACKFILL_TASK_ID,
     run_id: run.id,
+    workflow_id: run.id,
   };
 }
 
