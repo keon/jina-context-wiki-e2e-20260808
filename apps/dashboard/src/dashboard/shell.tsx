@@ -4,13 +4,12 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAppAccount, useAppAuth } from "../components/auth/app-auth";
-import { useDashboard, useTenant } from "./providers";
-import { apiUrl, parseInstallationResult } from "./lib/api";
+import { useCodexHarness, useDashboard, useTenant } from "./providers";
+import { parseInstallationResult } from "./lib/api";
 import { clerkAuthRedirect } from "./lib/auth-navigation";
-import { normalizeCodexHarnessInfo } from "./lib/codex-harness";
 import { WORKSPACE_NAV_ITEMS, type WorkspaceNavKey } from "./lib/navigation";
 import { formatRelative } from "./lib/presentation";
-import type { InstallationResult, ViewerResponse } from "./lib/types";
+import type { DashboardResponse, InstallationResult, ViewerResponse } from "./lib/types";
 
 type NavKey =
   | WorkspaceNavKey
@@ -22,7 +21,7 @@ type NavKey =
   | "history"
   | "tasks";
 
-type NavItem = { key: NavKey; label: string; href: string; icon: () => ReactNode };
+interface NavItem { key: NavKey; label: string; href: string; icon: () => ReactNode }
 
 const WORKSPACE_ICONS: Record<WorkspaceNavKey, () => ReactNode> = {
   reviews: ReviewsIcon,
@@ -32,7 +31,7 @@ const WORKSPACE_ICONS: Record<WorkspaceNavKey, () => ReactNode> = {
   "causal-graph": GraphIcon,
 };
 
-const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
+const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "Workspace",
     items: WORKSPACE_NAV_ITEMS.map((item) => ({ ...item, icon: WORKSPACE_ICONS[item.key] })),
@@ -111,35 +110,14 @@ export function Shell({ children }: { children: ReactNode }) {
   const [installationResult] = useState<InstallationResult | null>(() =>
     typeof window === "undefined" ? null : parseInstallationResult(window.location.search),
   );
-  const [codexReconnectRequired, setCodexReconnectRequired] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
-  const hasDashboardData = Boolean(data);
   const appAuthEnabled = viewer?.auth.enabled !== false;
-
-  // This status is secondary to first paint. Load it once after dashboard data is
-  // visible instead of repeating the query on every dashboard refresh.
-  useEffect(() => {
-    if (!viewer?.authenticated || !hasDashboardData) {
-      setCodexReconnectRequired(false);
-      return;
-    }
-    const controller = new AbortController();
-    fetch(apiUrl("/dashboard/integrations"), {
-      cache: "no-store",
-      credentials: "include",
-      signal: controller.signal,
-    })
-      .then((response) => (response.ok ? response.json() : undefined))
-      .then((body: Record<string, unknown> | undefined) => {
-        if (body && !controller.signal.aborted) {
-          setCodexReconnectRequired(normalizeCodexHarnessInfo(body?.codex_harness).reconnect_required === true);
-        }
-      })
-      .catch(() => {});
-    return () => controller.abort();
-  }, [viewer?.authenticated, viewer?.user?.id, hasDashboardData]);
+  // Read from the shared harness provider rather than querying /dashboard/integrations here: the
+  // Models page needs the same viewer-scoped status, and on /models both reads fired in the same tick.
+  const { harness } = useCodexHarness();
+  const codexReconnectRequired = harness.reconnect_required === true;
 
   // Strip the GitHub install callback query params (incl. installation_id) from
   // the URL once read, so they don't leak via the Referer header on later nav.
@@ -252,7 +230,7 @@ export function Shell({ children }: { children: ReactNode }) {
             </div>
             <div className="header__actions">
               <span className="header__stamp" title={error ?? undefined}>
-                {error ? "Live data unavailable" : data ? `Updated ${formatRelative(data.generated_at)}` : "Not loaded"}
+                {freshnessLabel(data, error)}
               </span>
               <button type="button" className="btn btn--sm" onClick={reload} disabled={loading}>
                 {loading ? "Refreshing…" : "Refresh"}
@@ -270,6 +248,19 @@ export function Shell({ children }: { children: ReactNode }) {
       {commandOpen ? <CommandPalette section={section} onClose={() => setCommandOpen(false)} /> : null}
     </div>
   );
+}
+
+/**
+ * Header freshness stamp. `generated_at` is the newest activity in the payload — the latest review-run
+ * update or finding — not the moment the response was generated, so this answers "how current is this
+ * workspace" instead of always reading "just now". A workspace with no rows has no such timestamp and
+ * says so rather than rendering a relative time for a value that does not exist.
+ */
+function freshnessLabel(data: DashboardResponse | null, error: string | null): string {
+  if (error) return "Live data unavailable";
+  if (!data) return "Not loaded";
+  if (!data.generated_at) return "No activity yet";
+  return `Updated ${formatRelative(data.generated_at)}`;
 }
 
 function CodexReconnectNotice() {

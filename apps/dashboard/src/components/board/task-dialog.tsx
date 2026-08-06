@@ -16,7 +16,9 @@ function taskFacts(task: BoardTask): TaskFact[] {
   const author = typeof task.metadata?.authorLogin === "string" ? `@${task.metadata.authorLogin}` : "—";
   return [
     { label: "Status", value: humanize(task.status), status: task.status },
-    { label: "Assignee", value: humanize(task.assigneeRole) },
+    // `assigneeRole` is optional; humanizing it unguarded rendered the literal
+    // string "Undefined" where every sibling field uses the absence sentinel.
+    { label: "Assignee", value: task.assigneeRole ? humanize(task.assigneeRole) : "—" },
     { label: "Attempt", value: String(task.attempt) },
     { label: "Epoch", value: task.epoch === undefined ? "—" : String(task.epoch) },
     { label: "Workspace", value: workspace },

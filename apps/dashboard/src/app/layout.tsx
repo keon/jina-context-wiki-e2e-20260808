@@ -4,7 +4,7 @@ import { GeistMono } from "geist/font/mono";
 import { GeistSans } from "geist/font/sans";
 import { AppAuthProvider } from "../components/auth/app-auth.tsx";
 import { UnifiedDashboardShell } from "../components/unified-dashboard-shell.tsx";
-import "../dashboard/theme.css";
+import "@jina/theme/theme.css";
 import "../dashboard/styles.css";
 import "./globals.css";
 

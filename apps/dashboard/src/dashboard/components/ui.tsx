@@ -85,7 +85,7 @@ export function StatusDot({ status }: { status: string }) {
   return <ToneDot tone={statusTone(status)} label={status} />;
 }
 
-export function Badge({ tone = "", children }: { tone?: Tone; children: ReactNode }) {
+export function Badge({ tone = "", children }: { tone?: Tone | undefined; children: ReactNode }) {
   return <span className={`badge${tone ? ` badge--${tone}` : ""}`}>{children}</span>;
 }
 
@@ -98,8 +98,8 @@ export function Panel({
   children,
 }: {
   title: string;
-  count?: number;
-  actions?: ReactNode;
+  count?: number | undefined;
+  actions?: ReactNode | undefined;
   children: ReactNode;
 }) {
   return (
@@ -272,7 +272,7 @@ export function Section({ title, children }: { title: string; children: ReactNod
 }
 
 /** Section whose body is a flush list/table with no padding. */
-export function SectionFlush({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
+export function SectionFlush({ title, count, children }: { title: string; count?: number | undefined; children: ReactNode }) {
   return (
     <section className="section">
       <div className="section__title section__title--row">

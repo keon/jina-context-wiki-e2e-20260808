@@ -49,13 +49,13 @@ export default function ScenarioPage({
   const { reviewRunId, scenarioId } = use(params);
   const decodedReviewRunId = decodeURIComponent(reviewRunId);
   const { data, loading } = useDashboard();
-  const fallbackRun = data?.review_runs.find((item) => item.review_run_id === decodedReviewRunId);
+  // The run from the list is seeded into the detail read itself (see useReviewRunDetail).
   const {
     run,
     loading: detailLoading,
     error: detailError,
     loaded: detailLoaded,
-  } = useReviewRunDetail(decodedReviewRunId, fallbackRun);
+  } = useReviewRunDetail(decodedReviewRunId);
 
   if ((loading && !data) || (detailLoading && !detailLoaded)) {
     return <div className="notice">Loading scenario context…</div>;
@@ -352,7 +352,7 @@ function ScenarioSimulationRuns({
   currentRun: ReviewRun;
   currentScenario: ParsedScenario;
 }) {
-  type Entry = { run: ReviewRun; scenario: ParsedScenario; sim: ScenarioSimulationScenario };
+  interface Entry { run: ReviewRun; scenario: ParsedScenario; sim: ScenarioSimulationScenario }
   // Group strictly by the stable lineage_key — i.e. the *same target scenario*
   // retried across review runs. Without a lineage_key (e.g. no simulation result
   // yet) we cannot tell scenarios apart, so we do not group: showing positional,
@@ -447,7 +447,7 @@ function ScenarioSimulationRuns({
   );
 }
 
-function TrailRow({ entry, sim }: { entry: ScenarioTrailEntry; sim?: ScenarioSimulationStep }) {
+function TrailRow({ entry, sim }: { entry: ScenarioTrailEntry; sim?: ScenarioSimulationStep | undefined }) {
   return (
     <div className="trail__row">
       <span className="trail__marker">{entry.marker}</span>
@@ -506,7 +506,7 @@ function StepEvidence({ step }: { step: ScenarioSimulationStep }) {
 }
 
 function stepNumberFromMarker(marker: string): number | undefined {
-  const match = marker.match(/^step (\d+)$/);
+  const match = /^step (\d+)$/.exec(marker);
   return match ? Number(match[1]) : undefined;
 }
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Badge } from "../components/ui";
 import { apiUrl } from "../lib/api";
@@ -11,17 +12,19 @@ import {
 } from "../lib/github-installation";
 import { openRouterSourceLabel, parseOpenRouterCallbackParam } from "../lib/openrouter";
 import { formatDate } from "../lib/presentation";
+import { CONFIG_STALE_TIME_MS, DashboardRequestError } from "../lib/query-client";
+import { tenantQueryKey, type TenantQueryKey } from "../lib/query-keys";
 import { isTenantWritable, type SelectedTenant } from "../lib/tenants";
-import { useDashboard, useTenant, useTenantFence } from "../providers";
+import { useDashboard, useTenant, useTenantFence, useTenantQueryScope } from "../providers";
 
 type LoadState = "loading" | "loaded" | "unavailable";
-type KeyInfo = { configured: boolean; last4?: string; connected_at?: string };
+interface KeyInfo { configured: boolean; last4?: string; connected_at?: string }
 type OpenRouterInfo = KeyInfo & { source?: string };
-type Integrations = {
+interface Integrations {
   openrouter: OpenRouterInfo;
   openai: KeyInfo;
   anthropic: KeyInfo;
-};
+}
 type ProviderField = "openrouter_api_key" | "openai_api_key" | "anthropic_api_key";
 
 const EMPTY_INTEGRATIONS: Integrations = {
@@ -30,7 +33,9 @@ const EMPTY_INTEGRATIONS: Integrations = {
   anthropic: { configured: false },
 };
 
-const PROVIDERS: Array<{
+const NO_CONNECTIONS: GithubConnection[] = [];
+
+const PROVIDERS: {
   id: keyof Integrations;
   name: string;
   mark: string;
@@ -38,7 +43,7 @@ const PROVIDERS: Array<{
   field: ProviderField;
   placeholder: string;
   oauth?: boolean;
-}> = [
+}[] = [
   {
     id: "openrouter",
     name: "OpenRouter",
@@ -103,13 +108,8 @@ async function connectGithubInstallation(tenantId: string, installationId: numbe
 export default function IntegrationsPage() {
   const { viewer } = useDashboard();
   const { selected, tenants, selectTenant } = useTenant();
-  const isCurrentTenant = useTenantFence();
-  const [providers, setProviders] = useState<Integrations>(EMPTY_INTEGRATIONS);
-  const [providerState, setProviderState] = useState<LoadState>("loading");
-  const [providerVersion, setProviderVersion] = useState(0);
-  const [connections, setConnections] = useState<GithubConnection[]>([]);
-  const [connectionState, setConnectionState] = useState<LoadState>("loading");
-  const [connectionVersion, setConnectionVersion] = useState(0);
+  const scope = useTenantQueryScope();
+  const queryClient = useQueryClient();
   const [pageMessage, setPageMessage] = useState<string | null>(null);
   const completingInstallation = useRef<string | null>(null);
 
@@ -117,66 +117,56 @@ export default function IntegrationsPage() {
   const installUrl =
     selected && writable ? githubInstallationUrl(viewer?.github_app?.install_url, selected) : undefined;
 
-  const reloadProviders = useCallback(() => setProviderVersion((version) => version + 1), []);
+  // Keyed by scope, so a workspace switch reads a different entry instead of
+  // resetting this one to EMPTY_INTEGRATIONS — that reset ran on every re-render
+  // of this component and blanked the provider rows before any answer arrived.
+  const providersKey: TenantQueryKey = tenantQueryKey("integrations", scope);
+  const providersQuery = useQuery<Integrations>({
+    queryKey: providersKey,
+    queryFn: async ({ signal }) => {
+      const response = await fetch(integrationsUrl(selected), { credentials: "include", signal });
+      if (!response.ok) {
+        throw new DashboardRequestError(response.status, `Integrations returned ${response.status}`);
+      }
+      return mergeIntegrations(await response.json());
+    },
+    staleTime: CONFIG_STALE_TIME_MS,
+  });
+  const providers = providersQuery.data ?? EMPTY_INTEGRATIONS;
+  const providerState: LoadState = providersQuery.isError
+    ? "unavailable"
+    : providersQuery.data === undefined
+      ? "loading"
+      : "loaded";
+  // Bound to the observer, so this stays stable across renders — the OpenRouter
+  // callback effect below keys on it.
+  const refetchProviders = providersQuery.refetch;
+  const reloadProviders = useCallback(() => void refetchProviders(), [refetchProviders]);
 
-  useEffect(() => {
-    const requestTenantId = selected?.tenantId ?? null;
-    const controller = new AbortController();
-    setProviderState("loading");
-    setProviders(EMPTY_INTEGRATIONS);
-    fetch(integrationsUrl(selected), {
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`Integrations returned ${response.status}`);
-        return mergeIntegrations(await response.json());
-      })
-      .then((next) => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
-          setProviders(next);
-          setProviderState("loaded");
-        }
-      })
-      .catch(() => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) setProviderState("unavailable");
-      });
-    return () => controller.abort();
-  }, [selected, providerVersion, isCurrentTenant]);
-
-  useEffect(() => {
-    if (!selected) {
-      setConnections([]);
-      setConnectionState("loaded");
-      return;
-    }
-    const requestTenantId = selected.tenantId;
-    const controller = new AbortController();
-    setConnectionState("loading");
-    fetch(githubConnectionsUrl(selected), {
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`GitHub installations returned ${response.status}`);
-        return normalizeGithubConnections(await response.json());
-      })
-      .then((next) => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
-          setConnections(next);
-          setConnectionState("loaded");
-        }
-      })
-      .catch(() => {
-        if (!controller.signal.aborted && isCurrentTenant(requestTenantId)) {
-          setConnections([]);
-          setConnectionState("unavailable");
-        }
-      });
-    return () => controller.abort();
-  }, [selected, connectionVersion, isCurrentTenant]);
+  const connectionsQuery = useQuery<GithubConnection[]>({
+    queryKey: tenantQueryKey("github-installations", scope),
+    queryFn: async ({ signal }) => {
+      // `enabled` keeps this from running without a tenant; the URL needs one.
+      const tenant = selected!;
+      const response = await fetch(githubConnectionsUrl(tenant), { credentials: "include", signal });
+      if (!response.ok) {
+        throw new DashboardRequestError(response.status, `GitHub installations returned ${response.status}`);
+      }
+      return normalizeGithubConnections(await response.json());
+    },
+    enabled: Boolean(selected),
+    staleTime: CONFIG_STALE_TIME_MS,
+  });
+  // Without a workspace there is nothing to install into: a settled empty answer, not a pending read.
+  // A failed read drops the rows rather than showing connections that could not be confirmed.
+  const connections = connectionsQuery.isError ? NO_CONNECTIONS : (connectionsQuery.data ?? NO_CONNECTIONS);
+  const connectionState: LoadState = !selected
+    ? "loaded"
+    : connectionsQuery.isError
+      ? "unavailable"
+      : connectionsQuery.data === undefined
+        ? "loading"
+        : "loaded";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -215,7 +205,9 @@ export default function IntegrationsPage() {
         setPageMessage(
           `GitHub connected${typeof body.repositories === "number" ? ` · ${body.repositories} repositories` : ""}.`,
         );
-        setConnectionVersion((version) => version + 1);
+        // Invalidate by resource rather than refetching this render's key: the
+        // selection above moves the page to the tenant that was just connected.
+        void queryClient.invalidateQueries({ queryKey: ["github-installations"] });
       })
       .catch((error: unknown) => {
         setPageMessage(error instanceof Error ? error.message : "Could not connect the GitHub installation");
@@ -227,7 +219,7 @@ export default function IntegrationsPage() {
         nextUrl.searchParams.delete("state");
         window.history.replaceState({}, "", nextUrl.pathname + nextUrl.search + nextUrl.hash);
       });
-  }, [viewer, tenants, selectTenant]);
+  }, [viewer, tenants, selectTenant, queryClient]);
 
   return (
     <div className="integrations-v2">
@@ -273,10 +265,9 @@ export default function IntegrationsPage() {
                 info={providers[provider.id]}
                 selected={selected}
                 writable={writable}
-                onChanged={(next) => {
-                  setProviders(next);
-                  setProviderState("loaded");
-                }}
+                // A write answers with the authoritative connection state; adopt it
+                // as the cached read so no follow-up request is needed.
+                onChanged={(next) => queryClient.setQueryData<Integrations>(providersKey, next)}
               />
             ))}
           </div>
