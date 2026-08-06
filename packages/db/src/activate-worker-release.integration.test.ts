@@ -32,6 +32,7 @@ test(
       const enabled = await execFileAsync(process.execPath, [activationScript], {
         env: {
           ...process.env,
+          DATABASE_URL: "",
           TEST_DATABASE_URL: databaseUrl,
           RUNTIME_DB_USER: runtimeUser,
           JINA_WORKER_RELEASE_ENABLED: "true",
@@ -66,6 +67,7 @@ test(
       const reopened = await execFileAsync(process.execPath, [activationScript], {
         env: {
           ...process.env,
+          DATABASE_URL: "",
           TEST_DATABASE_URL: databaseUrl,
           RUNTIME_DB_USER: runtimeUser,
           JINA_WORKER_RELEASE_ENABLED: "true",
@@ -86,6 +88,7 @@ test(
       const disabled = await execFileAsync(process.execPath, [activationScript], {
         env: {
           ...process.env,
+          DATABASE_URL: "",
           TEST_DATABASE_URL: databaseUrl,
           RUNTIME_DB_USER: runtimeUser,
           JINA_WORKER_RELEASE_ENABLED: "false"
