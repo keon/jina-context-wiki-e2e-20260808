@@ -112,7 +112,7 @@ function sectionForPath(pathname: string | null): NavKey {
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { data, viewer, error, loading, authLoading, reload } = useDashboard();
+  const { data, viewer, error, authLoading } = useDashboard();
   const { ready: authReady, signedIn } = useAppAuth();
   const developerMode = useDeveloperMode();
   const pathname = usePathname();
@@ -260,9 +260,6 @@ export function Shell({ children }: { children: ReactNode }) {
               <span className="header__stamp" title={error ?? undefined}>
                 {freshnessLabel(data, error)}
               </span>
-              <button type="button" className="btn btn--sm" onClick={reload} disabled={loading}>
-                {loading ? "Refreshing…" : "Refresh"}
-              </button>
             </div>
           </div>
         </header>
