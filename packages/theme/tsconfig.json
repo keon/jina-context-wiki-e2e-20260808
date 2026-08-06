@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // This package ships source rather than a build artifact — the apps list it
+    // in `transpilePackages`, so nothing here is compiled to dist. The config
+    // exists so the type-aware lint rules and `tsc --noEmit` can see the files.
+    "noEmit": true,
+    // The repo writes explicit `.ts` extensions in relative imports; nothing is
+    // emitted here, so the specifier reaches the bundler unchanged.
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  },
+  "include": ["*.ts"]
+}

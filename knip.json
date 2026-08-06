@@ -21,6 +21,13 @@
     "apps/worker": {
       "entry": ["src/server.ts", "src/acceptance.ts", "src/**/*.test.ts"]
     },
+    "packages/theme": {},
+    "apps/dashboard": {
+      "entry": ["src/app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}", "src/**/*.test.ts"]
+    },
+    "apps/admin": {
+      "entry": ["app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}", "lib/**/*.test.ts"]
+    },
     "packages/review-agent": {
       "entry": ["src/index.ts", "src/review/codex-review.ts", "src/**/*.test.ts"]
     },
