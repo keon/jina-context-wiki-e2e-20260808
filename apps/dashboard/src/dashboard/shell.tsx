@@ -67,6 +67,10 @@ const ORGANIZATION_NAV_ITEMS: NavItem[] = [
   { key: "usage", label: "Usage", href: "/usage", icon: UsageIcon },
 ];
 
+const PERSONAL_SETTINGS_NAV_ITEMS: NavItem[] = [
+  { key: "settings", label: "User Settings", href: "/settings", icon: AccountIcon },
+];
+
 const DEVELOPER_SECTIONS = new Set<NavKey>(["task-board", "history", "tasks"]);
 
 const DOCS_URL = process.env.NEXT_PUBLIC_DOCS_URL ?? "https://docs.usejina.com";
@@ -122,8 +126,12 @@ export function Shell({ children }: { children: ReactNode }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const appAuthEnabled = viewer?.auth.enabled !== false;
-  const organizationSettingsMode =
-    section === "organization-settings" || section === "organization" || section === "billing" || section === "usage";
+  const settingsMode =
+    section === "settings" ||
+    section === "organization-settings" ||
+    section === "organization" ||
+    section === "billing" ||
+    section === "usage";
   const developerRouteBlocked = developerMode.ready && !developerMode.enabled && DEVELOPER_SECTIONS.has(section);
   // Read from the shared harness provider rather than querying /dashboard/integrations here: the
   // Models page needs the same viewer-scoped status, and on /models both reads fired in the same tick.
@@ -212,7 +220,7 @@ export function Shell({ children }: { children: ReactNode }) {
         viewer={viewer}
         authLoading={authLoading}
         section={section}
-        organizationSettingsMode={organizationSettingsMode}
+        settingsMode={settingsMode}
         collapsed={sidebarCollapsed}
         commandOpen={commandOpen}
         onToggle={toggleSidebar}
@@ -310,7 +318,7 @@ function Sidebar({
   viewer,
   authLoading,
   section,
-  organizationSettingsMode,
+  settingsMode,
   collapsed,
   commandOpen,
   onToggle,
@@ -321,7 +329,7 @@ function Sidebar({
   viewer: ViewerResponse | null;
   authLoading: boolean;
   section: NavKey;
-  organizationSettingsMode: boolean;
+  settingsMode: boolean;
   collapsed: boolean;
   commandOpen: boolean;
   onToggle: () => void;
@@ -332,22 +340,15 @@ function Sidebar({
   const { selected } = useTenant();
   const developerMode = useDeveloperMode();
   const primaryItems = PRIMARY_NAV_ITEMS.filter((item) => item.key !== "task-board" || developerMode.enabled);
-  const sidebarItems = organizationSettingsMode ? ORGANIZATION_NAV_ITEMS : primaryItems;
 
   return (
     <aside className="sidebar" aria-label="Application sidebar">
       <div className="sidebar__top">
-        {organizationSettingsMode ? (
-          <Link
-            className="sidebar-settings__back"
-            href="/reviews"
-            onClick={onNavigate}
-            aria-label="Back to workspace"
-            data-label="Back to workspace"
-          >
-            <BackIcon />
-            <span>Org Settings</span>
-          </Link>
+        {settingsMode ? (
+          <div className="sidebar-settings__heading" data-label="Settings">
+            <SettingsIcon />
+            <span>Settings</span>
+          </div>
         ) : (
           <>
             <div className="sidebar__workspace" aria-hidden={collapsed}>
@@ -374,13 +375,9 @@ function Sidebar({
         </button>
       </div>
 
-      {organizationSettingsMode ? (
-        <div className="sidebar-settings__identity">
-          <WorkspaceAvatar label={selected?.login ?? "Jina"} />
-          <span>
-            <strong>{selected?.login ?? "Workspace"}</strong>
-            <small>Team settings</small>
-          </span>
+      {settingsMode ? (
+        <div className="sidebar-settings__workspace">
+          <WorkspaceSwitcher />
         </div>
       ) : (
         <button
@@ -396,30 +393,42 @@ function Sidebar({
         </button>
       )}
 
-      <nav
-        className={`nav sidebar__pane${organizationSettingsMode ? " sidebar__pane--settings" : ""}`}
-        aria-label={organizationSettingsMode ? "Organization settings" : "Dashboard navigation"}
-      >
-        {sidebarItems.map((item) => {
-          const Icon = item.icon;
-          return (
-            <Link
-              key={item.key}
-              className={`nav__item${item.key === section ? " nav__item--active" : ""}`}
-              href={item.href}
-              onClick={onNavigate}
-              data-label={item.label}
-              aria-label={item.label}
-              aria-current={item.key === section ? "page" : undefined}
-            >
-              <Icon />
-              <span className="nav__label">{item.label}</span>
-            </Link>
-          );
-        })}
-      </nav>
+      {settingsMode ? (
+        <nav className="nav sidebar__pane sidebar__pane--settings" aria-label="Settings navigation">
+          <SettingsNavGroup
+            label="Personal"
+            items={PERSONAL_SETTINGS_NAV_ITEMS}
+            section={section}
+            onNavigate={onNavigate}
+          />
+          <SettingsNavGroup
+            label={`Organization · ${selected?.login ?? "Workspace"}`}
+            items={ORGANIZATION_NAV_ITEMS}
+            section={section}
+            onNavigate={onNavigate}
+          />
+        </nav>
+      ) : (
+        <nav className="nav sidebar__pane" aria-label="Dashboard navigation">
+          {primaryItems.map((item) => (
+            <SidebarNavLink key={item.key} item={item} section={section} onNavigate={onNavigate} />
+          ))}
+        </nav>
+      )}
 
       <div className="sidebar__spacer" />
+      {settingsMode ? (
+        <Link
+          className="sidebar-settings__work-link"
+          href="/reviews"
+          onClick={onNavigate}
+          aria-label="Back to work"
+          data-label="Back to work"
+        >
+          <BackIcon />
+          <span>Back to work</span>
+        </Link>
+      ) : null}
       <AccountMenu
         viewer={viewer}
         authLoading={authLoading}
@@ -430,6 +439,52 @@ function Sidebar({
         onNavigate={onNavigate}
       />
     </aside>
+  );
+}
+
+function SettingsNavGroup({
+  label,
+  items,
+  section,
+  onNavigate,
+}: {
+  label: string;
+  items: NavItem[];
+  section: NavKey;
+  onNavigate: () => void;
+}) {
+  return (
+    <div className="sidebar-settings__group">
+      <span className="sidebar-settings__group-label">{label}</span>
+      {items.map((item) => (
+        <SidebarNavLink key={item.key} item={item} section={section} onNavigate={onNavigate} />
+      ))}
+    </div>
+  );
+}
+
+function SidebarNavLink({
+  item,
+  section,
+  onNavigate,
+}: {
+  item: NavItem;
+  section: NavKey;
+  onNavigate: () => void;
+}) {
+  const Icon = item.icon;
+  return (
+    <Link
+      className={`nav__item${item.key === section ? " nav__item--active" : ""}`}
+      href={item.href}
+      onClick={onNavigate}
+      data-label={item.label}
+      aria-label={item.label}
+      aria-current={item.key === section ? "page" : undefined}
+    >
+      <Icon />
+      <span className="nav__label">{item.label}</span>
+    </Link>
   );
 }
 
@@ -558,7 +613,7 @@ function AccountMenu({
       <button
         type="button"
         className="user"
-        data-label={workspaceLabel}
+        data-label={accountLabel}
         aria-label={`Open account menu for ${accountLabel}`}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -571,10 +626,10 @@ function AccountMenu({
           setOpen((value) => !value);
         }}
       >
-        <WorkspaceAvatar label={workspaceLabel} />
+        <AccountAvatar label={accountLabel} />
         <span className="user__copy">
-          <strong className="user__name">{workspaceLabel}</strong>
-          <small>{authLoading || !account.ready ? "Loading…" : workspaceType}</small>
+          <strong className="user__name">{accountLabel}</strong>
+          <small>{authLoading || !account.ready ? "Loading…" : account.email ?? "Personal account"}</small>
         </span>
         <ChevronIcon />
       </button>
@@ -660,6 +715,15 @@ function WorkspaceAvatar({ label, compact = false }: { label: string; compact?: 
   return (
     <span className={className} aria-hidden="true">
       {imageUrl ? <img src={imageUrl} alt="" /> : label.slice(0, 1).toUpperCase()}
+    </span>
+  );
+}
+
+function AccountAvatar({ label }: { label: string }) {
+  const account = useAppAccount();
+  return (
+    <span className="user__avatar" aria-hidden="true">
+      {account.imageUrl ? <img src={account.imageUrl} alt="" /> : label.slice(0, 1).toUpperCase()}
     </span>
   );
 }

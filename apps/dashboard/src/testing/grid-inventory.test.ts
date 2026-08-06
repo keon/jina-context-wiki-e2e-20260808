@@ -60,8 +60,7 @@ const DECLARED_GRIDS: Readonly<Record<string, number>> = {
   "task-types-layout": 2,
   "task-types-table-head": 4,
   trail__row: 4,
-  "usage-overview": 2,
-  "usage-recent__row": 5
+  "usage-activity__row": 5
 };
 
 const STYLESHEETS = ["../dashboard/styles.css", "../app/globals.css"].map((path) =>
