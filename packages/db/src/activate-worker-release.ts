@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Pool, type PoolConfig } from "pg";
 
-const connectionString = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL;
+const connectionString = process.env.DATABASE_URL?.trim() || process.env.TEST_DATABASE_URL?.trim();
 const host = process.env.INSTANCE_UNIX_SOCKET ?? process.env.DB_HOST;
 const config: PoolConfig = connectionString
   ? { connectionString }
