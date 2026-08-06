@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Hono } from "hono";
-import type { Context, Next } from "hono";
+import type { Context, MiddlewareHandler, Next } from "hono";
 import { cors } from "hono/cors";
 import { etag, RETAINED_304_HEADERS } from "hono/etag";
 
@@ -157,7 +157,11 @@ export function createApp(config: AppConfig): Hono {
       "set-cookie",
     ],
   });
-  const dashboardRevalidation = async (c: Context, next: Next) => {
+  // Typed as `MiddlewareHandler` rather than `(c: Context, next: Next)` like its
+  // neighbours: this one forwards `c` to hono's own `etag()`, whose parameter is
+  // narrower than a bare `Context`, and the looser annotation makes that call an
+  // unsafe argument.
+  const dashboardRevalidation: MiddlewareHandler = async (c, next) => {
     // GET only. Mutations must never be tagged, and only a GET response body is worth buffering to
     // hash. The one cookie-setting GET on this surface (the OpenRouter OAuth callback) answers with
     // a bodyless 302, which the ETag middleware skips on its own.
