@@ -13,23 +13,23 @@ const MANUAL_COMMAND_TAG = "manual-command";
 const MAX_INSTRUCTION_CODE_POINTS = 8_000;
 const REVIEW_PERMISSIONS = new Set(["admin", "maintain", "write"]);
 
-type RepositoryPermission = {
+interface RepositoryPermission {
   permission?: string;
   user?: { permissions?: { admin?: boolean; maintain?: boolean; push?: boolean } };
-};
+}
 
-type GithubReviewComment = {
+interface GithubReviewComment {
   body?: string;
   user?: { login?: string; type?: string };
-};
+}
 
-export type ReviewCommandGithub = {
+export interface ReviewCommandGithub {
   appSlug?: string;
   createInstallationAccessToken: (installationId: number) => Promise<string>;
   getPullRequest: (token: string, repository: string, number: number) => Promise<GithubPullRequest>;
   getRepositoryPermission: (token: string, repository: string, login: string) => Promise<RepositoryPermission>;
   getReviewComment: (token: string, repository: string, commentId: number) => Promise<GithubReviewComment>;
-};
+}
 
 const defaultGithub: ReviewCommandGithub = {
   appSlug: configuredAppSlug(),
@@ -42,14 +42,14 @@ const defaultGithub: ReviewCommandGithub = {
     githubJson<GithubReviewComment>(token, `/repos/${encodedRepository(repository)}/pulls/comments/${commentId}`),
 };
 
-export type JinaReviewCommand = { instructions?: string };
+export interface JinaReviewCommand { instructions?: string }
 
 /** A standalone mention anywhere triggers a review. The remaining Markdown is guidance for this run. */
 export function parseJinaReviewCommand(body: string): JinaReviewCommand | undefined {
   const normalized = body.replace(/\r\n?/g, "\n");
   const match = REVIEW_COMMAND_PATTERN.exec(normalized);
   if (!match) return undefined;
-  const commandIndex = match.index + match[1]!.length;
+  const commandIndex = match.index + match[1].length;
   const instructions = `${normalized.slice(0, commandIndex)}${normalized.slice(commandIndex + REVIEW_COMMAND.length)}`.trim();
   return instructions ? { instructions } : {};
 }

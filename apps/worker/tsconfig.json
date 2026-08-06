@@ -13,6 +13,7 @@
     { "path": "../../packages/github" },
     { "path": "../../packages/observability" },
     { "path": "../../packages/context-engine" },
+    { "path": "../../packages/review-agent/tsconfig.build.json" },
     { "path": "../../packages/shared-kernel" }
   ]
 }

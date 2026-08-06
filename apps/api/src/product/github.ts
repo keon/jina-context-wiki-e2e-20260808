@@ -16,14 +16,14 @@ import { INSTALLATION_BACKFILL_TASK_ID } from "./installation-board-admission.js
 
 const pullRequestReviewActions = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
 
-export type WebhookResponse = {
+export interface WebhookResponse {
   accepted: boolean;
   event: string;
   action?: string;
   task_id?: string;
   run_id?: string;
   ignored_reason?: string;
-};
+}
 
 export async function handleGithubWebhook(input: {
   config: AppConfig;

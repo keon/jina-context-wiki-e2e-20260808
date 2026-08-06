@@ -422,7 +422,7 @@ test("an in-flight access refresh cannot recreate a session after logout", async
       return Response.json([]);
     }
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
+  });
   await saveSession(session);
   try {
     const refresh = app.request("/dashboard/session/refresh", {

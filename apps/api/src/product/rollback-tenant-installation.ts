@@ -25,7 +25,7 @@ try {
   }
   console.log(JSON.stringify({ mode, githubInstallationId: installationId, ...result }));
 } catch (error) {
-  await client.query("rollback").catch(() => {});
+  await client.query("rollback").catch(() => undefined);
   throw error;
 } finally {
   client.release();

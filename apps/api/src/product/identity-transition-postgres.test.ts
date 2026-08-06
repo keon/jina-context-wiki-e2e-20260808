@@ -44,7 +44,7 @@ test(
          values
            ($1, $2, 'alice-transition', 'admin', 'oauth'),
            ($3, $4, 'bob-transition', 'admin', 'installer')`,
-        [personal.rows[0]!.id, githubIds.alice, team.rows[0]!.id, githubIds.bob],
+        [personal.rows[0].id, githubIds.alice, team.rows[0].id, githubIds.bob],
       );
       await client.query(
         `insert into user_integrations (github_user_id, github_login)
@@ -77,16 +77,16 @@ test(
       await client.query(
         `insert into installations (tenant_id, github_installation_id)
          values ($1, $2)`,
-        [team.rows[0]!.id, seed + 200],
+        [team.rows[0].id, seed + 200],
       );
       await client.query(
         `insert into repositories
            (tenant_id, github_repo_id, owner, name, default_branch, private, enabled)
          values ($1, $2, 'acme-transition', 'v2-compat', 'main', true, true)`,
-        [team.rows[0]!.id, seed + 300],
+        [team.rows[0].id, seed + 300],
       );
       const rollbackSnapshot = await legacyRollbackSnapshot(client, {
-        tenantIds: [personal.rows[0]!.id, team.rows[0]!.id],
+        tenantIds: [personal.rows[0].id, team.rows[0].id],
         memberGithubIds: [githubIds.alice, githubIds.bob],
         integrationGithubId: githubIds.charlie,
         sessionId: `identity-transition-${seed}`,
@@ -127,18 +127,18 @@ test(
         `select kind, name, personal_owner_user_id
          from tenants
          where id = $1`,
-        [personal.rows[0]!.id],
+        [personal.rows[0].id],
       );
-      assert.equal(personalTenant.rows[0]!.kind, "personal");
-      assert.equal(personalTenant.rows[0]!.name, "alice-transition");
+      assert.equal(personalTenant.rows[0].kind, "personal");
+      assert.equal(personalTenant.rows[0].name, "alice-transition");
       assert.equal(
-        personalTenant.rows[0]!.personal_owner_user_id,
+        personalTenant.rows[0].personal_owner_user_id,
         identities.rows.find((identity) => identity.provider_user_id === String(githubIds.alice))!.user_id,
       );
 
       const teamTenant = await client.query<{ kind: string; name: string }>(
         "select kind, name from tenants where id = $1",
-        [team.rows[0]!.id],
+        [team.rows[0].id],
       );
       assert.deepEqual(teamTenant.rows[0], { kind: "team", name: "acme-transition" });
 
@@ -152,7 +152,7 @@ test(
                 installed_by_github_user_id::text
          from installations
          where tenant_id = $1`,
-        [team.rows[0]!.id],
+        [team.rows[0].id],
       );
       assert.deepEqual(installation.rows[0], {
         github_account_id: String(seed + 100),
@@ -207,7 +207,7 @@ test(
         [seed + 300, seed + 200, "ACME-TRANSITION", "CONTEXT-COMPAT"],
       );
       assert.deepEqual(v2Repository.rows[0], {
-        tenant_id: team.rows[0]!.id,
+        tenant_id: team.rows[0].id,
         github_account_id: String(seed + 100),
         github_account_login: "acme-transition",
         github_account_type: "Organization",
@@ -233,17 +233,17 @@ test(
          where tm.tenant_id = $1::uuid
            and tm.github_user_id = $2::bigint
          limit 1`,
-        [team.rows[0]!.id, githubIds.bob],
+        [team.rows[0].id, githubIds.bob],
       );
       assert.deepEqual(v2Member.rows[0], {
-        tenant_id: team.rows[0]!.id,
+        tenant_id: team.rows[0].id,
         github_user_id: String(githubIds.bob),
         github_login: "bob-transition",
         role: "admin",
       });
       assert.deepEqual(
         await legacyRollbackSnapshot(client, {
-          tenantIds: [personal.rows[0]!.id, team.rows[0]!.id],
+          tenantIds: [personal.rows[0].id, team.rows[0].id],
           memberGithubIds: [githubIds.alice, githubIds.bob],
           integrationGithubId: githubIds.charlie,
           sessionId: `identity-transition-${seed}`,
@@ -275,7 +275,7 @@ test(
       await client.query(
         `insert into tenant_members (tenant_id, github_user_id, github_login, role, source)
          values ($1, $2, 'erin-transition', 'member', 'oauth')`,
-        [team.rows[0]!.id, githubIds.erin],
+        [team.rows[0].id, githubIds.erin],
       );
       const catchUp = await runInternalUserTransition(client);
       assert.equal(catchUp.identitiesCreated, 1);
@@ -284,9 +284,9 @@ test(
         `select user_id
          from tenant_members
          where tenant_id = $1 and github_user_id = $2`,
-        [team.rows[0]!.id, githubIds.erin],
+        [team.rows[0].id, githubIds.erin],
       );
-      assert.ok(erin.rows[0]!.user_id);
+      assert.ok(erin.rows[0].user_id);
     } finally {
       await client.query("rollback").catch(() => {});
       await client.end();
@@ -323,14 +323,14 @@ test(
            ($1, $2, $3, 'ambiguous-transition', 'Organization'),
            ($1, $4, $3, 'ambiguous-transition', 'Organization'),
            ($1, $5, $3, 'ambiguous-transition', 'Organization')`,
-        [source.rows[0]!.id, seed + 10, seed + 1, seed + 11, seed + 13],
+        [source.rows[0].id, seed + 10, seed + 1, seed + 11, seed + 13],
       );
       const foreignInstallation = await client.query<{ id: string }>(
         `insert into installations
            (tenant_id, github_installation_id, github_account_id, github_account_login, github_account_type)
          values ($1, $2, $3, 'other-transition', 'Organization')
          returning id`,
-        [other.rows[0]!.id, seed + 12, seed + 2],
+        [other.rows[0].id, seed + 12, seed + 2],
       );
       await client.query(
         `insert into repositories
@@ -340,10 +340,10 @@ test(
            ($1, null, $3, 'ambiguous-transition', 'disabled-history', 'main', true, false),
            ($1, $4, $5, 'ambiguous-transition', 'cross-tenant', 'main', true, true)`,
         [
-          source.rows[0]!.id,
+          source.rows[0].id,
           seed + 20,
           seed + 21,
-          foreignInstallation.rows[0]!.id,
+          foreignInstallation.rows[0].id,
           seed + 22,
         ],
       );
@@ -454,5 +454,5 @@ async function legacyRollbackSnapshot(
      ) as snapshot`,
     [scope.tenantIds, scope.memberGithubIds, scope.integrationGithubId, scope.sessionId],
   );
-  return result.rows[0]!.snapshot;
+  return result.rows[0].snapshot;
 }

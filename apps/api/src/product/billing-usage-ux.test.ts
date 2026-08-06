@@ -14,7 +14,7 @@ import { PLATFORM_BILLING_POLICY, shapeTenantUsage, type BillingPolicy } from ".
 /* ----------------------------------------------- platform model defaults --- */
 
 test("platformModelDefaults falls back to trigger-utils defaults when env is unset", () => {
-  assert.deepEqual(platformModelDefaults({} as NodeJS.ProcessEnv), {
+  assert.deepEqual(platformModelDefaults({}), {
     planner: "openai/gpt-5.6-sol",
     investigation: "openai/gpt-5.6-luna",
     review: "openai/gpt-5.6-luna",
@@ -86,9 +86,9 @@ test("shapeTenantUsage assembles totals (total = infra+ai), daily, and recent ro
   assert.equal(summary.totals.byok_runs, 1);
   assert.equal(summary.totals.harness_runs, 2);
   assert.deepEqual(summary.daily, [{ date: "2026-07-01", credits: 300, runs: 2 }]);
-  assert.equal(summary.recent_runs[0]!.repo_full_name, "acme/app");
-  assert.equal(summary.recent_runs[0]!.review_count, 3); // PR-aggregated: 3 runs rolled up
-  assert.equal(summary.recent_runs[0]!.created_at, "2026-07-01T00:00:00.000Z");
+  assert.equal(summary.recent_runs[0].repo_full_name, "acme/app");
+  assert.equal(summary.recent_runs[0].review_count, 3); // PR-aggregated: 3 runs rolled up
+  assert.equal(summary.recent_runs[0].created_at, "2026-07-01T00:00:00.000Z");
 });
 
 test("shapeTenantUsage defaults a null model cost to '0' and coerces null credit fields", () => {

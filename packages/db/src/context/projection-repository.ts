@@ -78,7 +78,10 @@ export class PostgresProjectionRepository implements ProjectionStore {
         [generation.id]
       )
     ).rows[0];
-    if (existing?.required_fingerprint !== undefined && existing.required_fingerprint !== generation.fingerprint) {
+    // pg surfaces SQL NULL as null, never undefined; a loose != null check
+    // covers both so a legacy NULL fingerprint cannot masquerade as a
+    // spurious identity collision.
+    if (existing?.required_fingerprint != null && existing.required_fingerprint !== generation.fingerprint) {
       throw new Error(`Generation identity collision for ${generation.id}`);
     }
     if (existing?.status === "published") {

@@ -85,7 +85,7 @@ export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   text: string,
   params: unknown[] = [],
 ): Promise<T[]> {
-  const result = await getPool().query<T>(text, params as unknown[]);
+  const result = await getPool().query<T>(text, params);
   return result.rows;
 }
 

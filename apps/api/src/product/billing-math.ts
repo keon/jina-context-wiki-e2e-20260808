@@ -6,7 +6,7 @@
  */
 
 /** A non-negative decimal parsed into an integer mantissa and its scale (10^scale divisor). */
-type Decimal = { mantissa: bigint; scale: number };
+interface Decimal { mantissa: bigint; scale: number }
 
 /**
  * Parse a non-negative decimal string ("0", "0.00012345", "12.5", "+3") into {mantissa, scale}.
@@ -108,7 +108,7 @@ export function normalizeDecimalLiteral(value: string | null | undefined): strin
   if (!match) {
     return undefined;
   }
-  const intPart = match[1]!;
+  const intPart = match[1];
   const fracPart = match[2] ?? "";
   const exponent = match[3] !== undefined ? Number.parseInt(match[3], 10) : 0;
   // Bound the exponent BEFORE any expansion. A |exponent| this large cannot fit numeric(18,8) and

@@ -39,3 +39,15 @@ updates:
     schedule:
       interval: weekly
       day: monday
+
+  - package-ecosystem: docker
+    directory: /apps/admin
+    schedule:
+      interval: weekly
+      day: monday
+
+  - package-ecosystem: docker
+    directory: /services/pageindex-worker
+    schedule:
+      interval: weekly
+      day: monday

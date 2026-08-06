@@ -18,7 +18,7 @@ const STAGES = new Set(["ui", "start", "poll", "exchange", "save"]);
 const SAFE_VALUE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const FLOW_ID = /^[a-zA-Z0-9_-]{8,80}$/;
 
-export type CodexConnectTelemetry = {
+export interface CodexConnectTelemetry {
   event: string;
   flow_id: string;
   stage?: string;
@@ -27,7 +27,7 @@ export type CodexConnectTelemetry = {
   elapsed_ms?: number;
   attempt?: number;
   visibility?: "visible" | "hidden";
-};
+}
 
 /**
  * Accept only a small, non-secret telemetry vocabulary. In particular, arbitrary messages and

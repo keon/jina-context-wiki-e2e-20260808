@@ -1,0 +1,99 @@
+steps:
+  - id: start-postgres
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        docker run --detach --name jina-ci-postgres --network cloudbuild \
+          --env POSTGRES_DB=jina_test \
+          --env POSTGRES_USER=postgres \
+          --env POSTGRES_PASSWORD=postgres \
+          postgres:16-alpine
+        until docker exec jina-ci-postgres pg_isready -U postgres -d jina_test; do
+          sleep 1
+        done
+
+  - id: validate
+    name: node:22-bookworm
+    waitFor: [start-postgres]
+    entrypoint: bash
+    args:
+      # Staging images must pass the same validation as production CI —
+      # a forked inline copy silently drops gates (this one had lost lint).
+      - scripts/cloud-build-ci.sh
+    env:
+      - DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
+      - TEST_DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
+
+  - id: build-api
+    name: gcr.io/cloud-builders/docker
+    waitFor: [validate]
+    args:
+      - build
+      - --file=apps/api/Dockerfile
+      - --label=org.opencontainers.image.revision=$COMMIT_SHA
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/api:staging-$COMMIT_SHA
+      - .
+
+  - id: build-worker
+    name: gcr.io/cloud-builders/docker
+    waitFor: [validate]
+    args:
+      - build
+      - --file=apps/worker/Dockerfile
+      - --label=org.opencontainers.image.revision=$COMMIT_SHA
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/worker:staging-$COMMIT_SHA
+      - .
+
+  - id: push-api
+    name: gcr.io/cloud-builders/docker
+    waitFor: [build-api]
+    args:
+      - push
+      - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/api:staging-$COMMIT_SHA
+
+  - id: push-worker
+    name: gcr.io/cloud-builders/docker
+    waitFor: [build-worker]
+    args:
+      - push
+      - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/worker:staging-$COMMIT_SHA
+
+  - id: serialize-deployment
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:563.0.0
+    waitFor: [push-api, push-worker]
+    entrypoint: bash
+    args: [scripts/serialize-cloud-build-deploy.sh]
+    env:
+      - GCP_PROJECT_ID=$PROJECT_ID
+      - GCP_CLOUD_BUILD_REGION=${_CLOUD_BUILD_REGION}
+      - CLOUD_BUILD_ID=$BUILD_ID
+
+  - id: deploy-staging
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:563.0.0
+    waitFor: [serialize-deployment]
+    entrypoint: bash
+    args: [scripts/deploy-staging.sh]
+    env:
+      - GCP_PROJECT_ID=$PROJECT_ID
+      - GCP_REGION=us-east1
+      - IMAGE_TAG=staging-$COMMIT_SHA
+      - JINA_CONTEXT_TENANT_ID=${_JINA_CONTEXT_TENANT_ID}
+      - JINA_ARTIFACT_REGISTRY_REPOSITORY=${_ARTIFACT_REPOSITORY}
+
+images:
+  - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/api:staging-$COMMIT_SHA
+  - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/worker:staging-$COMMIT_SHA
+
+substitutions:
+  _ARTIFACT_REPOSITORY: jina-staging
+  _CLOUD_BUILD_REGION: us-central1
+  _JINA_CONTEXT_TENANT_ID: "00000000-0000-4000-8000-000000000000"
+
+timeout: 7200s
+queueTtl: 21600s
+serviceAccount: projects/jina-staging-20260802/serviceAccounts/jina-cloud-build-staging@jina-staging-20260802.iam.gserviceaccount.com
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8

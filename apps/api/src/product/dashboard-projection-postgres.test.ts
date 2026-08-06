@@ -25,14 +25,14 @@ test(
       const repository = await client.query<{ id: string }>(
         `insert into repositories (tenant_id, github_repo_id, owner, name, default_branch)
          values ($1, $2, 'omxyz', 'projection-invariant', 'main') returning id`,
-        [tenant.rows[0]!.id, githubAccountId + 1],
+        [tenant.rows[0].id, githubAccountId + 1],
       );
       const run = await client.query<{ id: string }>(
         `insert into review_runs
            (tenant_id, repository_id, trigger, status, idempotency_key, head_sha)
          values ($1, $2, 'pull_request', 'queued', $3, repeat('a', 40))
          returning id`,
-        [tenant.rows[0]!.id, repository.rows[0]!.id, `projection-invariant-${githubAccountId}`],
+        [tenant.rows[0].id, repository.rows[0].id, `projection-invariant-${githubAccountId}`],
       );
 
       // The pre-projection API changed only the canonical column.
@@ -58,13 +58,13 @@ test(
            'review_markdown', repeat('x', 20000)
          )
          where id = $1`,
-        [run.rows[0]!.id],
+        [run.rows[0].id],
       );
       const projectedRun = await client.query<{ dashboard_result_json: Record<string, unknown> }>(
         `select dashboard_result_json from review_runs where id = $1`,
-        [run.rows[0]!.id],
+        [run.rows[0].id],
       );
-      const result = projectedRun.rows[0]!.dashboard_result_json;
+      const result = projectedRun.rows[0].dashboard_result_json;
       assert.equal(result.status, "completed");
       assert.equal(((result.final_review as Record<string, unknown>).summary as string).length, 500);
       assert.deepEqual((result.final_review as Record<string, unknown>).findings, []);
@@ -77,14 +77,14 @@ test(
         `update review_runs
          set result_json = jsonb_build_object('status', 'failed', 'error', repeat('e', 2000))
          where id = $1`,
-        [run.rows[0]!.id],
+        [run.rows[0].id],
       );
       const refreshedRun = await client.query<{ dashboard_result_json: Record<string, unknown> }>(
         `select dashboard_result_json from review_runs where id = $1`,
-        [run.rows[0]!.id],
+        [run.rows[0].id],
       );
-      assert.equal(refreshedRun.rows[0]!.dashboard_result_json.status, "failed");
-      assert.equal((refreshedRun.rows[0]!.dashboard_result_json.error as string).length, 500);
+      assert.equal(refreshedRun.rows[0].dashboard_result_json.status, "failed");
+      assert.equal((refreshedRun.rows[0].dashboard_result_json.error as string).length, 500);
 
       const projectedEvent = await client.query<{ dashboard_payload_json: Record<string, unknown> }>(
         `insert into review_run_events (review_run_id, status, payload_json, trigger_run_id)
@@ -100,28 +100,28 @@ test(
            'old-writer'
          )
          returning dashboard_payload_json`,
-        [run.rows[0]!.id],
+        [run.rows[0].id],
       );
-      assert.equal(projectedEvent.rows[0]!.dashboard_payload_json.status, "issues_found");
-      assert.equal((projectedEvent.rows[0]!.dashboard_payload_json.summary as string).length, 500);
-      assert.equal(projectedEvent.rows[0]!.dashboard_payload_json.findings_count, 7);
-      assert.equal("runtime_review" in projectedEvent.rows[0]!.dashboard_payload_json, false);
+      assert.equal(projectedEvent.rows[0].dashboard_payload_json.status, "issues_found");
+      assert.equal((projectedEvent.rows[0].dashboard_payload_json.summary as string).length, 500);
+      assert.equal(projectedEvent.rows[0].dashboard_payload_json.findings_count, 7);
+      assert.equal("runtime_review" in projectedEvent.rows[0].dashboard_payload_json, false);
 
       await client.query(
         `insert into review_run_events (review_run_id, status, recorded_at)
          select $1, 'cardinality-' || sequence,
                 timestamptz '2030-01-01 00:00:00+00' + sequence * interval '1 second'
          from generate_series(1, $2::integer + 50) sequence`,
-        [run.rows[0]!.id, DASHBOARD_LIST_EVENT_LIMIT],
+        [run.rows[0].id, DASHBOARD_LIST_EVENT_LIMIT],
       );
       const boundedEvents = await client.query<{ status: string }>(
         DASHBOARD_LIST_EVENTS_SQL,
-        [[run.rows[0]!.id], DASHBOARD_LIST_EVENT_LIMIT],
+        [[run.rows[0].id], DASHBOARD_LIST_EVENT_LIMIT],
       );
       assert.equal(boundedEvents.rowCount, DASHBOARD_LIST_EVENT_LIMIT);
-      assert.equal(boundedEvents.rows[0]!.status, "cardinality-51");
+      assert.equal(boundedEvents.rows[0].status, "cardinality-51");
       assert.equal(
-        boundedEvents.rows[DASHBOARD_LIST_EVENT_LIMIT - 1]!.status,
+        boundedEvents.rows[DASHBOARD_LIST_EVENT_LIMIT - 1].status,
         `cardinality-${DASHBOARD_LIST_EVENT_LIMIT + 50}`,
       );
 

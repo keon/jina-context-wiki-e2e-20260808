@@ -20,6 +20,9 @@ steps:
     entrypoint: bash
     args: [scripts/cloud-build-ci.sh]
     env:
+      # DATABASE_URL additionally runs the product migration smoke test in
+      # cloud-build-ci.sh, matching cloudbuild.ci.yaml.
+      - DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
       - TEST_DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
 
   - id: build-api

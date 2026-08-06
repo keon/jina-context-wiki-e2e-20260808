@@ -1,19 +1,19 @@
-export type ReviewEvent = {
+export interface ReviewEvent {
   status: string;
   payload?: unknown;
   trigger_run_id?: string;
   recorded_at: string;
-};
+}
 
-export type ProjectRecord = {
+export interface ProjectRecord {
   github_repo_id?: number;
   full_name: string;
   owner: string;
   name: string;
   private?: boolean;
-};
+}
 
-export type FindingRecord = {
+export interface FindingRecord {
   id: string;
   review_run_id: string;
   fingerprint: string;
@@ -28,9 +28,9 @@ export type FindingRecord = {
   pull_request?: number;
   pull_request_title?: string;
   pull_request_url?: string;
-};
+}
 
-export type ReviewRunRecord = {
+export interface ReviewRunRecord {
   review_run_id: string;
   trigger_run_id?: string;
   delivery_id?: string;
@@ -78,16 +78,16 @@ export type ReviewRunRecord = {
   created_at: string;
   updated_at: string;
   finished_at?: string;
-};
+}
 
-export type DashboardData = {
+export interface DashboardData {
   // Latest activity in this payload: the newest review-run `updated_at` or issue `created_at`,
   // and null when the workspace has no rows yet. Derived from the DATA, never from the clock:
   // this is the most-polled dashboard response, so a wall-clock stamp made every body unique and
   // defeated both ETag revalidation (never a 304) and client-side change detection (every poll
   // re-rendered every consumer). Identical input must serialize byte-identically.
   generated_at: string | null;
-  bots: Array<{
+  bots: {
     id: string;
     type: string;
     repository?: string;
@@ -95,14 +95,14 @@ export type DashboardData = {
     status: string;
     last_run_at: string;
     last_error?: string;
-  }>;
+  }[];
   review_runs: ReviewRunRecord[];
   issues: FindingRecord[];
   pagination?: {
     limit: number;
     next_cursor?: string;
   };
-};
+}
 
 /**
  * Newest timestamp carried by the payload, or null when it has no rows. Review runs are compared on

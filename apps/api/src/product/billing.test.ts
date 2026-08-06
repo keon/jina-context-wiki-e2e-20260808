@@ -24,7 +24,7 @@ import {
 
 /* ------------------------------------------------------------- fake autumn --- */
 
-type FakeAutumnOpts = {
+interface FakeAutumnOpts {
   creditsBalance?: number;
   creditsAllowed?: boolean;
   managedAllowed?: boolean;
@@ -40,14 +40,14 @@ type FakeAutumnOpts = {
   creditsGranted?: number;
   creditsUsage?: number;
   // Recent invoices returned when getCustomer is called with expandInvoices.
-  invoices?: Array<{ date: string | null; amount: string; status: string; url?: string }>;
-};
+  invoices?: { date: string | null; amount: string; status: string; url?: string }[];
+}
 
 class FakeAutumn implements AutumnClient {
-  readonly tracks: Array<{ customerId: string; featureId: string; value: number; idempotencyKey: string }> = [];
-  readonly checks: Array<{ customerId: string; featureId: string }> = [];
+  readonly tracks: { customerId: string; featureId: string; value: number; idempotencyKey: string }[] = [];
+  readonly checks: { customerId: string; featureId: string }[] = [];
   readonly ensured: string[] = [];
-  readonly updated: Array<{ customerId: string; name?: string; metadata?: Record<string, string> }> = [];
+  readonly updated: { customerId: string; name?: string; metadata?: Record<string, string> }[] = [];
 
   constructor(private readonly opts: FakeAutumnOpts = {}) {}
 
@@ -97,7 +97,7 @@ class FakeAutumn implements AutumnClient {
     return "https://checkout.example/session";
   }
 
-  readonly autoTopups: Array<{ customerId: string; featureId: string; enabled: boolean; threshold: number; quantity: number }> = [];
+  readonly autoTopups: { customerId: string; featureId: string; enabled: boolean; threshold: number; quantity: number }[] = [];
 
   async getCustomer(_customerId: string, opts?: { expandInvoices?: boolean }): Promise<CustomerSummary> {
     if (this.opts.failCustomer) {
@@ -300,7 +300,7 @@ class FakeStore implements BillingStorePort {
   }
 
   async claimInfraForTracking(input: { reviewRunId: string; tenantId: string; rateMode: "included" | "overage"; credits: number; autumnEventId: string }): Promise<boolean> {
-    let row = this.runBillings.get(input.reviewRunId);
+    const row = this.runBillings.get(input.reviewRunId);
     if (!row) {
       this.runBillings.set(input.reviewRunId, {
         rate_mode: input.rateMode,
@@ -397,7 +397,7 @@ class FakeStore implements BillingStorePort {
     return this.usage.filter((row) => row.billing_status === "pending").slice(0, limit);
   }
 
-  async listTerminalRunsWithPendingOutcome(limit: number): Promise<Array<{ reviewRunId: string; status: string }>> {
+  async listTerminalRunsWithPendingOutcome(limit: number): Promise<{ reviewRunId: string; status: string }[]> {
     const seen = new Map<string, string>();
     for (const row of this.usage) {
       if (row.billing_status !== "pending_outcome") {
@@ -411,8 +411,8 @@ class FakeStore implements BillingStorePort {
     return [...seen.entries()].slice(0, limit).map(([reviewRunId, status]) => ({ reviewRunId, status }));
   }
 
-  async listRunsWithPendingInfra(limit: number): Promise<Array<{ reviewRunId: string; status: string }>> {
-    const out: Array<{ reviewRunId: string; status: string }> = [];
+  async listRunsWithPendingInfra(limit: number): Promise<{ reviewRunId: string; status: string }[]> {
+    const out: { reviewRunId: string; status: string }[] = [];
     for (const [reviewRunId, billing] of this.runBillings) {
       const status = this.runStatuses.get(reviewRunId);
       if (billing.infra_billing_status === "pending" && status && isTerminal(status)) {
@@ -802,7 +802,7 @@ test("settlement of a completed run charges infra once and bills each AI row (en
 
   const infra = autumn.tracks.filter((t) => t.idempotencyKey === "infra:run-1");
   assert.equal(infra.length, 1);
-  assert.equal(infra[0]!.value, 100);
+  assert.equal(infra[0].value, 100);
   const ai = autumn.tracks.filter((t) => t.idempotencyKey.startsWith("ai:run-1:"));
   assert.deepEqual(ai.map((t) => t.value).sort((a, b) => a - b), [1, 35]);
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "billed");
@@ -889,7 +889,7 @@ test("a failed run waives every charge and calls Autumn zero times", async () =>
   await service("on", autumn, store).settleReviewOutcome("run-1", "failed");
 
   assert.equal(autumn.tracks.length, 0);
-  assert.equal(store.usage[0]!.billing_status, "waived");
+  assert.equal(store.usage[0].billing_status, "waived");
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "waived");
   assert.equal(store.runBillings.get("run-1")?.infra_credits_charged, 0);
 });
@@ -903,7 +903,7 @@ test("a superseded run waives every charge", async () => {
   await service("on", autumn, store).settleReviewOutcome("run-1", "completed_superseded");
 
   assert.equal(autumn.tracks.length, 0);
-  assert.equal(store.usage[0]!.billing_status, "waived");
+  assert.equal(store.usage[0].billing_status, "waived");
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "waived");
 });
 
@@ -921,8 +921,8 @@ test("shadow settlement finalizes shadow_computed with amounts persisted, but ne
   assert.equal(autumn.tracks.length, 0);
   // Amounts are still computed + persisted (reconciliation), but the status is the terminal
   // non-billable 'shadow_computed', not 'pending'.
-  assert.equal(store.usage[0]!.billing_status, "shadow_computed");
-  assert.equal(store.usage[0]!.ai_credits_charged, 35);
+  assert.equal(store.usage[0].billing_status, "shadow_computed");
+  assert.equal(store.usage[0].ai_credits_charged, 35);
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "shadow_computed");
   assert.equal(store.runBillings.get("run-1")?.infra_credits_charged, 100);
 });
@@ -937,7 +937,7 @@ test("flipping to 'on' after a shadow settlement bills NOTHING from the shadow p
 
   // Settle under shadow -> everything becomes 'shadow_computed'.
   await service("shadow", autumn, store).settleReviewOutcome("run-1", "completed");
-  assert.equal(store.usage[0]!.billing_status, "shadow_computed");
+  assert.equal(store.usage[0].billing_status, "shadow_computed");
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "shadow_computed");
 
   // Now enforcement flips to "on" and the retry drain runs. It must find nothing to bill.
@@ -945,7 +945,7 @@ test("flipping to 'on' after a shadow settlement bills NOTHING from the shadow p
 
   assert.deepEqual(counts, emptyCounts());
   assert.equal(autumn.tracks.length, 0, "no back-billing of shadow-period usage");
-  assert.equal(store.usage[0]!.billing_status, "shadow_computed");
+  assert.equal(store.usage[0].billing_status, "shadow_computed");
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "shadow_computed");
 });
 
@@ -973,8 +973,8 @@ test("settlement never throws when Autumn track fails; rows are left for retry",
   await assert.doesNotReject(service("on", autumn, store).settleReviewOutcome("run-1", "completed"));
   // Nothing is marked billed when tracking fails; the row stays recoverable for the retry job
   // (infra tracks first, so on failure the AI row is left untouched at 'pending_outcome').
-  assert.notEqual(store.usage[0]!.billing_status, "billed");
-  assert.notEqual(store.usage[0]!.billing_status, "waived");
+  assert.notEqual(store.usage[0].billing_status, "billed");
+  assert.notEqual(store.usage[0].billing_status, "waived");
   assert.notEqual(store.runBillings.get("run-1")?.infra_billing_status, "billed");
 });
 
@@ -997,7 +997,7 @@ test("settlement BILLS managed AI rows even when managed_ai_access is denied (al
   // managed_ai_access denied, and there is no entitlement-mismatch waive/warn anymore.
   assert.equal(autumn.tracks.filter((t) => t.idempotencyKey.startsWith("ai:")).length, 1);
   assert.equal(autumn.tracks.filter((t) => t.idempotencyKey === "infra:run-1").length, 1);
-  assert.equal(store.usage[0]!.billing_status, "billed");
+  assert.equal(store.usage[0].billing_status, "billed");
   assert.ok(!warnings.entries.some((w) => w[0] === "billing_entitlement_mismatch"), "no entitlement waive");
 });
 
@@ -1012,7 +1012,7 @@ test("settlement bills managed AI rows regardless of a managed_ai_access check o
   // Settlement no longer performs an entitlement check, so a managed_ai_access check outage cannot
   // strand managed AI rows — they are billed via track(), which is unaffected by a check() failure.
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "billed");
-  assert.equal(store.usage[0]!.billing_status, "billed");
+  assert.equal(store.usage[0].billing_status, "billed");
   assert.equal(autumn.tracks.filter((t) => t.idempotencyKey.startsWith("ai:")).length, 1);
 });
 
@@ -1065,7 +1065,7 @@ test("concurrent retry drains charge each row exactly once (the claim is the sin
   await Promise.all([svc.retryPendingBillingEvents(), svc.retryPendingBillingEvents()]);
 
   assert.equal(autumn.tracks.filter((t) => t.idempotencyKey === "ai:run-1:dk-u1").length, 1, "charged once");
-  assert.equal(store.usage[0]!.billing_status, "billed");
+  assert.equal(store.usage[0].billing_status, "billed");
   assert.equal(store.runBillings.get("run-1")?.ai_credits_charged_total, 35, "total added exactly once");
 });
 
@@ -1096,7 +1096,7 @@ test("retryPendingBillingEvents drains pending usage rows and pending infra (enf
 
   assert.equal(counts.usage_billed, 1);
   assert.equal(counts.infra_billed, 1);
-  assert.equal(store.usage[0]!.billing_status, "billed");
+  assert.equal(store.usage[0].billing_status, "billed");
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "billed");
   assert.ok(autumn.tracks.some((t) => t.idempotencyKey === "ai:run-1:dk-u1" && t.value === 35));
   assert.ok(autumn.tracks.some((t) => t.idempotencyKey === "infra:run-1" && t.value === 100));
@@ -1111,7 +1111,7 @@ test("retryPendingBillingEvents settles a terminal run still holding pending_out
   const counts = await service("on", autumn, store).retryPendingBillingEvents();
 
   assert.equal(counts.runs_settled, 1);
-  assert.equal(store.usage[0]!.billing_status, "billed");
+  assert.equal(store.usage[0].billing_status, "billed");
 });
 
 test("retry drain BILLS a pending managed AI row even when managed_ai_access is denied (no waive)", async () => {
@@ -1134,7 +1134,7 @@ test("retry drain BILLS a pending managed AI row even when managed_ai_access is 
   // Managed AI is always metered: the pending row is BILLED (not waived), no entitlement mismatch.
   assert.equal(counts.usage_billed, 1);
   assert.equal(autumn.tracks.filter((t) => t.idempotencyKey.startsWith("ai:")).length, 1);
-  assert.equal(store.usage[0]!.billing_status, "billed");
+  assert.equal(store.usage[0].billing_status, "billed");
   assert.ok(!warnings.entries.some((w) => w[0] === "billing_entitlement_mismatch"), "no entitlement waive");
 });
 
@@ -1149,7 +1149,7 @@ test("retry drain bills a pending managed AI row regardless of a managed_ai_acce
 
   // The drain no longer performs an entitlement check, so a check outage can't strand the row.
   assert.equal(counts.usage_billed, 1);
-  assert.equal(store.usage[0]!.billing_status, "billed");
+  assert.equal(store.usage[0].billing_status, "billed");
   assert.equal(autumn.tracks.filter((t) => t.idempotencyKey.startsWith("ai:")).length, 1);
 });
 
@@ -1239,7 +1239,7 @@ test("arrival-time settlement bills a late usage row for an already-completed ru
 
   await service("on", autumn, store).settleReviewOutcome("run-1", "completed");
 
-  assert.equal(store.usage[0]!.billing_status, "billed");
+  assert.equal(store.usage[0].billing_status, "billed");
   assert.ok(autumn.tracks.some((t) => t.idempotencyKey === "ai:run-1:dk-late" && t.value === 35));
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "billed");
 });
@@ -1253,7 +1253,7 @@ test("arrival-time settlement waives a late usage row for a failed terminal run 
   await service("on", autumn, store).settleReviewOutcome("run-1", "failed");
 
   assert.equal(autumn.tracks.length, 0);
-  assert.equal(store.usage[0]!.billing_status, "waived");
+  assert.equal(store.usage[0].billing_status, "waived");
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "waived");
 });
 
@@ -1283,7 +1283,7 @@ test("no settlement or gating happens when the Autumn secret is absent", async (
   await svc.gateDispatch(1);
 
   assert.equal(autumn.tracks.length, 0);
-  assert.equal(store.usage[0]!.billing_status, "pending_outcome");
+  assert.equal(store.usage[0].billing_status, "pending_outcome");
 });
 
 /* --------------------------------------------------- overview status --- */
@@ -1468,7 +1468,7 @@ test("ensureCustomer failure leaves settlement rows pending (no charge)", async 
   await service("on", autumn, store).settleReviewOutcome("run-1", "completed");
 
   assert.equal(autumn.tracks.length, 0, "nothing charged when bootstrap fails");
-  assert.notEqual(store.usage[0]!.billing_status, "billed");
+  assert.notEqual(store.usage[0].billing_status, "billed");
   assert.notEqual(store.runBillings.get("run-1")?.infra_billing_status, "billed");
 });
 
@@ -1489,7 +1489,7 @@ test("a non-retryable Autumn 4xx logs billing_config_error at error level and st
 
   const configError = errors.entries.find((e) => e[0] === "billing_config_error");
   assert.ok(configError, "emitted a distinct error-level config log");
-  const fields = configError![1] as Record<string, unknown>;
+  const fields = configError[1] as Record<string, unknown>;
   assert.equal(fields.status, 400);
   assert.equal(fields.endpoint, "/balances.check");
   assert.equal(fields.tenant_id, "t");
@@ -1522,6 +1522,6 @@ test("settlement of a blocked_insufficient_credits run waives every charge (bot_
   await service("on", autumn, store).settleReviewOutcome("run-1", "blocked");
 
   assert.equal(autumn.tracks.length, 0);
-  assert.equal(store.usage[0]!.billing_status, "waived");
+  assert.equal(store.usage[0].billing_status, "waived");
   assert.equal(store.runBillings.get("run-1")?.infra_billing_status, "waived");
 });

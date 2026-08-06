@@ -15,15 +15,7 @@
  */
 
 import { spawn } from "node:child_process";
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -36,7 +28,7 @@ const DEFAULT_TMP_EVAL_DIR = join(EVAL_ROOT, "tmp", "evals", "review-runtime-v1"
 const DEFAULT_METHOD = "review-agent-runtime-v1-current-2026-08-04";
 const DEFAULT_HISTORY_MARKDOWN = [
   "No GitHub PR thread/history context supplied for isolated review-runtime eval.",
-  "The subprocess must use only PR metadata, the checked-out repository, diff, and CodeGraph context.",
+  "The subprocess must use only PR metadata, the checked-out repository, diff, and CodeGraph context."
 ].join("\n");
 
 function usage() {
@@ -111,7 +103,7 @@ function parseArgs(argv) {
     title: "",
     author: "",
     maxExpectations: 0,
-    areaConcurrency: 0,
+    areaConcurrency: 0
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -175,14 +167,14 @@ async function resolveGithubToken() {
 
   const ghToken = await tryCommand("gh", ["auth", "token"], {
     env: process.env,
-    timeoutMs: 10_000,
+    timeoutMs: 10_000
   });
   if (ghToken.stdout.trim()) return ghToken.stdout.trim();
 
   const gitCredential = await tryCommand("git", ["credential", "fill"], {
     env: process.env,
     input: "protocol=https\nhost=github.com\n\n",
-    timeoutMs: 10_000,
+    timeoutMs: 10_000
   });
   const parsed = parseGitCredential(gitCredential.stdout);
   return parsed.password || parsed.oauth_token || parsed.token || "";
@@ -246,12 +238,18 @@ function findDatasetEntry(dataset, repo, prNumber) {
 }
 
 function findDatasetEntriesByRank(dataset, rank, repo) {
-  const normalizedRank = String(rank || "").trim().toUpperCase();
+  const normalizedRank = String(rank || "")
+    .trim()
+    .toUpperCase();
   const matches = [];
   for (const repoResult of asArray(dataset.repo_results)) {
     if (repo && repoResult.repository !== repo) continue;
     for (const entry of asArray(repoResult.entries)) {
-      if (String(entry?.rank || "").trim().toUpperCase() === normalizedRank) {
+      if (
+        String(entry?.rank || "")
+          .trim()
+          .toUpperCase() === normalizedRank
+      ) {
         matches.push({ repoResult, entry });
       }
     }
@@ -272,7 +270,7 @@ async function fetchPullRequestMetadata(args, datasetEntry = {}) {
     baseSha: args.baseSha || "",
     headRef: args.headRef || "",
     baseRef: args.baseRef || "",
-    repository: { owner, name, fullName: args.repo },
+    repository: { owner, name, fullName: args.repo }
   };
 
   if (args.noGithubApi) {
@@ -285,7 +283,7 @@ async function fetchPullRequestMetadata(args, datasetEntry = {}) {
   const headers = {
     Accept: "application/vnd.github+json",
     "User-Agent": "jina-simulation-evals",
-    "X-GitHub-Api-Version": "2022-11-28",
+    "X-GitHub-Api-Version": "2022-11-28"
   };
   if (args.githubToken) headers.Authorization = `Bearer ${args.githubToken}`;
 
@@ -301,7 +299,7 @@ async function fetchPullRequestMetadata(args, datasetEntry = {}) {
     baseSha: args.baseSha || stringValue(pr.base?.sha) || fallback.baseSha,
     headRef: args.headRef || stringValue(pr.head?.ref) || fallback.headRef,
     baseRef: args.baseRef || stringValue(pr.base?.ref) || fallback.baseRef,
-    repository: { owner, name, fullName: args.repo },
+    repository: { owner, name, fullName: args.repo }
   };
 }
 
@@ -326,7 +324,7 @@ function buildReviewInput(args, prMetadata) {
     baseSha: prMetadata.baseSha,
     baseRef: prMetadata.baseRef,
     headRef: prMetadata.headRef,
-    historyMarkdown: DEFAULT_HISTORY_MARKDOWN,
+    historyMarkdown: DEFAULT_HISTORY_MARKDOWN
   };
 }
 
@@ -342,14 +340,16 @@ function redactReviewInput(input) {
     headRef: input.headRef,
     historyMarkdown: input.historyMarkdown,
     token_present: Boolean(input.token),
-    clone_token_present: Boolean(input.cloneToken),
+    clone_token_present: Boolean(input.cloneToken)
   };
 }
 
 function prepareOutputDir(args) {
-  const out = args.out || (args.noDataset
-    ? join(DEFAULT_TMP_EVAL_DIR, safeName(args.repo), `pr-${args.pr}`)
-    : join(SCRIPT_DIR, "runs", "golden-dataset-1", safeName(args.repo), `pr-${args.pr}`, "review-runtime-v1"));
+  const out =
+    args.out ||
+    (args.noDataset
+      ? join(DEFAULT_TMP_EVAL_DIR, safeName(args.repo), `pr-${args.pr}`)
+      : join(SCRIPT_DIR, "runs", "golden-dataset-1", safeName(args.repo), `pr-${args.pr}`, "review-runtime-v1"));
   if (existsSync(out) && args.force) {
     assertSafeOutputRemoval(out);
     rmSync(out, { recursive: true, force: true });
@@ -367,15 +367,17 @@ function assertSafeOutputRemoval(out) {
     WORKSPACE_ROOT,
     resolve(WORKSPACE_ROOT, "packages", "review-agent"),
     resolve(WORKSPACE_ROOT, "apps", "api"),
-    resolve(WORKSPACE_ROOT, "apps", "dashboard"),
+    resolve(WORKSPACE_ROOT, "apps", "dashboard")
   ]);
   if (protectedPaths.has(resolved)) throw new Error(`Refusing to remove protected output path: ${resolved}`);
 }
 
 function safeName(value) {
-  return String(value || "item")
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "item";
+  return (
+    String(value || "item")
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "item"
+  );
 }
 
 function buildIsolationReport(args, datasetMatch, reviewInput) {
@@ -386,7 +388,8 @@ function buildIsolationReport(args, datasetMatch, reviewInput) {
       ? "parent harness selects target from golden dataset; child review subprocess receives only production PR input"
       : "parent harness selects arbitrary PR; child review subprocess receives only production PR input",
     review_subprocess_cwd: "temporary directory outside evals/",
-    implementation_pipeline: "temporary worker copy of packages/review-agent/src/runtime-review/index.ts#runRuntimeReview",
+    implementation_pipeline:
+      "temporary worker copy of packages/review-agent/src/runtime-review/index.ts#runRuntimeReview",
     board_workflow_context: {
       active_workflow: "review",
       covered_topic: "runtime-review",
@@ -396,8 +399,8 @@ function buildIsolationReport(args, datasetMatch, reviewInput) {
         "internal API prepare/event/complete calls",
         "Daytona sandbox creation",
         "GitHub progress comments",
-        "GitHub PR reviews/comments",
-      ],
+        "GitHub PR reviews/comments"
+      ]
     },
     eval_local_worker_patches: [
       "remove git clone --depth=100 in the temporary worker copy so older golden PRs have a merge base",
@@ -405,7 +408,7 @@ function buildIsolationReport(args, datasetMatch, reviewInput) {
       "increase temporary worker git checkout/diff timeouts for golden-dataset clones",
       "copy the temporary runtime workspace into the eval output directory before cleanup",
       "add an eval-isolation prompt boundary in the temporary worker copy without editing production source",
-      "optionally honor eval-only caps for expectation count, concurrency, mental traces, and agent iterations",
+      "optionally honor eval-only caps for expectation count, concurrency, mental traces, and agent iterations"
     ],
     review_input: redactReviewInput(reviewInput),
     withheld_from_review: datasetMatch
@@ -420,16 +423,16 @@ function buildIsolationReport(args, datasetMatch, reviewInput) {
           reference_issue_urls: true,
           evidence_summary: true,
           fix_pr_count: fixPrs.length,
-          fix_pr_urls: true,
+          fix_pr_urls: true
         }
       : {
           dataset_file: null,
           rank: null,
           bucket: null,
           reference_issue_count: null,
-          note: "No golden dataset entry was used for this arbitrary-PR run.",
+          note: "No golden dataset entry was used for this arbitrary-PR run."
         },
-    post_review_uses_of_golden_data: datasetMatch ? ["leakage scan"] : [],
+    post_review_uses_of_golden_data: datasetMatch ? ["leakage scan"] : []
   };
 }
 
@@ -450,7 +453,7 @@ async function runReviewSubprocess(args, reviewInput, out) {
       cwd: workerDir,
       env: isolatedEnv(args, artifactDir),
       timeoutMs: args.timeoutMs,
-      maxBufferBytes: 48 * 1024 * 1024,
+      maxBufferBytes: 48 * 1024 * 1024
     });
     writeFileSync(join(out, "review-subprocess.stdout.txt"), child.stdout);
     writeFileSync(join(out, "review-subprocess.stderr.txt"), child.stderr);
@@ -474,11 +477,11 @@ function patchedRuntimeReviewSource(args) {
 
   source = source.replace(
     `import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";`,
-    `import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";`,
+    `import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";`
   );
   source = source.replace(
     `["clone", "--no-tags", "--depth=100", repoUrl, input.repoDir]`,
-    `["clone", "--no-tags", repoUrl, input.repoDir]`,
+    `["clone", "--no-tags", repoUrl, input.repoDir]`
   );
   source = addEvalGitTimeouts(source);
   source = addEvalBaseShaCheckout(source);
@@ -500,7 +503,7 @@ function addEvalBaseShaCheckout(source) {
     `      baseRef: input.baseRef,
       baseSha: (input as RuntimeReviewInput & { baseSha?: string }).baseSha,
       repoDir
-    });`,
+    });`
   );
   source = source.replace(
     `  baseRef: string;
@@ -509,7 +512,7 @@ function addEvalBaseShaCheckout(source) {
     `  baseRef: string;
   baseSha?: string;
   repoDir: string;
-}): Promise<void> {`,
+}): Promise<void> {`
   );
 
   const original = `  await runCommand(
@@ -540,7 +543,9 @@ function addEvalBaseShaCheckout(source) {
   }
 `;
   if (!source.includes(original)) {
-    throw new Error("Could not patch historical base SHA checkout in packages/review-agent/src/runtime-review/index.ts");
+    throw new Error(
+      "Could not patch historical base SHA checkout in packages/review-agent/src/runtime-review/index.ts"
+    );
   }
   return source.replace(original, replacement);
 }
@@ -557,7 +562,9 @@ function addEvalGitTimeouts(source) {
 
 `;
   if (!source.includes(anchor)) {
-    throw new Error("Could not locate checkoutPullRequest for git timeout patch in packages/review-agent/src/runtime-review/index.ts");
+    throw new Error(
+      "Could not locate checkoutPullRequest for git timeout patch in packages/review-agent/src/runtime-review/index.ts"
+    );
   }
   return source.replace(anchor, `${helper}${anchor}`);
 }
@@ -573,11 +580,11 @@ function addEvalRuntimeCaps(source) {
     .replace(
       concurrencyAnchor,
       `export const MAX_PARALLEL_INVESTIGATIONS =
-  evalPositiveInt(process.env, "EVAL_RUNTIME_REVIEW_AREA_CONCURRENCY") ?? 10;`,
+  evalPositiveInt(process.env, "EVAL_RUNTIME_REVIEW_AREA_CONCURRENCY") ?? 10;`
     )
     .replace(
       optionsAnchor,
-      `    maxAreas: evalPositiveInt(env, "EVAL_RUNTIME_REVIEW_MAX_EXPECTATIONS") ?? Number.MAX_SAFE_INTEGER,`,
+      `    maxAreas: evalPositiveInt(env, "EVAL_RUNTIME_REVIEW_MAX_EXPECTATIONS") ?? Number.MAX_SAFE_INTEGER,`
     )
     .replace(
       helperAnchor,
@@ -586,7 +593,7 @@ function addEvalRuntimeCaps(source) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-${helperAnchor}`,
+${helperAnchor}`
     );
 }
 
@@ -603,7 +610,9 @@ function addEvalArtifactCopy(source) {
     await cleanupTransientPath(workspace, "runtime_review_workspace");
 `;
   if (!source.includes(original)) {
-    throw new Error("Could not patch runtime workspace artifact copy in packages/review-agent/src/runtime-review/index.ts");
+    throw new Error(
+      "Could not patch runtime workspace artifact copy in packages/review-agent/src/runtime-review/index.ts"
+    );
   }
   return source.replace(original, replacement);
 }
@@ -613,7 +622,7 @@ function addEvalIsolationPromptBoundary(source) {
     "Eval isolation:",
     "- Do not browse GitHub, the web, or external issue/PR pages.",
     "- Do not inspect evaluation datasets, golden datasets, known regression issue mappings, reference issues, fix PRs, or prior eval outputs.",
-    "- Use only the supplied PR metadata, checked-out source, local git diff/history available in the checkout, and CodeGraph/local command output.",
+    "- Use only the supplied PR metadata, checked-out source, local git diff/history available in the checkout, and CodeGraph/local command output."
   ].join("\\n");
 
   const sharedContextAnchor = `Raw file instructions:
@@ -623,7 +632,7 @@ function addEvalIsolationPromptBoundary(source) {
       sharedContextAnchor,
       `Raw file instructions:
 ${boundary}
-- Truncated prompt context is orientation only; inspect raw files before relying on exact source behavior.`,
+- Truncated prompt context is orientation only; inspect raw files before relying on exact source behavior.`
     );
   }
 
@@ -631,7 +640,7 @@ ${boundary}
   if (source.includes(legacyAnchor)) {
     return source.replace(
       legacyAnchor,
-      `- Do not request any custom tool except mental_trace.\\n\\n${boundary}\\n\\nCodeGraph CLI path:`,
+      `- Do not request any custom tool except mental_trace.\\n\\n${boundary}\\n\\nCodeGraph CLI path:`
     );
   }
 
@@ -665,7 +674,10 @@ main().catch((error) => {
 }
 
 function splitCommand(value) {
-  const parts = String(value || "").trim().split(/\s+/).filter(Boolean);
+  const parts = String(value || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
   if (!parts.length) throw new Error("Empty command");
   return { command: parts[0], args: parts.slice(1) };
 }
@@ -687,7 +699,7 @@ function isolatedEnv(args, artifactDir) {
     "NO_PROXY",
     "https_proxy",
     "http_proxy",
-    "no_proxy",
+    "no_proxy"
   ];
   const env = {};
   for (const key of keep) {
@@ -702,7 +714,7 @@ function isolatedEnv(args, artifactDir) {
     "RUNTIME_AGENT_MODEL",
     "RUNTIME_MENTAL_TRACE_MODEL",
     "REVIEW_CODEX_MODEL",
-    "EVAL_REVIEW_GIT_TIMEOUT_MS",
+    "EVAL_REVIEW_GIT_TIMEOUT_MS"
   ]) {
     if (process.env[key]) env[key] = process.env[key];
   }
@@ -719,7 +731,7 @@ function runCommand(command, args, options) {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "";
     let stderr = "";
@@ -778,7 +790,7 @@ function scanForGoldenLeakage(datasetMatch, result) {
     "fixPrs",
     "evidence_summary",
     "evidenceSummary",
-    "known_attributed_closed_issue_count",
+    "known_attributed_closed_issue_count"
   ];
   for (const name of bannedFieldNames) {
     if (text.includes(`"${name}"`)) findings.push({ type: "banned_field", value: name });
@@ -810,17 +822,24 @@ function writeReviewArtifacts(out, result) {
   writeFileSync(join(out, "review-runtime.md"), `${String(result.markdown || "").trim()}\n`);
   writeFileSync(join(out, "runtime-plan.json"), `${JSON.stringify(result.plan ?? null, null, 2)}\n`);
   writeFileSync(join(out, "runtime-findings.json"), `${JSON.stringify(result.findings ?? [], null, 2)}\n`);
-  writeFileSync(join(out, "runtime-summary.json"), `${JSON.stringify({
-    status: result.status,
-    summary: result.summary,
-    commit: result.commit,
-    changed_file_count: Array.isArray(result.changedFiles) ? result.changedFiles.length : 0,
-    changed_files: result.changedFiles ?? [],
-    expectation_count: Array.isArray(result.plan?.areas) ? result.plan.areas.length : 0,
-    area_count: Array.isArray(result.areas) ? result.areas.length : 0,
-    finding_count: Array.isArray(result.findings) ? result.findings.length : 0,
-    error: result.error,
-  }, null, 2)}\n`);
+  writeFileSync(
+    join(out, "runtime-summary.json"),
+    `${JSON.stringify(
+      {
+        status: result.status,
+        summary: result.summary,
+        commit: result.commit,
+        changed_file_count: Array.isArray(result.changedFiles) ? result.changedFiles.length : 0,
+        changed_files: result.changedFiles ?? [],
+        expectation_count: Array.isArray(result.plan?.areas) ? result.plan.areas.length : 0,
+        area_count: Array.isArray(result.areas) ? result.areas.length : 0,
+        finding_count: Array.isArray(result.findings) ? result.findings.length : 0,
+        error: result.error
+      },
+      null,
+      2
+    )}\n`
+  );
 }
 
 async function main() {
@@ -836,41 +855,53 @@ async function main() {
   const out = prepareOutputDir(args);
 
   writeFileSync(join(out, "review-input.json"), `${JSON.stringify(redactReviewInput(reviewInput), null, 2)}\n`);
-  writeFileSync(join(out, "isolation-report.json"), `${JSON.stringify(buildIsolationReport(args, datasetMatch, reviewInput), null, 2)}\n`);
-  writeFileSync(join(out, "metadata.json"), `${JSON.stringify({
-    generated_at: new Date().toISOString(),
-    repository: args.repo,
-    pr_number: args.pr,
-    rank: datasetMatch?.entry.rank ?? null,
-    bucket: datasetMatch?.entry.bucket ?? null,
-    dataset_file: datasetMatch ? args.dataset : null,
-    method: args.method,
-    dry_run: args.dryRun,
-    model_config: runtimeModelConfig(),
-    tool_config: {
-      codex_bin: args.codexBin,
-      codegraph_bin: args.codegraphBin,
-    },
-    eval_caps: {
-      max_expectations: args.maxExpectations || null,
-      area_concurrency: args.areaConcurrency || null,
-    },
-    golden_reference_metadata_reserved_for_post_review: datasetMatch
-      ? {
-          rank: datasetMatch.entry.rank,
-          bucket: datasetMatch.entry.bucket,
-          reference_issue_count: asArray(datasetMatch.entry.introduced_issues).length,
-          fix_pr_count: asArray(datasetMatch.entry.fix_prs).length,
-        }
-      : null,
-  }, null, 2)}\n`);
+  writeFileSync(
+    join(out, "isolation-report.json"),
+    `${JSON.stringify(buildIsolationReport(args, datasetMatch, reviewInput), null, 2)}\n`
+  );
+  writeFileSync(
+    join(out, "metadata.json"),
+    `${JSON.stringify(
+      {
+        generated_at: new Date().toISOString(),
+        repository: args.repo,
+        pr_number: args.pr,
+        rank: datasetMatch?.entry.rank ?? null,
+        bucket: datasetMatch?.entry.bucket ?? null,
+        dataset_file: datasetMatch ? args.dataset : null,
+        method: args.method,
+        dry_run: args.dryRun,
+        model_config: runtimeModelConfig(),
+        tool_config: {
+          codex_bin: args.codexBin,
+          codegraph_bin: args.codegraphBin
+        },
+        eval_caps: {
+          max_expectations: args.maxExpectations || null,
+          area_concurrency: args.areaConcurrency || null
+        },
+        golden_reference_metadata_reserved_for_post_review: datasetMatch
+          ? {
+              rank: datasetMatch.entry.rank,
+              bucket: datasetMatch.entry.bucket,
+              reference_issue_count: asArray(datasetMatch.entry.introduced_issues).length,
+              fix_pr_count: asArray(datasetMatch.entry.fix_prs).length
+            }
+          : null
+      },
+      null,
+      2
+    )}\n`
+  );
 
   if (args.dryRun) {
     console.log(`Dry run wrote review input and isolation report to ${out}`);
     return;
   }
   if (!args.githubToken) {
-    throw new Error("No GitHub credential could be resolved non-interactively from --github-token, GITHUB_TOKEN, GH_TOKEN, gh auth token, or git credential fill.");
+    throw new Error(
+      "No GitHub credential could be resolved non-interactively from --github-token, GITHUB_TOKEN, GH_TOKEN, gh auth token, or git credential fill."
+    );
   }
 
   const result = await runReviewSubprocess(args, reviewInput, out);
@@ -878,22 +909,36 @@ async function main() {
 
   if (datasetMatch) {
     const leakageFindings = scanForGoldenLeakage(datasetMatch, result);
-    writeFileSync(join(out, "leakage-scan.json"), `${JSON.stringify({
-      passed: leakageFindings.length === 0,
-      finding_count: leakageFindings.length,
-      findings: leakageFindings,
-    }, null, 2)}\n`);
+    writeFileSync(
+      join(out, "leakage-scan.json"),
+      `${JSON.stringify(
+        {
+          passed: leakageFindings.length === 0,
+          finding_count: leakageFindings.length,
+          findings: leakageFindings
+        },
+        null,
+        2
+      )}\n`
+    );
     if (leakageFindings.length && !args.allowLeakage) {
       throw new Error(`Review output mentions withheld golden data; see ${join(out, "leakage-scan.json")}`);
     }
   } else {
-    writeFileSync(join(out, "leakage-scan.json"), `${JSON.stringify({
-      passed: true,
-      skipped: true,
-      reason: "No golden dataset entry was used for this arbitrary-PR run.",
-      finding_count: 0,
-      findings: [],
-    }, null, 2)}\n`);
+    writeFileSync(
+      join(out, "leakage-scan.json"),
+      `${JSON.stringify(
+        {
+          passed: true,
+          skipped: true,
+          reason: "No golden dataset entry was used for this arbitrary-PR run.",
+          finding_count: 0,
+          findings: []
+        },
+        null,
+        2
+      )}\n`
+    );
   }
 
   console.log(`Wrote isolated review-runtime v1 output to ${out}`);
@@ -911,6 +956,6 @@ function runtimeModelConfig() {
     mental_trace_model: process.env.RUNTIME_MENTAL_TRACE_MODEL || "gpt-5.4-mini",
     planner_effort: "medium",
     agent_effort: "medium",
-    mental_trace_effort: "low",
+    mental_trace_effort: "low"
   };
 }

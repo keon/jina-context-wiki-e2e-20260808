@@ -20,6 +20,7 @@ import {
   transitionBoardTask,
   type BoardState
 } from "./reducer.js";
+import { supersedeEpochTasks } from "./supersession.js";
 import { canTransition } from "./transitions.js";
 
 test("transition policy follows task kind instead of an extension type name", () => {
@@ -453,16 +454,20 @@ test("bounded retries fail the task and root only after the fourth attempt", () 
   state = reduceBoard(state, "2026-01-01T00:00:00.000Z");
 
   for (let attempt = 1; attempt <= BOARD_TASK_HARD_MAX_ATTEMPTS; attempt += 1) {
+    // Retry requeues carry an exponential availableAt backoff, so each claim
+    // happens comfortably after the previous retry's delay has elapsed.
+    const claimAt = `2026-01-01T00:${String(2 * attempt).padStart(2, "0")}:00.000Z`;
+    const retryAt = `2026-01-01T00:${String(2 * attempt + 1).padStart(2, "0")}:00.000Z`;
     const claim = leaseNextOutboxMessage(state, {
       topics: ["run-retry-fixture"],
       taskIds: [taskId],
       leaseId: `retry-limit-lease-${attempt}`,
       writeFenceToken: `retry-limit-fence-${attempt}`,
-      now: `2026-01-01T00:00:0${attempt}.000Z`,
-      expiresAt: "2026-01-01T00:10:00.000Z"
+      now: claimAt,
+      expiresAt: "2026-01-01T01:00:00.000Z"
     });
     assert.ok(claim);
-    state = transitionBoardTask(claim.state, taskId, "in_progress", `2026-01-01T00:00:0${attempt}.000Z`);
+    state = transitionBoardTask(claim.state, taskId, "in_progress", claimAt);
     const result = retryLeasedOutboxTask(state, {
       messageId: claim.message.id,
       taskId,
@@ -470,7 +475,7 @@ test("bounded retries fail the task and root only after the fourth attempt", () 
       writeFenceToken: `retry-limit-fence-${attempt}`,
       attempt,
       maxAttempts: BOARD_TASK_HARD_MAX_ATTEMPTS,
-      now: `2026-01-01T00:01:0${attempt}.000Z`,
+      now: retryAt,
       diagnostic: { category: "daytona", reason: "sandbox unavailable" }
     });
     assert.ok(result);
@@ -1029,4 +1034,173 @@ test("operator batch retry atomically reopens parallel failures and their shared
     })
   );
   assert.deepEqual(findTask(exhaustedState, leftId), findTask(state, leftId));
+});
+
+test("epoch supersession retires undispatched outbox messages so workers cannot claim dead work", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+  const oldTaskId = entityId<"task">("supersede-old");
+  const leasedTaskId = entityId<"task">("supersede-leased");
+  const currentTaskId = entityId<"task">("supersede-current");
+  const doneTaskId = entityId<"task">("supersede-done");
+  const baseTask = {
+    type: "review_pass",
+    title: "review",
+    assigneeRole: "review_agent",
+    required: true,
+    attempt: 1,
+    createdAt: now,
+    updatedAt: now,
+    kind: "dispatchable",
+    dispatchTopic: "run-review",
+    metadata: { repository: "acme/app" }
+  } as const;
+  const state: BoardState = {
+    tasks: [
+      { ...baseTask, id: oldTaskId, status: "queued", dedupeKey: "old:1", epoch: 1 },
+      { ...baseTask, id: leasedTaskId, status: "in_progress", dedupeKey: "leased:1", epoch: 1 },
+      { ...baseTask, id: doneTaskId, status: "done", dedupeKey: "done:1", epoch: 1 },
+      { ...baseTask, id: currentTaskId, status: "queued", dedupeKey: "current:2", epoch: 2 }
+    ],
+    dependencies: [],
+    events: [],
+    outbox: [
+      {
+        id: entityId<"board_outbox_message">("supersede-message-pending"),
+        taskId: oldTaskId,
+        topic: "run-review",
+        idempotencyKey: "old:1",
+        status: "pending",
+        payload: { taskId: oldTaskId, attempt: 1 },
+        createdAt: now
+      },
+      {
+        id: entityId<"board_outbox_message">("supersede-message-leased"),
+        taskId: leasedTaskId,
+        topic: "run-review",
+        idempotencyKey: "leased:1",
+        status: "leased",
+        payload: { taskId: leasedTaskId, attempt: 1 },
+        createdAt: now,
+        leaseId: "lease",
+        writeFenceToken: "fence",
+        leasedAt: now,
+        leaseExpiresAt: "2026-01-01T00:01:00.000Z"
+      },
+      {
+        id: entityId<"board_outbox_message">("supersede-message-dispatched"),
+        taskId: doneTaskId,
+        topic: "run-review",
+        idempotencyKey: "done:1",
+        status: "dispatched",
+        payload: { taskId: doneTaskId, attempt: 1 },
+        createdAt: now,
+        dispatchedAt: now
+      },
+      {
+        id: entityId<"board_outbox_message">("supersede-message-current"),
+        taskId: currentTaskId,
+        topic: "run-review",
+        idempotencyKey: "current:2",
+        status: "pending",
+        payload: { taskId: currentTaskId, attempt: 1 },
+        createdAt: now
+      }
+    ]
+  };
+
+  const supersededAt = "2026-01-01T00:02:00.000Z";
+  const next = supersedeEpochTasks(state, 2, supersededAt, (task) => task.metadata.repository === "acme/app");
+
+  assert.equal(findTask(next, oldTaskId)?.status, "superseded");
+  assert.equal(findTask(next, leasedTaskId)?.status, "superseded");
+  assert.equal(findTask(next, doneTaskId)?.status, "done");
+  assert.equal(findTask(next, currentTaskId)?.status, "queued");
+
+  const outboxByTask = new Map(next.outbox.map((message) => [message.taskId, message]));
+  assert.equal(outboxByTask.get(oldTaskId)?.status, "dispatched");
+  assert.equal(outboxByTask.get(leasedTaskId)?.status, "dispatched");
+  assert.equal(outboxByTask.get(leasedTaskId)?.leaseId, undefined);
+  assert.equal(outboxByTask.get(currentTaskId)?.status, "pending");
+
+  const retirements = next.events.filter((event) => event.type === "task.superseded_outbox_retired");
+  assert.deepEqual(retirements.map((event) => event.taskId).sort(), [leasedTaskId, oldTaskId].sort());
+
+  const claimed = leaseNextOutboxMessage(next, {
+    topics: ["run-review"],
+    leaseId: "next-lease",
+    writeFenceToken: "next-fence",
+    now: "2026-01-01T00:03:00.000Z",
+    expiresAt: "2026-01-01T00:04:00.000Z"
+  });
+  assert.equal(claimed?.message.taskId, currentTaskId);
+});
+
+test("retry requeues back off exponentially before the next claim", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+  const taskId = entityId<"task">("backoff-task");
+  let state = applyCommand(
+    createEmptyBoardState(),
+    {
+      command: "CreateTask",
+      task: {
+        id: taskId,
+        type: "fixture_retry",
+        kind: "dispatchable",
+        title: "Backoff fixture",
+        assigneeRole: "worker",
+        dedupeKey: "backoff:work",
+        dispatchTopic: "run-retry-fixture"
+      }
+    },
+    { actor: { type: "system", id: "test" }, now }
+  ).state;
+  state = reduceBoard(state, now);
+
+  const first = state.outbox.find((message) => message.payload.attempt === 1);
+  assert.ok(first);
+  assert.equal(first.availableAt, undefined);
+
+  const leased = leaseNextOutboxMessage(state, {
+    topics: ["run-retry-fixture"],
+    leaseId: "lease-1",
+    writeFenceToken: "fence-1",
+    now,
+    expiresAt: "2026-01-01T00:05:00.000Z"
+  });
+  assert.ok(leased);
+  state = transitionBoardTask(leased.state, taskId, "in_progress", now);
+
+  const retried = retryLeasedOutboxTask(state, {
+    messageId: leased.message.id,
+    taskId,
+    leaseId: "lease-1",
+    writeFenceToken: "fence-1",
+    attempt: 1,
+    maxAttempts: 4,
+    now: "2026-01-01T00:01:00.000Z",
+    diagnostic: { category: "github_response", reason: "HTTP 502" }
+  });
+  assert.ok(retried);
+  assert.equal(retried.terminal, false);
+  assert.ok(retried.nextMessage);
+  // Failed attempt 1 -> second attempt waits 1s.
+  assert.equal(retried.nextMessage.availableAt, "2026-01-01T00:01:01.000Z");
+
+  const tooEarly = leaseNextOutboxMessage(retried.state, {
+    topics: ["run-retry-fixture"],
+    leaseId: "lease-2",
+    writeFenceToken: "fence-2",
+    now: "2026-01-01T00:01:00.500Z",
+    expiresAt: "2026-01-01T00:06:00.000Z"
+  });
+  assert.equal(tooEarly, undefined);
+
+  const afterDelay = leaseNextOutboxMessage(retried.state, {
+    topics: ["run-retry-fixture"],
+    leaseId: "lease-2",
+    writeFenceToken: "fence-2",
+    now: "2026-01-01T00:01:01.000Z",
+    expiresAt: "2026-01-01T00:06:00.000Z"
+  });
+  assert.equal(afterDelay?.message.payload.attempt, 2);
 });

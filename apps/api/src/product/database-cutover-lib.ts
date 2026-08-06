@@ -14,5 +14,8 @@ export function databaseRole(value: string | undefined, variable: string): strin
 }
 
 export function quoteRole(role: string): string {
-  return `"${role}"`;
+  // Double embedded quotes so a role name can never break out of the identifier.
+  // databaseRole() rejects exotic names, but quoteRole also quotes values read
+  // back from the database (e.g. current_user), which skip that validation.
+  return `"${role.replaceAll('"', '""')}"`;
 }
