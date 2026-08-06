@@ -26,6 +26,10 @@ staging deploy installs the Board-recorded 15-minute billing retry schedule and 
 OpenTelemetry sidecars, including the causal worker's release-gated sidecar. Production continues to use the
 coordinated `cloudbuild.yaml` path below.
 
+The audited staging-to-production source consolidation, provider inventory, backup,
+and rollback runbook is
+[STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md).
+
 For an operator rerun, invoke the source-bound trigger with the exact audited staging SHA:
 
 ```sh
@@ -1320,6 +1324,12 @@ Role installation requires `CREATEROLE`. Production runs
 the schema, and is deliberately `NOINHERIT`. Adapters use `transactionAs`/`queryAs` to
 execute `SET LOCAL ROLE` before accessing context tables. See
 [DATA_MODELS.md](DATA_MODELS.md) for the capability-role list.
+
+The production job now uses the exact release API image and runs
+`dist/product/migrate-all.js --install-roles`, applying runtime and product migrations
+through one ledgered path. This unified path is required for the source consolidation,
+as specified in
+[STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md#unified-production-migration-job).
 
 Install the pgvector extension/schema only when an approved embedding provider is ready
 for evaluation:

@@ -11,6 +11,7 @@ import { canonicalReviewTriggerRequest } from "@jina/shared-kernel";
 import type pg from "pg";
 
 import { withTransaction } from "./db.js";
+import { markFirstV2GithubWebhookWorkflowWithClient } from "./github-webhook-inbox-store.js";
 import {
   bindReviewRunToBoardWithClient,
   createReviewRunWithClient,
@@ -156,6 +157,7 @@ async function admitBoardReviewV2WithClient(
       : {}),
   });
   const workflow = await repository.admitWorkflow(client, workflowInput);
+  await markFirstV2GithubWebhookWorkflowWithClient(client, workflow.workflowId);
   if (
     existingReview?.board_workflow_id &&
     existingReview.board_workflow_id !== workflow.workflowId

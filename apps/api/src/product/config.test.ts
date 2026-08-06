@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 
 /** A valid base64-encoded 32-byte SECRETS_ENCRYPTION_KEY (FINDING 4a requires one in production). */
 const PROD_SECRETS_KEY = Buffer.alloc(32).toString("base64");
+const WEBHOOK_INBOX_KEY = Buffer.alloc(32, 7).toString("base64");
 
 function baseEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -60,6 +61,66 @@ test("review Board pipeline selection defaults v1 and validates canary configura
       ),
     /invalid repository/,
   );
+});
+
+test("GitHub webhook inbox is opt-in and requires a versioned dedicated key", () => {
+  assert.equal(loadConfig(baseEnv()).githubWebhookInbox, undefined);
+  assert.throws(
+    () => loadConfig(baseEnv({ JINA_GITHUB_WEBHOOK_INBOX_ENABLED: "yes" })),
+    /must be true or false/,
+  );
+  assert.throws(
+    () => loadConfig(baseEnv({ JINA_GITHUB_WEBHOOK_INBOX_ENABLED: "true" })),
+    /GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY/,
+  );
+  assert.throws(
+    () => loadConfig(baseEnv({
+      JINA_GITHUB_WEBHOOK_INBOX_ENABLED: "true",
+      GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY: WEBHOOK_INBOX_KEY,
+      GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION: "latest",
+    })),
+    /numeric Secret Manager version/,
+  );
+
+  const inbox = loadConfig(baseEnv({
+    JINA_GITHUB_WEBHOOK_INBOX_ENABLED: "true",
+    GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY: WEBHOOK_INBOX_KEY,
+    GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION: "17",
+  })).githubWebhookInbox;
+  assert.equal(inbox?.encryptionKeyVersion, "17");
+  assert.equal(inbox?.encryptionKey.equals(Buffer.alloc(32, 7)), true);
+  assert.equal(inbox?.leaseMs, 120_000);
+  assert.equal(inbox?.maxBodyBytes, 2 * 1024 * 1024);
+});
+
+test("GitHub legacy forwarding accepts only an exact tagged Cloud Run webhook URL", () => {
+  const enabled = {
+    JINA_GITHUB_WEBHOOK_INBOX_ENABLED: "true",
+    GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY: WEBHOOK_INBOX_KEY,
+    GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION: "9",
+    API_BASE_URL: "https://api.usejina.com",
+  };
+  for (const legacyForwardUrl of [
+    "https://api.usejina.com/webhooks/github",
+    "https://jina-code-review-api-hash-ue.a.run.app/webhooks/github",
+    "https://rollback---jina-code-review-api-hash-ue.a.run.app/other",
+    "http://rollback---jina-code-review-api-hash-ue.a.run.app/webhooks/github",
+  ]) {
+    assert.throws(
+      () => loadConfig(baseEnv({
+        ...enabled,
+        JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL: legacyForwardUrl,
+      })),
+      /tagged Cloud Run|must not target/,
+      legacyForwardUrl,
+    );
+  }
+
+  const url = "https://rollback---jina-code-review-api-hash-ue.a.run.app/webhooks/github";
+  assert.equal(loadConfig(baseEnv({
+    ...enabled,
+    JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL: url,
+  })).githubWebhookInbox?.legacyForwardUrl, url);
 });
 
 test("uses DASHBOARD_URL as the default credentialed dashboard origin", () => {
