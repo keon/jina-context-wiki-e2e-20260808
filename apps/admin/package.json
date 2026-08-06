@@ -11,6 +11,8 @@
     "start": "next start --port 3100"
   },
   "dependencies": {
+    "@jina/theme": "workspace:*",
+    "geist": "^1.7.2",
     "next": "^16.2.11",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

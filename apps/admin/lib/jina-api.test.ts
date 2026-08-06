@@ -99,6 +99,84 @@ test("admin preserves authoritative current-first release order for each ref", a
   );
 });
 
+test("admin skips malformed release rows instead of blanking the releases section", async (context) => {
+  context.mock.method(console, "warn", () => {});
+  context.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      releases: [
+        null,
+        { repository: "acme/repository", ref: "main", createdAt: "2026-01-01T00:00:00.000Z" },
+        {
+          id: "release-usable",
+          repository: "acme/repository",
+          ref: "main",
+          createdAt: "2026-01-01T00:00:00.000Z"
+        }
+      ]
+    })
+  );
+
+  const releases = await listAllReleases();
+  assert.deepEqual(
+    releases.map((release) => release.id),
+    ["release-usable"]
+  );
+  // A row that omitted its state must not be reported as healthy.
+  assert.equal(releases[0]?.completeness, "unknown");
+  assert.equal(releases[0]?.contextStatus, "unknown");
+});
+
+test("admin survives build rows that omit the field the sort dereferences", async (context) => {
+  context.mock.method(console, "warn", () => {});
+  context.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      builds: [
+        { id: "build-no-timestamp", repository: "acme/repository", ref: "main", status: "active", stages: [] },
+        "not-a-build",
+        {
+          id: "build-sortable",
+          repository: "acme/repository",
+          ref: "main",
+          refSequence: 2,
+          status: "active",
+          stages: [{ id: "stage-1", status: "queued" }, null],
+          createdAt: "2026-01-02T00:00:00.000Z",
+          updatedAt: "2026-01-02T01:00:00.000Z"
+        }
+      ]
+    })
+  );
+
+  const builds = await listContextBuilds();
+  assert.deepEqual(
+    builds.map((build) => build.id),
+    ["build-sortable", "build-no-timestamp"]
+  );
+  assert.deepEqual(
+    builds[0]?.stages.map((stage) => stage.id),
+    ["stage-1"]
+  );
+});
+
+test("admin drops checkpoint progress it cannot bind to a build", async (context) => {
+  context.mock.method(console, "warn", () => {});
+  context.mock.method(globalThis, "fetch", async () => Response.json({ stages: [], pages: [] }));
+
+  const progress = await listContextBuildProgress([
+    {
+      id: "build-1",
+      repository: "acme/repository",
+      ref: "main",
+      refSequence: 1,
+      status: "active",
+      stages: [],
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T01:00:00.000Z"
+    }
+  ]);
+  assert.deepEqual(progress, []);
+});
+
 test("admin binds checkpoint progress to the exact build, repository, and ref", async (context) => {
   const requested: string[] = [];
   context.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {

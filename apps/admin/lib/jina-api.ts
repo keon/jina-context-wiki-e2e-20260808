@@ -6,8 +6,10 @@ export interface AdminContextRelease {
   readonly repository: string;
   readonly ref: string;
   readonly commitSha: string;
-  readonly completeness: "complete" | "partial";
-  readonly contextStatus: "available" | "partial" | "unavailable";
+  // "unknown" is reserved for a row the API returned without the field: an
+  // operator console must not report unmeasured state as healthy.
+  readonly completeness: "complete" | "partial" | "unknown";
+  readonly contextStatus: "available" | "partial" | "unavailable" | "unknown";
   readonly createdAt: string;
   readonly publishedAt?: string;
 }
@@ -220,13 +222,300 @@ export function adminApiHeaders(input: {
   return headers;
 }
 
+// Response validation ------------------------------------------------------
+//
+// This page renders every repository in the tenant, so a single malformed row
+// must never take a whole section down: an undefined `updatedAt` inside a sort
+// comparator throws and blanks the section that would have shown the outage.
+// Rows that do not satisfy the fields this app dereferences are skipped and
+// counted, and the count is reported server-side for operators.
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function requiredString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function reportSkipped(count: number, resource: string): void {
+  if (count > 0) console.warn("[admin] skipped %d malformed %s row(s) from the Jina API", count, resource);
+}
+
+/** Keeps only rows this app can render without throwing. */
+function collectValid<Output>(
+  values: readonly unknown[],
+  resource: string,
+  parse: (value: unknown) => Output | undefined
+): Output[] {
+  const output: Output[] = [];
+  let skipped = 0;
+  for (const value of values) {
+    const parsed = parse(value);
+    if (parsed === undefined) skipped += 1;
+    else output.push(parsed);
+  }
+  reportSkipped(skipped, resource);
+  return output;
+}
+
+function parseCompleteness(value: unknown): AdminContextRelease["completeness"] {
+  if (value === "complete") return "complete";
+  if (value === "partial") return "partial";
+  return "unknown";
+}
+
+function parseContextStatus(value: unknown): AdminContextRelease["contextStatus"] {
+  if (value === "available") return "available";
+  if (value === "partial") return "partial";
+  if (value === "unavailable") return "unavailable";
+  return "unknown";
+}
+
+function parseRelease(value: unknown): AdminContextRelease | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = requiredString(value.id);
+  const repository = requiredString(value.repository);
+  const ref = requiredString(value.ref);
+  const createdAt = requiredString(value.createdAt);
+  if (!id || !repository || !ref || !createdAt) return undefined;
+  const publishedAt = requiredString(value.publishedAt);
+  return {
+    id,
+    repository,
+    ref,
+    commitSha: optionalString(value.commitSha) ?? "",
+    completeness: parseCompleteness(value.completeness),
+    contextStatus: parseContextStatus(value.contextStatus),
+    createdAt,
+    ...(publishedAt ? { publishedAt } : {})
+  };
+}
+
+type ParsedStage = AdminContextBuild["stages"][number];
+
+function parseStage(value: unknown): ParsedStage | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = requiredString(value.id);
+  const status = requiredString(value.status);
+  if (!id || !status) return undefined;
+  const phaseCheckpoints = Array.isArray(value.phaseCheckpoints)
+    ? value.phaseCheckpoints.flatMap((checkpoint) => {
+        if (!isRecord(checkpoint)) return [];
+        const phase = requiredString(checkpoint.phase);
+        const recordedAt = requiredString(checkpoint.recordedAt);
+        return phase && recordedAt ? [{ phase, attempt: finiteNumber(checkpoint.attempt, 1), recordedAt }] : [];
+      })
+    : undefined;
+  return {
+    id,
+    type: optionalString(value.type) ?? "stage",
+    title: optionalString(value.title) ?? id,
+    status,
+    attempt: finiteNumber(value.attempt, 1),
+    ...definedOnly({
+      failureCode: optionalString(value.failureCode),
+      failureReason: optionalString(value.failureReason),
+      startedAt: optionalString(value.startedAt),
+      modelInputTokens: optionalNumber(value.modelInputTokens),
+      modelCachedInputTokens: optionalNumber(value.modelCachedInputTokens),
+      modelOutputTokens: optionalNumber(value.modelOutputTokens),
+      modelTotalTokens: optionalNumber(value.modelTotalTokens),
+      lastRetryAt: optionalString(value.lastRetryAt),
+      lastRetryFailureCode: optionalString(value.lastRetryFailureCode),
+      lastRetryFailureReason: optionalString(value.lastRetryFailureReason)
+    }),
+    ...(phaseCheckpoints ? { phaseCheckpoints } : {}),
+    // Stage rows are rendered with `formatTimestamp`, which tolerates a
+    // non-ISO string but not a missing one.
+    updatedAt: optionalString(value.updatedAt) ?? ""
+  };
+}
+
+/** Drops absent keys so the result satisfies `exactOptionalPropertyTypes`. */
+function definedOnly<T extends Record<string, unknown>>(input: T): { [K in keyof T]?: Exclude<T[K], undefined> } {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)) as {
+    [K in keyof T]?: Exclude<T[K], undefined>;
+  };
+}
+
+function parseStages(value: unknown): ParsedStage[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((stage) => {
+    const parsed = parseStage(stage);
+    return parsed ? [parsed] : [];
+  });
+}
+
+function parseFollowup(value: unknown): AdminContextBuild["queuedFollowup"] | undefined {
+  if (!isRecord(value)) return undefined;
+  const repository = requiredString(value.repository);
+  const ref = requiredString(value.ref);
+  if (!repository || !ref) return undefined;
+  const commitSha = requiredString(value.commitSha);
+  return {
+    repository,
+    ref,
+    ...(commitSha ? { commitSha } : {}),
+    trigger: optionalString(value.trigger) ?? "unknown",
+    requestedAt: optionalString(value.requestedAt) ?? "",
+    reason: optionalString(value.reason) ?? ""
+  };
+}
+
+function parseBuild(value: unknown): AdminContextBuild | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = requiredString(value.id);
+  const repository = requiredString(value.repository);
+  const ref = requiredString(value.ref);
+  if (!id || !repository || !ref) return undefined;
+  const followup = parseFollowup(value.queuedFollowup);
+  return {
+    id,
+    repository,
+    ref,
+    refSequence: finiteNumber(value.refSequence, 0),
+    status: parseBuildStatus(value.status),
+    stages: parseStages(value.stages),
+    ...definedOnly({
+      commitSha: optionalString(value.commitSha),
+      trigger: optionalString(value.trigger),
+      derivationBudgetSeconds: optionalNumber(value.derivationBudgetSeconds),
+      derivationDeadlineAt: optionalString(value.derivationDeadlineAt),
+      consumedExecutionSeconds: optionalNumber(value.consumedExecutionSeconds),
+      remainingExecutionSeconds: optionalNumber(value.remainingExecutionSeconds),
+      derivationTokenBudget: optionalNumber(value.derivationTokenBudget),
+      consumedModelTokens: optionalNumber(value.consumedModelTokens),
+      activeModelReservedTokens: optionalNumber(value.activeModelReservedTokens),
+      remainingModelTokens: optionalNumber(value.remainingModelTokens),
+      queuedFollowupCount: optionalNumber(value.queuedFollowupCount),
+      failureCode: optionalString(value.failureCode),
+      failureReason: optionalString(value.failureReason)
+    }),
+    ...(followup ? { queuedFollowup: followup } : {}),
+    createdAt: optionalString(value.createdAt) ?? "",
+    // Sorted on below; an absent value must not reach `localeCompare`.
+    updatedAt: optionalString(value.updatedAt) ?? ""
+  };
+}
+
+function parseCitations(value: unknown): AdminContextDocument["citations"] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((citation) => {
+    if (!isRecord(citation)) return [];
+    const anchor = isRecord(citation.anchor) ? citation.anchor : {};
+    return [
+      {
+        claim: optionalString(citation.claim) ?? "",
+        ...definedOnly({
+          citationId: optionalString(citation.citationId),
+          claimSpan: optionalString(citation.claimSpan)
+        }),
+        anchor: {
+          sourceType: optionalString(anchor.sourceType) ?? "unknown",
+          sourceId: optionalString(anchor.sourceId) ?? "",
+          ...definedOnly({
+            pathOrUrl: optionalString(anchor.pathOrUrl),
+            startLine: optionalNumber(anchor.startLine),
+            endLine: optionalNumber(anchor.endLine)
+          })
+        }
+      }
+    ];
+  });
+}
+
+type CatalogDocument = Omit<AdminContextDocument, "repository" | "releaseId" | "ref" | "commitSha">;
+
+function parseCatalogDocument(value: unknown): CatalogDocument | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = requiredString(value.id);
+  // Sorted on and used as a map key downstream.
+  const logicalId = requiredString(value.logicalId);
+  if (!id || !logicalId) return undefined;
+  const kind = requiredString(value.kind);
+  return {
+    id,
+    logicalId,
+    ...(kind ? { kind } : {}),
+    title: optionalString(value.title) ?? logicalId,
+    summary: optionalString(value.summary) ?? "",
+    citations: parseCitations(value.citations)
+  };
+}
+
+function parseProjectors(value: unknown): AdminContextMetrics["projectors"] {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((projector) => {
+    if (!isRecord(projector)) return [];
+    const name = requiredString(projector.name);
+    if (!name) return [];
+    return [
+      {
+        name,
+        status: optionalString(projector.status) ?? "unknown",
+        checkpoint: optionalString(projector.checkpoint) ?? "unknown",
+        backlog: finiteNumber(projector.backlog, 0),
+        version: optionalString(projector.version) ?? "unknown"
+      }
+    ];
+  });
+}
+
+function parseOutboxDepth(value: unknown): Record<string, number> {
+  if (!isRecord(value)) return {};
+  const depths: Record<string, number> = {};
+  for (const [consumer, depth] of Object.entries(value)) {
+    if (typeof depth === "number" && Number.isFinite(depth)) depths[consumer] = depth;
+  }
+  return depths;
+}
+
+function parseQuotas(value: unknown): AdminContextMetrics["quotas"] {
+  if (!isRecord(value)) return undefined;
+  const active = isRecord(value.active) ? value.active : {};
+  const storage = isRecord(value.storage) ? value.storage : {};
+  const monthlyModel = isRecord(value.monthlyModel) ? value.monthlyModel : {};
+  return {
+    active: {
+      builds: finiteNumber(active.builds, 0),
+      modelTasks: finiteNumber(active.modelTasks, 0)
+    },
+    storage: {
+      committedBytes: finiteNumber(storage.committedBytes, 0),
+      reservedBytes: finiteNumber(storage.reservedBytes, 0),
+      limitBytes: finiteNumber(storage.limitBytes, 0)
+    },
+    monthlyModel: {
+      requests: finiteNumber(monthlyModel.requests, 0),
+      totalTokens: finiteNumber(monthlyModel.totalTokens, 0),
+      requestLimit: finiteNumber(monthlyModel.requestLimit, 0),
+      tokenLimit: finiteNumber(monthlyModel.tokenLimit, 0)
+    }
+  };
+}
+
 export async function listAllReleases(): Promise<readonly AdminContextRelease[]> {
-  const body = (await apiGet("/context/releases")) as { readonly releases?: unknown };
-  if (!Array.isArray(body.releases)) throw new JinaApiError("Jina API response for /context/releases omitted releases");
+  const body = await apiGet("/context/releases");
+  if (!isRecord(body) || !Array.isArray(body.releases)) {
+    throw new JinaApiError("Jina API response for /context/releases omitted releases");
+  }
   // The API places each authoritative current pointer before historical
   // releases. Re-sorting by timestamp would silently select history after an
   // operator rollback to an older certified release.
-  return body.releases as AdminContextRelease[];
+  return collectValid(body.releases, "context release", parseRelease);
 }
 
 export async function listContextDocuments(
@@ -240,45 +529,53 @@ export async function listContextDocuments(
     if (!latestByScope.has(key)) latestByScope.set(key, release);
   }
   const catalogs = await mapInBatches([...latestByScope.values()], 3, async (release) => {
-    const body = (await apiGet(
+    const body = await apiGet(
       `/context/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`
-    )) as { readonly documents?: unknown };
-    if (!Array.isArray(body.documents)) {
+    );
+    if (!isRecord(body) || !Array.isArray(body.documents)) {
       throw new JinaApiError(`Jina API response for context release ${release.id} omitted documents`);
     }
-    return (body.documents as Omit<AdminContextDocument, "repository" | "releaseId" | "ref" | "commitSha">[]).map(
-      (document) => ({
-        ...document,
-        repository: release.repository,
-        releaseId: release.id,
-        ref: release.ref,
-        commitSha: release.commitSha
-      })
-    );
+    return collectValid(body.documents, "context document", parseCatalogDocument).map((document) => ({
+      ...document,
+      repository: release.repository,
+      releaseId: release.id,
+      ref: release.ref,
+      commitSha: release.commitSha
+    }));
   });
   return catalogs.flat().sort((left, right) => left.logicalId.localeCompare(right.logicalId));
 }
 
+/** Builds, most recently updated first. */
 export async function listContextBuilds(): Promise<readonly AdminContextBuild[]> {
-  const body = (await apiGet("/context/builds")) as { readonly builds?: unknown };
-  if (!Array.isArray(body.builds)) throw new JinaApiError("Jina API response for /context/builds omitted builds");
-  return [...(body.builds as AdminContextBuild[])].sort(
+  const body = await apiGet("/context/builds");
+  if (!isRecord(body) || !Array.isArray(body.builds)) {
+    throw new JinaApiError("Jina API response for /context/builds omitted builds");
+  }
+  return collectValid(body.builds, "context build", parseBuild).sort(
     (left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id)
   );
 }
 
+/** Upper bound on the active builds sampled for checkpoint progress. */
+export const CONTEXT_BUILD_PROGRESS_LIMIT = 12;
+
 export async function listContextBuildProgress(
   builds: readonly AdminContextBuild[],
-  limit = 12
+  limit = CONTEXT_BUILD_PROGRESS_LIMIT
 ): Promise<readonly AdminContextBuildProgress[]> {
   // Terminal rows already include their stages and bounded failure reason.
   // Checkpoint progress matters only while a build is changing.
   const selected = builds.filter((build) => build.status === "active").slice(0, Math.max(0, limit));
   const progress = await mapInBatches(selected, 3, async (build) => {
     try {
-      const item = (await apiGet(
-        `/context/builds/${encodeURIComponent(build.id)}/progress`
-      )) as AdminContextBuildProgress;
+      const item = parseBuildProgress(await apiGet(`/context/builds/${encodeURIComponent(build.id)}/progress`));
+      if (!item) {
+        // Unparseable progress cannot be proven to belong to this build, so it
+        // is dropped rather than rendered against the wrong row.
+        reportSkipped(1, "context build progress");
+        return undefined;
+      }
       if (item.buildId !== build.id || item.repository !== build.repository || item.ref !== build.ref) {
         throw new JinaApiError(`Jina API returned mismatched progress for context build ${build.id}`);
       }
@@ -307,6 +604,92 @@ async function mapInBatches<Input, Output>(
   return output;
 }
 
+function parseValidationStatus(value: unknown): "pending" | "valid" | "invalid" {
+  if (value === "valid") return "valid";
+  if (value === "invalid") return "invalid";
+  return "pending";
+}
+
+function parseBuildStatus(value: unknown): AdminContextBuild["status"] {
+  if (value === "active") return "active";
+  if (value === "failed") return "failed";
+  return "completed";
+}
+
+function parseBuildProgress(value: unknown): AdminContextBuildProgress | undefined {
+  if (!isRecord(value)) return undefined;
+  const buildId = requiredString(value.buildId);
+  const repository = requiredString(value.repository);
+  const ref = requiredString(value.ref);
+  if (!buildId || !repository || !ref) return undefined;
+  const followup = parseFollowup(value.queuedFollowup);
+  const pages = Array.isArray(value.pages)
+    ? value.pages.flatMap((page) => {
+        if (!isRecord(page)) return [];
+        const documentPath = requiredString(page.documentPath);
+        if (!documentPath) return [];
+        return [
+          {
+            documentPath,
+            title: optionalString(page.title) ?? documentPath,
+            bytes: finiteNumber(page.bytes, 0),
+            validationStatus: parseValidationStatus(page.validationStatus),
+            diagnostics: Array.isArray(page.diagnostics)
+              ? page.diagnostics.filter((entry): entry is string => typeof entry === "string")
+              : [],
+            checkpointSequence: finiteNumber(page.checkpointSequence, 0),
+            updatedAt: optionalString(page.updatedAt) ?? ""
+          }
+        ];
+      })
+    : [];
+  return {
+    buildId,
+    repository,
+    ref,
+    status: value.status === "active" ? "active" : parseBuildStatus(value.status),
+    stages: parseStages(value.stages),
+    pages,
+    ...definedOnly({
+      derivationBudgetSeconds: optionalNumber(value.derivationBudgetSeconds),
+      derivationDeadlineAt: optionalString(value.derivationDeadlineAt),
+      consumedExecutionSeconds: optionalNumber(value.consumedExecutionSeconds),
+      remainingExecutionSeconds: optionalNumber(value.remainingExecutionSeconds),
+      derivationTokenBudget: optionalNumber(value.derivationTokenBudget),
+      consumedModelTokens: optionalNumber(value.consumedModelTokens),
+      activeModelReservedTokens: optionalNumber(value.activeModelReservedTokens),
+      remainingModelTokens: optionalNumber(value.remainingModelTokens),
+      queuedFollowupCount: optionalNumber(value.queuedFollowupCount),
+      failureCode: optionalString(value.failureCode),
+      failureReason: optionalString(value.failureReason)
+    }),
+    ...(followup ? { queuedFollowup: followup } : {}),
+    updatedAt: optionalString(value.updatedAt) ?? ""
+  };
+}
+
 export async function getContextMetrics(): Promise<AdminContextMetrics> {
-  return (await apiGet("/context/metrics")) as AdminContextMetrics;
+  const body = await apiGet("/context/metrics");
+  if (!isRecord(body)) throw new JinaApiError("Jina API response for /context/metrics was not an object");
+  const projectors = parseProjectors(body.projectors);
+  const quotas = parseQuotas(body.quotas);
+  const query = isRecord(body.query)
+    ? {
+        count: finiteNumber(body.query.count, 0),
+        p95Ms: finiteNumber(body.query.p95Ms, 0),
+        citationFailureCount: finiteNumber(body.query.citationFailureCount, 0),
+        conflictCount: finiteNumber(body.query.conflictCount, 0)
+      }
+    : undefined;
+  return {
+    outboxDepthByConsumer: parseOutboxDepth(body.outboxDepthByConsumer),
+    publishedGenerationCount: finiteNumber(body.publishedGenerationCount, 0),
+    documentCount: finiteNumber(body.documentCount, 0),
+    fragmentCount: finiteNumber(body.fragmentCount, 0),
+    hierarchyNodeCount: finiteNumber(body.hierarchyNodeCount, 0),
+    embeddingCount: finiteNumber(body.embeddingCount, 0),
+    ...(query ? { query } : {}),
+    ...(projectors ? { projectors } : {}),
+    ...(quotas ? { quotas } : {})
+  };
 }
