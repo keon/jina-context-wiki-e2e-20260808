@@ -98,6 +98,7 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingCloudBuild, /JINA_REQUIRE_WORKER_RELEASE_GATE=true/);
   assert.match(stagingDeployment, /jina-staging-worker-release-credential/);
   assert.match(stagingDeployment, /activate-worker-release\.js/);
+  assert.match(stagingDeployment, /JINA_WORKER_ACCEPTS_CLAIMS=\$\{accepts_claims\}/);
   assert.match(stagingDeployment, /JINA_WORKER_RELEASE_ID=\$\{release_id\}/);
   assert.match(
     stagingDeployment,
@@ -110,6 +111,12 @@ test("staging uses one v2 database connection and one migration job", async () =
       stagingDeployment.indexOf('--to-revisions="${api_release_revision}=100"'),
     "the gated API must move only after the credentialed workers"
   );
+  const releaseSwitch = stagingDeployment.indexOf('main_release_mutation_started="true"');
+  const closeClaims = stagingDeployment.indexOf("\n  false\n", releaseSwitch);
+  const moveApi = stagingDeployment.indexOf('--to-revisions="${api_release_revision}=100"');
+  const reopenClaims = stagingDeployment.indexOf("\n  true\n", moveApi);
+  assert.ok(closeClaims >= 0 && closeClaims < moveApi, "claim admission must close before traffic moves");
+  assert.ok(moveApi < reopenClaims, "claim admission must reopen only after API traffic moves");
   assert.match(stagingDeployment, /restore_main_release_control/);
   assert.match(stagingDeployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
   assert.match(stagingDeployment, /TRIGGER_SECRET_KEY=\$\{review_trigger_secret\}:latest/);
@@ -125,10 +132,7 @@ test("staging uses one v2 database connection and one migration job", async () =
     stagingDeployment,
     /gcloud secrets versions describe "\$\{product_internal_token_version\}"[\s\S]+?--secret="\$\{product_internal_token_secret\}"/
   );
-  assert.doesNotMatch(
-    stagingDeployment,
-    /JINA_PRODUCT_INTERNAL_API_TOKEN=\$\{product_internal_token_secret\}:latest/
-  );
+  assert.doesNotMatch(stagingDeployment, /JINA_PRODUCT_INTERNAL_API_TOKEN=\$\{product_internal_token_secret\}:latest/);
   assert.match(stagingDeployment, /github_webhook_inbox_scheduler_job="jina-github-webhook-inbox-staging"/);
   assert.match(stagingDeployment, /--schedule="\* \* \* \* \*"/);
   assert.match(
@@ -177,10 +181,7 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
     stagingCloudBuild,
     /GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION=\$\{_GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION\}/
   );
-  assert.match(
-    stagingCloudBuild,
-    /JINA_PRODUCT_INTERNAL_TOKEN_VERSION=\$\{_JINA_PRODUCT_INTERNAL_TOKEN_VERSION\}/
-  );
+  assert.match(stagingCloudBuild, /JINA_PRODUCT_INTERNAL_TOKEN_VERSION=\$\{_JINA_PRODUCT_INTERNAL_TOKEN_VERSION\}/);
   assert.match(stagingCloudBuild, /_GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION: "1"/);
   assert.match(stagingCloudBuild, /_JINA_PRODUCT_INTERNAL_TOKEN_VERSION: "4"/);
   assert.match(stagingCloudBuild, /org\.opencontainers\.image\.revision=\$COMMIT_SHA/);

@@ -14,6 +14,7 @@ const config: PoolConfig = connectionString
     };
 
 const enabled = process.env.JINA_WORKER_RELEASE_ENABLED !== "false";
+const acceptsClaims = enabled ? optionalBoolean(process.env.JINA_WORKER_ACCEPTS_CLAIMS, true) : true;
 const runtimeUser = requiredRoleName(process.env.RUNTIME_DB_USER ?? process.env.CONTEXT_RUNTIME_DB_USER);
 const release = enabled
   ? {
@@ -74,9 +75,9 @@ try {
     if (release) {
       await client.query(
         `insert into jina_runtime.release_control
-           (id,worker_claims_enabled,worker_accepts_claims,worker_release_id,worker_credential_sha256,
+         (id,worker_claims_enabled,worker_accepts_claims,worker_release_id,worker_credential_sha256,
             context_worker_revision,task_worker_revision,updated_at)
-         values (1,true,true,$1,$2,$3,$4,clock_timestamp())
+         values (1,true,$5,$1,$2,$3,$4,clock_timestamp())
          on conflict (id) do update set
            worker_claims_enabled=excluded.worker_claims_enabled,
            worker_accepts_claims=excluded.worker_accepts_claims,
@@ -85,7 +86,7 @@ try {
            context_worker_revision=excluded.context_worker_revision,
            task_worker_revision=excluded.task_worker_revision,
            updated_at=excluded.updated_at`,
-        [release.releaseId, release.credentialSha256, release.contextRevision, release.taskRevision]
+        [release.releaseId, release.credentialSha256, release.contextRevision, release.taskRevision, acceptsClaims]
       );
       await client.query(`grant select,insert,update on jina_runtime.api_state to "${runtimeUser}"`);
     } else {
@@ -114,6 +115,7 @@ try {
   process.stdout.write(
     `${JSON.stringify({
       enabled,
+      ...(enabled ? { acceptsClaims } : {}),
       releaseId: release?.releaseId,
       contextRevision: release?.contextRevision,
       taskRevision: release?.taskRevision
@@ -158,4 +160,12 @@ function requiredRoleName(value: string | undefined): string {
 function requiredEnv(name: string, value = process.env[name]): string {
   if (!value) throw new Error(`${name} is required when DATABASE_URL is not set`);
   return value;
+}
+
+function optionalBoolean(value: string | undefined, defaultValue: boolean): boolean {
+  const normalized = value?.trim();
+  if (!normalized) return defaultValue;
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  throw new Error("JINA_WORKER_ACCEPTS_CLAIMS must be true or false");
 }
