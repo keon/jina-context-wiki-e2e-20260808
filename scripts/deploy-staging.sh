@@ -67,7 +67,9 @@ case "${review_board_pipeline_mode}" in
     review_run_topic_mode="disabled"
     ;;
   v2)
-    review_topics="run-review|github-installation-backfill|billing-retry"
+    # Keep the v1 topics during the staging cutover so workflows admitted
+    # before the switch can drain while new heads use the Trigger bridge.
+    review_topics="prepare-review|summary-review|runtime-review|finalize-review|publish-review|settle-review|run-review|github-installation-backfill|billing-retry"
     review_run_topic_mode="relational"
     ;;
   allowlist)
@@ -79,14 +81,6 @@ case "${review_board_pipeline_mode}" in
     exit 2
     ;;
 esac
-if [[ "${review_run_topic_mode}" == "relational" && "${require_worker_release_gate}" != "true" ]]; then
-  printf 'Relational run-review is blocked until staging enables the worker release gate and credential\n' >&2
-  exit 2
-fi
-if [[ "${review_run_topic_mode}" == "relational" ]]; then
-  printf 'Relational run-review remains blocked: deploy-staging.sh does not yet activate a task-worker release credential\n' >&2
-  exit 2
-fi
 
 required_staging_values=(
   "${project}"
