@@ -344,23 +344,14 @@ function Sidebar({
   return (
     <aside className="sidebar" aria-label="Application sidebar">
       <div className="sidebar__top">
-        {settingsMode ? (
-          <div className="sidebar-settings__heading" data-label="Settings">
-            <SettingsIcon />
-            <span>Settings</span>
-          </div>
-        ) : (
-          <>
-            <div className="sidebar__workspace" aria-hidden={collapsed}>
-              <WorkspaceSwitcher />
-            </div>
-            {collapsed ? (
-              <span className="sidebar__mark" aria-hidden="true">
-                J
-              </span>
-            ) : null}
-          </>
-        )}
+        <div className="sidebar__workspace" aria-hidden={collapsed}>
+          <WorkspaceSwitcher />
+        </div>
+        {collapsed ? (
+          <span className="sidebar__mark" aria-hidden="true">
+            J
+          </span>
+        ) : null}
         <button
           type="button"
           className="sidebar__collapse"
@@ -375,11 +366,7 @@ function Sidebar({
         </button>
       </div>
 
-      {settingsMode ? (
-        <div className="sidebar-settings__workspace">
-          <WorkspaceSwitcher />
-        </div>
-      ) : (
+      {!settingsMode ? (
         <button
           type="button"
           className="nav__item sidebar__search"
@@ -391,7 +378,7 @@ function Sidebar({
           <span className="nav__label">Search</span>
           <kbd className="sidebar__shortcut">⌘ K</kbd>
         </button>
-      )}
+      ) : null}
 
       {settingsMode ? (
         <nav className="nav sidebar__pane sidebar__pane--settings" aria-label="Settings navigation">
