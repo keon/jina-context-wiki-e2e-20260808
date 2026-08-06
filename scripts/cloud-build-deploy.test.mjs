@@ -95,6 +95,7 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--max-instances=10/);
   assert.match(stagingDeployment, /--max-instances=5/);
   assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
+  assert.match(stagingDeployment, /JINA_GRAPH_REQUEST_TIMEOUT_MS=30000/);
   assert.match(stagingCloudBuild, /JINA_REQUIRE_WORKER_RELEASE_GATE=true/);
   assert.match(stagingDeployment, /jina-staging-worker-release-credential/);
   assert.match(stagingDeployment, /activate-worker-release\.js/);
