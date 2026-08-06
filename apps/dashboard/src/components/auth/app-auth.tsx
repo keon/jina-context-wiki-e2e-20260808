@@ -3,15 +3,7 @@
 import { ClerkProvider, SignIn, useClerk, useAuth, useUser } from "@clerk/nextjs";
 import { isClerkAPIResponseError } from "@clerk/nextjs/errors";
 import { themeTokens } from "@jina/theme/tokens";
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode
-} from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 interface DeveloperModeContextValue {
   ready: boolean;
@@ -73,7 +65,7 @@ function DeveloperModeProvider({ children }: { readonly children: ReactNode }) {
         setSaving(false);
       }
     },
-    [user],
+    [user]
   );
 
   const value = useMemo<DeveloperModeContextValue>(
@@ -81,9 +73,9 @@ function DeveloperModeProvider({ children }: { readonly children: ReactNode }) {
       ready: isLoaded,
       enabled: optimisticEnabled ?? persistedEnabled,
       saving,
-      setEnabled,
+      setEnabled
     }),
-    [isLoaded, optimisticEnabled, persistedEnabled, saving, setEnabled],
+    [isLoaded, optimisticEnabled, persistedEnabled, saving, setEnabled]
   );
 
   return <DeveloperModeContext.Provider value={value}>{children}</DeveloperModeContext.Provider>;
@@ -124,8 +116,8 @@ export function AppSignIn() {
           footer: "auth-clerk-footer",
           socialButtonsBlockButton: "auth-clerk-social",
           formFieldInput: "auth-clerk-input",
-          formButtonPrimary: "auth-clerk-primary",
-        },
+          formButtonPrimary: "auth-clerk-primary"
+        }
       }}
     />
   );
@@ -142,7 +134,7 @@ export function useAppAccount() {
     displayName,
     email,
     imageUrl: user?.imageUrl,
-    signOut: () => signOut({ redirectUrl: "/signin" }),
+    signOut: () => signOut({ redirectUrl: "/signin" })
   };
 }
 
