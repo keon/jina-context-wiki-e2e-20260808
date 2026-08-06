@@ -13,6 +13,7 @@ test("the dashboard retains the complete customer route inventory", () => {
     "/issues/[id]",
     "/models",
     "/organization",
+    "/organization/settings",
     "/reviews",
     "/reviews/[reviewRunId]",
     "/reviews/[reviewRunId]/scenarios/[scenarioId]",

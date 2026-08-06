@@ -8,6 +8,7 @@ export const PRODUCT_DASHBOARD_ROUTES = [
   "/issues/[id]",
   "/models",
   "/organization",
+  "/organization/settings",
   "/reviews",
   "/reviews/[reviewRunId]",
   "/reviews/[reviewRunId]/scenarios/[scenarioId]",
