@@ -1,9 +1,10 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { apiUrl, safeHref } from "../lib/api";
-import { Badge } from "../components/ui";
+import { Badge, EmptyState, PanelCount } from "../components/ui";
 import { formatDate } from "../lib/presentation";
 import {
   BILLING_PLANS,
@@ -18,7 +19,9 @@ import {
   MAX_TOPUP_USD,
   type Billing,
 } from "../lib/billing";
-import { useTenant, useTenantFence } from "../providers";
+import { CONFIG_STALE_TIME_MS } from "../lib/query-client";
+import { tenantQueryKey } from "../lib/query-keys";
+import { useTenant, useTenantFence, useTenantQueryScope } from "../providers";
 import { isTenantWritable, type SelectedTenant } from "../lib/tenants";
 
 /** Billing endpoints for the active tenant, or the legacy viewer-scoped routes. */
@@ -31,28 +34,23 @@ function billingUrl(selected: SelectedTenant | null, suffix = ""): string {
 export default function BillingPage() {
   const { selected } = useTenant();
   const isCurrentTenant = useTenantFence();
+  const scope = useTenantQueryScope();
   const isOrg = selected?.type === "Organization";
   const writable = isTenantWritable(selected);
+
+  // Keyed by tenant (each has its own balance), so a switch reads a different
+  // entry rather than blanking this one. A network error / non-OK response maps
+  // to UNAVAILABLE (not "not configured"); the API signals unconfigured with a
+  // 200 body of status:"not_configured", so this never rejects and never retries.
+  const { data: billing, refetch } = useQuery<Billing>({
+    queryKey: tenantQueryKey("billing", scope),
+    queryFn: () => loadBilling(() => fetch(billingUrl(selected), { credentials: "include" })),
+    staleTime: CONFIG_STALE_TIME_MS,
+    retry: false,
+  });
+  const reload = useCallback(() => void refetch(), [refetch]);
+
   // undefined = loading; otherwise a normalized Billing (not_configured on any failure/absence).
-  const [billing, setBilling] = useState<Billing | undefined>(undefined);
-
-  const reload = useCallback(() => {
-    // Re-load whenever the selected tenant changes (each tenant has its own balance).
-    // A network error / non-OK response maps to UNAVAILABLE (not "not configured");
-    // the API signals unconfigured with a 200 body of status:"not_configured".
-    const requestTenantId = selected?.tenantId ?? null;
-    void loadBilling(() => fetch(billingUrl(selected), { credentials: "include", cache: "no-store" })).then(
-      (next) => {
-        if (isCurrentTenant(requestTenantId)) setBilling(next);
-      },
-    );
-  }, [selected, isCurrentTenant]);
-
-  useEffect(() => {
-    setBilling(undefined);
-    reload();
-  }, [reload]);
-
   if (billing === undefined) {
     return (
       <BillingFrame selected={selected}>
@@ -580,12 +578,12 @@ function BillingActivity({ billing }: { billing: Billing }) {
           <h2>Billing activity</h2>
           <p>Recent invoices and account balance changes.</p>
         </div>
-        {rows.length > 0 ? <span className="panel__count">{rows.length}</span> : null}
+        {rows.length > 0 ? <PanelCount>{rows.length}</PanelCount> : null}
       </div>
       {rows.length === 0 ? (
-        <div className="empty empty--compact">
+        <EmptyState compact className="billing-v2__empty">
           No billing activity yet &mdash; Stripe invoices may take up to 24 hours to appear.
-        </div>
+        </EmptyState>
       ) : (
         <div className="activity-list">
           {rows.map((row, index) => {

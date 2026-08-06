@@ -5,17 +5,17 @@ export type ScenarioRisk = "high" | "medium" | "low" | "unknown";
 
 export interface ParsedScenario {
   id: string;
-  sourceId?: string;
+  sourceId?: string | undefined;
   index: number;
   risk: ScenarioRisk;
   title: string;
-  summary?: string;
+  summary?: string | undefined;
   steps: string[];
   expectedOutcomes: string[];
-  expectedResult?: string;
-  context?: string;
+  expectedResult?: string | undefined;
+  context?: string | undefined;
   preconditions: string[];
-  rationale?: string;
+  rationale?: string | undefined;
   surface: string[];
   riskTypes: string[];
   evidenceSources: string[];
@@ -185,13 +185,13 @@ function scenarioFromJson(value: unknown, index: number): ParsedScenario | undef
 
 function scenarioMarkdown(input: {
   title: string;
-  summary?: string;
+  summary?: string | undefined;
   risk: ScenarioRisk;
   relevantPaths: string[];
   preconditions: string[];
   steps: string[];
   expectedOutcome: string[];
-  rationale?: string;
+  rationale?: string | undefined;
 }): string {
   const paths = input.relevantPaths.length > 0 ? input.relevantPaths.join(", ") : "not specified";
   const lines = [`- [ ] [risk: ${input.risk}] ${input.title}${input.summary ? ` - ${input.summary}` : ""}. Relevant paths: ${paths}.`];
@@ -260,8 +260,8 @@ function relevantPathsFromLine(line: string): string[] {
 function scenarioDetails(lines: string[]): {
   preconditions: string[];
   steps: string[];
-  expectedResult?: string;
-  context?: string;
+  expectedResult?: string | undefined;
+  context?: string | undefined;
 } {
   const preconditions: string[] = [];
   const steps: string[] = [];

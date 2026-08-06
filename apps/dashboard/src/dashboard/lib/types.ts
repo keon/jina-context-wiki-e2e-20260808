@@ -1,5 +1,8 @@
 export interface DashboardResponse {
-  generated_at: string;
+  // Newest activity in the payload (max review-run `updated_at` / issue `created_at`), null when the
+  // workspace has no rows yet. The API derives this from the data rather than the clock, which is what
+  // lets an unchanged poll revalidate to a 304 instead of shipping an identical body every 10s.
+  generated_at: string | null;
   bots: BotStatus[];
   review_runs: ReviewRun[];
   issues: ReviewIssue[];
@@ -39,7 +42,7 @@ interface DashboardTeam {
 
 export interface ViewerResponse {
   auth: { mode: "disabled" | "github" | "clerk"; enabled: boolean };
-  github_app?: { install_url?: string; installed?: boolean };
+  github_app?: { install_url?: string; installed?: boolean } | undefined;
   authenticated: boolean;
   user?: {
     /** Legacy GitHub id retained during the rolling identity transition. */
@@ -261,4 +264,4 @@ export interface ScenarioTrailEntry {
   detail?: string;
 }
 
-export interface InstallationResult { action: string; installationId?: string }
+export interface InstallationResult { action: string; installationId?: string | undefined }

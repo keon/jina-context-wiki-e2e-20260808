@@ -7,53 +7,53 @@ type ReviewWorkSource = "static" | "runtime";
 
 export interface ReviewWork {
   changeSummary: ReviewWorkChangeSummary;
-  staticReview?: StaticReviewWork;
-  runtimeReview?: RuntimeReviewWork;
+  staticReview?: StaticReviewWork | undefined;
+  runtimeReview?: RuntimeReviewWork | undefined;
   findings: ReviewWorkFinding[];
   notices: ReviewWorkNotice[];
   hasScenarioHistory: boolean;
 }
 
 interface ReviewWorkChangeSummary {
-  repository?: string;
-  pullRequestNumber?: number;
-  pullRequestTitle?: string;
-  headRef?: string;
-  baseRef?: string;
-  headSha?: string;
-  commit?: string;
+  repository?: string | undefined;
+  pullRequestNumber?: number | undefined;
+  pullRequestTitle?: string | undefined;
+  headRef?: string | undefined;
+  baseRef?: string | undefined;
+  headSha?: string | undefined;
+  commit?: string | undefined;
   changedFiles: string[];
-  diffStat?: string;
-  codegraphContext?: string;
+  diffStat?: string | undefined;
+  codegraphContext?: string | undefined;
 }
 
 interface ReviewWorkNotice {
-  source?: ReviewWorkSource;
+  source?: ReviewWorkSource | undefined;
   status: string;
   tone: Tone;
   title: string;
-  message?: string;
-  recordedAt?: string;
+  message?: string | undefined;
+  recordedAt?: string | undefined;
 }
 
 interface ReviewWorkReview {
   source: ReviewWorkSource;
-  status?: string;
-  summary?: string;
-  commit?: string;
+  status?: string | undefined;
+  summary?: string | undefined;
+  commit?: string | undefined;
   changedFiles: string[];
-  diffStat?: string;
+  diffStat?: string | undefined;
   findingsCount: number;
-  publishableFindingsCount?: number;
-  inlineCommentCount?: number;
-  fileCommentCount?: number;
-  unanchoredFindingsCount?: number;
-  lowConfidenceFindingsHeldBack?: number;
+  publishableFindingsCount?: number | undefined;
+  inlineCommentCount?: number | undefined;
+  fileCommentCount?: number | undefined;
+  unanchoredFindingsCount?: number | undefined;
+  lowConfidenceFindingsHeldBack?: number | undefined;
   detailsAvailable: boolean;
-  publishState?: "published" | "skipped" | "failed";
-  publishMessage?: string;
-  githubReviewUrl?: string;
-  error?: string;
+  publishState?: "published" | "skipped" | "failed" | undefined;
+  publishMessage?: string | undefined;
+  githubReviewUrl?: string | undefined;
+  error?: string | undefined;
 }
 
 type StaticReviewWork = ReviewWorkReview & {
@@ -64,10 +64,10 @@ type StaticReviewWork = ReviewWorkReview & {
 export type RuntimeReviewWork = ReviewWorkReview & {
   source: "runtime";
   publishAcceptedLowConfidence: boolean;
-  intentMarkdown?: string;
-  readinessScore?: number;
-  readinessRationale?: string;
-  finalReviewSummary?: string;
+  intentMarkdown?: string | undefined;
+  readinessScore?: number | undefined;
+  readinessRationale?: string | undefined;
+  finalReviewSummary?: string | undefined;
   areasCount: number;
   tasksCount: number;
   blockedCount: number;
@@ -80,10 +80,10 @@ export type RuntimeReviewWork = ReviewWorkReview & {
 };
 
 interface ReviewWorkArea {
-  id?: string;
+  id?: string | undefined;
   title: string;
-  status?: string;
-  summary?: string;
+  status?: string | undefined;
+  summary?: string | undefined;
   tasks: ReviewWorkTask[];
   findings: ReviewWorkFinding[];
   blocked: ReviewWorkBlocked[];
@@ -91,69 +91,69 @@ interface ReviewWorkArea {
 }
 
 export interface ReviewWorkTask {
-  id?: string;
-  areaId?: string;
-  areaTitle?: string;
+  id?: string | undefined;
+  areaId?: string | undefined;
+  areaTitle?: string | undefined;
   title: string;
-  goal?: string;
-  hypothesis?: string;
-  whyChosen?: string;
-  purpose?: string;
-  method?: string;
+  goal?: string | undefined;
+  hypothesis?: string | undefined;
+  whyChosen?: string | undefined;
+  purpose?: string | undefined;
+  method?: string | undefined;
   actionsTaken: string[];
-  whatWasLearned?: string;
-  verdict?: string;
-  confidence?: string;
+  whatWasLearned?: string | undefined;
+  verdict?: string | undefined;
+  confidence?: string | undefined;
   auditTrail: ReviewWorkAuditEntry[];
   issuesFound: number;
 }
 
 export interface ReviewWorkAuditEntry {
-  type?: string;
+  type?: string | undefined;
   detail: string;
   evidence: string[];
 }
 
 interface ReviewWorkBlocked {
-  areaId?: string;
-  areaTitle?: string;
-  task?: string;
-  reason?: string;
-  fallbackUsed?: string;
+  areaId?: string | undefined;
+  areaTitle?: string | undefined;
+  task?: string | undefined;
+  reason?: string | undefined;
+  fallbackUsed?: string | undefined;
 }
 
 interface ReviewWorkNonIssue {
-  areaId?: string;
-  areaTitle?: string;
-  hypothesis?: string;
-  whyDismissed?: string;
+  areaId?: string | undefined;
+  areaTitle?: string | undefined;
+  hypothesis?: string | undefined;
+  whyDismissed?: string | undefined;
   evidence: string[];
 }
 
 export interface ReviewWorkFinding {
   source: ReviewWorkSource;
-  fingerprint?: string;
+  fingerprint?: string | undefined;
   title: string;
   description: string;
-  risk?: string;
+  risk?: string | undefined;
   severity: string;
-  confidence?: string;
-  likelihood?: string;
-  category?: string;
-  filePath?: string;
-  lineNumber?: number;
-  rootCause?: string;
-  impact?: string;
-  reproductionOrTrace?: string;
+  confidence?: string | undefined;
+  likelihood?: string | undefined;
+  category?: string | undefined;
+  filePath?: string | undefined;
+  lineNumber?: number | undefined;
+  rootCause?: string | undefined;
+  impact?: string | undefined;
+  reproductionOrTrace?: string | undefined;
   /** Execution grounding captured by the investigation agent. */
-  failureScenario?: string;
-  reproductionCommand?: string;
-  observedOutput?: string;
-  suggestedFix?: string;
-  suggestedCodeChange?: string;
+  failureScenario?: string | undefined;
+  reproductionCommand?: string | undefined;
+  observedOutput?: string | undefined;
+  suggestedFix?: string | undefined;
+  suggestedCodeChange?: string | undefined;
   evidence: string[];
   auditTrail: ReviewWorkAuditEntry[];
-  validationMethod?: string;
+  validationMethod?: string | undefined;
   heldBack: boolean;
 }
 
@@ -607,8 +607,8 @@ function reviewNotices(
 
 function publishInfo(event: ReviewEvent | undefined): {
   state?: ReviewWorkReview["publishState"];
-  message?: string;
-  githubReviewUrl?: string;
+  message?: string | undefined;
+  githubReviewUrl?: string | undefined;
 } {
   if (!event) {
     return {};

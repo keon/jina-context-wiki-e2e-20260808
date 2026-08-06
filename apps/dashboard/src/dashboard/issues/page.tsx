@@ -6,23 +6,32 @@ import { formatRelative } from "../lib/presentation";
 import { issueHref, issueLocation, issueTitle, severityTone } from "../lib/issues";
 import type { ReviewIssue } from "../lib/types";
 
+const NO_ISSUES: readonly ReviewIssue[] = [];
+
 export default function IssuesPage() {
-  const { data } = useDashboard();
-  const issues = data?.issues ?? [];
+  const { data, loading, error } = useDashboard();
+  const issues = data?.issues ?? NO_ISSUES;
 
   return (
     <>
       <h1 className="sr-only">Issues</h1>
       <Toolbar />
-      <Panel title="Issues" count={issues.length}>
-        {issues.length === 0 ? (
-          <EmptyState>No issues recorded from final reviews yet.</EmptyState>
-        ) : (
+      <Panel title="Issues" count={data ? issues.length : undefined}>
+        {/* A failed refresh keeps the last good feed visible, so surface the error
+            alongside it rather than replacing the list. */}
+        {error && issues.length > 0 ? <div className="notice notice--bad">{error}</div> : null}
+        {issues.length > 0 ? (
           <List>
             {issues.map((issue) => (
               <IssueRow key={issue.id} issue={issue} />
             ))}
           </List>
+        ) : error ? (
+          <div className="notice notice--bad">Issues could not be loaded. {error}</div>
+        ) : loading || !data ? (
+          <div className="notice">Loading issues...</div>
+        ) : (
+          <EmptyState>No issues recorded from final reviews yet.</EmptyState>
         )}
       </Panel>
     </>

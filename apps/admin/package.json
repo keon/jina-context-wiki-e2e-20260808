@@ -5,19 +5,26 @@
   "scripts": {
     "build": "next build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"lib/*.test.ts\"",
+    "test": "npm run test:unit && npm run test:components",
+    "test:unit": "node --test \"lib/*.test.ts\"",
+    "test:components": "TSX_TSCONFIG_PATH=tsconfig.test.json node --test --import tsx --import ./testing/setup.ts \"app/**/*.test.tsx\"",
     "lint": "eslint . --max-warnings 0",
     "dev": "next dev --port 3100",
     "start": "next start --port 3100"
   },
   "dependencies": {
+    "@jina/theme": "workspace:*",
+    "@jina/ui": "workspace:*",
+    "geist": "^1.7.2",
     "next": "~16.2.12",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.11.1",
     "@types/node": "^26.1.2",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4"
+    "@types/react-dom": "^19.2.4",
+    "tsx": "^4.23.5"
   }
 }

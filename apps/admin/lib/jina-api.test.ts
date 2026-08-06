@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   adminApiHeaders,
+  getContextMetrics,
   JinaApiError,
   listAllReleases,
   listContextBuildProgress,
   listContextBuilds,
   listContextDocuments
 } from "./jina-api.ts";
+import { statusTone } from "./status-tone.ts";
 
 test("admin API requests bind the configured principal and tenant", () => {
   assert.deepEqual(
@@ -97,6 +99,84 @@ test("admin preserves authoritative current-first release order for each ref", a
     requested.some((url) => url.includes("releaseId=release-newer")),
     false
   );
+});
+
+test("admin skips malformed release rows instead of blanking the releases section", async (context) => {
+  context.mock.method(console, "warn", () => {});
+  context.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      releases: [
+        null,
+        { repository: "acme/repository", ref: "main", createdAt: "2026-01-01T00:00:00.000Z" },
+        {
+          id: "release-usable",
+          repository: "acme/repository",
+          ref: "main",
+          createdAt: "2026-01-01T00:00:00.000Z"
+        }
+      ]
+    })
+  );
+
+  const releases = await listAllReleases();
+  assert.deepEqual(
+    releases.map((release) => release.id),
+    ["release-usable"]
+  );
+  // A row that omitted its state must not be reported as healthy.
+  assert.equal(releases[0]?.completeness, "unknown");
+  assert.equal(releases[0]?.contextStatus, "unknown");
+});
+
+test("admin survives build rows that omit the field the sort dereferences", async (context) => {
+  context.mock.method(console, "warn", () => {});
+  context.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      builds: [
+        { id: "build-no-timestamp", repository: "acme/repository", ref: "main", status: "active", stages: [] },
+        "not-a-build",
+        {
+          id: "build-sortable",
+          repository: "acme/repository",
+          ref: "main",
+          refSequence: 2,
+          status: "active",
+          stages: [{ id: "stage-1", status: "queued" }, null],
+          createdAt: "2026-01-02T00:00:00.000Z",
+          updatedAt: "2026-01-02T01:00:00.000Z"
+        }
+      ]
+    })
+  );
+
+  const builds = await listContextBuilds();
+  assert.deepEqual(
+    builds.map((build) => build.id),
+    ["build-sortable", "build-no-timestamp"]
+  );
+  assert.deepEqual(
+    builds[0]?.stages.map((stage) => stage.id),
+    ["stage-1"]
+  );
+});
+
+test("admin drops checkpoint progress it cannot bind to a build", async (context) => {
+  context.mock.method(console, "warn", () => {});
+  context.mock.method(globalThis, "fetch", async () => Response.json({ stages: [], pages: [] }));
+
+  const progress = await listContextBuildProgress([
+    {
+      id: "build-1",
+      repository: "acme/repository",
+      ref: "main",
+      refSequence: 1,
+      status: "active",
+      stages: [],
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T01:00:00.000Z"
+    }
+  ]);
+  assert.deepEqual(progress, []);
 });
 
 test("admin binds checkpoint progress to the exact build, repository, and ref", async (context) => {
@@ -269,4 +349,129 @@ test("admin keeps the context page available when individual progress reads fail
     progress.map((item) => item.buildId),
     ["build-healthy"]
   );
+});
+
+test("admin keeps an unreported metrics counter absent and a measured zero at zero", async (context) => {
+  context.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      // A measured zero and an absent counter must not arrive at the page
+      // looking the same: only one of them says the system is idle.
+      documentCount: 0,
+      outboxDepthByConsumer: { projection: 0 }
+    })
+  );
+
+  const metrics = await getContextMetrics();
+  assert.equal(metrics.documentCount, 0);
+  assert.deepEqual(metrics.outboxDepthByConsumer, { projection: 0 });
+  assert.equal(metrics.fragmentCount, undefined);
+  assert.equal(metrics.hierarchyNodeCount, undefined);
+  assert.equal(metrics.embeddingCount, undefined);
+  assert.equal(metrics.publishedGenerationCount, undefined);
+  // Absent, not present-and-undefined: the key is never written at all.
+  assert.equal("fragmentCount" in metrics, false);
+  assert.equal("query" in metrics, false);
+});
+
+test("admin keeps an unreported outbox map absent rather than reporting an empty backlog", async (context) => {
+  context.mock.method(globalThis, "fetch", async () => Response.json({ documentCount: 4 }));
+
+  const metrics = await getContextMetrics();
+  assert.equal(metrics.outboxDepthByConsumer, undefined);
+});
+
+test("admin keeps unreported query counters absent while preserving measured ones", async (context) => {
+  context.mock.method(globalThis, "fetch", async () => Response.json({ query: { count: 0, p95Ms: 42 } }));
+
+  const metrics = await getContextMetrics();
+  assert.equal(metrics.query?.count, 0);
+  assert.equal(metrics.query?.p95Ms, 42);
+  assert.equal(metrics.query?.citationFailureCount, undefined);
+  assert.equal(metrics.query?.conflictCount, undefined);
+});
+
+test("admin does not report an unrecognised build status as a completed build", async (context) => {
+  context.mock.method(console, "warn", () => {});
+  context.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      builds: [
+        {
+          id: "build-blocked",
+          repository: "acme/repository",
+          ref: "main",
+          status: "blocked",
+          stages: [],
+          updatedAt: "2026-01-02T02:00:00.000Z"
+        },
+        {
+          id: "build-statusless",
+          repository: "acme/repository",
+          ref: "main",
+          stages: [],
+          updatedAt: "2026-01-02T01:00:00.000Z"
+        }
+      ]
+    })
+  );
+
+  const builds = await listContextBuilds();
+  const blocked = builds.find((build) => build.id === "build-blocked");
+  const statusless = builds.find((build) => build.id === "build-statusless");
+  // A status this app has never seen is shown as the API reported it, and is
+  // never coloured as a healthy finished build.
+  assert.equal(blocked?.status, "blocked");
+  assert.equal(statusTone("blocked"), undefined);
+  assert.notEqual(blocked?.status, "completed");
+  // Nothing was reported, so nothing is claimed.
+  assert.equal(statusless?.status, undefined);
+  assert.equal(statusless && "status" in statusless, false);
+});
+
+test("admin keeps a projector backlog absent when the row reported none", async (context) => {
+  context.mock.method(console, "warn", () => {});
+  context.mock.method(globalThis, "fetch", async () =>
+    Response.json({
+      projectors: [
+        { name: "fragments", status: "healthy", checkpoint: "generation-1", version: "3" },
+        { name: "hierarchy", status: "healthy", checkpoint: "generation-1", backlog: 0, version: "3" },
+        { name: "", status: "healthy", backlog: 7 },
+        null
+      ]
+    })
+  );
+
+  const metrics = await getContextMetrics();
+  // An unmeasured backlog must not sit beside a healthy status as a zero.
+  assert.equal(metrics.projectors?.[0]?.backlog, undefined);
+  assert.equal(metrics.projectors?.[0] && "backlog" in metrics.projectors[0], false);
+  assert.equal(metrics.projectors?.[1]?.backlog, 0);
+  // Rows that are malformed as rows are still skipped.
+  assert.deepEqual(
+    metrics.projectors?.map((projector) => projector.name),
+    ["fragments", "hierarchy"]
+  );
+});
+
+test("admin does not fabricate zero active usage from partial quota telemetry", async (context) => {
+  context.mock.method(globalThis, "fetch", async () =>
+    Response.json({ quotas: { active: { builds: 0 }, monthlyModel: { requests: 12 } } })
+  );
+
+  const metrics = await getContextMetrics();
+  assert.equal(metrics.quotas?.active?.builds, 0);
+  // Omitted counters and omitted quota objects both stay absent, so capacity
+  // pressure cannot hide behind a reading that looks idle.
+  assert.equal(metrics.quotas?.active?.modelTasks, undefined);
+  assert.equal(metrics.quotas?.storage, undefined);
+  assert.equal(metrics.quotas && "storage" in metrics.quotas, false);
+  assert.equal(metrics.quotas?.monthlyModel?.requests, 12);
+  assert.equal(metrics.quotas?.monthlyModel?.tokenLimit, undefined);
+});
+
+test("admin reports quotas the API omitted entirely as unavailable", async (context) => {
+  context.mock.method(globalThis, "fetch", async () => Response.json({ documentCount: 2 }));
+
+  const metrics = await getContextMetrics();
+  assert.equal(metrics.quotas, undefined);
+  assert.equal(metrics.projectors, undefined);
 });

@@ -19,7 +19,14 @@ export function connectedLabel(formattedDate: string | null): string {
   return formattedDate ? `Codex connected ${formattedDate}` : "Codex connected";
 }
 
-/** Active connect/reconnect flows require an explicit Cancel action; only a completed view dismisses freely. */
+/**
+ * Whether the modal is showing a settled connection rather than a flow in progress.
+ *
+ * The name predates the dialog rebuild: closing is now always available, because
+ * the device flow is persisted per tenant and resumes on reopen — only the
+ * explicit "Cancel sign-in" abandons it. What this still decides is which body
+ * the modal renders, connected or connecting.
+ */
 export function codexModalCanDismiss(configured: boolean, reconnectRequired: boolean): boolean {
   return configured && !reconnectRequired;
 }

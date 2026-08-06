@@ -1,11 +1,22 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, memo } from "react";
 import { confidenceLabel, eventLabel, humanize } from "../../lib/format.ts";
-import type { BoardEvent, BoardTask } from "../../lib/types.ts";
-import { historyDateGroup, historyEventConfidence, historyEventContext } from "./history-events.tsx";
+import type { BoardEvent } from "../../lib/types.ts";
+import { eventClockTime, historyDateGroup, historyEventConfidence, type HistoryEventRow } from "./history-events.tsx";
 
 /** The grouped list of history rows shown in the activity table. */
+
+/**
+ * Upper bound on rendered rows. The activity stream is unbounded, and each row
+ * is a focusable button with several formatted cells; past a few hundred nodes
+ * the keystroke-by-keystroke filter re-render becomes the bottleneck. Anything
+ * beyond this is reported in the footer rather than silently dropped.
+ */
+export const HISTORY_RENDER_LIMIT = 200;
+
+/** What the list should say when it has no rows to show. */
+export type HistoryListStatus = "loading" | "unavailable" | "ready";
 
 function HistoryEventCell({ event }: { readonly event: BoardEvent }) {
   const tone = /failed|canceled/i.test(event.type)
@@ -21,18 +32,16 @@ function HistoryEventCell({ event }: { readonly event: BoardEvent }) {
   );
 }
 
-function HistoryRow({
-  event,
-  tasks,
+const HistoryRow = memo(function HistoryRow({
+  row,
   selected,
   onSelect
 }: {
-  readonly event: BoardEvent;
-  readonly tasks: readonly BoardTask[];
+  readonly row: HistoryEventRow;
   readonly selected: boolean;
   readonly onSelect: (id: string) => void;
 }) {
-  const context = historyEventContext(event, tasks);
+  const { event, context } = row;
   const confidence = historyEventConfidence(event);
   return (
     <button
@@ -42,8 +51,8 @@ function HistoryRow({
       aria-pressed={selected}
       onClick={() => onSelect(event.id)}
     >
-      <time className="run-history-row__time">
-        {new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+      <time className="run-history-row__time" dateTime={event.at}>
+        {eventClockTime(event.at)}
       </time>
       <span className="run-history-row__event">
         <HistoryEventCell event={event} />
@@ -61,36 +70,80 @@ function HistoryRow({
       </span>
     </button>
   );
+});
+
+function HistoryListPlaceholder({
+  status,
+  filtered,
+  onRetry
+}: {
+  readonly status: HistoryListStatus;
+  readonly filtered: boolean;
+  readonly onRetry: () => void;
+}) {
+  if (status === "loading") {
+    return (
+      <div className="run-history-empty" aria-busy="true">
+        <strong>Loading activity…</strong>
+        <p>Reading this workspace&rsquo;s event history.</p>
+      </div>
+    );
+  }
+  if (status === "unavailable") {
+    return (
+      <div className="run-history-empty" role="status">
+        <strong>Activity history is unavailable</strong>
+        <p>The workspace service could not be reached, so no events could be read.</p>
+        <button type="button" className="knowledge-button" onClick={onRetry}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (filtered) {
+    return (
+      <div className="run-history-empty">
+        <strong>No matching events</strong>
+        <p>Try changing or clearing one of the filters above.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="run-history-empty">
+      <strong>No activity recorded yet</strong>
+      <p>Events appear here as tasks are created, queued, and completed.</p>
+    </div>
+  );
 }
 
 export function HistoryList({
-  events,
-  tasks,
+  rows,
+  status,
+  filtered,
   selectedEventId,
-  onSelect
+  onSelect,
+  onRetry
 }: {
-  readonly events: readonly BoardEvent[];
-  readonly tasks: readonly BoardTask[];
+  readonly rows: readonly HistoryEventRow[];
+  readonly status: HistoryListStatus;
+  readonly filtered: boolean;
   readonly selectedEventId: string | null;
   readonly onSelect: (id: string) => void;
+  readonly onRetry: () => void;
 }) {
+  const visible = rows.length > HISTORY_RENDER_LIMIT ? rows.slice(0, HISTORY_RENDER_LIMIT) : rows;
   let previousGroup: string | null = null;
   return (
     <div className="run-history-list" id="history-list">
-      {events.length === 0 ? (
-        <div className="run-history-empty">
-          <strong>No matching events</strong>
-          <p>Try changing or clearing one of the filters above.</p>
-        </div>
-      ) : null}
-      {events.map((event) => {
-        const group = historyDateGroup(event.at);
+      {visible.length === 0 ? <HistoryListPlaceholder status={status} filtered={filtered} onRetry={onRetry} /> : null}
+      {visible.map((row) => {
+        const group = historyDateGroup(row.event.at);
         const heading = group !== previousGroup ? <div className="run-history-group">{group}</div> : null;
         previousGroup = group;
         return (
-          <Fragment key={event.id}>
+          <Fragment key={row.event.id}>
             {heading}
-            <HistoryRow event={event} tasks={tasks} selected={event.id === selectedEventId} onSelect={onSelect} />
+            <HistoryRow row={row} selected={row.event.id === selectedEventId} onSelect={onSelect} />
           </Fragment>
         );
       })}

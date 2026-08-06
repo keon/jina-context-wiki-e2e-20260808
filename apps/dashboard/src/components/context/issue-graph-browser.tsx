@@ -6,6 +6,13 @@ import type { ContextBuildSummary, ContextIssue, IssueGraphResponse } from "../.
 
 type GraphStatus = "loading" | "ready" | "missing" | "error";
 
+/**
+ * Upper bound on rendered issue buttons. A published graph can hold thousands
+ * of commit-derived issues; the remainder is reported in the header count and
+ * the list footer rather than dropped silently.
+ */
+const ISSUE_RENDER_LIMIT = 200;
+
 export function IssueGraphBrowser({
   repository,
   ref,
@@ -14,7 +21,7 @@ export function IssueGraphBrowser({
 }: {
   readonly repository: string;
   readonly ref: string;
-  readonly build?: ContextBuildSummary;
+  readonly build?: ContextBuildSummary | undefined;
   readonly apiBasePath: string;
 }) {
   const [graph, setGraph] = useState<IssueGraphResponse>();
@@ -23,11 +30,13 @@ export function IssueGraphBrowser({
   const [selectedId, setSelectedId] = useState("");
   const [reloadVersion, setReloadVersion] = useState(0);
 
+  // An active build re-runs this effect every poll tick (`build.updatedAt`). It must
+  // therefore refresh the graph *in place*: resetting status/graph/query here would
+  // wipe the reader's filter text and selection every few seconds. The parent keys
+  // this component on the viewed scope, so a genuine repository/ref change remounts
+  // it with fresh state instead.
   useEffect(() => {
     const controller = new AbortController();
-    setStatus("loading");
-    setGraph(undefined);
-    setQuery("");
     void fetch(`${apiBasePath}?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`, {
       credentials: "include",
       headers: { accept: "application/json" },
@@ -70,7 +79,13 @@ export function IssueGraphBrowser({
         title="Causal graph unavailable"
         description="The published graph could not be reached. No data was changed."
         action={
-          <button className="knowledge-button" onClick={() => setReloadVersion((value) => value + 1)}>
+          <button
+            className="knowledge-button"
+            onClick={() => {
+              setStatus("loading");
+              setReloadVersion((value) => value + 1);
+            }}
+          >
             Retry
           </button>
         }
@@ -99,6 +114,7 @@ export function IssueGraphBrowser({
   }
 
   const selected = graph.issues.find((issue) => issue.id === selectedId);
+  const visibleIssues = issues.length > ISSUE_RENDER_LIMIT ? issues.slice(0, ISSUE_RENDER_LIMIT) : issues;
   const causalities = graph.causalities.filter(
     (edge) => edge.subjectIssueId === selectedId || (edge.object.kind === "issue" && edge.object.id === selectedId)
   );
@@ -126,7 +142,9 @@ export function IssueGraphBrowser({
           <header>
             <div>
               <strong>Issues</strong>
-              <span>{issues.length}</span>
+              <span>
+                {issues.length === graph.issues.length ? issues.length : `${issues.length} of ${graph.issues.length}`}
+              </span>
             </div>
             <label className="knowledge-search">
               <SearchIcon />
@@ -139,7 +157,7 @@ export function IssueGraphBrowser({
             </label>
           </header>
           <div className="knowledge-issues__list">
-            {issues.map((issue) => (
+            {visibleIssues.map((issue) => (
               <button
                 type="button"
                 key={issue.id}
@@ -154,6 +172,9 @@ export function IssueGraphBrowser({
               </button>
             ))}
             {issues.length === 0 ? <p>No matching issues.</p> : null}
+            {visibleIssues.length < issues.length ? (
+              <p>{`Showing ${visibleIssues.length} of ${issues.length} issues — filter to reach the rest.`}</p>
+            ) : null}
           </div>
         </aside>
 
@@ -290,7 +311,7 @@ function IssueDetail({
   causalities
 }: {
   readonly repository: string;
-  readonly issue?: ContextIssue;
+  readonly issue?: ContextIssue | undefined;
   readonly graph: IssueGraphResponse;
   readonly causalities: IssueGraphResponse["causalities"];
 }) {

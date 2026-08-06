@@ -6,11 +6,16 @@
     "build": "next build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
-    "test": "node --test --import tsx src/lib/*.test.ts src/server/*.test.ts src/dashboard/**/*.test.ts",
+    "test": "npm run test:unit && npm run test:components",
+    "test:unit": "node --test --import tsx src/lib/*.test.ts src/server/*.test.ts src/dashboard/**/*.test.ts src/testing/*.test.ts",
+    "test:components": "TSX_TSCONFIG_PATH=tsconfig.test.json node --test --import tsx --import ./src/testing/setup.ts \"src/**/*.test.tsx\"",
     "dev": "next dev -p 3000"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.6.5",
+    "@jina/theme": "workspace:*",
+    "@jina/ui": "workspace:*",
+    "@tanstack/react-query": "5.101.4",
     "geist": "^1.7.2",
     "mermaid": "^11.16.1",
     "next": "~16.2.12",
@@ -20,6 +25,9 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.11.1",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^26.1.2",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

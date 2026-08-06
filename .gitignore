@@ -10,3 +10,12 @@ coverage/
 !.env.example
 .claude/
 .vercel/
+
+# Playwright. Traces, failure screenshots and HTML reports are per-run
+# artifacts. `__screenshots__` holds pixel baselines, which are deliberately
+# generated rather than committed — see the note at the top of
+# e2e/playwright.config.ts.
+e2e/.artifacts/
+e2e/__screenshots__/
+playwright-report/
+test-results/

@@ -1,0 +1,6 @@
+{
+  "//": "Not a pnpm workspace — pnpm-workspace.yaml globs only apps/* and packages/*, and nothing here has dependencies of its own. This file exists solely to declare the module system, so `node e2e/support/stub-api.ts` loads as ESM instead of being reparsed by syntax detection.",
+  "name": "@jina/e2e",
+  "private": true,
+  "type": "module"
+}

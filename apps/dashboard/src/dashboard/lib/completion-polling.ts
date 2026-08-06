@@ -12,7 +12,7 @@ export interface CompletionPoll {
 
 /**
  * Poll only after the previous request settles. Hidden tabs pause completely;
- * returning to or focusing the page refreshes immediately without overlap.
+ * returning to the page refreshes immediately without overlap.
  */
 export function startCompletionPolling(
   task: () => Promise<unknown>,
@@ -83,13 +83,14 @@ function browserPollingHost(): CompletionPollingHost {
     setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
     clearTimeout: (timer) => window.clearTimeout(timer),
     visible: () => document.visibilityState !== "hidden",
+    // `visibilitychange` only. Returning to the tab fires `focus` as well, and the in-flight guard
+    // only suppresses the second call while the first is still pending — a fast response let it
+    // through, so every poller on the page issued two requests for one alt-tab. Nothing depends on
+    // `focus` specifically: `visible()` is the gate, and a tab that regains focus while already
+    // visible is still covered by the running interval.
     onAttention: (callback) => {
       document.addEventListener("visibilitychange", callback);
-      window.addEventListener("focus", callback);
-      return () => {
-        document.removeEventListener("visibilitychange", callback);
-        window.removeEventListener("focus", callback);
-      };
+      return () => document.removeEventListener("visibilitychange", callback);
     },
   };
 }

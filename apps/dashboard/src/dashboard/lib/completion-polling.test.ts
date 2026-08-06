@@ -18,7 +18,7 @@ test("completion polling never overlaps and schedules from completion", async ()
 
   assert.equal(calls, 1);
   host.attend();
-  assert.equal(calls, 1, "focus must not start a second request while one is running");
+  assert.equal(calls, 1, "returning to the tab must not start a second request while one is running");
   assert.equal(host.timerCount(), 0, "the interval starts only after completion");
 
   finishFirst?.();
@@ -56,6 +56,50 @@ test("completion polling pauses while hidden and refreshes when visible", async 
   host.attend();
   assert.equal(host.timerCount(), 0);
   polling.stop();
+});
+
+test("the browser host wakes on visibility only, so one alt-tab is one refresh", async () => {
+  const documentListeners = new Map<string, () => void>();
+  const windowListeners = new Map<string, () => void>();
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const previousDocument = globals.document;
+  const previousWindow = globals.window;
+  globals.document = {
+    visibilityState: "visible",
+    addEventListener: (type: string, listener: () => void) => documentListeners.set(type, listener),
+    removeEventListener: (type: string) => documentListeners.delete(type),
+  };
+  globals.window = {
+    setTimeout: () => 1,
+    clearTimeout: () => undefined,
+    addEventListener: (type: string, listener: () => void) => windowListeners.set(type, listener),
+    removeEventListener: (type: string) => windowListeners.delete(type),
+  };
+
+  try {
+    let calls = 0;
+    const polling = startCompletionPolling(async () => {
+      calls += 1;
+    }, 10_000);
+    await settle();
+    assert.equal(calls, 1);
+    assert.deepEqual([...documentListeners.keys()], ["visibilitychange"]);
+    assert.deepEqual(
+      [...windowListeners.keys()],
+      [],
+      "a focus listener doubles every alt-tab: focus and visibilitychange both fire for one return",
+    );
+
+    documentListeners.get("visibilitychange")?.();
+    await settle();
+    assert.equal(calls, 2, "returning to the tab refreshes exactly once");
+
+    polling.stop();
+    assert.equal(documentListeners.size, 0, "stop must unsubscribe");
+  } finally {
+    globals.document = previousDocument;
+    globals.window = previousWindow;
+  }
 });
 
 function fakeHost(initiallyVisible = true): CompletionPollingHost & {

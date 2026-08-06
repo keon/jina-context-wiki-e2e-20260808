@@ -1,0 +1,43 @@
+/* One pill, four tones. Every value is a `@jina/theme` token: no colour
+   literal, no rgb()/rgba(), no px radius, no font-size outside the scale. */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  gap: 6px;
+  padding: 2px var(--space-2);
+  /* The untinted base states a fact rather than a status, so it reads the
+     neutral tone rather than borrowing a surface token to do a tone's job. */
+  border: 1px solid var(--neutral-border);
+  border-radius: var(--radius-pill);
+  background: var(--neutral-bg);
+  color: var(--neutral-fg);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.ok {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+
+.warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+
+.bad {
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+}
+
+.info {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+  color: var(--info-fg);
+}

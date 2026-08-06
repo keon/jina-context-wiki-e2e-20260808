@@ -34,9 +34,8 @@ export function localReviewRun(reviewRunId: string): ReviewRun | undefined {
 }
 
 export function mergeLocalDashboardFixture(data: DashboardResponse | null): DashboardResponse {
-  const generatedAt = new Date().toISOString();
   const base: DashboardResponse = data ?? {
-    generated_at: generatedAt,
+    generated_at: null,
     bots: [],
     review_runs: [],
     issues: [],
@@ -53,7 +52,12 @@ export function mergeLocalDashboardFixture(data: DashboardResponse | null): Dash
   ];
   return {
     ...base,
-    generated_at: base.generated_at || generatedAt,
+    // Same rule as the API: the newest activity in the merged rows, never a clock reading, so the
+    // fixture-backed dashboard is as stable across polls as the real one.
+    generated_at:
+      base.generated_at && base.generated_at > LOCAL_REVIEW_RUN.updated_at
+        ? base.generated_at
+        : LOCAL_REVIEW_RUN.updated_at,
     review_runs: reviewRuns,
     issues,
     projects: [

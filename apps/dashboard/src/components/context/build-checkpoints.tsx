@@ -14,7 +14,7 @@ export function BuildCheckpoints({
 }: {
   readonly build: ContextBuildSummary;
   readonly tenantId: string;
-  readonly release?: ContextRelease;
+  readonly release?: ContextRelease | undefined;
 }) {
   const progress = usePoll<ContextBuildProgressResponse>(contextBuildProgressUrl({ tenantId }, build.id), 5_000);
   const current = progress.data?.buildId === build.id ? progress.data : undefined;

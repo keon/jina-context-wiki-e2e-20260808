@@ -60,10 +60,11 @@ export async function getReviewRun(
   tenantId: string | null,
   signal?: AbortSignal,
 ): Promise<ReviewRun | null> {
+  // The API tags these GETs with an ETag and `cache-control: no-cache`, so the default cache mode
+  // revalidates on every read and an unchanged run answers 304 from the browser cache.
   const response = await fetch(apiUrl(reviewRunPath(reviewRunId, tenantId)), {
-    cache: "no-store",
     credentials: "include",
-    signal,
+    signal: signal ?? null,
   });
   if (response.status === 404) {
     return null;
@@ -83,9 +84,8 @@ export async function getScenarioLineageRuns(
 ): Promise<ReviewRun[]> {
   const path = `${reviewRunPath(reviewRunId, tenantId)}/scenario-lineage/${encodeURIComponent(lineageKey)}`;
   const response = await fetch(apiUrl(path), {
-    cache: "no-store",
     credentials: "include",
-    signal,
+    signal: signal ?? null,
   });
   if (!response.ok) {
     throw new Error(`Scenario lineage returned ${response.status}`);

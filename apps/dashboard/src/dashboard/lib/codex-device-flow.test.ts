@@ -129,7 +129,11 @@ test("assembleAuthJson matches the codex auth.json shape (OPENAI_API_KEY null)",
   // A null account_id is preserved (JWT lacked the claim).
   const noAccount = JSON.parse(
     assembleAuthJson({ idToken: "i", accessToken: "a", refreshToken: "r", accountId: null }),
-  ) as { OPENAI_API_KEY: unknown; tokens: { account_id: unknown }; last_refresh: unknown };
+  ) as {
+    OPENAI_API_KEY: string | null;
+    tokens: { account_id: string | null };
+    last_refresh: string;
+  };
   assert.equal(noAccount.OPENAI_API_KEY, null);
   assert.equal(noAccount.tokens.account_id, null);
   assert.equal(typeof noAccount.last_refresh, "string");
