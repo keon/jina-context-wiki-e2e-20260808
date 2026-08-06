@@ -102,10 +102,10 @@ test("review Board v2 planner creates one high-level review task with exact Trig
     admission.tasks.map((task) => [task.taskType, task.topic, task.status, task.maxAttempts]),
     [["review", "run-review", "queued", 3]],
   );
-  assert.deepEqual(admission.tasks[0]!.metadata?.trigger_payload, triggerPayload);
-  assert.deepEqual(admission.tasks[0]!.metadata?.trigger_options, triggerOptions);
-  assert.equal(admission.tasks[0]!.metadata?.trigger_task_id, "review");
-  assert.match(String(admission.tasks[0]!.metadata?.request_digest), /^[0-9a-f]{64}$/);
+  assert.deepEqual(admission.tasks[0].metadata?.trigger_payload, triggerPayload);
+  assert.deepEqual(admission.tasks[0].metadata?.trigger_options, triggerOptions);
+  assert.equal(admission.tasks[0].metadata?.trigger_task_id, "review");
+  assert.match(String(admission.tasks[0].metadata?.request_digest), /^[0-9a-f]{64}$/);
 });
 
 test("review Board v2 requires the Trigger idempotency key used for ambiguous dispatch replay", () => {
@@ -163,7 +163,7 @@ test("manual v2 Board identity stays comment-stable while Trigger concurrency re
   assert.equal(admission.subjectId, "123:42:issue_comment:9001");
   assert.equal(admission.concurrencyKey, idempotencyKey);
   assert.equal(
-    (admission.tasks[0]!.metadata?.trigger_options as { concurrencyKey?: string }).concurrencyKey,
+    (admission.tasks[0].metadata?.trigger_options as { concurrencyKey?: string }).concurrencyKey,
     triggerOptions.concurrencyKey,
   );
 });

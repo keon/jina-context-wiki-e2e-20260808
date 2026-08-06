@@ -38,7 +38,7 @@ export interface BoardReviewV2AdmissionResult extends BoardAdmissionResult {
   readonly tenantId: string;
 }
 
-export type ReviewBoardPipelineMode = "paused" | "v1" | "v2" | "allowlist";
+type ReviewBoardPipelineMode = "paused" | "v1" | "v2" | "allowlist";
 
 export interface ReviewBoardPipelineSelection {
   readonly mode: ReviewBoardPipelineMode;
@@ -70,7 +70,7 @@ export async function admitConfiguredBoardReview(
     if (pipeline === REVIEW_BOARD_V2_PIPELINE_VERSION) {
       return admitBoardReviewV2WithClient(client, arrival, scope, repository);
     }
-    throw new Error(`review request uses unsupported pipeline ${pipeline}`);
+    throw new Error("review request selected an unsupported pipeline");
   });
 }
 

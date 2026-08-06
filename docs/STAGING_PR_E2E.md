@@ -42,14 +42,23 @@ A non-draft `pull_request.opened`, `pull_request.reopened`,
 `pull_request.ready_for_review`, or allowed `pull_request.synchronize` delivery
 has two consumers in the unified API.
 
-The review workflow must create exactly these durable stages:
+When the fixture repository is selected for the relational review pipeline
+(`JINA_REVIEW_BOARD_PIPELINE_MODE=v2`, or an `allowlist` selection), the review
+workflow must create exactly one durable Board task:
 
-1. `prepare-review`
-2. `summary-review`
-3. `runtime-review`
-4. `finalize-review`
-5. `publish-review`
-6. `settle-review`
+1. `run-review`
+
+The Board worker dispatches that task to the pinned Trigger.dev root task
+`review` and records the returned Trigger run ID in its durable effect receipt.
+The Trigger root owns the original `review-summary` and `review-runtime` child
+runs, prompt, Daytona session, progress comments, publication, and product
+completion calls. Those Trigger children are external execution evidence; they
+must not appear as additional Board tasks. While Trigger is nonterminal, the
+Board task is `waiting_external`; after Trigger reaches `COMPLETED`, it becomes
+`succeeded` only after the worker acknowledges that terminal state to the Board.
+
+The legacy v1 six-stage review graph is historical evidence only. It is not the
+acceptance topology for a repository selected for v2.
 
 The Context workflow must create:
 
@@ -76,15 +85,23 @@ and `publish-causal-graph`.
    inline findings where the fixture is designed to produce them.
 4. Open the published dashboard URL and confirm the review details and findings
    render after authentication.
-5. Query the staging Board and require all six review stages to be `succeeded`.
-   Require each task and workflow to have a 32-character trace ID and each worker
-   attempt to have trace/span IDs.
-6. Query the Context Board for the same delivery and exact head SHA. Require the
+5. Query the staging Board and require a `pr_review` workflow with pipeline
+   version `pr_review.board.v2` and exactly one `run-review` task. Require the
+   task to be `succeeded`, its `trigger.review.dispatch` effect receipt to be
+   `succeeded` with provider `trigger.dev`, and the receipt to contain the
+   Trigger root run ID. Require the task and workflow to have a 32-character
+   trace ID and every worker attempt to have trace/span IDs.
+6. In Trigger.dev, require that same root run ID to identify task `review` and
+   reach `COMPLETED`. Require its `review-summary` and `review-runtime` children
+   to reach terminal success, and confirm the root used the expected deployment
+   environment and preview branch. The product review row's `trigger_run_id`
+   must match the Board effect receipt.
+7. Query the Context Board for the same delivery and exact head SHA. Require the
    aggregate, graph, snapshot, planner, every page, and publication task to reach
    `done`.
-7. Require `current_context_board_releases` to point at the same head SHA and
+8. Require `current_context_board_releases` to point at the same head SHA and
    require a PageIndex attachment plus at least one published document.
-8. If causal graph is in scope, trigger its dedicated staging endpoint and
+9. If causal graph is in scope, trigger its dedicated staging endpoint and
    independently verify its four-task graph and immutable current release.
 
 Do not count a review-only success as end-to-end success. Do not count a prior
@@ -98,7 +115,8 @@ Add one dated record for each release acceptance containing:
 
 - source commit and immutable image tag;
 - fixture repository, PR number, delivery ID, and exact head SHA;
-- review run ID, Board workflow ID, and workflow trace ID;
+- product review run ID, Board workflow/task IDs, workflow trace ID, Trigger
+  root run ID, and Trigger summary/runtime child run IDs;
 - Context build ID, release ID, document count, and PageIndex attachment time;
 - causal build/release IDs when separately exercised;
 - links to the PR and staging dashboard; and
@@ -107,7 +125,10 @@ Add one dated record for each release acceptance containing:
 Keep identifiers and timestamps. Never paste bearer tokens, webhook secrets,
 private keys, database passwords, or full private payloads into the repository.
 
-## 2026-08-04 audit record
+## 2026-08-04 legacy-v1 audit record
+
+This record predates the relational v2 cutover and proves the former six-stage
+Board topology only. It must not be used as evidence for the one-task v2 graph.
 
 Historical fixture: `omxyz/jina-board-staging-e2e-20260804#1` at
 `c99887aa3c852d61f95b7dcd300c8d6a8a8fb9a6`.

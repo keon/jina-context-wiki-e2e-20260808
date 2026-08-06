@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 
-import { configure, runs } from "@trigger.dev/sdk/v3";
 import { canonicalReviewTriggerRequest } from "@jina/shared-kernel";
 
-export const REVIEW_TRIGGER_PIPELINE_VERSION = "pr_review.board.v2";
-export const REVIEW_TRIGGER_TASK_IDENTIFIER = "review";
+const REVIEW_TRIGGER_PIPELINE_VERSION = "pr_review.board.v2";
+const REVIEW_TRIGGER_TASK_IDENTIFIER = "review";
+const REVIEW_TRIGGER_CONTROL_PLANE_API_VERSION = "2025-07-16";
+const REVIEW_TRIGGER_CLIENT_VERSION = "4.4.6";
 export const REVIEW_TRIGGER_EFFECT_TYPE = "trigger.review.dispatch";
 export const REVIEW_TRIGGER_EFFECT_VERSION = 1;
 export const REVIEW_TRIGGER_PROVIDER = "trigger.dev";
@@ -12,10 +13,6 @@ export const REVIEW_TRIGGER_PROVIDER = "trigger.dev";
 const TRIGGER_OPTION_KEYS = new Set(["idempotencyKey", "concurrencyKey", "queue", "tags", "ttl", "machine"]);
 const TRIGGER_QUEUE_KEYS = new Set(["name", "concurrencyLimit"]);
 const TRIGGER_MACHINES = new Set(["micro", "small-1x", "small-2x", "medium-1x", "medium-2x", "large-1x", "large-2x"]);
-
-type SdkRetrievedRun = Awaited<ReturnType<typeof runs.retrieve>>;
-export type TriggerReviewRunStatus = SdkRetrievedRun["status"];
-export type TriggerReviewRunStatusKind = "nonterminal" | "completed" | "failed";
 
 export const TRIGGER_REVIEW_RUN_STATUS_KINDS = {
   PENDING_VERSION: "nonterminal",
@@ -31,7 +28,10 @@ export const TRIGGER_REVIEW_RUN_STATUS_KINDS = {
   SYSTEM_FAILURE: "failed",
   EXPIRED: "failed",
   TIMED_OUT: "failed"
-} as const satisfies Record<TriggerReviewRunStatus, TriggerReviewRunStatusKind>;
+} as const;
+
+export type TriggerReviewRunStatus = keyof typeof TRIGGER_REVIEW_RUN_STATUS_KINDS;
+export type TriggerReviewRunStatusKind = (typeof TRIGGER_REVIEW_RUN_STATUS_KINDS)[TriggerReviewRunStatus];
 
 export interface TriggerReviewEffectReceipt {
   readonly idempotencyKey: string;
@@ -91,7 +91,6 @@ export function createTriggerReviewClient(env: NodeJS.ProcessEnv = process.env):
   const accessToken = requiredEnvironment(env, "TRIGGER_SECRET_KEY");
   const baseURL = (optionalEnvironment(env, "TRIGGER_API_URL") ?? "https://api.trigger.dev").replace(/\/$/, "");
   const previewBranch = optionalEnvironment(env, "TRIGGER_PREVIEW_BRANCH");
-  configure({ accessToken, baseURL });
   return {
     async trigger(taskIdentifier, payload, options) {
       // Keep the original API client's wire contract. SDK 4.4.6 narrows
@@ -108,7 +107,7 @@ export function createTriggerReviewClient(env: NodeJS.ProcessEnv = process.env):
         body: JSON.stringify({ payload, options })
       });
       if (!response.ok) {
-        throw new TriggerDispatchHttpError(response.status, (await response.text()).slice(0, 2_000));
+        throw new TriggerControlPlaneHttpError("dispatch", response.status, (await response.text()).slice(0, 2_000));
       }
       const handle = (await response.json()) as Partial<{ id: unknown }>;
       if (typeof handle.id !== "string" || !handle.id.trim()) {
@@ -117,25 +116,49 @@ export function createTriggerReviewClient(env: NodeJS.ProcessEnv = process.env):
       return { id: handle.id };
     },
     async retrieve(runId) {
-      const run = await runs.retrieve(runId);
-      return {
-        id: run.id,
-        status: run.status,
-        ...(run.output === undefined ? {} : { output: run.output }),
-        ...(run.error === undefined ? {} : { error: run.error })
-      };
+      const response = await fetch(`${baseURL}/api/v3/runs/${encodeURIComponent(runId)}`, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          accept: "application/json",
+          "trigger-version": REVIEW_TRIGGER_CLIENT_VERSION,
+          "x-trigger-api-version": REVIEW_TRIGGER_CONTROL_PLANE_API_VERSION
+        }
+      });
+      if (!response.ok) {
+        throw new TriggerControlPlaneHttpError("retrieve", response.status, (await response.text()).slice(0, 2_000));
+      }
+      return parseTriggerReviewRun(await response.json());
     }
   };
 }
 
-class TriggerDispatchHttpError extends Error {
+class TriggerControlPlaneHttpError extends Error {
   readonly status: number;
 
-  constructor(status: number, body: string) {
-    super(`Trigger.dev returned ${status}${body ? `: ${body}` : ""}`);
-    this.name = "TriggerDispatchHttpError";
+  constructor(operation: "dispatch" | "retrieve", status: number, body: string) {
+    super(`Trigger.dev ${operation} returned ${status}${body ? `: ${body}` : ""}`);
+    this.name = "TriggerControlPlaneHttpError";
     this.status = status;
   }
+}
+
+function parseTriggerReviewRun(value: unknown): TriggerReviewRun {
+  const run = requiredRecord(value, "Trigger run response");
+  const status = requiredString(run.status, "Trigger run response status");
+  if (!isTriggerReviewRunStatus(status)) {
+    throw new Error(`Trigger run response status ${status} is unsupported`);
+  }
+  return {
+    id: requiredString(run.id, "Trigger run response id"),
+    status,
+    ...(run.output === undefined ? {} : { output: run.output }),
+    ...(run.error === undefined ? {} : { error: run.error })
+  };
+}
+
+function isTriggerReviewRunStatus(value: string): value is TriggerReviewRunStatus {
+  return Object.hasOwn(TRIGGER_REVIEW_RUN_STATUS_KINDS, value);
 }
 
 export function parseRelationalReviewTaskMetadata(
@@ -161,7 +184,7 @@ export function parseRelationalReviewTaskMetadata(
       canonicalReviewTriggerRequest({
         taskIdentifier: triggerTaskIdentifier,
         payload: triggerPayload,
-        options: triggerOptions as Readonly<Record<string, unknown>>
+        options: triggerOptions
       }),
       "utf8"
     )

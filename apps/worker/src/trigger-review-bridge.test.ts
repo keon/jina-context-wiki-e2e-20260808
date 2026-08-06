@@ -58,7 +58,7 @@ test("relational review metadata preserves the exact Trigger request and verifie
 });
 
 test("dispatch uses the original Trigger HTTP contract without rewriting options", async () => {
-  const requests: Array<{ url: string; authorization?: string; branch?: string; body: unknown }> = [];
+  const requests: { url: string; authorization?: string; branch?: string; body: unknown }[] = [];
   const server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -91,6 +91,70 @@ test("dispatch uses the original Trigger HTTP contract without rewriting options
         authorization: "Bearer tr_dev_secret",
         branch: "review-cutover",
         body: { payload, options }
+      }
+    ]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("retrieve uses the versioned Trigger run endpoint and validates the control-plane response", async () => {
+  const requests: {
+    url: string;
+    authorization?: string;
+    accept?: string;
+    clientVersion?: string;
+    apiVersion?: string;
+  }[] = [];
+  const server = createServer((request, response) => {
+    requests.push({
+      url: request.url ?? "",
+      ...(request.headers.authorization ? { authorization: request.headers.authorization } : {}),
+      ...(request.headers.accept ? { accept: request.headers.accept } : {}),
+      ...(typeof request.headers["trigger-version"] === "string"
+        ? { clientVersion: request.headers["trigger-version"] }
+        : {}),
+      ...(typeof request.headers["x-trigger-api-version"] === "string"
+        ? { apiVersion: request.headers["x-trigger-api-version"] }
+        : {})
+    });
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        id: "run_exact",
+        status: request.url?.endsWith("/run_unknown") ? "PAUSED" : "COMPLETED",
+        output: { status: "completed", review_run_id: "review-1" }
+      })
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+    const client = createTriggerReviewClient({
+      TRIGGER_SECRET_KEY: "tr_dev_secret",
+      TRIGGER_API_URL: `http://127.0.0.1:${address.port}`
+    });
+    assert.deepEqual(await client.retrieve("run_exact"), {
+      id: "run_exact",
+      status: "COMPLETED",
+      output: { status: "completed", review_run_id: "review-1" }
+    });
+    await assert.rejects(() => client.retrieve("run_unknown"), /status PAUSED is unsupported/);
+    assert.deepEqual(requests, [
+      {
+        url: "/api/v3/runs/run_exact",
+        authorization: "Bearer tr_dev_secret",
+        accept: "application/json",
+        clientVersion: "4.4.6",
+        apiVersion: "2025-07-16"
+      },
+      {
+        url: "/api/v3/runs/run_unknown",
+        authorization: "Bearer tr_dev_secret",
+        accept: "application/json",
+        clientVersion: "4.4.6",
+        apiVersion: "2025-07-16"
       }
     ]);
   } finally {

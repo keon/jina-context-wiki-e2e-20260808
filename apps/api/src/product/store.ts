@@ -157,7 +157,7 @@ export async function prepareReviewRun(input: CreateReviewRunInput): Promise<str
     if (workflowRows.rows.length !== 1) {
       throw new ReviewDispatchProvenanceError("review request resolves to multiple Board workflows");
     }
-    const workflow = workflowRows.rows[0]!;
+    const workflow = workflowRows.rows[0];
     if (workflow.workflow_type !== REVIEW_BOARD_WORKFLOW_TYPE) {
       throw new ReviewDispatchProvenanceError(
         `Board workflow ${workflow.workflow_id} is not a review workflow`,
@@ -184,7 +184,7 @@ export async function prepareReviewRun(input: CreateReviewRunInput): Promise<str
           `v1 Board workflow ${workflow.workflow_id} does not resolve to exactly one Board-owned review run`,
         );
       }
-      const legacy = legacyRows.rows[0]!;
+      const legacy = legacyRows.rows[0];
       if (legacy.trigger_run_id && triggerRunId && legacy.trigger_run_id !== triggerRunId) {
         throw new ReviewDispatchProvenanceError(`review run ${legacy.id} belongs to another Trigger run`);
       }
@@ -620,7 +620,7 @@ export async function reconcileBoardReviewTerminal(input: {
     if (receiptRows.rows.length !== 1) {
       throw new ReviewDispatchProvenanceError("Board review dispatch receipt is missing");
     }
-    const receipt = receiptRows.rows[0]!;
+    const receipt = receiptRows.rows[0];
     if (receipt.status !== "succeeded" || receipt.provider_id !== input.triggerRunId) {
       throw new ReviewDispatchProvenanceError(
         "terminal Trigger run does not own the Board review dispatch receipt",
@@ -674,7 +674,7 @@ export async function reconcileBoardReviewTerminal(input: {
         "terminal reconciliation identities do not resolve to exactly one Board-owned review run",
       );
     }
-    const review = matching[0]!;
+    const review = matching[0];
     if (receipt.authority_record_id !== review.id) {
       throw new ReviewDispatchProvenanceError(
         "Board review dispatch receipt does not name the reconciled authority record",

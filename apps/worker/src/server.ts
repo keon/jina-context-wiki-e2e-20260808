@@ -934,7 +934,7 @@ const topicHandlers = {
 
 async function executeTopic<T extends SupportedWorkerTopic>(work: ClaimedWork<T>): Promise<WorkResult> {
   if (work.topic === "run-review" && reviewRunTopicMode === "relational") {
-    return runRelationalReview(work as ClaimedWork<"run-review">);
+    return runRelationalReview(work);
   }
   // Indexing a mapped function registry loses the key/parameter correlation;
   // the exhaustive `satisfies` check above proves it once for every entry.

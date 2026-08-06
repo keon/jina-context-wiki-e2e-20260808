@@ -17,8 +17,7 @@
     "@jina/observability": "workspace:*",
     "@jina/review-agent": "workspace:*",
     "@jina/shared-kernel": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "@trigger.dev/sdk": "4.4.6"
+    "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.2"

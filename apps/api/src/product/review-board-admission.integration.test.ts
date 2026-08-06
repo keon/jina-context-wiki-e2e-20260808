@@ -164,7 +164,7 @@ test(
          where task.workflow_id=$1`,
         [v2First.workflowId],
       );
-      const v2TaskRow = v2Task.rows[0]!;
+      const v2TaskRow = v2Task.rows[0];
       const effectKey = `trigger-review:${v2First.workflowId}`;
       await control.query(
         `insert into jina_runtime.board_effect_receipts
@@ -275,8 +275,8 @@ test(
           `trigger-review-decoy:${decoyAdmission.workflowId}`,
           decoyAdmission.tenantId,
           decoyAdmission.workflowId,
-          decoyTask.rows[0]!.task_id,
-          decoyTask.rows[0]!.request_digest,
+          decoyTask.rows[0].task_id,
+          decoyTask.rows[0].request_digest,
           "run_v2_decoy_receipt",
         ],
       );
@@ -308,8 +308,8 @@ test(
           prePrepareEffectKey,
           prePrepareAdmission.tenantId,
           prePrepareAdmission.workflowId,
-          prePrepareTask.rows[0]!.task_id,
-          prePrepareTask.rows[0]!.request_digest,
+          prePrepareTask.rows[0].task_id,
+          prePrepareTask.rows[0].request_digest,
           "run_before_prepare",
         ],
       );
@@ -361,8 +361,8 @@ test(
           raceEffectKey,
           raceAdmission.tenantId,
           raceAdmission.workflowId,
-          raceTask.rows[0]!.task_id,
-          raceTask.rows[0]!.request_digest,
+          raceTask.rows[0].task_id,
+          raceTask.rows[0].request_digest,
           "run_prepare_reconcile_race",
         ],
       );

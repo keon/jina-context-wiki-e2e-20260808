@@ -94,7 +94,7 @@ export function loadConfig(env = process.env): AppConfig {
   };
 }
 
-export function parseReviewBoardPipelineSelection(
+function parseReviewBoardPipelineSelection(
   env: NodeJS.ProcessEnv,
 ): ReviewBoardPipelineSelection {
   const rawMode = optionalEnv(env, "JINA_REVIEW_BOARD_PIPELINE_MODE") ?? "v1";
