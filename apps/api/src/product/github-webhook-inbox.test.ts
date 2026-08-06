@@ -119,6 +119,58 @@ test("a handler failure leaves the captured delivery retryable without logging i
   assert.deepEqual(repository.retried, ["error"]);
 });
 
+test("a deterministic handler rejection dead-letters the delivery and unblocks its ordering key", async () => {
+  const repository = new FakeInboxRepository();
+  repository.mode = "capture_and_process";
+  const service = inboxService(repository);
+  const rawBody = Buffer.from(JSON.stringify(payload()));
+  await service.capture(signedHeaders(rawBody), rawBody);
+
+  const result = await service.processOne("delivery-1", async () => {
+    throw new ApiError(422, "unsupported webhook shape");
+  });
+
+  assert.equal(result.disposition, "dead_letter");
+  assert.deepEqual(repository.deadLettered, ["api_422"]);
+  assert.deepEqual(repository.retried, []);
+});
+
+test("an AES-GCM failure remains retryable so a misbound deployment key can be rolled back", async () => {
+  const repository = new FakeInboxRepository();
+  repository.mode = "capture_and_process";
+  const service = inboxService(repository);
+  const rawBody = Buffer.from(JSON.stringify(payload()));
+  await service.capture(signedHeaders(rawBody), rawBody);
+  repository.captured = {
+    ...repository.captured!,
+    payloadCiphertext: Buffer.from("corrupted-ciphertext"),
+  };
+
+  const result = await service.processOne("delivery-1", async () => {
+    throw new Error("must not process corrupt bytes");
+  });
+
+  assert.equal(result.disposition, "retry_wait");
+  assert.deepEqual(repository.retried, ["webhook_inbox_ciphertext_invalid"]);
+  assert.deepEqual(repository.deadLettered, []);
+});
+
+test("unknown processing failures are dead-lettered after a bounded number of attempts", async () => {
+  const repository = new FakeInboxRepository();
+  repository.mode = "capture_and_process";
+  repository.attemptCount = 25;
+  const service = inboxService(repository);
+  const rawBody = Buffer.from(JSON.stringify(payload()));
+  await service.capture(signedHeaders(rawBody), rawBody);
+
+  const result = await service.processOne("delivery-1", async () => {
+    throw new Error("still unavailable");
+  });
+
+  assert.equal(result.disposition, "dead_letter");
+  assert.deepEqual(repository.deadLettered, ["error"]);
+});
+
 test("legacy_forward recomputes HMAC and refuses redirects through fetch policy", async () => {
   const repository = new FakeInboxRepository();
   repository.mode = "legacy_forward";
@@ -199,6 +251,8 @@ class FakeInboxRepository implements GithubWebhookInboxRepository {
   captured?: GithubWebhookInboxCapture;
   completed: (string | undefined)[] = [];
   retried: string[] = [];
+  deadLettered: string[] = [];
+  attemptCount = 1;
 
   async capture(input: GithubWebhookInboxCapture): Promise<GithubWebhookInboxCaptureResult> {
     this.captured = input;
@@ -238,7 +292,7 @@ class FakeInboxRepository implements GithubWebhookInboxRepository {
       payloadSha256: this.captured.payloadSha256,
       payloadCiphertext: this.captured.payloadCiphertext,
       encryptionKeyVersion: this.captured.encryptionKeyVersion,
-      attemptCount: 1,
+      attemptCount: this.attemptCount,
     };
   }
 
@@ -256,6 +310,14 @@ class FakeInboxRepository implements GithubWebhookInboxRepository {
     retryAfterMs: number;
   }): Promise<void> {
     this.retried.push(input.errorCode);
+  }
+
+  async deadLetter(input: {
+    lease: GithubWebhookInboxLease;
+    errorCode: string;
+  }): Promise<void> {
+    this.deadLettered.push(input.errorCode);
+    this.captured = undefined;
   }
 
   async transitionMode(input: {

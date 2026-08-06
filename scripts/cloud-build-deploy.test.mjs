@@ -282,19 +282,30 @@ test("candidate revisions pass full acceptance before production traffic changes
   assert.doesNotMatch(deployment, /route_latest_revision/);
 });
 
-test("mechanical deployment is the nonblocking default and full acceptance remains available", () => {
+test("deferred deployment is the non-routing default and explicit acceptance modes remain available", () => {
   assert.match(cloudBuild, /JINA_DEPLOYMENT_ACCEPTANCE_MODE=\$\{_JINA_DEPLOYMENT_ACCEPTANCE_MODE\}/);
-  assert.match(cloudBuild, /_JINA_DEPLOYMENT_ACCEPTANCE_MODE: mechanical/);
-  assert.match(deployment, /deployment_acceptance_mode="\$\{JINA_DEPLOYMENT_ACCEPTANCE_MODE:-mechanical\}"/);
-  assert.match(deployment, /JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full or mechanical/);
+  assert.match(cloudBuild, /_JINA_DEPLOYMENT_ACCEPTANCE_MODE: deferred/);
+  assert.match(deployment, /deployment_acceptance_mode="\$\{JINA_DEPLOYMENT_ACCEPTANCE_MODE:-deferred\}"/);
+  assert.match(deployment, /JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full, mechanical, or deferred/);
   assert.match(
     deployment,
-    /if \[\[ "\$\{deployment_acceptance_mode\}" == "full" \]\]; then[\s\S]+?gcloud run jobs execute jina-acceptance[\s\S]+?else[\s\S]+?Mechanical deployment mode/
+    /if \[\[ "\$\{deployment_acceptance_mode\}" == "full" \]\]; then[\s\S]+?gcloud run jobs execute jina-acceptance[\s\S]+?else[\s\S]+?deployment mode: candidate readiness passed/
   );
   assert.equal(deployment.match(/gcloud run jobs execute jina-context-daytona-preflight/g)?.length, 1);
   assert.ok(
     deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight") <
       deployment.indexOf('if [[ "${deployment_acceptance_mode}" == "full" ]]')
+  );
+  const deferredGate = deployment.indexOf('if [[ "${deployment_acceptance_mode}" == "deferred" ]]');
+  const rollbackTrap = deployment.indexOf("trap rollback_failed_release EXIT");
+  const firstCloudMutation = deployment.indexOf("gcloud run jobs deploy jina-context-daytona-preflight", deferredGate);
+  assert.ok(deferredGate > 0);
+  assert.ok(rollbackTrap > deferredGate, "mutation-capable cleanup must not be armed during deferred preflight");
+  assert.ok(firstCloudMutation > deferredGate);
+  assert.ok(firstCloudMutation > rollbackTrap);
+  assert.match(
+    deployment.slice(deferredGate, firstCloudMutation),
+    /Deferred deployment complete: immutable images verified; production state and traffic unchanged[\s\S]+?exit 0/
   );
 });
 

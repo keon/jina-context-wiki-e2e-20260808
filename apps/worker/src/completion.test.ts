@@ -135,6 +135,85 @@ test("claim errors other than Context quota backpressure remain health failures"
   assert.equal(metricCounter(health, "worker.claim_backpressure"), 0);
 });
 
+test("malformed relational review claims are fenced terminally instead of leaking their lease", async (context) => {
+  let claimed = false;
+  const completions: Record<string, unknown>[] = [];
+  const mock = createServer(async (request, response) => {
+    const body = await readJson(request);
+    if (request.url === "/internal/worker/claim") {
+      if (claimed) {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      claimed = true;
+      json(response, 200, {
+        message: {
+          id: "outbox_malformed_review_1",
+          topic: "run-review",
+          leaseId: "lease_malformed_review_1",
+          leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          attempt: 1,
+          writeFenceToken: "fence_malformed_review_1"
+        },
+        task: {
+          id: "task_malformed_review_1",
+          metadata: {
+            tenantId: "c0f4ff2b-d896-45c1-87f0-06d872daab39",
+            workflowId: "d599444c-5752-52e5-9502-6179269a53bc",
+            workflowType: "pr_review",
+            pipelineVersion: "pr_review.board.v2"
+          }
+        }
+      });
+      return;
+    }
+    if (request.url === "/internal/worker/complete") {
+      completions.push(body);
+      json(response, 200, { accepted: true, terminal: true });
+      return;
+    }
+    json(response, 404, { error: "not found" });
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+
+  const workerPort = await availablePort();
+  const mockPort = (mock.address() as AddressInfo).port;
+  const worker = spawn(process.execPath, [new URL("./server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: String(workerPort),
+      JINA_API_URL: `http://127.0.0.1:${mockPort}`,
+      INTERNAL_API_TOKEN: "test-token",
+      TRIGGER_SECRET_KEY: "tr_dev_test",
+      JINA_REVIEW_RUN_TOPIC_MODE: "relational",
+      WORKER_TOPICS: "run-review",
+      WORKER_POLL_INTERVAL_MS: "20",
+      WORKER_API_TIMEOUT_MS: "1000"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  context.after(async () => {
+    await terminate(worker);
+    await new Promise<void>((resolve) => mock.close(() => resolve()));
+  });
+
+  const health = await waitForHealth(workerPort, (value) => recordOrUndefined(value.lastWork)?.outcome === "failed");
+  assert.equal(health.ok, true);
+  assert.equal(completions.length, 1);
+  assert.deepEqual(completions[0], {
+    messageId: "outbox_malformed_review_1",
+    taskId: "task_malformed_review_1",
+    leaseId: "lease_malformed_review_1",
+    attempt: 1,
+    writeFenceToken: "fence_malformed_review_1",
+    outcome: "failed",
+    reason: "claimed work violated the worker contract: task schema_version must be a positive safe integer",
+    failureCategory: "worker_execution"
+  });
+  assert.equal(metricCounter(health, "worker.poll_failures"), 0);
+});
+
 test("a failed Context completion releases exactly its own lease", async (context) => {
   const taskIds = ["cs_completion_success", "cs_completion_failure"] as const;
   let claimIndex = 0;

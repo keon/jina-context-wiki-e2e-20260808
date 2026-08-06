@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useAppAccount, useAppAuth, useDeveloperMode } from "../components/auth/app-auth";
+import { dashboardUsesGithubAuth, useAppAccount, useAppAuth, useDeveloperMode } from "../components/auth/app-auth";
 import { useCodexHarness, useDashboard, useTenant } from "./providers";
 import { parseInstallationResult } from "./lib/api";
 import { clerkAuthRedirect } from "./lib/auth-navigation";
@@ -36,38 +36,39 @@ const WORKSPACE_ICONS: Record<WorkspaceNavKey, () => ReactNode> = {
   issues: IssuesIcon,
   "task-board": TaskBoardIcon,
   context: ContextIcon,
-  "causal-graph": GraphIcon,
+  "causal-graph": GraphIcon
 };
 
 const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "Workspace",
-    items: WORKSPACE_NAV_ITEMS.map((item) => ({ ...item, icon: WORKSPACE_ICONS[item.key] })),
+    items: WORKSPACE_NAV_ITEMS.map((item) => ({ ...item, icon: WORKSPACE_ICONS[item.key] }))
   },
   {
     label: "Configure",
     items: [
       { key: "integrations", label: "Integrations", href: "/integrations", icon: IntegrationsIcon },
-      { key: "models", label: "Models", href: "/models", icon: ModelsIcon },
-    ],
-  },
+      { key: "models", label: "Models", href: "/models", icon: ModelsIcon }
+    ]
+  }
 ];
 
 const PRIMARY_NAV_ITEMS: NavItem[] = [...NAV_GROUPS[0]!.items, ...NAV_GROUPS[1]!.items];
 
 const DEVELOPER_NAV_ITEMS: NavItem[] = [
   { key: "history", label: "Run History", href: "/history", icon: HistoryIcon },
-  { key: "tasks", label: "Tasks", href: "/tasks", icon: TasksIcon },
+  { key: "tasks", label: "Tasks", href: "/tasks", icon: TasksIcon }
 ];
 
 const ORGANIZATION_NAV_ITEMS: NavItem[] = [
   { key: "organization-settings", label: "General", href: "/organization/settings", icon: SettingsIcon },
   { key: "organization", label: "Members", href: "/organization", icon: OrganizationIcon },
   { key: "billing", label: "Billing", href: "/billing", icon: BillingIcon },
-  { key: "usage", label: "Usage", href: "/usage", icon: UsageIcon },
+  { key: "usage", label: "Usage", href: "/usage", icon: UsageIcon }
 ];
 
 const DEVELOPER_SECTIONS = new Set<NavKey>(["task-board", "history", "tasks"]);
+const CLERK_ONLY_SECTIONS = new Set<NavKey>(["organization-settings", "organization", "settings"]);
 
 const DOCS_URL = process.env.NEXT_PUBLIC_DOCS_URL ?? "https://docs.usejina.com";
 
@@ -85,7 +86,7 @@ const SECTION_TITLE: Record<NavKey, string> = {
   billing: "Billing",
   history: "Run History",
   tasks: "Tasks",
-  settings: "User Settings",
+  settings: "User Settings"
 };
 
 function sectionForPath(pathname: string | null): NavKey {
@@ -116,7 +117,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const section = sectionForPath(pathname);
   const isSignin = pathname === "/signin";
   const [installationResult] = useState<InstallationResult | null>(() =>
-    typeof window === "undefined" ? null : parseInstallationResult(window.location.search),
+    typeof window === "undefined" ? null : parseInstallationResult(window.location.search)
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -125,6 +126,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const organizationSettingsMode =
     section === "organization-settings" || section === "organization" || section === "billing" || section === "usage";
   const developerRouteBlocked = developerMode.ready && !developerMode.enabled && DEVELOPER_SECTIONS.has(section);
+  const clerkOnlyRouteBlocked = dashboardUsesGithubAuth && CLERK_ONLY_SECTIONS.has(section);
   // Read from the shared harness provider rather than querying /dashboard/integrations here: the
   // Models page needs the same viewer-scoped status, and on /models both reads fired in the same tick.
   const { harness } = useCodexHarness();
@@ -152,7 +154,7 @@ export function Shell({ children }: { children: ReactNode }) {
     const destination = clerkAuthRedirect({
       isLoaded: authReady,
       isSignedIn: signedIn,
-      isSigninPage: isSignin,
+      isSigninPage: isSignin
     });
     if (destination) router.replace(destination);
   }, [appAuthEnabled, authLoading, authReady, signedIn, isSignin, router]);
@@ -162,6 +164,12 @@ export function Shell({ children }: { children: ReactNode }) {
       router.replace("/reviews");
     }
   }, [developerRouteBlocked, router]);
+
+  useEffect(() => {
+    if (clerkOnlyRouteBlocked) {
+      router.replace("/reviews");
+    }
+  }, [clerkOnlyRouteBlocked, router]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem("jina-sidebar-collapsed");
@@ -262,7 +270,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <main className={`main${section === "context" ? " main--context" : ""}`}>
           {installationResult ? <InstallResultNotice result={installationResult} /> : null}
           {codexReconnectRequired ? <CodexReconnectNotice /> : null}
-          {developerRouteBlocked ? (
+          {developerRouteBlocked || clerkOnlyRouteBlocked ? (
             <div className="page-placeholder page-placeholder--compact" role="status">
               Opening Reviews…
             </div>
@@ -316,7 +324,7 @@ function Sidebar({
   onToggle,
   onOpenSearch,
   onNavigate,
-  onMobileClose,
+  onMobileClose
 }: {
   viewer: ViewerResponse | null;
   authLoading: boolean;
@@ -332,7 +340,9 @@ function Sidebar({
   const { selected } = useTenant();
   const developerMode = useDeveloperMode();
   const primaryItems = PRIMARY_NAV_ITEMS.filter((item) => item.key !== "task-board" || developerMode.enabled);
-  const sidebarItems = organizationSettingsMode ? ORGANIZATION_NAV_ITEMS : primaryItems;
+  const sidebarItems = organizationSettingsMode
+    ? ORGANIZATION_NAV_ITEMS.filter((item) => !dashboardUsesGithubAuth || !CLERK_ONLY_SECTIONS.has(item.key))
+    : primaryItems;
 
   return (
     <aside className="sidebar" aria-label="Application sidebar">
@@ -440,7 +450,7 @@ function AccountMenu({
   collapsed,
   commandOpen,
   onExpand,
-  onNavigate,
+  onNavigate
 }: {
   viewer: ViewerResponse | null;
   authLoading: boolean;
@@ -493,32 +503,34 @@ function AccountMenu({
               <small>{workspaceType}</small>
             </span>
           </div>
-          <div className="user-menu__section">
-            <Link
-              className={`user-menu__action${section === "organization-settings" ? " user-menu__action--active" : ""}`}
-              href="/organization/settings"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onNavigate();
-              }}
-            >
-              <SettingsIcon />
-              <span>Org Settings</span>
-            </Link>
-            <Link
-              className={`user-menu__action${section === "settings" ? " user-menu__action--active" : ""}`}
-              href="/settings"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onNavigate();
-              }}
-            >
-              <AccountIcon />
-              <span>User Settings</span>
-            </Link>
-          </div>
+          {!dashboardUsesGithubAuth ? (
+            <div className="user-menu__section">
+              <Link
+                className={`user-menu__action${section === "organization-settings" ? " user-menu__action--active" : ""}`}
+                href="/organization/settings"
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false);
+                  onNavigate();
+                }}
+              >
+                <SettingsIcon />
+                <span>Org Settings</span>
+              </Link>
+              <Link
+                className={`user-menu__action${section === "settings" ? " user-menu__action--active" : ""}`}
+                href="/settings"
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false);
+                  onNavigate();
+                }}
+              >
+                <AccountIcon />
+                <span>User Settings</span>
+              </Link>
+            </div>
+          ) : null}
           {developerMode.enabled ? (
             <div className="user-menu__section">
               {DEVELOPER_NAV_ITEMS.map((item) => {
@@ -653,8 +665,35 @@ function WorkspaceSwitcher() {
 function WorkspaceAvatar({ label, compact = false }: { label: string; compact?: boolean }) {
   const account = useAppAccount();
   const { selected } = useTenant();
+  const fallbackImageUrl = selected?.type === "User" ? account.imageUrl : undefined;
+  if (dashboardUsesGithubAuth) {
+    return <WorkspaceAvatarImage label={label} compact={compact} imageUrl={fallbackImageUrl} />;
+  }
+  return <ClerkWorkspaceAvatar label={label} compact={compact} fallbackImageUrl={fallbackImageUrl} />;
+}
+
+function ClerkWorkspaceAvatar({
+  label,
+  compact,
+  fallbackImageUrl
+}: {
+  label: string;
+  compact: boolean;
+  fallbackImageUrl: string | undefined;
+}) {
   const { organization } = useSelectedClerkOrganization();
-  const imageUrl = organization?.imageUrl ?? (selected?.type === "User" ? account.imageUrl : undefined);
+  return <WorkspaceAvatarImage label={label} compact={compact} imageUrl={organization?.imageUrl ?? fallbackImageUrl} />;
+}
+
+function WorkspaceAvatarImage({
+  label,
+  compact,
+  imageUrl
+}: {
+  label: string;
+  compact: boolean;
+  imageUrl: string | undefined;
+}) {
   const className = compact ? "workspace-switcher__mark" : "user__avatar";
 
   return (
@@ -667,7 +706,7 @@ function WorkspaceAvatar({ label, compact = false }: { label: string; compact?: 
 function CommandPalette({
   section,
   developerMode,
-  onClose,
+  onClose
 }: {
   section: NavKey;
   developerMode: boolean;
@@ -677,11 +716,13 @@ function CommandPalette({
   const items = useMemo(
     () => [
       ...PRIMARY_NAV_ITEMS.filter((item) => item.key !== "task-board" || developerMode),
-      ...ORGANIZATION_NAV_ITEMS,
+      ...ORGANIZATION_NAV_ITEMS.filter((item) => !dashboardUsesGithubAuth || !CLERK_ONLY_SECTIONS.has(item.key)),
       ...(developerMode ? DEVELOPER_NAV_ITEMS : []),
-      { key: "settings" as const, label: "User Settings", href: "/settings", icon: AccountIcon },
+      ...(!dashboardUsesGithubAuth
+        ? [{ key: "settings" as const, label: "User Settings", href: "/settings", icon: AccountIcon }]
+        : [])
     ],
-    [developerMode],
+    [developerMode]
   );
   const visible = items.filter((item) => item.label.toLowerCase().includes(query.trim().toLowerCase()));
 

@@ -1,6 +1,10 @@
 import { clerkMiddleware } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
+import { dashboardProxyUsesClerk } from "./server/auth-mode";
 
-export default clerkMiddleware();
+const dashboardProxy = dashboardProxyUsesClerk() ? clerkMiddleware() : () => NextResponse.next();
+
+export default dashboardProxy;
 
 export const config = {
   matcher: [

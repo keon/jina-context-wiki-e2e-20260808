@@ -5,12 +5,31 @@ import type {
 } from "./types";
 import { normalizeViewerTenants, type ViewerTenant } from "./tenants";
 
+const directApiBaseUrl = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL);
+
 export function apiUrl(path: string, params?: URLSearchParams): string {
-  const url = new URL(`/api${path}`, window.location.origin);
+  const url = directApiBaseUrl
+    ? new URL(`${directApiBaseUrl}${path}`, window.location.origin)
+    : new URL(`/api${path}`, window.location.origin);
   if (params) {
     url.search = params.toString();
   }
   return url.toString();
+}
+
+function normalizeApiBaseUrl(value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return "";
+  const parsed = new URL(trimmed);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("NEXT_PUBLIC_API_BASE_URL must use http(s)");
+  }
+  return parsed.origin;
+}
+
+export function loginUrl(): string {
+  const params = new URLSearchParams({ return_to: window.location.href });
+  return apiUrl("/auth/github/login", params);
 }
 
 /**

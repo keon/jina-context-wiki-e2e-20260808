@@ -56,7 +56,7 @@ acceptance_derivation_budget_seconds="${JINA_ACCEPTANCE_DERIVATION_BUDGET_SECOND
 acceptance_derivation_token_budget="${JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET:-24000000}"
 acceptance_timeout_ms="${JINA_ACCEPTANCE_TIMEOUT_MS:-10800000}"
 acceptance_job_timeout_seconds="${JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS:-11700}"
-deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-mechanical}"
+deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-deferred}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
 context_worker_min_instances="${JINA_CONTEXT_WORKER_MIN_INSTANCES:-20}"
 context_worker_max_instances="${JINA_CONTEXT_WORKER_MAX_INSTANCES:-100}"
@@ -98,8 +98,8 @@ if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
   echo "Deployment must deploy images built by the current coordinated Cloud Build" >&2
   exit 2
 fi
-if [[ "${deployment_acceptance_mode}" != "full" && "${deployment_acceptance_mode}" != "mechanical" ]]; then
-  echo "JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full or mechanical" >&2
+if [[ "${deployment_acceptance_mode}" != "full" && "${deployment_acceptance_mode}" != "mechanical" && "${deployment_acceptance_mode}" != "deferred" ]]; then
+  echo "JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full, mechanical, or deferred" >&2
   exit 2
 fi
 if [[ ! "${image_tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
@@ -1197,8 +1197,6 @@ ROLLFORWARD
   exit "${status}"
 }
 
-trap rollback_failed_release EXIT
-
 # Platform operators create and secure this bucket once. Requiring it before
 # secret checks, image resolution, Daytona execution, or Cloud SQL mutation
 # makes an incomplete bootstrap fail cheaply and clearly. The build identity
@@ -1241,6 +1239,21 @@ api_image="$(resolve_release_image "${api_image}")"
 worker_image="$(resolve_release_image "${worker_image}")"
 dashboard_image="$(resolve_release_image "${dashboard_image}")"
 admin_image="$(resolve_release_image "${admin_image}")"
+
+# The default path is intentionally build-only. It proves every referenced
+# image and deployment prerequisite, then exits before creating jobs, release
+# credentials, revisions, backups, schema changes, worker drains, or traffic
+# mutations. An operator must rerun the exact immutable source revision with an
+# explicit mechanical/full mode to begin the coordinated release protocol.
+if [[ "${deployment_acceptance_mode}" == "deferred" ]]; then
+  echo "Deferred deployment complete: immutable images verified; production state and traffic unchanged"
+  exit 0
+fi
+
+# Cleanup is mutation-capable: it can delete a candidate control job and
+# destroy candidate-only credential versions. Install it only after deferred
+# mode has exited, so even a failed default preflight cannot mutate production.
+trap rollback_failed_release EXIT
 
 # Validate Daytona access, the immutable sandbox source, and remote command
 # execution before touching production. Model credentials are deliberately not
@@ -1689,7 +1702,7 @@ if [[ "${deployment_acceptance_mode}" == "full" ]]; then
     exit "${acceptance_status}"
   fi
 else
-  echo "Mechanical deployment mode: candidate readiness passed; full Context acceptance deferred"
+  echo "${deployment_acceptance_mode^} deployment mode: candidate readiness passed; full Context acceptance deferred"
 fi
 
 # Full acceptance, when selected, used only tagged candidate URLs. Mechanical

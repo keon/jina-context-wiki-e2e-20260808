@@ -50,6 +50,8 @@ steps:
     args:
       - build
       - --file=apps/dashboard/Dockerfile
+      - --build-arg=NEXT_PUBLIC_API_BASE_URL=${_JINA_PUBLIC_API_BASE_URL}
+      - --build-arg=NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE=${_JINA_DASHBOARD_AUTH_MODE}
       - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID
       - .
 
@@ -186,6 +188,10 @@ substitutions:
   _JINA_CONTEXT_DAYTONA_MODEL_DOMAINS: api.openai.com
   _JINA_CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS: ""
   _JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET: jina-v1-internal-api-token
+  # Production keeps the established GitHub session contract. Staging's Vercel
+  # project remains Clerk-backed and does not consume these image build args.
+  _JINA_PUBLIC_API_BASE_URL: https://api.usejina.com
+  _JINA_DASHBOARD_AUTH_MODE: github
   _JINA_WORKER_RELEASE_SECRET: jina-worker-release-credential
   # A measured full Board run takes about 2.5 hours. The acceptance poll gets
   # three hours, with a further fifteen-minute Cloud Run job envelope.
@@ -193,10 +199,11 @@ substitutions:
   _JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET: "24000000"
   _JINA_ACCEPTANCE_TIMEOUT_MS: "10800000"
   _JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS: "11700"
-  # Do not hold the worker generation paused behind a multi-hour Context build.
-  # Production Context acceptance runs after cutover as an ordinary observable
-  # build; an operator may still select "full" for an exceptional blocking gate.
-  _JINA_DEPLOYMENT_ACCEPTANCE_MODE: mechanical
+  # A source push may build and validate candidates, but production traffic is
+  # an explicit operator decision made only after the release evidence is
+  # accepted. Select "mechanical" for readiness-gated routing or "full" for the
+  # complete Context acceptance gate; the safe default never changes traffic.
+  _JINA_DEPLOYMENT_ACCEPTANCE_MODE: deferred
   # Normal releases accept only the current schema. The first Context
   # production transition must override both values explicitly:
   #   _JINA_CONTEXT_RESET_MODE=legacy-once

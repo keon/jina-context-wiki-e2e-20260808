@@ -163,12 +163,31 @@ test(
         undefined,
       );
 
+      await repository.capture(capture("delivery-poison", "f".repeat(64), 202));
+      await repository.capture(capture("delivery-after-poison", "1".repeat(64), 202));
+      const poisonLease = await repository.claim({
+        leaseMs: 120_000,
+        canaryRepositories: new Set(["omxyz/private-repo"]),
+      });
+      assert.equal(poisonLease?.deliveryId, "delivery-poison");
+      await repository.deadLetter({
+        lease: poisonLease,
+        errorCode: "webhook_inbox_ciphertext_invalid",
+      });
+      const successorLease = await repository.claim({
+        leaseMs: 120_000,
+        canaryRepositories: new Set(["omxyz/private-repo"]),
+      });
+      assert.equal(successorLease?.deliveryId, "delivery-after-poison");
+      await repository.complete({ lease: successorLease });
+
       const snapshot = await repository.snapshot();
       assert.equal(snapshot.pending, 1);
       assert.equal(snapshot.leased, 0);
-      assert.equal(snapshot.completed, 3);
+      assert.equal(snapshot.completed, 4);
+      assert.equal(snapshot.deadLetter, 1);
       assert.equal(snapshot.priorGenerationLeases, 0);
-      assert.deepEqual(snapshot.activeKeyVersions, { "7": 1 });
+      assert.deepEqual(snapshot.activeKeyVersions, { "7": 2 });
     } finally {
       await getPool().end().catch(() => undefined);
       restoreEnvironment("JINA_PRODUCT_DATABASE_URL", previousProductUrl);

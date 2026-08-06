@@ -658,7 +658,117 @@ async function claim(): Promise<ClaimedWork<SupportedWorkerTopic> | undefined> {
     throw new Error(`claim failed with ${response.status}: ${detail}`);
   }
   recordApiSuccess();
-  return parseClaimedWork(await response.json());
+  const claimed: unknown = await response.json();
+  try {
+    return parseClaimedWork(claimed);
+  } catch (error) {
+    await failMalformedClaim(claimed, error);
+    return undefined;
+  }
+}
+
+interface MalformedClaimFence {
+  readonly topic: SupportedWorkerTopic;
+  readonly tenantId: string;
+  readonly messageId: string;
+  readonly taskId: string;
+  readonly leaseId: string;
+  readonly attempt: number;
+  readonly writeFenceToken: string;
+}
+
+async function failMalformedClaim(value: unknown, parseError: unknown): Promise<void> {
+  let fence: MalformedClaimFence;
+  try {
+    fence = malformedClaimFence(value);
+  } catch (fenceError) {
+    throw new Error(
+      `claim response violated both the task contract (${errorMessage(parseError)}) and its fencing envelope: ${errorMessage(fenceError)}`,
+      { cause: fenceError }
+    );
+  }
+  const reason = `claimed work violated the worker contract: ${errorMessage(parseError)}`.slice(0, 2_000);
+  const body = {
+    messageId: fence.messageId,
+    taskId: fence.taskId,
+    leaseId: fence.leaseId,
+    attempt: fence.attempt,
+    writeFenceToken: fence.writeFenceToken,
+    outcome: "failed",
+    reason,
+    failureCategory: "worker_execution",
+    ...(workerRuntime ? workerRuntimeRequestBody(workerRuntime) : {}),
+    ...(workerRelease ? workerReleaseRequestBody(workerRelease) : {})
+  };
+  let lastFailure: unknown;
+  for (let sendAttempt = 1; sendAttempt <= completionSendAttempts; sendAttempt += 1) {
+    try {
+      const response = await fetch(`${apiUrl}/internal/worker/complete`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "x-jina-tenant-id": fence.tenantId
+        },
+        body: JSON.stringify(body),
+        signal: requestSignal(workerApiTimeoutMs)
+      });
+      if (response.ok || response.status === 409) {
+        recordApiSuccess();
+        lastWork = {
+          topic: fence.topic,
+          outcome: response.ok ? "failed" : "lease_lost",
+          finishedAt: new Date().toISOString(),
+          ...(response.ok ? { failureCategory: "worker_execution" } : {})
+        };
+        metrics.count("worker.tasks", {
+          topic: fence.topic,
+          outcome: response.ok ? "failed" : "lease_lost",
+          category: "worker_execution"
+        });
+        logger.error("malformed claimed work was terminalized", {
+          event: "worker.claim_contract_failed",
+          workerId,
+          topic: fence.topic,
+          taskId: fence.taskId,
+          attempt: fence.attempt,
+          terminalized: response.ok,
+          reason: reason.slice(0, 500)
+        });
+        return;
+      }
+      lastFailure = new Error(
+        `malformed claim completion failed with ${response.status}: ${await boundedFailureDetail(response)}`
+      );
+    } catch (error) {
+      lastFailure = error;
+    }
+    if (sendAttempt < completionSendAttempts) {
+      await delay(completionRetryDelayMs * 2 ** (sendAttempt - 1));
+    }
+  }
+  throw lastFailure instanceof Error
+    ? lastFailure
+    : new Error("malformed claim completion failed without a diagnostic");
+}
+
+function malformedClaimFence(value: unknown): MalformedClaimFence {
+  if (!isRecord(value) || !isRecord(value.message) || !isRecord(value.task) || !isRecord(value.task.metadata)) {
+    throw new Error("claim response must include message, task, and task metadata");
+  }
+  const topicValue = requiredString(value.message.topic, "claim message topic");
+  if (!SUPPORTED_WORKER_TOPICS.includes(topicValue as SupportedWorkerTopic)) {
+    throw new Error(`unsupported claimed topic ${topicValue}`);
+  }
+  return {
+    topic: topicValue as SupportedWorkerTopic,
+    tenantId: requiredString(value.task.metadata.tenantId, "task tenantId"),
+    messageId: requiredString(value.message.id, "claim message id"),
+    taskId: requiredString(value.task.id, "claim task id"),
+    leaseId: requiredString(value.message.leaseId, "claim lease id"),
+    attempt: requiredPositiveInteger(value.message.attempt, "claim attempt"),
+    writeFenceToken: requiredString(value.message.writeFenceToken, "claim write fence token")
+  };
 }
 
 async function execute(work: ClaimedWork<SupportedWorkerTopic>): Promise<void> {

@@ -96,6 +96,10 @@ export interface GithubWebhookInboxRepository {
     readonly errorCode: string;
     readonly retryAfterMs: number;
   }): Promise<void>;
+  deadLetter(input: {
+    readonly lease: GithubWebhookInboxLease;
+    readonly errorCode: string;
+  }): Promise<void>;
   transitionMode(input: {
     readonly expectedGeneration: number;
     readonly mode: GithubWebhookInboxMode;
@@ -404,6 +408,34 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
         input.lease.leaseId,
         input.lease.leaseGeneration,
         input.retryAfterMs,
+        safeErrorCode(input.errorCode),
+      ],
+    );
+    if (!rows[0]) throw new GithubWebhookInboxLeaseLostError(input.lease.deliveryId);
+  }
+
+  async deadLetter(input: {
+    readonly lease: GithubWebhookInboxLease;
+    readonly errorCode: string;
+  }): Promise<void> {
+    const rows = await query<{ github_delivery_id: string }>(
+      `update github_webhook_inbox
+          set status='dead_letter',
+              completed_at=now(),
+              lease_id=null,
+              lease_expires_at=null,
+              lease_generation=null,
+              last_error_code=$4,
+              last_error_at=now()
+        where github_delivery_id=$1
+          and status='leased'
+          and lease_id=$2
+          and lease_generation=$3
+      returning github_delivery_id`,
+      [
+        input.lease.deliveryId,
+        input.lease.leaseId,
+        input.lease.leaseGeneration,
         safeErrorCode(input.errorCode),
       ],
     );
