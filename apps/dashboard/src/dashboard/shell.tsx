@@ -264,7 +264,7 @@ export function Shell({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        <main className={`main${section === "context" ? " main--context" : ""}`}>
+        <main key={pathname ?? section} className={`main${section === "context" ? " main--context" : ""}`}>
           {installationResult ? <InstallResultNotice result={installationResult} /> : null}
           {codexReconnectRequired ? <CodexReconnectNotice /> : null}
           {developerRouteBlocked ? (
