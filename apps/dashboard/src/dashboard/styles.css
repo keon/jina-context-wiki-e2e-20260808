@@ -4140,6 +4140,16 @@ button.nav__item:hover {
   gap: 7px;
 }
 
+/* Keep the button chrome intact when GitHub setup is unavailable. Applying
+   opacity to the whole control also fades its one-pixel border into the card,
+   which makes the lower edge look clipped on dark surfaces. */
+.integration-row__actions .btn:disabled {
+  border-color: var(--line);
+  background: var(--surface-raised);
+  color: var(--ink-subtle);
+  opacity: 1;
+}
+
 .integration-row__editor {
   display: grid;
   grid-column: 2 / -1;

@@ -456,10 +456,12 @@ export function RepositoryPicker({
     <section className="knowledge-repository-picker" aria-label="Choose a repository">
       <div className="knowledge-repository-grid">
         <Link className="knowledge-repository-card knowledge-repository-card--add" href="/integrations">
-          <PlusIcon />
-          <span>
+          <span className="knowledge-repository-card__icon" aria-hidden="true">
+            <PlusIcon />
+          </span>
+          <span className="knowledge-repository-card__body">
             <strong>Add repo</strong>
-            <small>Connect another GitHub repository</small>
+            <small>Connect a GitHub repository</small>
           </span>
           <ForwardIcon />
         </Link>
@@ -472,8 +474,10 @@ export function RepositoryPicker({
               key={repository.name}
               onClick={() => onSelect(repository.name)}
             >
-              <RepositoryIcon />
-              <span>
+              <span className="knowledge-repository-card__icon" aria-hidden="true">
+                <RepositoryIcon />
+              </span>
+              <span className="knowledge-repository-card__body">
                 <strong>{name}</strong>
                 <small>{owner}</small>
               </span>

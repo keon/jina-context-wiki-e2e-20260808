@@ -1779,31 +1779,34 @@
 .knowledge-repository-grid {
   display: grid;
   width: 100%;
-  max-width: 780px;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 12px;
+  max-width: 860px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 300px));
+  gap: 14px;
 }
 
 .knowledge-repository-card {
   position: relative;
   display: grid;
   min-width: 0;
-  min-height: 108px;
-  grid-template-columns: 18px minmax(0, 1fr);
-  grid-template-rows: auto 1fr;
+  min-height: 132px;
+  grid-template-columns: 34px minmax(0, 1fr);
   align-content: start;
-  gap: 8px;
-  padding: 14px;
+  gap: 12px;
+  padding: 18px;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
+  border-radius: calc(var(--radius) + 3px);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--surface-raised) 72%, transparent), transparent 70%),
+    var(--surface);
   color: var(--ink-muted);
   font: inherit;
   text-align: left;
   cursor: pointer;
+  box-shadow: 0 1px 0 color-mix(in srgb, white 4%, transparent) inset;
   transition:
     border-color 140ms ease,
     background 140ms ease,
+    box-shadow 140ms ease,
     transform 140ms ease;
 }
 
@@ -1811,38 +1814,55 @@
 .knowledge-repository-card:focus-visible {
   border-color: var(--line-strong);
   background: var(--surface-raised);
-  transform: translateY(-1px);
+  box-shadow:
+    0 1px 0 color-mix(in srgb, white 6%, transparent) inset,
+    0 10px 24px color-mix(in srgb, black 18%, transparent);
+  transform: translateY(-2px);
 }
 
 .knowledge-repository-card--add {
-  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+  background:
+    radial-gradient(circle at 88% 14%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 42%),
+    linear-gradient(145deg, color-mix(in srgb, var(--accent) 22%, var(--surface)), var(--surface));
 }
 
 .knowledge-repository-card--add:hover,
 .knowledge-repository-card--add:focus-visible {
-  background: color-mix(in srgb, var(--accent) 21%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--line));
+  background:
+    radial-gradient(circle at 88% 14%, color-mix(in srgb, var(--accent) 30%, transparent), transparent 42%),
+    linear-gradient(145deg, color-mix(in srgb, var(--accent) 28%, var(--surface)), var(--surface));
 }
 
-.knowledge-repository-card > svg:first-child {
-  width: 16px;
-  height: 16px;
-  grid-column: 1;
-  grid-row: 1;
+.knowledge-repository-card__icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-raised) 72%, transparent);
   color: var(--ink-subtle);
 }
 
-.knowledge-repository-card > span {
-  display: grid;
-  min-width: 0;
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  align-content: start;
-  gap: 5px;
+.knowledge-repository-card--add .knowledge-repository-card__icon {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-raised));
+  color: var(--ink-strong);
 }
 
-.knowledge-repository-card--add > span {
-  grid-column: 1 / span 2;
-  grid-row: 2;
+.knowledge-repository-card__icon > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.knowledge-repository-card__body {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 4px;
+  padding-top: 1px;
 }
 
 .knowledge-repository-card strong,
@@ -1865,11 +1885,17 @@
 
 .knowledge-repository-card > svg:last-child {
   position: absolute;
-  right: 12px;
-  bottom: 12px;
-  width: 15px;
-  height: 15px;
+  right: 16px;
+  bottom: 16px;
+  width: 16px;
+  height: 16px;
   color: var(--ink-subtle);
+  transition: transform 140ms ease;
+}
+
+.knowledge-repository-card:hover > svg:last-child,
+.knowledge-repository-card:focus-visible > svg:last-child {
+  transform: translateX(2px);
 }
 
 @keyframes knowledge-step-in {
