@@ -1026,25 +1026,29 @@ button.nav__item:hover {
   gap: var(--space-6);
 }
 
-.review-run-hero {
+.review-run-hero,
+.issue-detail-hero {
   display: grid;
   min-width: 0;
   gap: var(--space-5);
   padding: var(--space-1) 0 var(--space-2);
 }
 
-.review-run-hero__heading {
+.review-run-hero__heading,
+.issue-detail-hero__heading {
   display: grid;
   min-width: 0;
   gap: var(--space-2);
 }
 
-.review-run-hero__kicker {
+.review-run-hero__kicker,
+.issue-detail-hero__kicker {
   color: var(--ink-subtle);
   font-size: var(--text-sm);
 }
 
-.review-run-hero h1 {
+.review-run-hero h1,
+.issue-detail-hero h1 {
   max-width: 920px;
   margin: 0;
   color: var(--ink-strong);
@@ -1055,7 +1059,8 @@ button.nav__item:hover {
   overflow-wrap: anywhere;
 }
 
-.review-run-hero__meta {
+.review-run-hero__meta,
+.issue-detail-hero__meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1083,7 +1088,27 @@ button.nav__item:hover {
   color: var(--ink) !important;
 }
 
-.review-run-actions {
+.issue-detail-hero__location {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 26px;
+  padding: 3px 9px;
+  overflow: hidden;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.issue-detail-hero__location .link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.review-run-actions,
+.issue-detail-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -2878,25 +2903,30 @@ button.nav__item:hover {
     padding: 24px 16px 48px;
   }
 
-  .review-run-hero {
+  .review-run-hero,
+  .issue-detail-hero {
     gap: var(--space-4);
   }
 
-  .review-run-hero h1 {
+  .review-run-hero h1,
+  .issue-detail-hero h1 {
     font-size: 28px;
     overflow-wrap: break-word;
   }
 
-  .review-run-hero__meta > span {
+  .review-run-hero__meta > span,
+  .issue-detail-hero__location {
     min-width: 0;
   }
 
-  .review-run-actions {
+  .review-run-actions,
+  .issue-detail-actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .review-run-actions .btn {
+  .review-run-actions .btn,
+  .issue-detail-actions .btn {
     width: 100%;
     min-width: 0;
   }
@@ -2984,11 +3014,13 @@ button.nav__item:hover {
 }
 
 @media (max-width: 420px) {
-  .review-run-actions {
+  .review-run-actions,
+  .issue-detail-actions {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .review-run-hero__meta > span {
+  .review-run-hero__meta > span,
+  .issue-detail-hero__location {
     width: 100%;
   }
 }
