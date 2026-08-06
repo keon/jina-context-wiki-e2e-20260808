@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "test": "npm run test:unit && npm run test:components",
-    "test:unit": "node --test --import tsx src/lib/*.test.ts src/server/*.test.ts src/dashboard/**/*.test.ts",
+    "test:unit": "node --test --import tsx src/lib/*.test.ts src/server/*.test.ts src/dashboard/**/*.test.ts src/testing/*.test.ts",
     "test:components": "TSX_TSCONFIG_PATH=tsconfig.test.json node --test --import tsx --import ./src/testing/setup.ts \"src/**/*.test.tsx\"",
     "dev": "next dev -p 3000"
   },

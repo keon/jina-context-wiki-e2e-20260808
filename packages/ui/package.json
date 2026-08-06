@@ -5,6 +5,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./testing": "./testing/index.ts",
+    "./testing/css-contract": "./testing/css-contract.ts",
     "./testing/module-stubs.mjs": "./testing/module-stubs.mjs",
     "./testing/stubs": "./testing/stubs/index.ts"
   },
