@@ -1,7 +1,10 @@
 # Relational Board to original Trigger.dev review cutover
 
-Status: core implementation complete on `codex/review-trigger-board-cutover`; runtime
-cutover is not enabled or deployed.
+Status: core implementation complete. The relational one-task review path is deployed
+in isolated staging; the production monorepo task-worker lane still uses legacy
+`run-review` mode while the public product remains on the old source. The audited
+production rollout, backup, routing, provider, and rollback plan is in
+[STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md).
 
 This plan is grounded in:
 
@@ -1116,12 +1119,21 @@ to the legacy semantic switch or enable relational `run-review`.
 
 Add product configuration with four explicit modes:
 
-- `paused`: reject new review admission with a retriable response during the legacy
-  topic drain;
+- `paused`: reject direct internal review admission during the legacy topic drain;
 - `v1`: admit the current six-task Board pipeline;
 - `v2`: admit the single-task Trigger bridge; and
 - `allowlist`: admit v2 only for normalized repository full names in
   `JINA_REVIEW_BOARD_V2_REPOSITORIES`, otherwise v1.
+
+`paused` is not a safe GitHub-webhook response policy. Before an operator selects it,
+the public webhook ingress must already be in durable-inbox `capture_only` mode: verify
+the signature, transactionally store the encrypted delivery, and return `202` only
+after that commit. The inbox processor, not GitHub retry behavior, controls when a
+captured delivery reaches admission. `canary_only` similarly holds non-canary
+deliveries in the inbox; it must not route them through v1 merely because they are not
+on the v2 allowlist. The authoritative inbox schema, encryption, leasing, replay, and
+rollback requirements are defined in
+[`STAGING_TO_PRODUCTION_CUTOVER.md`](./STAGING_TO_PRODUCTION_CUTOVER.md#authoritative-encrypted-github-delivery-inbox).
 
 The concrete names should be `JINA_REVIEW_BOARD_PIPELINE_MODE` and
 `JINA_REVIEW_BOARD_V2_REPOSITORIES`. Reject unknown modes, invalid repository names,
@@ -1433,24 +1445,37 @@ no task; each environment still accepts only its old drain revision.
 
 Run this phase independently in staging before Phase 5 and in production during Phase 6. Never use a staging zero assertion to authorize the production semantic switch.
 
-1. Set that environment's review admission to `paused` so GitHub receives a retriable
-   response and no new legacy message is created.
-2. Leave that environment's old worker revision accepted while it drains every legacy
+1. Put every GitHub arrival through the durable inbox while its old semantic processor
+   is still available. Production uses generation-fenced `legacy_forward` to the exact
+   pinned old rollback clone; an isolated environment may use its equivalently pinned
+   old-semantic processor.
+2. At a quiet point, require zero active old Trigger runs and legacy messages, then
+   atomically increment the processor generation and select `capture_only`. Stop new
+   old-semantic claims and wait for every prior-generation processor lease.
+3. Prove a signed test delivery receives `202`, creates exactly one pending inbox row,
+   and creates no Board workflow or legacy message.
+4. Set internal review admission to `paused`; do not return a deliberate failure to
+   GitHub and do not depend on GitHub redelivery.
+5. Leave that environment's old worker revision accepted while it drains every legacy
    JSON Board `run-review` outbox message.
-3. Prove zero pending, leased, retrying, expired-reclaimable, or recoverable legacy
+6. Prove zero pending, leased, retrying, expired-reclaimable, or recoverable legacy
    messages, zero active legacy Trigger review runs, and zero enabled legacy review
    schedules in that environment.
-4. Stop/pause every worker in that environment configured with legacy `run-review`
+7. If the zero assertions do not complete before the environment's pending-delivery
+   objective is breached, restore the old-semantic processor, drain captured rows, and
+   retry later. Do not lose a delivery or advance the semantic switch.
+8. Stop/pause every worker in that environment configured with legacy `run-review`
    semantics, then prove none can reacquire its release credential.
-5. Only after all three zero assertions, deploy the source that reclassifies
+9. Only after all three zero assertions, deploy the source that reclassifies
    `run-review` as a relational topic and atomically change the single accepted release
    identity to the transitional bridge revision.
-6. Enable only the bridge revision's v1 drain/control topics while admission is still
-   paused; add relational `run-review` only as part of the following environment-specific
-   enablement phase.
-7. Record the environment, admission pause, old/new accepted revisions, legacy message
-   count, active Trigger run count, schedule count, timestamps, and rollback images in
-   the deployment log.
+10. Enable only the bridge revision's v1 drain/control topics while admission is still
+    paused; add relational `run-review` only as part of the following environment-specific
+    enablement phase.
+11. Record the environment, inbox mode and oldest pending-delivery age, admission pause,
+    old/new accepted revisions, legacy message count, active Trigger run count, schedule
+    count, timestamps, and rollback images in the deployment log. The oldest captured
+    delivery must remain below the release objective while the drain is in progress.
 
 Exit criterion: in that environment the `run-review` string is safely reclassified and
 only the bridge-capable revision is accepted. Staging must meet this criterion before
@@ -1461,10 +1486,13 @@ Phase 5 starts.
 1. Deploy API naming cleanup and `pr_review.board.v2` single-task admission.
 2. Add relational `run-review` to the accepted task worker's topics.
 3. Keep all six v1 topics enabled so already-admitted v1 workflows drain.
-4. Set pipeline mode to `allowlist`, validate one authorized repository, then set it to
-   `v2` after acceptance.
-5. Run staging PR acceptance and fault-injection cases.
-6. Verify no API code path possesses or calls the Trigger runtime secret.
+4. Set the inbox processor to `canary_only` and pipeline mode to `allowlist`. Validate
+   one authorized repository while non-canary deliveries remain durably pending rather
+   than falling back to v1.
+5. After acceptance, set pipeline mode to `v2` and the inbox processor to
+   `capture_and_process`; drain the pending inbox rows within the recorded objective.
+6. Run staging PR acceptance and fault-injection cases.
+7. Verify no API code path possesses or calls the Trigger runtime secret.
 
 Exit criterion: a new staging PR completes through one Board task and the exact original
 Trigger workflow.
@@ -1477,14 +1505,21 @@ Trigger workflow.
 3. Execute every Phase 4 step against production, including its own zero assertions and
    accepted-release switch; staging evidence is not a substitute.
 4. Verify the accepted bridge revision retains the six v1 drain/control topics, then add
-   relational `run-review` while production admission remains paused.
-5. Set pipeline mode to `allowlist` for named authorized canary repositories. Existing
-   dedupe keys remain on their first selected pipeline.
-6. Resume review admission and enable relational `run-review` claims.
+   relational `run-review` while production admission remains paused and the inbox
+   remains `capture_only`.
+5. Set pipeline mode to `allowlist` and the inbox processor to `canary_only` for named
+   authorized canary repositories. Existing dedupe keys remain on their first selected
+   pipeline; non-canary deliveries remain durably pending and do not fall back to v1.
+6. Resume internal review admission and enable relational `run-review` claims.
 7. Compare Board, review row, Trigger, GitHub, usage, and dashboard results, including a
    manual-comment redelivery after a head change.
-8. Expand the allowlist, then set mode to `v2`, only after ambiguity, age, failure,
-   duplicate-run, and v1/v2 partitioned metrics are clean.
+8. The first durable v2 workflow marks the irreversible rollback-epoch boundary: from
+   that point, the old API is not a valid rollback target and the bridge, compatible
+   monorepo API, and Trigger deployment must remain available for existing v2 work.
+9. Expand the allowlist, then set pipeline mode to `v2` and the inbox processor to
+   `capture_and_process`, only after ambiguity, age, failure, duplicate-run, and v1/v2
+   partitioned metrics are clean. Drain pending inbox rows within the recorded
+   objective with zero dead-letter rows.
 
 Exit criterion: all enabled tenants use v2 and old work continues to drain.
 
@@ -1507,14 +1542,18 @@ Only after zero nonterminal v1 workflow and zero legacy message are proven:
 The database migration is additive and is never rolled back destructively.
 
 Before v2 admission is enabled, rollback is the prior API/worker revision and no data
-conversion is needed.
+conversion is needed. For production, that API target is the tested
+numeric-secret-pinned rollback clone recorded in the release manifest, not an
+unverified currently serving revision. Already-captured inbox deliveries are forwarded
+only through the pre-v2 `legacy_forward` mode, with a newly computed HMAC for the pinned
+old API.
 
 After v2 workflows exist:
 
 - the API may set pipeline mode to `v1` for new dedupe keys, while the existing-
   admission lookup keeps every prior v2 key on v2;
-- use `paused` before changing a worker/topic semantic that cannot safely serve new
-  arrivals;
+- set the webhook inbox to `capture_only` before changing a worker/topic semantic that
+  cannot safely serve new arrivals, then use `paused` only for internal admission;
 - the bridge-capable worker and Trigger deployment must remain available until every v2
   task is terminal;
 - a worker that does not understand `waiting_external` must not be accepted by the
@@ -1525,14 +1564,21 @@ After v2 workflows exist:
   source unless a separately approved workflow change is intended.
 
 If the Trigger service is unavailable for an extended period, pause `run-review` claims
-and optionally v2 admission. Existing queued/waiting Board tasks remain durable. Do not
-fall back to the simple legacy OpenAI handler because it has different prompts,
-execution, findings, and publication semantics.
+and set the webhook inbox to `capture_only` before optionally pausing internal v2
+admission. Existing queued/waiting Board tasks and captured deliveries remain durable.
+Do not fall back to the simple legacy OpenAI handler or the old API after any v2
+workflow exists because they have different prompts, execution, findings, publication,
+and callback semantics.
 
 ## Definition of done
 
 The cutover is complete only when:
 
+- signed GitHub deliveries are committed to the encrypted durable inbox before a `202`
+  response, deduplicated by delivery ID and digest, lease-fenced, replayable, and
+  protected from plaintext comment leakage;
+- `capture_only`, `canary_only`, `capture_and_process`, and pre-v2-only
+  `legacy_forward` behavior have passed acceptance and failure-injection tests;
 - API review arrival is named and implemented as relational Board admission;
 - new review workflows contain exactly one high-level `review` task;
 - only an accepted task worker can start the Trigger task;
@@ -1557,6 +1603,9 @@ The cutover is complete only when:
 - staging and production both enforce and pass the single accepted task-worker revision
   gate before relational `run-review` is enabled;
 - staging and production acceptance records contain Board, review, Trigger, Daytona,
-  GitHub, and trace evidence for the same PR/head; and
+  GitHub, and trace evidence for the same PR/head;
+- the production release manifest records numeric secret versions, the tested pre-v2
+  rollback clone, the last-good post-v2-compatible revision, and the first-v2 rollback
+  epoch boundary; and
 - architecture and operations documentation describes the implemented system rather
   than the retired six-stage or legacy paths.

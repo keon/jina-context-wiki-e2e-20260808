@@ -1453,7 +1453,7 @@ gcloud run jobs deploy jina-context-migrate \
   --set-cloudsql-instances="${cloud_sql_instance}" \
   --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}~CONTEXT_RUNTIME_DB_USER=${db_user}~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}" \
   --set-secrets="DB_PASS=${migration_db_pass_secret},JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${deployment_release_secret_version}" \
-  --args=node_modules/@jina/db/dist/migrate.js,--install-roles \
+  --args=dist/product/migrate-all.js,--install-roles \
   --tasks=1 \
   --max-retries=0 \
   --task-timeout=15m \

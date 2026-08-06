@@ -94,6 +94,17 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
   assert.match(stagingDeployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
   assert.match(stagingDeployment, /TRIGGER_SECRET_KEY=\$\{review_trigger_secret\}:latest/);
+  assert.match(
+    stagingDeployment,
+    /GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY=\$\{github_webhook_inbox_encryption_secret\}:\$\{github_webhook_inbox_encryption_key_version\}/
+  );
+  assert.match(stagingDeployment, /github_webhook_inbox_scheduler_job="jina-github-webhook-inbox-staging"/);
+  assert.match(stagingDeployment, /--schedule="\* \* \* \* \*"/);
+  assert.match(
+    stagingDeployment,
+    /inbox_scheduler_uri="https:\/\/api\.staging\.usejina\.com\/internal\/github-webhook-inbox\/process"/
+  );
+  assert.match(stagingDeployment, /--oidc-token-audience="\$\{scheduler_audience\}"/);
   assert.doesNotMatch(stagingDeployment, /Relational run-review (?:is|remains) blocked/);
   assert.match(
     stagingDeployment,
@@ -124,6 +135,12 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingCloudBuild, /IMAGE_TAG=staging-\$COMMIT_SHA/);
   assert.match(stagingCloudBuild, /JINA_CONTEXT_TENANT_ID=\$\{_JINA_CONTEXT_TENANT_ID\}/);
   assert.match(stagingCloudBuild, /JINA_REVIEW_BOARD_PIPELINE_MODE=v2/);
+  assert.match(stagingCloudBuild, /JINA_GITHUB_WEBHOOK_INBOX_ENABLED=true/);
+  assert.match(
+    stagingCloudBuild,
+    /GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION=\$\{_GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION\}/
+  );
+  assert.match(stagingCloudBuild, /_GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION: "1"/);
   assert.match(stagingCloudBuild, /org\.opencontainers\.image\.revision=\$COMMIT_SHA/);
   assert.doesNotMatch(stagingCloudBuild, /_IMAGE_TAG|_SOURCE_SHA|dynamicSubstitutions/);
   assert.match(
@@ -331,6 +348,18 @@ test("schema preflight and exact post-migration checks run under the release lea
   assert.ok(exactSchema > migration);
   assert.ok(api > exactSchema);
   assert.match(productionPreflight, /await assertDeploymentLease\(client\);[\s\S]+?await inspectSchemaDatabase/);
+});
+
+test("production uses the exact API image to apply runtime and product migrations together", () => {
+  const migrationDeployment = deployment.match(
+    /gcloud run jobs deploy jina-context-migrate[\s\S]+?gcloud run jobs execute jina-context-migrate/
+  )?.[0];
+  assert.ok(migrationDeployment);
+  assert.match(migrationDeployment, /--image="\$\{api_image\}"/);
+  assert.match(migrationDeployment, /--args=dist\/product\/migrate-all\.js,--install-roles/);
+  assert.doesNotMatch(migrationDeployment, /node_modules\/@jina\/db\/dist\/migrate\.js/);
+  assert.match(apiDockerfile, /test -f \/out\/dist\/product\/migrate-all\.js/);
+  assert.match(apiDockerfile, /test -f \/out\/product-migrations\/0031_github_webhook_inbox\.sql/);
 });
 
 test("owner migration and destructive reset are bound to the live coordinated deployment lease", () => {
@@ -890,7 +919,7 @@ test("production Board agents are Daytona-only and do not receive the host model
 test("production storage, quota database, and PageIndex dependencies are explicit", () => {
   assert.match(deployment, /CONTEXT_GCS_BUCKET=\$\{context_artifact_bucket\}/);
   assert.match(deployment, /--set-cloudsql-instances="\$\{cloud_sql_instance\}"/);
-  assert.match(deployment, /migrate\.js,--install-roles/);
+  assert.match(deployment, /product\/migrate-all\.js,--install-roles/);
   assert.match(deployment, /CONTEXT_PAGEINDEX_PYTHON=\/opt\/pageindex-venv\/bin\/python/);
   assert.match(deployment, /CONTEXT_PAGEINDEX_WORKER=\/opt\/pageindex-worker\/worker\.py/);
   assert.match(deployment, /PAGEINDEX_SOURCE_ROOT=\/opt\/PageIndex/);

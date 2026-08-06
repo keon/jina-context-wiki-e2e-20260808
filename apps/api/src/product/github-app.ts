@@ -189,7 +189,7 @@ export async function listInstallationRepositories(
   throw new ApiError(502, "GitHub installation repository list exceeded the pagination limit");
 }
 
-function createGithubAppJwt(appId: string, privateKey: string): string {
+export function createGithubAppJwt(appId: string, privateKey: string): string {
   const now = Math.floor(Date.now() / 1000);
   const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const payload = base64Url(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }));
@@ -203,7 +203,7 @@ function base64Url(input: string | Buffer): string {
   return Buffer.from(input).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
-function normalizePrivateKey(value: string): string {
+export function normalizePrivateKey(value: string): string {
   return value.replace(/\\n/g, "\n");
 }
 
