@@ -1160,6 +1160,22 @@ encrypted with authenticated encryption, plus its SHA-256 digest; do not store t
 signature or plaintext. The ciphertext is required because comment events can contain
 private instructions and must be replayed byte-for-byte after signature verification.
 
+Treat that numeric version as part of the durable row format, not merely a deployment
+setting. The authenticated inbox snapshot reports `activeKeyVersions`, grouped across
+every non-completed row (`pending`, `retry_wait`, `leased`, and `dead_letter`). Before
+the production promotion command can enable a candidate, it independently fetches that
+snapshot from the accepted tagged revision and rejects the release if any positive row
+count is pinned to a version other than the manifest's enabled numeric version. This
+check occurs before enabling/provisioning the scheduler and before changing traffic.
+Promotion also inspects the exact currently serving revision: if it is an inbox writer,
+its secret resource identity, mounted `secretKeyRef.key`, and separate numeric-version
+label must all equal the candidate's. The manifest fixes the production key resource
+name as well as its version. These checks close the race in which the old
+revision could encrypt a delivery after the snapshot but before traffic moves.
+Consequently direct single-key rotation is fail-closed even when the observed old-key
+count is zero. A zero-interruption rotation requires an accepted multi-key decryptor;
+changing the secret binding alone is not a supported rotation procedure.
+
 Change GitHub ingress to this sequence:
 
 1. enforce the body-size limit and required delivery/event/signature headers;
@@ -1222,6 +1238,29 @@ forward already crossing the network.
 
 Add an internal authenticated dashboard/query for pending age, lease expiry, attempt
 count, dead letters, and processed workflow ID. Never render decrypted comment bodies.
+
+The production processor is driven by the fixed Cloud Scheduler job
+`jina-github-webhook-inbox-production` in `jina-463721/us-east1`, once per minute. Its
+HTTP target is the accepted candidate's tagged
+`/internal/github-webhook-inbox/process` URL and its OIDC token uses
+`jina-api-runtime@jina-463721.iam.gserviceaccount.com` with audience
+`https://api.usejina.com`. Promotion creates a missing job on an intentionally dormant
+annual schedule, pauses it, binds and validates the exact accepted tag/cadence/OIDC
+configuration while paused, moves 100% API traffic, resumes it, triggers an immediate
+run, and requires a post-activation `AttemptFinished` log for that exact tagged URL with
+a 2xx response. Before modifying an existing owned job, promotion snapshots its exact
+endpoint and enabled/paused state. Every activation failure first changes the database
+processor to generation-fenced `capture_only`, waits for both active and
+prior-generation leases to reach zero, then pauses and verifies the Scheduler job
+before restoring prior API traffic and Scheduler state. If any fence fails, traffic
+deliberately remains on the capture-first candidate for manual repair. The prior inbox
+mode is restored last, only when the prior serving revision was itself an inbox writer,
+and only by compare-and-set against the exact generation created by this fence; a newer
+safety transition aborts compensation. Explicit rollback uses the same application fence before pausing Scheduler or
+moving traffic. Pause is idempotent, a recoverable Scheduler `UPDATE_FAILED` state is
+rebound and revalidated during compensation, and a job that has never existed is the
+only tolerated missing-resource case. Jobs with drifted ownership/configuration are
+rejected without mutation.
 
 For defense in depth, add a scheduled GitHub App delivery reconciler that checks failed
 GitHub deliveries and requests redelivery by delivery ID. This is recovery for an
@@ -1387,16 +1426,67 @@ The prerequisite branch `codex/prod-cutover-prerequisites` now contains the foll
 source-level controls. This checkpoint records implementation, not deployment or
 cutover approval:
 
-| Control                 | Implemented evidence                                                                                                                                                                                                                                                                             | State at this checkpoint                                                                                                |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Authoritative inbox     | Migration [`0031_github_webhook_inbox.sql`](../apps/api/product-migrations/0031_github_webhook_inbox.sql), AES-256-GCM binding, capture-before-202, same-delivery event/digest conflict checks, ordered leases, canary/all/forward modes, first-v2 epoch, and durable redelivery cooldown ledger | Unit, API, reconciler, and disposable PostgreSQL integration tests passed; not deployed to production                   |
-| Scheduled backlog drain | OIDC-or-internal authenticated `/internal/github-webhook-inbox/process`; it drains local work, lists only failed GitHub App deliveries, skips captured GUIDs, and requests bounded provider redelivery without fetching payload bodies; staging deploy creates a one-minute job when enabled     | Staging job is declared but not created until the branch deploys                                                        |
-| Unified migrations      | Production job uses the exact API image and `dist/product/migrate-all.js --install-roles`; Docker build asserts the entry point and migration are present                                                                                                                                        | Contract-tested; not run against staging recovery or production                                                         |
-| Build-only release      | [`cloudbuild.release-build.yaml`](../cloudbuild.release-build.yaml) validates once and builds API, worker, dashboard, and admin images with Cloud Build provenance and no deploy/runtime-secret/migration commands                                                                               | Contract-tested; no release build submitted yet                                                                         |
-| Public API candidate    | Fixed `jina-463721/us-east1/jina-code-review-api`, digest-only images, numeric secrets, explicit environment-delta allowlist, domain/TLS/IAM/Cloud SQL checks, no-traffic deploy, tagged health, fresh full-suite acceptance receipt, exact promote/rollback                                     | Fake-cloud promote/rollback and failure-before-mutation tests passed; no production candidate created                   |
-| Worker candidates       | Fixed `jina-v2` Context/task services, digest-only worker image, numeric secrets, `paused` claims, relational `run-review`, no release credential, and no traffic-changing command                                                                                                               | Fake-cloud tests passed; no production candidate created                                                                |
-| Staging key             | Dedicated `jina-staging-github-webhook-inbox-encryption-key` in `jina-staging-20260802`, user-managed in `us-east1`; enabled version `1`; secret-level accessor only for `jina-api-staging@jina-staging-20260802.iam.gserviceaccount.com`                                                        | Additive staging resource created; no value was logged; Cloud Build is pinned to version `1`; staging traffic unchanged |
-| Full repository gate    | `scripts/cloud-build-ci.sh`, API typecheck/lint, real PostgreSQL inbox and Board transaction tests, and all candidate contract suites                                                                                                                                                            | Passed locally on this branch                                                                                           |
+| Control                  | Implemented evidence                                                                                                                                                                                                                                                                             | State at this checkpoint                                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Authoritative inbox      | Migration [`0031_github_webhook_inbox.sql`](../apps/api/product-migrations/0031_github_webhook_inbox.sql), AES-256-GCM binding, capture-before-202, same-delivery event/digest conflict checks, ordered leases, canary/all/forward modes, first-v2 epoch, and durable redelivery cooldown ledger | Unit, API, reconciler, and disposable PostgreSQL integration tests passed; not deployed to production                                |
+| Scheduled backlog drain  | OIDC-or-internal authenticated `/internal/github-webhook-inbox/process`; it drains local work, lists only failed GitHub App deliveries, skips captured GUIDs, and requests bounded provider redelivery without fetching payload bodies; staging deploy creates a one-minute job when enabled     | Staging job is declared but not created until the branch deploys                                                                     |
+| Production drain binding | Candidate promotion owns the fixed one-minute production Cloud Scheduler job; it creates the job dormant, pauses and binds it to the accepted tagged revision, promotes traffic, then resumes/verifies it; scheduler failure restores prior traffic                                              | Fake-cloud create/update/pause/resume, activation-failure rollback, and missing-job rollback tests passed; no production job created |
+| Inbox key-version fence  | Every non-completed inbox row is counted by numeric encryption-key version; the key resource name is fixed; promotion checks the accepted tag's snapshot and the concurrently serving inbox writer before scheduler or traffic mutation                                                          | Unit and PostgreSQL integration coverage plus active-row and writer-race negative tests passed; no production key binding changed    |
+| Unified migrations       | Production job uses the exact API image and `dist/product/migrate-all.js --install-roles`; Docker build asserts the entry point and migration are present                                                                                                                                        | Contract-tested; not run against staging recovery or production                                                                      |
+| Build-only release       | [`cloudbuild.release-build.yaml`](../cloudbuild.release-build.yaml) validates once and builds API, worker, dashboard, and admin images with Cloud Build provenance and no deploy/runtime-secret/migration commands                                                                               | Contract-tested; no release build submitted yet                                                                                      |
+| Public API candidate     | Fixed `jina-463721/us-east1/jina-code-review-api`, digest-only images, numeric secrets, explicit environment-delta allowlist, domain/TLS/IAM/Cloud SQL checks, no-traffic deploy, tagged health, fresh full-suite acceptance receipt, exact promote/rollback                                     | Fake-cloud promote/rollback and failure-before-mutation tests passed; no production candidate created                                |
+| Worker candidates        | Fixed `jina-v2` Context/task services, digest-only worker image, numeric secrets, `paused` claims, relational `run-review`, no release credential, and no traffic-changing command                                                                                                               | Fake-cloud tests passed; no production candidate created                                                                             |
+| Staging key              | Dedicated `jina-staging-github-webhook-inbox-encryption-key` in `jina-staging-20260802`, user-managed in `us-east1`; enabled version `1`; secret-level accessor only for `jina-api-staging@jina-staging-20260802.iam.gserviceaccount.com`                                                        | Additive staging resource created; no value was logged; Cloud Build is pinned to version `1`; staging traffic unchanged              |
+| Full repository gate     | `scripts/cloud-build-ci.sh`, API typecheck/lint, real PostgreSQL inbox and Board transaction tests, and all candidate contract suites                                                                                                                                                            | Passed for the initial prerequisite commit; must be rerun after the key/scheduler review fixes                                       |
+
+### Execution record: release `20260806T173452Z-a4051c9`
+
+Execution began additively on 2026-08-06. No public traffic, production schema,
+production Trigger deployment, Vercel alias, GitHub App configuration, customer
+billing state, or Daytona object has been changed. The following recovery work is
+complete and retained:
+
+- production Cloud SQL on-demand backup `1786037698757` is `SUCCESSFUL`;
+- logical export operation `fad74545-c7f9-4afe-a3a1-2ff900000026` completed to the
+  protected recovery bucket as generation `1786038362819469`, 325,655,770 bytes, with
+  CRC32C `1iiVcg==`;
+- physical restore operation `a468347d-a691-4add-a1e5-4c3700000026` completed into
+  retained instance `jina-db-physical-20260806`;
+- logical restore operation `8a91d664-225c-4976-a44b-310500000026` completed into the
+  application-owned `jina_app_restore` database on retained instance
+  `jina-db-logical-20260806`;
+- source, physical restore, and application-owned logical restore contain the same 94
+  product tables, exact migration ledgers, and semantically identical schemas; the
+  live database advanced after the backup as expected and no backup table had a
+  negative row-count delta;
+- an existing encrypted integration decrypted successfully on both retained restores
+  without recording plaintext;
+- production Cloud SQL deletion protection was enabled in place, settings version 85
+  to 86, without a restart or traffic change;
+- all three production GCS data sets were copied additively with normalized CRC32C/MD5
+  parity: east Context 529 objects/245,487,533 bytes, central Context 496
+  objects/702,397,021 bytes, and graph reset 11 objects/2,588 bytes;
+- verified all-ref Git bundles and exact checkouts preserve the old production commit,
+  old local head and dirty state, monorepo `main`, monorepo `staging`, and this
+  prerequisite commit; and
+- redacted provider exports cover GCP, Vercel, production/staging Trigger, Daytona,
+  Autumn plus its Stripe linkage metadata, Clerk, and both GitHub Apps. GitHub delivery
+  exports contain metadata only, never webhook bodies. The first local Trigger export
+  incorrectly trusted provider `isSecret` flags and retained environment values; the
+  exact-value scan caught it, the exporter was changed to redact sensitive names as
+  well, and the files were regenerated before any commit or upload.
+
+Recovery objects are in project `jina-recovery-20260806`, bucket
+`gs://jina-recovery-20260806-a4051c9-us-east1`, protected by the release CMEK,
+uniform bucket access, public-access prevention, versioning, 30-day soft delete, and an
+unlocked 90-day retention policy. The exact-value scan covered all 150 enabled Secret
+Manager versions across production, monorepo, staging, and recovery, scanned 547 local
+files, skipped zero versions, and found zero matches. The evidence was uploaded
+additively and fully downloaded to a fresh directory; all 548 payload hashes passed the
+top-level `ROOT_SHA256SUMS` check and the root manifest SHA-256 is
+`dd8cb4c54ca60617b0e7ff9d3501aa6bc0348879ff03bd81e96eeb28612e6b3f` on both sides.
+Retention remains unlocked until a second operator verifies recoverability because
+locking is irreversible.
 
 The following implementation/operational work remains blocking:
 
@@ -1408,45 +1498,52 @@ The following implementation/operational work remains blocking:
    post-v2 rollback revision;
 4. deploy and accept the inbox in isolated staging, including its one-minute scheduler,
    before merging to `main`;
-5. complete and restore-verify all production backups; and
+5. obtain the independent backup countersign; and
 6. submit/accept the build-only release and dark candidates before any production
    traffic or schema mutation.
 
 ## Confirmed blockers and risk register
 
-| Severity | Finding                                                                                      | Required disposition before cutover                                                                         |
-| -------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Blocker  | No fresh pre-change production backup has been created for this release                      | Complete and restore-verify the backup manifest below                                                       |
-| Blocker  | The authoritative encrypted webhook inbox is implemented but not staging/production accepted | Deploy migration `0031`, capture-first 202 ingress, scheduler, and recovery tests to isolated staging first |
-| Blocker  | Production lacks product migrations `0029`/`0030` and the inbox migration                    | Rehearse the implemented unified `migrate-all` job and apply it additively only after backup gates          |
-| Blocker  | Production encryption keys differ between old and monorepo projects                          | Select canonical key/keyring and prove decrypt compatibility without exposing values                        |
-| Blocker  | Production monorepo `run-review` lane is legacy while target is relational                   | Execute the drain and semantic transition in the review cutover doc                                         |
-| Blocker  | Staging release gate is disabled                                                             | Enable and pass negative/positive claim tests                                                               |
-| Blocker  | Branch merge is 141 staging commits and 639 changed files                                    | Review a deterministic merge commit; do not deploy branch head implicitly                                   |
-| Blocker  | Build-only and candidate lanes are implemented but have no provider-side rehearsal evidence  | Rehearse them in staging/recovery and retain immutable build, tagged acceptance, and rollback evidence      |
-| Blocker  | Serving and deploy scripts bind long-lived secrets to `latest`                               | Resolve numeric versions, patch scripts, and create pinned pre-v2/post-v2 rollback revisions                |
-| High     | Public GitHub App install URL is broken                                                      | Correct and verify install/setup flow                                                                       |
-| High     | Public admin points to retained `us-central1` endpoints                                      | Rebind to canonical/current endpoints and test auth/operations                                              |
-| High     | Isolated staging automated SQL backup/PITR is disabled                                       | Enable protection before destructive rehearsal                                                              |
-| High     | Primary production SQL deletion protection is off                                            | Enable before migration window                                                                              |
-| High     | GCS Context/review buckets lack versioning/retention                                         | Create versioned backup copy and manifest before cutover                                                    |
-| High     | Isolated staging shares Daytona/OpenAI/OpenRouter credentials with production                | Explicitly accept temporarily or separate and retest before production                                      |
-| High     | Production Autumn catalog differs from source                                                | Reconcile overage add-on semantics without changing subscriptions blindly                                   |
-| High     | Production Trigger project owns non-review schedules                                         | Do not replace it with review-only source; use dedicated review project or preserve task set                |
-| High     | Merging `staging` into `main` creates a full-deploy production build                         | Leave it unapproved, use the build-only config, then cancel the full-deploy build                           |
-| Medium   | Production Cloud SQL accepts unencrypted connections                                         | Inventory clients, then enforce SSL in a separate change                                                    |
-| Medium   | Duplicate GCP stacks remain active                                                           | Select canonical routing; retire only after observation                                                     |
-| Medium   | Context worker revision name says paused while claims are enabled                            | Trust/configure actual env and release record, not names                                                    |
-| Medium   | Daytona retains 57 non-auto-deleting sandboxes                                               | Record cost/retention owner; cleanup later with explicit approval                                           |
-| Medium   | Clerk provider and staging DB identities are not reconciled                                  | Keep production GitHub auth; run separate identity project later                                            |
-| Medium   | Old local repository is dirty                                                                | Preserve bundle, patch, and untracked files before archival                                                 |
+| Severity | Finding                                                                                                                             | Required disposition before cutover                                                                                                                                                                      |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Blocker  | Fresh database/GCS/Git/provider backups and evidence upload/readback are restore/hash verified, but not independently countersigned | Pass the second-operator recoverability gate before any release mutation                                                                                                                                 |
+| Blocker  | A production database credential appeared in a local diagnostic tool transcript while backup verification was being debugged        | Treat the credential as exposed; preserve current service continuity, prepare/test a new credential binding, then perform a coordinated rotation with an accepted rollback revision before final cutover |
+| High     | A staging scheduler bearer credential appeared in a local diagnostic tool transcript while validating provider response shape       | Treat it as exposed; prepare a replacement staging binding, update and verify the staging API/job together, then disable the old credential before staging acceptance                                    |
+| Blocker  | The authoritative encrypted webhook inbox is implemented but not staging/production accepted                                        | Deploy migration `0031`, capture-first 202 ingress, scheduler, and recovery tests to isolated staging first                                                                                              |
+| Blocker  | Production lacks product migrations `0029`/`0030` and the inbox migration                                                           | Rehearse the implemented unified `migrate-all` job and apply it additively only after backup gates                                                                                                       |
+| Blocker  | Production encryption keys differ between old and monorepo projects                                                                 | Select canonical key/keyring and prove decrypt compatibility without exposing values                                                                                                                     |
+| Blocker  | Production monorepo `run-review` lane is legacy while target is relational                                                          | Execute the drain and semantic transition in the review cutover doc                                                                                                                                      |
+| Blocker  | Staging release gate is disabled                                                                                                    | Enable and pass negative/positive claim tests                                                                                                                                                            |
+| Blocker  | Branch merge is 141 staging commits and 639 changed files                                                                           | Review a deterministic merge commit; do not deploy branch head implicitly                                                                                                                                |
+| Blocker  | Build-only and candidate lanes are implemented but have no provider-side rehearsal evidence                                         | Rehearse them in staging/recovery and retain immutable build, tagged acceptance, and rollback evidence                                                                                                   |
+| Blocker  | Serving and deploy scripts bind long-lived secrets to `latest`                                                                      | Resolve numeric versions, patch scripts, and create pinned pre-v2/post-v2 rollback revisions                                                                                                             |
+| High     | Public GitHub App install URL is broken                                                                                             | Correct and verify install/setup flow                                                                                                                                                                    |
+| High     | Public admin points to retained `us-central1` endpoints                                                                             | Rebind to canonical/current endpoints and test auth/operations                                                                                                                                           |
+| High     | Isolated staging automated SQL backup/PITR is disabled                                                                              | Enable protection before destructive rehearsal                                                                                                                                                           |
+| Resolved | Primary production SQL deletion protection was off                                                                                  | Enabled in place and captured in release evidence before any migration                                                                                                                                   |
+| Resolved | Source GCS Context/review buckets lacked release-specific protection                                                                | Additive, hash-matched copies are retained in the versioned recovery bucket; never delete-sync them                                                                                                      |
+| High     | Isolated staging shares Daytona/OpenAI/OpenRouter credentials with production                                                       | Explicitly accept temporarily or separate and retest before production                                                                                                                                   |
+| High     | Production Autumn catalog differs from source                                                                                       | Reconcile overage add-on semantics without changing subscriptions blindly                                                                                                                                |
+| High     | Production Trigger project owns non-review schedules                                                                                | Do not replace it with review-only source; use dedicated review project or preserve task set                                                                                                             |
+| High     | Merging `staging` into `main` creates a full-deploy production build                                                                | Leave it unapproved, use the build-only config, then cancel the full-deploy build                                                                                                                        |
+| Medium   | Production Cloud SQL accepts unencrypted connections                                                                                | Inventory clients, then enforce SSL in a separate change                                                                                                                                                 |
+| Medium   | Duplicate GCP stacks remain active                                                                                                  | Select canonical routing; retire only after observation                                                                                                                                                  |
+| Medium   | Context worker revision name says paused while claims are enabled                                                                   | Trust/configure actual env and release record, not names                                                                                                                                                 |
+| Medium   | Daytona retains 57 non-auto-deleting sandboxes                                                                                      | Record cost/retention owner; cleanup later with explicit approval                                                                                                                                        |
+| Medium   | Clerk provider and staging DB identities are not reconciled                                                                         | Keep production GitHub auth; run separate identity project later                                                                                                                                         |
+| Medium   | Old local repository is dirty                                                                                                       | Preserve bundle, patch, and untracked files before archival                                                                                                                                              |
 
-## Required pre-change backup
+## Pre-change backup: executed state and remaining gate
 
-No fresh release-specific backup was created during the read-only audit. The following
-backup must be completed before any production serving, data, schema, or provider-
-configuration mutation. Creating and restore-testing recovery artifacts is the only
-earlier allowed operation.
+The release-specific physical backup, logical export, two retained restore rehearsals,
+GCS copies, Git bundles, provider exports, and production deletion protection recorded
+in the execution checkpoint above are complete. The zero-finding secret scan,
+top-level SHA-256 manifest, additive upload, and complete independent-directory
+readback are also complete. The remaining backup gate is the second-operator
+countersign.
+No production serving, schema, data, or provider-configuration mutation is permitted
+until that gate is complete. The procedure below remains the normative specification
+and audit trail for the artifacts already created and the unfinished evidence steps.
 
 ### Backup destination
 
@@ -1841,7 +1938,9 @@ traffic or Board claims.
 11. Use `scripts/deploy-public-api-candidate.sh` to deploy the monorepo API as a
     no-traffic revision of `jina-463721/us-east1/jina-code-review-api`, using the exact
     environment manifest and numeric secret versions accepted in Phase 4. Configure the
-    inbox as `capture_only` and internal Board review admission as `paused`.
+    inbox as `capture_only` and internal Board review admission as `paused`. The
+    manifest must also contain the fixed production scheduler identity/cadence/OIDC
+    binding and the inbox encryption-key version that is persisted on new rows.
 12. Through only the tagged URL, run health, GitHub OAuth, tenant, repository,
     review-history, integration-decryption, Context, billing-balance, encrypted-inbox,
     and internal callback probes. A signed test delivery must return 202 after exactly
@@ -1876,9 +1975,22 @@ changes without pausing customer reviews. The final old-semantic fence is a boun
    encrypted row, is forwarded exactly once to the pinned rollback clone, and completes
    through the old workflow. Reconfirm the separate tagged-candidate callback fixture;
    before step 5, the canonical callback URL still resolves to the old public API.
-5. Atomically route 100% of `api.usejina.com` to the accepted monorepo candidate. Do not
-   use a percentage traffic split: one webhook protocol cannot safely alternate between
-   direct-Trigger and capture-first semantics.
+5. Run the manifest-pinned promotion command. It must first prove that a currently
+   serving inbox writer uses the candidate's exact key resource, mounted numeric
+   secret version, and numeric-version label, then query the
+   tagged candidate for all non-completed inbox-row encryption-key versions and abort
+   if any positive count differs from that version. It then provisions the
+   fixed production inbox scheduler if absent on a dormant schedule, pauses it, binds
+   and validates the accepted tagged endpoint, atomically routes 100% of
+   `api.usejina.com` to the candidate, then resumes, immediately runs, and requires a
+   post-activation 2xx completion log for the exact tagged URL. Do not use a percentage traffic split: one webhook protocol cannot
+   safely alternate between direct-Trigger and capture-first semantics. Any scheduler
+   activation/verification failure must first transition the database processor to
+   generation-fenced `capture_only`, wait for active and prior-generation leases to
+   reach zero, then pause and verify the job before restoring prior traffic and
+   Scheduler state. Restore the prior inbox mode last. If any fence itself fails, leave
+   capture-first candidate traffic in place and require manual intervention; never
+   create dual processors.
 6. Verify public health, GitHub OAuth/session callbacks, dashboard reads, internal old
    Trigger callbacks, Context/graph calls, Autumn checks, encrypted inbox capture, and
    continued old-workflow review completion. Require zero duplicate forwarding and
@@ -2105,23 +2217,24 @@ all v2 work; it never authorizes routing to the old API.
 
 ## Rollback matrix
 
-| Layer            | Rollback action                                                                                        | Data rule                                                            |
-| ---------------- | ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
-| Git/source       | Rebuild only if an exact old digest is unavailable; prefer recorded immutable artifact                 | Never rewrite branch history or delete merge commit/tag              |
-| Cloud Run API    | Epoch A/B: numeric-secret-pinned old clone; Epoch C/D: recorded last-good compatible monorepo revision | Expanded DB schema/inbox remain; never route v2 callbacks to old API |
-| Webhook inbox    | Keep ingress writable; select `legacy_forward` only in Epoch B, otherwise `capture_only` during repair | Never delete, rewrite, or acknowledge unprocessed deliveries         |
-| Workers          | Stop new claims, then select an epoch-compatible accepted release; bridge remains for existing v2 work | Existing v2 work remains v2; never reinterpret or convert rows       |
-| Trigger          | Restore prior worker Trigger key/revision or promote prior Trigger deployment                          | Preserve run IDs, idempotency keys, schedules, and effect receipts   |
-| Vercel dashboard | Move `app.usejina.com` alias to `jina-simulation-dashboard-k9ngibg5s-omlabs.vercel.app`                | Do not delete new deployment                                         |
-| Vercel admin     | Move alias to recorded prior deployment and restore prior env binding                                  | Do not erase current env-variable history                            |
-| Database         | Restore only for catastrophic corruption under a separate outage decision                              | Normal rollback is app rollback on additive schema                   |
-| GCS              | Read/restore missing objects from versioned backup copy                                                | Never run sync with delete                                           |
-| Secret Manager   | Rebind service to recorded previous numeric enabled version                                            | Do not use `latest`; retain old/new and disabled release versions    |
-| GitHub App       | Restore prior URLs/config if needed; keep same App ID/key/webhook                                      | Do not uninstall customer installations                              |
-| Autumn           | Restore catalog/config only from audited export and provider-supported operation                       | Never delete customers, balances, usage, or subscriptions            |
-| Stripe           | No direct Jina rollback; restore Autumn connection/config with Autumn support if changed               | Never recreate/delete Stripe customers to force linkage              |
-| Clerk            | Initial cutover remains GitHub auth; restore prior GitHub-auth Vercel/API revisions                    | Do not merge/delete identities                                       |
-| Daytona          | Restore prior service key bindings/snapshot selection                                                  | Do not delete sandboxes/snapshots                                    |
+| Layer            | Rollback action                                                                                                                                                                                                                                                                | Data rule                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| Git/source       | Rebuild only if an exact old digest is unavailable; prefer recorded immutable artifact                                                                                                                                                                                         | Never rewrite branch history or delete merge commit/tag                |
+| Cloud Run API    | Epoch A/B: numeric-secret-pinned old clone; Epoch C/D: recorded last-good compatible monorepo revision                                                                                                                                                                         | Expanded DB schema/inbox remain; never route v2 callbacks to old API   |
+| Webhook inbox    | Keep ingress writable; select `legacy_forward` only in Epoch B, otherwise `capture_only` during repair                                                                                                                                                                         | Never delete, rewrite, or acknowledge unprocessed deliveries           |
+| Inbox scheduler  | Set the database processor to generation-fenced `capture_only`, wait for active/prior-generation leases to reach zero, then pause and verify the fixed production drain job before routing API traffic to the recorded rollback target; tolerate only a job that never existed | Do not delete the job or repoint it to an unaccepted/untagged revision |
+| Workers          | Stop new claims, then select an epoch-compatible accepted release; bridge remains for existing v2 work                                                                                                                                                                         | Existing v2 work remains v2; never reinterpret or convert rows         |
+| Trigger          | Restore prior worker Trigger key/revision or promote prior Trigger deployment                                                                                                                                                                                                  | Preserve run IDs, idempotency keys, schedules, and effect receipts     |
+| Vercel dashboard | Move `app.usejina.com` alias to `jina-simulation-dashboard-k9ngibg5s-omlabs.vercel.app`                                                                                                                                                                                        | Do not delete new deployment                                           |
+| Vercel admin     | Move alias to recorded prior deployment and restore prior env binding                                                                                                                                                                                                          | Do not erase current env-variable history                              |
+| Database         | Restore only for catastrophic corruption under a separate outage decision                                                                                                                                                                                                      | Normal rollback is app rollback on additive schema                     |
+| GCS              | Read/restore missing objects from versioned backup copy                                                                                                                                                                                                                        | Never run sync with delete                                             |
+| Secret Manager   | Rebind service to recorded previous numeric enabled version                                                                                                                                                                                                                    | Do not use `latest`; retain old/new and disabled release versions      |
+| GitHub App       | Restore prior URLs/config if needed; keep same App ID/key/webhook                                                                                                                                                                                                              | Do not uninstall customer installations                                |
+| Autumn           | Restore catalog/config only from audited export and provider-supported operation                                                                                                                                                                                               | Never delete customers, balances, usage, or subscriptions              |
+| Stripe           | No direct Jina rollback; restore Autumn connection/config with Autumn support if changed                                                                                                                                                                                       | Never recreate/delete Stripe customers to force linkage                |
+| Clerk            | Initial cutover remains GitHub auth; restore prior GitHub-auth Vercel/API revisions                                                                                                                                                                                            | Do not merge/delete identities                                         |
+| Daytona          | Restore prior service key bindings/snapshot selection                                                                                                                                                                                                                          | Do not delete sandboxes/snapshots                                      |
 
 Database restore is a last-resort recovery, not the normal response to an application
 defect. Because the database is active and shared, restoring it rewinds unrelated data
@@ -2133,18 +2246,29 @@ and requires a separately approved outage/reconciliation plan.
 
 - [ ] Change freeze and operators confirmed.
 - [ ] Release manifest created and stored.
-- [ ] Old and monorepo Git bundles verified.
-- [ ] Dirty old local checkout patch/untracked archive verified.
-- [ ] Fresh SQL physical backup successful.
-- [ ] Physical backup restored to retained recovery instance and verified within RTO.
-- [ ] Logical SQL restore verified.
-- [ ] Production and retained-region GCS copied/checksummed.
-- [ ] GCP/Vercel/Trigger/Daytona/Autumn/Stripe/Clerk/GitHub exports complete.
-- [ ] Primary SQL deletion protection enabled.
+- [x] Old and monorepo Git bundles verified.
+- [x] Dirty old local checkout patch/untracked archive verified.
+- [x] Fresh SQL physical backup successful.
+- [x] Physical backup restored to retained recovery instance and verified within RTO.
+- [x] Logical SQL restore verified under the application database role.
+- [x] Production and retained-region GCS copied/checksummed without delete semantics.
+- [x] GCP/Vercel/Trigger/Daytona/Autumn/Stripe-linkage/Clerk/GitHub exports complete.
+- [x] Evidence scan checked all 150 enabled Secret Manager versions with zero skipped
+      values and zero findings across 547 files.
+- [x] Evidence is uploaded without delete semantics and fully read back against the
+      top-level SHA-256 manifest.
+- [ ] A second operator countersigned backup recoverability and rollback evidence.
+- [x] Primary SQL deletion protection enabled.
 - [ ] Isolated staging backup/PITR enabled.
 - [ ] Merge commit reviewed; images built once by digest.
 - [ ] Build-only pipeline and candidate-only worker lane contract tests passed.
 - [ ] Public API candidate deployment/promote/rollback script rehearsed.
+- [ ] Candidate snapshot proves every active inbox row and the currently serving writer
+      use the manifest's exact key resource and numeric version.
+- [ ] Production inbox scheduler manifest is exact; compensated rebind,
+      application generation/lease-zero fence before Scheduler pause and traffic
+      rollback, immediate 2xx execution proof, and fence-failure handling are
+      provider-rehearsed.
 - [ ] Unified production `migrate-all` job rehearsed on both recovery instances.
 - [ ] Numeric secret-version manifest complete; no long-lived `latest` references.
 - [ ] Pre-v2 old rollback clone and post-v2 compatible rollback revision accepted.

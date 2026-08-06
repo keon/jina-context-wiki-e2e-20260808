@@ -64,6 +64,8 @@ export interface GithubWebhookInboxSnapshot {
   readonly completed: number;
   readonly deadLetter: number;
   readonly priorGenerationLeases: number;
+  /** Counts for every non-completed row, keyed by its pinned Secret Manager version. */
+  readonly activeKeyVersions: Readonly<Record<string, number>>;
   readonly oldestPendingAt?: Date;
 }
 
@@ -466,6 +468,16 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
        from github_webhook_inbox`,
       [control.generation],
     );
+    const keyVersions = await query<{
+      encryption_key_version: string;
+      active_count: number;
+    }>(
+      `select encryption_key_version,count(*)::int as active_count
+         from github_webhook_inbox
+        where status <> 'completed'
+        group by encryption_key_version
+        order by encryption_key_version`,
+    );
     return {
       control,
       pending: counts?.pending ?? 0,
@@ -474,6 +486,9 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
       completed: counts?.completed ?? 0,
       deadLetter: counts?.dead_letter ?? 0,
       priorGenerationLeases: counts?.prior_generation_leases ?? 0,
+      activeKeyVersions: Object.fromEntries(
+        keyVersions.map((row) => [row.encryption_key_version, Number(row.active_count)]),
+      ),
       ...(counts?.oldest_pending_at ? { oldestPendingAt: counts.oldest_pending_at } : {}),
     };
   }

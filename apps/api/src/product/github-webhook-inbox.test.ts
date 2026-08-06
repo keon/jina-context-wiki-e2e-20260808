@@ -278,6 +278,7 @@ class FakeInboxRepository implements GithubWebhookInboxRepository {
       completed: this.completed.length,
       deadLetter: 0,
       priorGenerationLeases: 0,
+      activeKeyVersions: this.captured ? { [this.captured.encryptionKeyVersion]: 1 } : {},
     };
   }
 }
