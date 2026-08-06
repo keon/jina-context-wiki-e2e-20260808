@@ -1026,6 +1026,72 @@ button.nav__item:hover {
   gap: var(--space-6);
 }
 
+.review-run-hero {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-5);
+  padding: var(--space-1) 0 var(--space-2);
+}
+
+.review-run-hero__heading {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+}
+
+.review-run-hero__kicker {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.review-run-hero h1 {
+  max-width: 920px;
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: clamp(28px, 3.4vw, 38px);
+  font-weight: 500;
+  line-height: 1.12;
+  letter-spacing: -0.04em;
+  overflow-wrap: anywhere;
+}
+
+.review-run-hero__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.review-run-hero__meta > span {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 26px;
+  gap: 7px;
+  padding: 3px 9px;
+  overflow: hidden;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-run-hero__status {
+  color: var(--ink) !important;
+}
+
+.review-run-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line-subtle);
+}
+
 .two-col,
 .split,
 .review-field-grid {
@@ -1123,8 +1189,7 @@ button.nav__item:hover {
   max-height: 260px;
 }
 
-.detail-surface,
-.review-detail-surface {
+.detail-surface {
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1183,50 +1248,25 @@ button.nav__item:hover {
   overflow-wrap: anywhere;
 }
 
-.review-detail-surface > .section,
-.review-detail-surface .review-appendix__body > .section {
-  overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+.review-detail-surface {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-4);
 }
 
-.review-detail-surface > .section + .section,
-.review-detail-surface > .notice + .section,
-.review-detail-surface .review-appendix__body > .section + .section {
-  border-top: 1px solid var(--line-subtle);
-}
-
-.review-detail-surface > .notice {
-  border-width: 1px 0 0;
-  border-radius: 0;
-}
-
-.review-detail-surface .section__title {
-  min-height: 0;
-  padding: 18px 20px 8px;
-  border-bottom: 0;
-}
-
-.review-detail-surface .section__body {
-  padding: 10px 20px 22px;
-}
-
-/* Opts out of the body-less `.section` fallback: sections here are already
-   flattened into the surface and set their own title/body insets, and
-   `SectionFlush` deliberately runs its list to the surface edge. */
-.review-detail-surface .section:not(:has(> .section__body)) {
+/* `SectionFlush` rows and the appendix manage their own body insets. */
+.review-detail-surface > .section:not(:has(> .section__body)) {
   padding: 0;
 }
 
-.review-detail-surface .section:not(:has(> .section__body)) > .section__title {
+.review-detail-surface > .section:not(:has(> .section__body)) > .section__title {
   margin: 0;
 }
 
 .review-detail-surface .review-context {
-  grid-template-columns: 160px minmax(0, 1fr);
+  grid-template-columns: minmax(120px, 160px) minmax(0, 1fr);
   gap: 0;
-  padding: 0 var(--space-5) var(--space-5);
+  margin: 0;
 }
 
 .review-detail-surface .review-context dt,
@@ -1243,51 +1283,8 @@ button.nav__item:hover {
   font-size: var(--text-sm);
 }
 
-.review-detail-surface .review-area,
-.review-detail-surface .review-note,
-.review-detail-surface .review-notice,
-.review-detail-surface .metric {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.review-detail-surface .review-area {
-  padding: 0;
-}
-
-.review-detail-surface .review-area + .review-area {
-  padding-top: 18px;
-  border-top: 1px solid var(--line-subtle);
-}
-
-.review-detail-surface .review-block,
-.review-detail-surface .disclosure,
-.review-detail-surface .review-appendix {
-  border-top-color: var(--line-subtle);
-}
-
-.review-detail-surface .code-block {
-  padding: var(--space-3) 0 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.review-detail-surface .review-row--issue,
-.review-detail-surface .review-row--task {
-  box-shadow: none;
-}
-
-.review-detail-surface .review-notices,
-.review-detail-surface .review-area-stack,
 .review-detail-surface .review-appendix__body {
-  gap: 0;
-}
-
-.review-detail-surface .review-appendix__body > .section,
-.review-detail-surface .review-appendix__body > .event-history {
-  border-top: 1px solid var(--line-subtle);
+  padding: 0 var(--space-4) var(--space-4);
 }
 
 .form,
@@ -2881,6 +2878,46 @@ button.nav__item:hover {
     padding: 24px 16px 48px;
   }
 
+  .review-run-hero {
+    gap: var(--space-4);
+  }
+
+  .review-run-hero h1 {
+    font-size: 28px;
+    overflow-wrap: break-word;
+  }
+
+  .review-run-hero__meta > span {
+    min-width: 0;
+  }
+
+  .review-run-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .review-run-actions .btn {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .review-detail-surface {
+    gap: var(--space-3);
+  }
+
+  .review-detail-surface .section__body {
+    padding: var(--space-4);
+  }
+
+  .review-detail-surface .section__title {
+    padding-inline: var(--space-4);
+  }
+
+  .review-row__location {
+    max-width: 100%;
+    flex-basis: 100%;
+  }
+
   .topup {
     align-items: stretch;
     flex-direction: column;
@@ -2943,6 +2980,16 @@ button.nav__item:hover {
   .codex-modal {
     width: calc(100vw - var(--space-4));
     max-height: calc(100dvh - var(--space-4));
+  }
+}
+
+@media (max-width: 420px) {
+  .review-run-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .review-run-hero__meta > span {
+    width: 100%;
   }
 }
 
