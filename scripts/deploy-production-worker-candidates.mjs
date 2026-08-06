@@ -68,6 +68,9 @@ export function validateWorkerCandidateManifest(value) {
     const runtime = normalizeRuntime(worker.runtime, `workers.${kind}.runtime`);
     const environment = stringMap(worker.environment, `workers.${kind}.environment`);
     const secrets = secretMap(worker.secrets, `workers.${kind}.secrets`);
+    for (const [name, secret] of Object.entries(secrets)) {
+      if (secret.project !== PROJECT) fail(`workers.${kind}.secrets.${name}.project must be ${PROJECT}`);
+    }
     validateWorkerEnvironment(kind, environment, apiUrl);
     for (const name of REQUIRED_SECRETS[kind]) {
       if (!secrets[name]) fail(`workers.${kind}.secrets.${name} is required`);
@@ -99,7 +102,7 @@ export function buildWorkerCandidateDeployArgs(manifest, kind) {
     .join("~");
   const secrets = Object.entries(worker.secrets)
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([name, secret]) => `${name}=projects/${secret.project}/secrets/${secret.name}:${secret.version}`)
+    .map(([name, secret]) => `${name}=${secret.name}:${secret.version}`)
     .join(",");
   return [
     "run",
