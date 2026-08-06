@@ -94,11 +94,11 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
   assert.match(stagingDeployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
   assert.match(stagingDeployment, /TRIGGER_SECRET_KEY=\$\{review_trigger_secret\}:latest/);
+  assert.doesNotMatch(stagingDeployment, /Relational run-review (?:is|remains) blocked/);
   assert.match(
     stagingDeployment,
-    /Relational run-review remains blocked: deploy-staging\.sh does not yet activate a task-worker release credential/
+    /review_topics="prepare-review\|summary-review\|runtime-review\|finalize-review\|publish-review\|settle-review\|run-review\|github-installation-backfill\|billing-retry"/
   );
-  assert.match(stagingDeployment, /review_topics="run-review\|github-installation-backfill\|billing-retry"/);
   assert.match(
     stagingDeployment,
     /review_topics="prepare-review\|summary-review\|runtime-review\|finalize-review\|publish-review\|settle-review\|github-installation-backfill\|billing-retry"/
@@ -123,6 +123,7 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingCloudBuild, /id: deploy-staging[\s\S]+?scripts\/deploy-staging\.sh/);
   assert.match(stagingCloudBuild, /IMAGE_TAG=staging-\$COMMIT_SHA/);
   assert.match(stagingCloudBuild, /JINA_CONTEXT_TENANT_ID=\$\{_JINA_CONTEXT_TENANT_ID\}/);
+  assert.match(stagingCloudBuild, /JINA_REVIEW_BOARD_PIPELINE_MODE=v2/);
   assert.match(stagingCloudBuild, /org\.opencontainers\.image\.revision=\$COMMIT_SHA/);
   assert.doesNotMatch(stagingCloudBuild, /_IMAGE_TAG|_SOURCE_SHA|dynamicSubstitutions/);
   assert.match(
