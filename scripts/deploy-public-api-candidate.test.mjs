@@ -451,6 +451,20 @@ test("candidate deployment is no-traffic, keeps the old revision serving, and pr
   assert.ok(cloud.calls.slice(0, deployIndex).every((call) => !call.join(" ").includes("update-traffic")));
 });
 
+test("old rollback clone probes the legacy health route", async () => {
+  const raw = rawManifest();
+  raw.mode = "old-rollback-clone";
+  raw.image = `us-east1-docker.pkg.dev/jina-463721/jina-code-review/jina-code-review-api@sha256:${"c".repeat(64)}`;
+  const manifest = validatePublicApiCandidateManifest(raw);
+  const cloud = fakeCloud(manifest);
+  const probes = [];
+  await deployPublicApiCandidate(manifest, {
+    runner: cloud.runner,
+    probe: async (url) => probes.push(url)
+  });
+  assert.deepEqual(probes, ["https://candidate---jina-code-review-api-abc123-ue.a.run.app/v1/healthz"]);
+});
+
 test("a failed prerequisite cannot reach the Cloud Run deploy mutation", async () => {
   const manifest = validatePublicApiCandidateManifest(rawManifest());
   const cloud = fakeCloud(manifest, { omitImageReader: true });

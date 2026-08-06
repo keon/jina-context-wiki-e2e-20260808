@@ -488,7 +488,8 @@ export async function deployPublicApiCandidate(manifest, dependencies = {}) {
     (target) => target.tag === manifest.candidate.tag && target.revisionName === candidateRevision(manifest)
   );
   if (!tagged?.url) fail("candidate tag does not resolve to the expected revision");
-  await probe(`${tagged.url}/health`);
+  const healthPath = manifest.mode === "old-rollback-clone" ? "/v1/healthz" : "/health";
+  await probe(`${tagged.url}${healthPath}`);
   return { revision: candidateRevision(manifest), taggedUrl: tagged.url };
 }
 
