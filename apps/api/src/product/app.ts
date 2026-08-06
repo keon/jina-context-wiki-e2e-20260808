@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import { cors } from "hono/cors";
+import { etag, RETAINED_304_HEADERS } from "hono/etag";
 
 import {
   githubCallback,
@@ -132,6 +133,44 @@ export function createApp(config: AppConfig): Hono {
   app.onError((error, c) => jsonError(c, error));
   app.use("/dashboard/*", dashboardCors);
   app.use("/auth/*", dashboardCors);
+
+  // The dashboard re-fetches these GET routes on a 2.5-15s timer (apps/dashboard/src/lib/poll.ts),
+  // and most polls observe no change. Tagging the response lets the browser HTTP cache turn an
+  // unchanged poll into a bodyless 304 revalidation instead of a full payload transfer.
+  //
+  // Semantics match the legacy server's `jsonCacheable` (apps/api/src/server.ts): a strong ETag
+  // derived from the exact serialized body, plus `cache-control: no-cache` so the browser always
+  // revalidates rather than serving a stale body out of cache.
+  //
+  // Hono's default 304 header allowlist keeps only the caching headers, which would drop the
+  // credentialed CORS headers dashboardCors set on the way in. A 304 without
+  // access-control-allow-origin is blocked by the browser, so the poll would fail instead of
+  // revalidating; Set-Cookie is retained for the same "never lose a header the 200 would have
+  // carried" reason.
+  const revalidationMiddleware = etag({
+    retainedHeaders: [
+      ...RETAINED_304_HEADERS,
+      "access-control-allow-origin",
+      "access-control-allow-credentials",
+      "access-control-expose-headers",
+      "set-cookie",
+    ],
+  });
+  const dashboardRevalidation = async (c: Context, next: Next) => {
+    // GET only. Mutations must never be tagged, and only a GET response body is worth buffering to
+    // hash. The one cookie-setting GET on this surface (the OpenRouter OAuth callback) answers with
+    // a bodyless 302, which the ETag middleware skips on its own.
+    if (c.req.method !== "GET") return next();
+    return revalidationMiddleware(c, async () => {
+      await next();
+      // Set while the real response is still current: the ETag middleware post-processes after this
+      // returns, and `cache-control` has to already be present to survive onto the 304.
+      if (!c.res.headers.has("set-cookie")) {
+        c.res.headers.set("cache-control", "no-cache");
+      }
+    });
+  };
+  app.use("/dashboard/*", dashboardRevalidation);
 
   // FINDING 1 (credentialed CSRF): every credentialed, state-changing dashboard route must reject a
   // cross-site forgery. With SameSite=None cookies a cross-site `text/plain` "simple request" carries
