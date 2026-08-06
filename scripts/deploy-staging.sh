@@ -480,6 +480,8 @@ gcloud --quiet run deploy "${api_service}" \
   --set-env-vars="^~^OTELCOL_CONFIG=${otel_collector_config}" \
   --startup-probe="initialDelaySeconds=0,timeoutSeconds=10,periodSeconds=10,failureThreshold=5,httpGet.path=/,httpGet.port=13133" \
   --liveness-probe="timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/,httpGet.port=13133"
+api_release_revision="$(gcloud run services describe "${api_service}" \
+  --project="${project}" --region="${region}" --format='value(status.latestCreatedRevisionName)')"
 api_url="$(gcloud run services describe "${api_service}" \
   --project="${project}" \
   --region="${region}" \
@@ -518,14 +520,9 @@ if ! retry_health "${api_candidate_url}/health"; then
   printf 'Candidate API revision failed its health check; staging traffic was not moved.\n' >&2
   exit 1
 fi
-# A previous emergency rollback pins traffic to a named revision. Cloud Run
-# preserves that pin across later deploys, so restore latest-revision routing
-# now that the candidate has proven healthy.
-gcloud run services update-traffic "${api_service}" \
-  --project="${project}" \
-  --region="${region}" \
-  --to-latest \
-  --quiet
+# Keep the prior API revision serving until both credentialed worker revisions
+# exist and release control names those exact revisions. Moving the gated API
+# here would temporarily reject claims from the still-serving prior workers.
 
 # Cloud Scheduler only admits a durable Board workflow. The task worker owns
 # execution, retries, event history, and trace export for every billing drain.
@@ -715,6 +712,11 @@ gcloud run services update-traffic "${task_worker_service}" \
   --project="${project}" \
   --region="${region}" \
   --to-revisions="${task_release_revision}=100" \
+  --quiet
+gcloud run services update-traffic "${api_service}" \
+  --project="${project}" \
+  --region="${region}" \
+  --to-revisions="${api_release_revision}=100" \
   --quiet
 
 retry_health "${api_url}/health"

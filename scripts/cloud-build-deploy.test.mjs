@@ -83,7 +83,10 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--args=dist\/product\/migrate-all\.js,--install-roles/);
   assert.doesNotMatch(stagingDeployment, /JINA_PRODUCT_DATABASE_URL|jina-staging-database-url/);
   assert.doesNotMatch(stagingDeployment, /jina-product-migrate-staging|jina-context-migrate-staging/);
-  assert.match(stagingDeployment, /services update-traffic "\$\{api_service\}"[\s\S]+?--to-latest/);
+  assert.match(
+    stagingDeployment,
+    /services update-traffic "\$\{api_service\}"[\s\S]+?--to-revisions="\$\{api_release_revision\}=100"/
+  );
   assert.match(
     stagingDeployment,
     /context_topics="run-context-input-snapshot\|run-context-page-plan\|run-context-page-build\|run-context-publication"/
@@ -102,6 +105,11 @@ test("staging uses one v2 database connection and one migration job", async () =
   );
   assert.match(stagingDeployment, /--to-revisions="\$\{context_release_revision\}=100"/);
   assert.match(stagingDeployment, /--to-revisions="\$\{task_release_revision\}=100"/);
+  assert.ok(
+    stagingDeployment.indexOf('--to-revisions="${task_release_revision}=100"') <
+      stagingDeployment.indexOf('--to-revisions="${api_release_revision}=100"'),
+    "the gated API must move only after the credentialed workers"
+  );
   assert.match(stagingDeployment, /restore_main_release_control/);
   assert.match(stagingDeployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
   assert.match(stagingDeployment, /TRIGGER_SECRET_KEY=\$\{review_trigger_secret\}:latest/);
