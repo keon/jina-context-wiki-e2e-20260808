@@ -44,6 +44,7 @@ internal_token_secret="${JINA_V2_INTERNAL_TOKEN_SECRET:-jina-v2-staging-internal
 context_token_secret="jina-staging-context-api-token"
 checkpoint_secret="jina-staging-context-private-checkpoint-key"
 product_internal_token_secret="jina-staging-internal-api-token"
+product_internal_token_version="${JINA_PRODUCT_INTERNAL_TOKEN_VERSION:?JINA_PRODUCT_INTERNAL_TOKEN_VERSION is required and must be a numeric pinned Secret Manager version}"
 product_encryption_secret="jina-staging-secrets-encryption-key"
 github_webhook_inbox_encryption_secret="jina-staging-github-webhook-inbox-encryption-key"
 clerk_secret="jina-staging-clerk-secret-key"
@@ -71,6 +72,10 @@ fi
 if [[ "${github_webhook_inbox_enabled}" == "true" &&
       ! "${github_webhook_inbox_encryption_key_version}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION must be a numeric pinned version when the inbox is enabled\n' >&2
+  exit 2
+fi
+if [[ ! "${product_internal_token_version}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'JINA_PRODUCT_INTERNAL_TOKEN_VERSION must be a numeric pinned version\n' >&2
   exit 2
 fi
 
@@ -191,6 +196,8 @@ for secret_name in \
   "${openai_secret}"; do
   gcloud secrets versions describe latest --secret="${secret_name}" --project="${project}" >/dev/null
 done
+gcloud secrets versions describe "${product_internal_token_version}" \
+  --secret="${product_internal_token_secret}" --project="${project}" >/dev/null
 gcloud secrets describe "${worker_release_credential_secret}" --project="${project}" >/dev/null
 gcloud storage buckets describe "gs://${artifact_bucket}" --project="${project}" >/dev/null
 gcloud storage buckets describe "gs://${review_artifact_bucket}" --project="${project}" >/dev/null
@@ -438,7 +445,7 @@ if [[ "${review_run_topic_mode}" == "relational" ]]; then
   api_env+="~JINA_REVIEW_RUN_TOPIC_MODE=relational"
 fi
 api_env+="~JINA_SCHEDULER_OIDC_AUDIENCE=https://api.staging.usejina.com~JINA_SCHEDULER_OIDC_EMAIL=${scheduler_oidc_service_account}"
-api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
+api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
 if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
   api_secrets+=",GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY=${github_webhook_inbox_encryption_secret}:${github_webhook_inbox_encryption_key_version}"
 fi
@@ -619,7 +626,7 @@ fi
 unset release_credential release_secret_version_name
 
 context_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${context_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=jina-staging-context-openai~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex~CONTEXT_DAYTONA_SNAPSHOT=jina-context-board-codex-0-145-0-bwrap-v2"
-context_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
+context_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
 gcloud --quiet run deploy "${context_worker_service}" \
   --project="${project}" \
   --region="${region}" \
@@ -654,7 +661,7 @@ context_release_revision="$(gcloud run services describe "${context_worker_servi
   --project="${project}" --region="${region}" --format='value(status.latestCreatedRevisionName)')"
 
 task_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~DASHBOARD_URL=https://app.staging.usejina.com~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${review_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REVIEW_GCS_BUCKET=${review_artifact_bucket}~JINA_GRAPH_MCP_ENABLED=true~DAYTONA_RUN_TIMEOUT_SECONDS=3600~DAYTONA_SETUP_TIMEOUT_SECONDS=300~DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS=120~DAYTONA_SANDBOX_IMAGE=node:22-bookworm~DAYTONA_SANDBOX_CPU=4~DAYTONA_SANDBOX_MEMORY=8~DAYTONA_SANDBOX_DISK=10~REVIEW_CODEX_MODEL=openai/gpt-5.6-luna~REVIEW_CODEX_EFFORT=medium~RUNTIME_PLANNER_MODEL=openai/gpt-5.6-sol~RUNTIME_AGENT_MODEL=openai/gpt-5.6-luna~RUNTIME_MENTAL_TRACE_MODEL=openai/gpt-5.6-luna"
-task_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,OPENAI_API_KEY=${openai_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
+task_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,OPENAI_API_KEY=${openai_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
 if [[ "${review_run_topic_mode}" == "relational" ]]; then
   task_env+="~JINA_REVIEW_RUN_TOPIC_MODE=relational"
   task_secrets+=",TRIGGER_SECRET_KEY=${review_trigger_secret}:latest"
