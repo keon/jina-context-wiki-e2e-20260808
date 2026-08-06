@@ -87,7 +87,15 @@ export interface AdminContextBuild {
   };
   readonly queuedFollowups?: readonly NonNullable<AdminContextBuild["queuedFollowup"]>[];
   readonly queuedFollowupCount?: number;
-  readonly status: "active" | "completed" | "failed";
+  /**
+   * Whatever the API reported, verbatim. `active`, `completed`, and `failed`
+   * are the values this app reasons about, but an unrecognised one is kept
+   * rather than coerced: presenting a blocked build or a status introduced by a
+   * newer API version as `completed` would report a stalled build as a
+   * successful one. Absent when the row carried no status at all — that is not
+   * the same as a completed build either.
+   */
+  readonly status?: string;
   readonly failureCode?: string;
   readonly failureReason?: string;
   readonly stages: readonly AdminContextBuildStage[];
@@ -99,7 +107,7 @@ export interface AdminContextBuildProgress {
   readonly buildId: string;
   readonly repository: string;
   readonly ref: string;
-  readonly status: AdminContextBuild["status"];
+  readonly status?: NonNullable<AdminContextBuild["status"]>;
   readonly derivationBudgetSeconds?: number;
   readonly derivationDeadlineAt?: string;
   readonly consumedExecutionSeconds?: number;
@@ -126,41 +134,48 @@ export interface AdminContextBuildProgress {
   readonly updatedAt: string;
 }
 
+/**
+ * Every counter here is optional, and an absent one is never defaulted to `0`.
+ * Telemetry the API did not send is not a measurement of nothing: on an
+ * operations console a fabricated zero reads as a healthy, idle system, which
+ * is exactly the state an operator would be looking for a way to rule out. A
+ * `0` in this type therefore always means the API measured zero.
+ */
 export interface AdminContextMetrics {
-  readonly outboxDepthByConsumer: Readonly<Record<string, number>>;
-  readonly publishedGenerationCount: number;
-  readonly documentCount: number;
-  readonly fragmentCount: number;
-  readonly hierarchyNodeCount: number;
-  readonly embeddingCount: number;
+  readonly outboxDepthByConsumer?: Readonly<Record<string, number>>;
+  readonly publishedGenerationCount?: number;
+  readonly documentCount?: number;
+  readonly fragmentCount?: number;
+  readonly hierarchyNodeCount?: number;
+  readonly embeddingCount?: number;
   readonly query?: {
-    readonly count: number;
-    readonly p95Ms: number;
-    readonly citationFailureCount: number;
-    readonly conflictCount: number;
+    readonly count?: number;
+    readonly p95Ms?: number;
+    readonly citationFailureCount?: number;
+    readonly conflictCount?: number;
   };
   readonly projectors?: readonly {
     readonly name: string;
     readonly status: string;
     readonly checkpoint: string;
-    readonly backlog: number;
+    readonly backlog?: number;
     readonly version: string;
   }[];
   readonly quotas?: {
-    readonly active: {
-      readonly builds: number;
-      readonly modelTasks: number;
+    readonly active?: {
+      readonly builds?: number;
+      readonly modelTasks?: number;
     };
-    readonly storage: {
-      readonly committedBytes: number;
-      readonly reservedBytes: number;
-      readonly limitBytes: number;
+    readonly storage?: {
+      readonly committedBytes?: number;
+      readonly reservedBytes?: number;
+      readonly limitBytes?: number;
     };
-    readonly monthlyModel: {
-      readonly requests: number;
-      readonly totalTokens: number;
-      readonly requestLimit: number;
-      readonly tokenLimit: number;
+    readonly monthlyModel?: {
+      readonly requests?: number;
+      readonly totalTokens?: number;
+      readonly requestLimit?: number;
+      readonly tokenLimit?: number;
     };
   };
 }
@@ -387,9 +402,9 @@ function parseBuild(value: unknown): AdminContextBuild | undefined {
     repository,
     ref,
     refSequence: finiteNumber(value.refSequence, 0),
-    status: parseBuildStatus(value.status),
     stages: parseStages(value.stages),
     ...definedOnly({
+      status: parseBuildStatus(value.status),
       commitSha: optionalString(value.commitSha),
       trigger: optionalString(value.trigger),
       derivationBudgetSeconds: optionalNumber(value.derivationBudgetSeconds),
@@ -456,6 +471,11 @@ function parseCatalogDocument(value: unknown): CatalogDocument | undefined {
   };
 }
 
+/**
+ * A row without a usable name is skipped, as everywhere else. A row that is
+ * otherwise valid keeps its absent backlog absent: a fabricated `0` beside a
+ * healthy status is how projector lag goes unnoticed.
+ */
 function parseProjectors(value: unknown): AdminContextMetrics["projectors"] {
   if (!Array.isArray(value)) return undefined;
   return value.flatMap((projector) => {
@@ -467,15 +487,16 @@ function parseProjectors(value: unknown): AdminContextMetrics["projectors"] {
         name,
         status: optionalString(projector.status) ?? "unknown",
         checkpoint: optionalString(projector.checkpoint) ?? "unknown",
-        backlog: finiteNumber(projector.backlog, 0),
-        version: optionalString(projector.version) ?? "unknown"
+        version: optionalString(projector.version) ?? "unknown",
+        ...definedOnly({ backlog: optionalNumber(projector.backlog) })
       }
     ];
   });
 }
 
-function parseOutboxDepth(value: unknown): Record<string, number> {
-  if (!isRecord(value)) return {};
+/** `undefined` when the API sent no map at all; `{}` when it measured none. */
+function parseOutboxDepth(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
   const depths: Record<string, number> = {};
   for (const [consumer, depth] of Object.entries(value)) {
     if (typeof depth === "number" && Number.isFinite(depth)) depths[consumer] = depth;
@@ -483,28 +504,34 @@ function parseOutboxDepth(value: unknown): Record<string, number> {
   return depths;
 }
 
+/**
+ * Partial quota telemetry stays partial. Reporting an omitted counter as zero
+ * active usage would hide capacity pressure behind a reading that looks idle.
+ */
 function parseQuotas(value: unknown): AdminContextMetrics["quotas"] {
   if (!isRecord(value)) return undefined;
-  const active = isRecord(value.active) ? value.active : {};
-  const storage = isRecord(value.storage) ? value.storage : {};
-  const monthlyModel = isRecord(value.monthlyModel) ? value.monthlyModel : {};
-  return {
-    active: {
-      builds: finiteNumber(active.builds, 0),
-      modelTasks: finiteNumber(active.modelTasks, 0)
-    },
-    storage: {
-      committedBytes: finiteNumber(storage.committedBytes, 0),
-      reservedBytes: finiteNumber(storage.reservedBytes, 0),
-      limitBytes: finiteNumber(storage.limitBytes, 0)
-    },
-    monthlyModel: {
-      requests: finiteNumber(monthlyModel.requests, 0),
-      totalTokens: finiteNumber(monthlyModel.totalTokens, 0),
-      requestLimit: finiteNumber(monthlyModel.requestLimit, 0),
-      tokenLimit: finiteNumber(monthlyModel.tokenLimit, 0)
-    }
-  };
+  const active = isRecord(value.active)
+    ? definedOnly({
+        builds: optionalNumber(value.active.builds),
+        modelTasks: optionalNumber(value.active.modelTasks)
+      })
+    : undefined;
+  const storage = isRecord(value.storage)
+    ? definedOnly({
+        committedBytes: optionalNumber(value.storage.committedBytes),
+        reservedBytes: optionalNumber(value.storage.reservedBytes),
+        limitBytes: optionalNumber(value.storage.limitBytes)
+      })
+    : undefined;
+  const monthlyModel = isRecord(value.monthlyModel)
+    ? definedOnly({
+        requests: optionalNumber(value.monthlyModel.requests),
+        totalTokens: optionalNumber(value.monthlyModel.totalTokens),
+        requestLimit: optionalNumber(value.monthlyModel.requestLimit),
+        tokenLimit: optionalNumber(value.monthlyModel.tokenLimit)
+      })
+    : undefined;
+  return definedOnly({ active, storage, monthlyModel });
 }
 
 export async function listAllReleases(): Promise<readonly AdminContextRelease[]> {
@@ -610,10 +637,14 @@ function parseValidationStatus(value: unknown): "pending" | "valid" | "invalid" 
   return "pending";
 }
 
+/**
+ * Reports the status verbatim rather than mapping unrecognised values onto
+ * `completed`. `statusTone()` leaves anything it does not recognise neutral, so
+ * a status this app has never seen reaches an operator uncoloured instead of
+ * being presented as a healthy, finished build.
+ */
 function parseBuildStatus(value: unknown): AdminContextBuild["status"] {
-  if (value === "active") return "active";
-  if (value === "failed") return "failed";
-  return "completed";
+  return requiredString(value);
 }
 
 function parseBuildProgress(value: unknown): AdminContextBuildProgress | undefined {
@@ -647,10 +678,10 @@ function parseBuildProgress(value: unknown): AdminContextBuildProgress | undefin
     buildId,
     repository,
     ref,
-    status: value.status === "active" ? "active" : parseBuildStatus(value.status),
     stages: parseStages(value.stages),
     pages,
     ...definedOnly({
+      status: parseBuildStatus(value.status),
       derivationBudgetSeconds: optionalNumber(value.derivationBudgetSeconds),
       derivationDeadlineAt: optionalString(value.derivationDeadlineAt),
       consumedExecutionSeconds: optionalNumber(value.consumedExecutionSeconds),
@@ -671,25 +702,25 @@ function parseBuildProgress(value: unknown): AdminContextBuildProgress | undefin
 export async function getContextMetrics(): Promise<AdminContextMetrics> {
   const body = await apiGet("/context/metrics");
   if (!isRecord(body)) throw new JinaApiError("Jina API response for /context/metrics was not an object");
-  const projectors = parseProjectors(body.projectors);
-  const quotas = parseQuotas(body.quotas);
   const query = isRecord(body.query)
-    ? {
-        count: finiteNumber(body.query.count, 0),
-        p95Ms: finiteNumber(body.query.p95Ms, 0),
-        citationFailureCount: finiteNumber(body.query.citationFailureCount, 0),
-        conflictCount: finiteNumber(body.query.conflictCount, 0)
-      }
+    ? definedOnly({
+        count: optionalNumber(body.query.count),
+        p95Ms: optionalNumber(body.query.p95Ms),
+        citationFailureCount: optionalNumber(body.query.citationFailureCount),
+        conflictCount: optionalNumber(body.query.conflictCount)
+      })
     : undefined;
-  return {
+  // Omitted counters are dropped, not zeroed: the page renders an absent
+  // counter as "—" so unavailable telemetry cannot be read as an empty system.
+  return definedOnly({
     outboxDepthByConsumer: parseOutboxDepth(body.outboxDepthByConsumer),
-    publishedGenerationCount: finiteNumber(body.publishedGenerationCount, 0),
-    documentCount: finiteNumber(body.documentCount, 0),
-    fragmentCount: finiteNumber(body.fragmentCount, 0),
-    hierarchyNodeCount: finiteNumber(body.hierarchyNodeCount, 0),
-    embeddingCount: finiteNumber(body.embeddingCount, 0),
-    ...(query ? { query } : {}),
-    ...(projectors ? { projectors } : {}),
-    ...(quotas ? { quotas } : {})
-  };
+    publishedGenerationCount: optionalNumber(body.publishedGenerationCount),
+    documentCount: optionalNumber(body.documentCount),
+    fragmentCount: optionalNumber(body.fragmentCount),
+    hierarchyNodeCount: optionalNumber(body.hierarchyNodeCount),
+    embeddingCount: optionalNumber(body.embeddingCount),
+    query,
+    projectors: parseProjectors(body.projectors),
+    quotas: parseQuotas(body.quotas)
+  });
 }

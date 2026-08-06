@@ -44,7 +44,7 @@ export default async function ContextAdminPage({
   // page from turning one navigation into a burst of expensive Board and
   // catalog reads that competes with workers, MCP, and webhook admission.
   const releasesSection = await loadSection<readonly AdminContextRelease[]>(listAllReleases, [], HEADINGS.releases);
-  const metricsSection = await loadSection(getContextMetrics, EMPTY_METRICS, HEADINGS.health);
+  const metricsSection = await loadSection(getContextMetrics, UNMEASURED_METRICS, HEADINGS.health);
   const buildsSection = await loadSection<readonly AdminContextBuild[]>(listContextBuilds, [], HEADINGS.builds);
 
   const releases = releasesSection.value;
@@ -88,9 +88,14 @@ export default async function ContextAdminPage({
   const shownBuilds = visibleBuilds.slice(0, BUILD_ROW_LIMIT);
   const shownDocuments = documents.slice(0, DOCUMENT_ROW_LIMIT);
   const progressByBuild = new Map(buildProgress.map((progress) => [progress.buildId, progress]));
-  const pending = Object.values(metrics.outboxDepthByConsumer).reduce((sum, count) => sum + count, 0);
-  const activeBuilds = metrics.quotas?.active.builds ?? 0;
-  const activeModelTasks = metrics.quotas?.active.modelTasks ?? 0;
+  // A total is only a total when every part of it was measured. An absent
+  // outbox map is not an empty one, and absent quota telemetry is not idle
+  // capacity: both stay `undefined` so the stat renders “—”.
+  const outboxDepth = metrics.outboxDepthByConsumer;
+  const pending =
+    outboxDepth === undefined ? undefined : Object.values(outboxDepth).reduce((sum, count) => sum + count, 0);
+  const activeBuilds = metrics.quotas?.active?.builds;
+  const activeModelTasks = metrics.quotas?.active?.modelTasks;
   const currentDocuments = new Map(
     documents.map((document) => [`${document.repository}\0${document.logicalId}`, document])
   ).size;
@@ -280,6 +285,16 @@ export default async function ContextAdminPage({
                   );
                   const queuedFollowup = progress?.queuedFollowup ?? build.queuedFollowup;
                   const queuedFollowupCount = progress?.queuedFollowupCount ?? build.queuedFollowupCount ?? 0;
+                  // Checkpoint progress supersedes the build row where it exists;
+                  // where neither reported a figure it stays undefined, because a
+                  // budget rendered against a fabricated 0 reads as untouched
+                  // headroom and a fabricated 0 remaining reads as exhausted.
+                  const consumedModelTokens = progress?.consumedModelTokens ?? build.consumedModelTokens;
+                  const reservedModelTokens = progress?.activeModelReservedTokens ?? build.activeModelReservedTokens;
+                  const derivationDeadlineAt = progress?.derivationDeadlineAt ?? build.derivationDeadlineAt;
+                  const consumedExecutionSeconds = progress?.consumedExecutionSeconds ?? build.consumedExecutionSeconds;
+                  const remainingExecutionSeconds =
+                    progress?.remainingExecutionSeconds ?? build.remainingExecutionSeconds;
                   return (
                     <tr key={build.id}>
                       <td>{build.repository}</td>
@@ -292,7 +307,7 @@ export default async function ContextAdminPage({
                         <code>{build.commitSha?.slice(0, 10) ?? "unresolved"}</code>
                       </td>
                       <td data-tone={statusTone(build.status)}>
-                        {build.status}
+                        {build.status ?? <Unmeasured title="The API reported no status for this build" />}
                         {buildFailure ? <span className="failure-detail">{buildFailure}</span> : null}
                         {queuedFollowup ? (
                           <span className="muted">
@@ -306,42 +321,37 @@ export default async function ContextAdminPage({
                       <td>
                         {build.derivationTokenBudget !== undefined ? (
                           <>
-                            {compactNumber(progress?.consumedModelTokens ?? build.consumedModelTokens ?? 0)} /{" "}
-                            {compactNumber(build.derivationTokenBudget)} tokens
-                            {(progress?.activeModelReservedTokens ?? build.activeModelReservedTokens ?? 0) > 0 ? (
+                            {consumedModelTokens === undefined ? (
+                              <Unmeasured title="No consumed model tokens were reported against this budget" />
+                            ) : (
+                              compactNumber(consumedModelTokens)
+                            )}{" "}
+                            / {compactNumber(build.derivationTokenBudget)} tokens
+                            {reservedModelTokens !== undefined && reservedModelTokens > 0 ? (
                               <>
                                 <br />
-                                <span className="muted">
-                                  {compactNumber(
-                                    progress?.activeModelReservedTokens ?? build.activeModelReservedTokens ?? 0
-                                  )}{" "}
-                                  actively reserved
-                                </span>
+                                <span className="muted">{compactNumber(reservedModelTokens)} actively reserved</span>
                               </>
                             ) : null}
                           </>
                         ) : (
                           "not recorded"
                         )}
-                        {(progress?.derivationDeadlineAt ?? build.derivationDeadlineAt) ? (
+                        {derivationDeadlineAt ? (
                           <>
                             <br />
-                            <span className="muted">
-                              deadline{" "}
-                              {formatTimestamp((progress?.derivationDeadlineAt ?? build.derivationDeadlineAt)!)}
-                            </span>
+                            <span className="muted">deadline {formatTimestamp(derivationDeadlineAt)}</span>
                           </>
                         ) : null}
-                        {(progress?.consumedExecutionSeconds ?? build.consumedExecutionSeconds) !== undefined ? (
+                        {consumedExecutionSeconds !== undefined ? (
                           <>
                             <br />
                             <span className="muted">
-                              {compactDuration(
-                                progress?.consumedExecutionSeconds ?? build.consumedExecutionSeconds ?? 0
-                              )}{" "}
-                              used ·{" "}
-                              {compactDuration(
-                                progress?.remainingExecutionSeconds ?? build.remainingExecutionSeconds ?? 0
+                              {compactDuration(consumedExecutionSeconds)} used ·{" "}
+                              {remainingExecutionSeconds === undefined ? (
+                                <Unmeasured title="No remaining execution time was reported for this build" />
+                              ) : (
+                                compactDuration(remainingExecutionSeconds)
                               )}{" "}
                               execution remaining
                             </span>
@@ -406,9 +416,7 @@ export default async function ContextAdminPage({
       <section id="health" className="context-admin-section admin-data-section">
         <h2>{HEADINGS.health}</h2>
         <p className="muted">
-          {metricsKnown
-            ? `${metrics.fragmentCount} lexical fragments and ${metrics.hierarchyNodeCount} hierarchy nodes. Dense embeddings remain disabled (${metrics.embeddingCount} stored).`
-            : "Index counts could not be read, so none are shown."}
+          {metricsKnown ? indexHealthSummary(metrics) : "Index counts could not be read, so none are shown."}
         </p>
         {!metricsKnown ? (
           <SectionError section={metricsSection} />
@@ -431,7 +439,13 @@ export default async function ContextAdminPage({
                 <tr key={projector.name}>
                   <td>{projector.name}</td>
                   <td data-tone={statusTone(projector.status)}>{projector.status}</td>
-                  <td>{projector.backlog}</td>
+                  <td>
+                    {projector.backlog === undefined ? (
+                      <Unmeasured title="No backlog was reported for this projection, so its lag is unknown" />
+                    ) : (
+                      projector.backlog.toLocaleString("en-US")
+                    )}
+                  </td>
                   <td>
                     <code>{projector.version}</code>
                   </td>
@@ -507,14 +521,12 @@ export default async function ContextAdminPage({
   );
 }
 
-const EMPTY_METRICS: AdminContextMetrics = {
-  outboxDepthByConsumer: {},
-  publishedGenerationCount: 0,
-  documentCount: 0,
-  fragmentCount: 0,
-  hierarchyNodeCount: 0,
-  embeddingCount: 0
-};
+/**
+ * The fallback for a metrics read that failed. Every counter is absent rather
+ * than zero, so nothing downstream can render an unread metric as a measured
+ * one even if the `metricsKnown` guard were ever dropped.
+ */
+const UNMEASURED_METRICS: AdminContextMetrics = {};
 
 /**
  * A section is either measured, failed, or never attempted because something it
@@ -609,13 +621,26 @@ function rowCountLabel(shown: number, total: number, plural: string): string {
   return total === 1 ? `1 ${plural.replace(/s$/, "")} shown` : `${total} ${plural} shown`;
 }
 
+/**
+ * A number the API never reported. It renders as an em dash and never as `0`,
+ * because a zero on this page is a measurement: an operator reading "0 backlog"
+ * or "0 active builds" would take it as evidence that nothing is wrong.
+ */
+function Unmeasured({ title }: { readonly title: string }) {
+  return (
+    <span className="unmeasured" title={title}>
+      <span aria-hidden="true">—</span>
+      <span className="sr-only">Unavailable</span>
+    </span>
+  );
+}
+
 function Stat({ label, value }: { readonly label: string; readonly value: number | undefined }) {
   if (value === undefined) {
     return (
       <div className="stat stat--unknown">
-        <div className="value" title="Not measured: this data did not load">
-          <span aria-hidden="true">—</span>
-          <span className="sr-only">Unavailable</span>
+        <div className="value">
+          <Unmeasured title="Not measured: this value was not reported, and is not zero" />
         </div>
         <div className="label">{label}</div>
       </div>
@@ -627,6 +652,27 @@ function Stat({ label, value }: { readonly label: string; readonly value: number
       <div className="label">{label}</div>
     </div>
   );
+}
+
+/** Formats a count for prose. `0` stays `0`; an unmeasured count reads as “—”. */
+function countText(value: number | undefined): string {
+  return value === undefined ? "—" : value.toLocaleString("en-US");
+}
+
+/**
+ * Index counts the API did not report are named as unreported rather than
+ * printed as zeroes, so a section that loaded but measured nothing cannot be
+ * mistaken for an empty, healthy index.
+ */
+function indexHealthSummary(metrics: AdminContextMetrics): string {
+  const embeddings =
+    metrics.embeddingCount === undefined
+      ? "The dense embedding count was not reported."
+      : `Dense embeddings remain disabled (${countText(metrics.embeddingCount)} stored).`;
+  const unmeasured = [metrics.fragmentCount, metrics.hierarchyNodeCount].some((count) => count === undefined)
+    ? " Counts shown as “—” were never measured and are not zero."
+    : "";
+  return `${countText(metrics.fragmentCount)} lexical fragments and ${countText(metrics.hierarchyNodeCount)} hierarchy nodes. ${embeddings}${unmeasured}`;
 }
 
 function shortRef(ref: string): string {

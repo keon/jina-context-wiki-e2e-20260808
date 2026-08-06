@@ -26,3 +26,14 @@ test("an unrecognised status stays neutral rather than being coloured healthy", 
   assert.equal(statusTone(null), undefined);
   assert.equal(statusTone(undefined), undefined);
 });
+
+test("a status the parsers could not determine is neutral, not a failure", () => {
+  // "unknown" is what the parsers record for a field the API did not send, and
+  // an unrecognised status now reaches the table verbatim. A gap in what was
+  // measured is not evidence that anything failed, so neither is coloured as a
+  // failure — nor as healthy.
+  assert.equal(statusTone("unknown"), undefined);
+  assert.equal(statusTone("blocked"), undefined);
+  assert.notEqual(statusTone("unknown"), "bad");
+  assert.notEqual(statusTone("blocked"), statusTone("completed"));
+});

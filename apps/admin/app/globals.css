@@ -701,6 +701,14 @@ button.admin-nav__item:hover,
   color: var(--ink-subtle);
 }
 
+/* A number the API never reported. It is deliberately not a figure: a zero here
+ * would read as a measurement, and "0 backlog" is the reading an operator would
+ * use to rule a projection out. The dash sits in muted ink so it reads as an
+ * absence rather than a value. */
+.unmeasured {
+  color: var(--ink-subtle);
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
