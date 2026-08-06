@@ -51,6 +51,39 @@ export function renderWithQueryClient(ui: ReactElement): RenderResult {
   return render(ui, { wrapper: Wrapper });
 }
 
+/* ------------------------------------------------------------------ queries --- */
+
+/**
+ * Query helpers that answer in primitives.
+ *
+ * Never let a DOM node become an assertion operand. `node:test` serializes an
+ * AssertionError's `actual`/`expected` into its diagnostic, and a happy-dom
+ * element's object graph reaches its document, its window, and everything
+ * either of those holds: the runner spends half a minute walking it and is then
+ * killed by the OS. The test reports "test failed" with no message — precisely
+ * when the message is the only thing you wanted. So assertions here take counts,
+ * booleans, strings and attribute values.
+ */
+
+export function count(root: ParentNode, selector: string): number {
+  return root.querySelectorAll(selector).length;
+}
+
+/** Whether the render contains `selector` at all. */
+export function present(root: ParentNode, selector: string): boolean {
+  return root.querySelector(selector) !== null;
+}
+
+/** `textContent` of the first match, or "" when there is none. */
+export function textOf(root: ParentNode, selector: string): string {
+  return root.querySelector(selector)?.textContent ?? "";
+}
+
+/** An attribute of the first match; null when the element or attribute is absent. */
+export function attrOf(root: ParentNode, selector: string, name: string): string | null {
+  return root.querySelector(selector)?.getAttribute(name) ?? null;
+}
+
 /* -------------------------------------------------------------------- fetch --- */
 
 /**
@@ -117,7 +150,11 @@ export function assertNoLeakedValues(container: HTMLElement, subject: string): v
     for (const child of Array.from(element.childNodes)) walk(child);
   };
   walk(container);
-  assert.deepEqual(offences, [], `${subject} rendered a formatter placeholder to the reader:\n  ${offences.join("\n  ")}`);
+  assert.deepEqual(
+    offences,
+    [],
+    `${subject} rendered a formatter placeholder to the reader:\n  ${offences.join("\n  ")}`
+  );
 }
 
 /* ------------------------------------------------------------ grid contract --- */

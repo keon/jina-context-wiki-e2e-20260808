@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useDashboard } from "../dashboard/providers.tsx";
 import { gridContracts } from "./css-contract.ts";
-import { assertGridContracts, assertNoLeakedValues, renderComponent } from "./render.tsx";
+import { assertGridContracts, assertNoLeakedValues, attrOf, count, renderComponent, textOf } from "./render.tsx";
 import { setDashboardState } from "./stubs/dashboard-providers.tsx";
 
 /**
@@ -14,12 +14,12 @@ import { setDashboardState } from "./stubs/dashboard-providers.tsx";
 
 test("a component renders into a real document", () => {
   const { container } = renderComponent(<p className="probe">rendered</p>);
-  assert.equal(container.querySelector(".probe")?.textContent, "rendered");
+  assert.equal(textOf(container, ".probe"), "rendered");
   assert.equal(typeof document.body.innerHTML, "string");
 });
 
 test("each test starts with an empty document", () => {
-  assert.equal(document.body.querySelectorAll(".probe").length, 0);
+  assert.equal(count(document.body, ".probe"), 0);
 });
 
 test("next/link, next/navigation and the dashboard providers resolve to test doubles", () => {
@@ -33,10 +33,9 @@ test("next/link, next/navigation and the dashboard providers resolve to test dou
   }
   setDashboardState({ loading: false });
   const { container } = renderComponent(<Probe />);
-  const anchor = container.querySelector("a");
-  assert.equal(anchor?.getAttribute("href"), "/reviews");
-  assert.equal(container.querySelector("span")?.getAttribute("data-loading"), "false");
-  assert.equal(container.querySelector("span")?.getAttribute("data-path"), "/");
+  assert.equal(attrOf(container, "a", "href"), "/reviews");
+  assert.equal(attrOf(container, "span", "data-loading"), "false");
+  assert.equal(attrOf(container, "span", "data-path"), "/");
 });
 
 test("the stylesheet's fixed grid track counts are read, and open-ended ones are not", () => {

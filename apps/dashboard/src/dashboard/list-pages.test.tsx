@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertGridContracts, assertNoLeakedValues, renderComponent } from "../testing/render.tsx";
+import {
+  assertGridContracts,
+  assertNoLeakedValues,
+  count,
+  present,
+  renderComponent,
+  textOf
+} from "../testing/render.tsx";
 import { setDashboardState } from "../testing/stubs/dashboard-providers.tsx";
 import IssuesPage from "./issues/page.tsx";
 import ReviewsPage from "./reviews/page.tsx";
@@ -87,7 +94,7 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
     setDashboardState({ data: null, loading: true, error: null });
     const loading = renderComponent(<Page />);
     renders.set("loading", loading.container.textContent ?? "");
-    assert.equal(loading.container.querySelector(".empty"), null, `/${name} claimed emptiness while loading`);
+    assert.equal(count(loading.container, ".empty"), 0, `/${name} claimed emptiness while loading`);
     assert.doesNotMatch(loading.container.textContent ?? "", emptyCopy);
     loading.unmount();
 
@@ -95,8 +102,8 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
     setDashboardState({ data: null, loading: false, error: "Dashboard API returned 503" });
     const failed = renderComponent(<Page />);
     renders.set("failed", failed.container.textContent ?? "");
-    assert.equal(failed.container.querySelector(".empty"), null, `/${name} reported a failed read as empty`);
-    assert.ok(failed.container.querySelector(".notice--bad"), `/${name} did not surface the failure`);
+    assert.equal(count(failed.container, ".empty"), 0, `/${name} reported a failed read as empty`);
+    assert.ok(present(failed.container, ".notice--bad"), `/${name} did not surface the failure`);
     assert.doesNotMatch(failed.container.textContent ?? "", emptyCopy);
     failed.unmount();
 
@@ -104,7 +111,7 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
     setDashboardState({ data: feed(), loading: false, error: null });
     const empty = renderComponent(<Page />);
     renders.set("empty", empty.container.textContent ?? "");
-    assert.ok(empty.container.querySelector(".empty"), `/${name} did not report a genuinely empty feed`);
+    assert.ok(present(empty.container, ".empty"), `/${name} did not report a genuinely empty feed`);
     assert.match(empty.container.textContent ?? "", emptyCopy);
     empty.unmount();
 
@@ -112,7 +119,7 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
     setDashboardState({ data: populated, loading: false, error: null });
     const ready = renderComponent(<Page />);
     renders.set("ready", ready.container.textContent ?? "");
-    assert.equal(ready.container.querySelectorAll(rowSelector).length, 1);
+    assert.equal(count(ready.container, rowSelector), 1);
     assert.doesNotMatch(ready.container.textContent ?? "", emptyCopy);
 
     assert.equal(new Set(renders.values()).size, 4, `/${name} renders two of its four states identically`);
@@ -122,9 +129,9 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
     setDashboardState({ data: populated, loading: false, error: "Dashboard API returned 503" });
     const { container } = renderComponent(<Page />);
 
-    assert.equal(container.querySelectorAll(rowSelector).length, 1, "the last good feed should stay on screen");
-    assert.ok(container.querySelector(".notice--bad"), "the failure should be surfaced alongside it");
-    assert.equal(container.querySelector(".empty"), null);
+    assert.equal(count(container, rowSelector), 1, "the last good feed should stay on screen");
+    assert.ok(present(container, ".notice--bad"), "the failure should be surfaced alongside it");
+    assert.equal(count(container, ".empty"), 0);
   });
 
   test(`/${name} renders no formatter placeholders and honours its grid contracts`, () => {
@@ -148,6 +155,6 @@ test("a row with nothing to say in its meta line uses the absence sentinel", () 
   });
   const { container } = renderComponent(<ReviewsPage />);
 
-  assert.equal(container.querySelector(".row__meta")?.textContent, "—");
+  assert.equal(textOf(container, ".row__meta"), "—");
   assertNoLeakedValues(container, "/reviews");
 });

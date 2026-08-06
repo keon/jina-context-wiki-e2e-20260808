@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { screen, waitFor } from "@testing-library/react";
-import { jsonResponse, renderWithQueryClient, stubFetch } from "../../testing/render.tsx";
+import { attrOf, jsonResponse, present, renderWithQueryClient, stubFetch, textOf } from "../../testing/render.tsx";
 import { setTenantState } from "../../testing/stubs/dashboard-providers.tsx";
 import TaskTypesPage from "./page.tsx";
 
@@ -19,11 +19,10 @@ test("no workspace selected renders a terminal message, not a spinner", () => {
 
   const { container } = renderWithQueryClient(<TaskTypesPage />);
 
-  const placeholder = container.querySelector(".page-placeholder");
-  assert.ok(placeholder, "expected the no-workspace placeholder");
-  assert.equal(placeholder.getAttribute("role"), "status");
-  assert.match(placeholder.textContent ?? "", /No workspace selected/);
-  assert.equal(screen.queryByText(/Loading task types/), null);
+  assert.ok(present(container, ".page-placeholder"), "expected the no-workspace placeholder");
+  assert.equal(attrOf(container, ".page-placeholder", "role"), "status");
+  assert.match(textOf(container, ".page-placeholder"), /No workspace selected/);
+  assert.equal(screen.queryAllByText(/Loading task types/).length, 0);
   assert.deepEqual(requests, []);
 });
 
@@ -38,26 +37,26 @@ test("loading, unavailable and empty are three different renders for a real work
 
   stubFetch(() => new Promise<Response>(() => undefined));
   const pending = renderWithQueryClient(<TaskTypesPage />);
-  const loadingCopy = pending.container.querySelector(".task-types-empty")?.textContent ?? "";
+  const loadingCopy = textOf(pending.container, ".task-types-empty");
   assert.match(loadingCopy, /Loading task types/);
-  assert.equal(pending.container.querySelector(".task-types-empty")?.getAttribute("aria-busy"), "true");
+  assert.equal(attrOf(pending.container, ".task-types-empty", "aria-busy"), "true");
   pending.unmount();
 
   stubFetch((url) => (url.includes("work-overview") ? jsonResponse(EMPTY_OVERVIEW) : jsonResponse({}, 503)));
   const failed = renderWithQueryClient(<TaskTypesPage />);
   await waitFor(() => {
-    assert.match(failed.container.querySelector(".task-types-empty")?.textContent ?? "", /could not be loaded/);
+    assert.match(textOf(failed.container, ".task-types-empty"), /could not be loaded/);
   });
-  assert.ok(failed.container.querySelector(".task-types-empty button"), "a failed read must offer a retry");
-  const failedCopy = failed.container.querySelector(".task-types-empty")?.textContent ?? "";
+  assert.ok(present(failed.container, ".task-types-empty button"), "a failed read must offer a retry");
+  const failedCopy = textOf(failed.container, ".task-types-empty");
   failed.unmount();
 
   stubFetch(respond);
   const empty = renderWithQueryClient(<TaskTypesPage />);
   await waitFor(() => {
-    assert.match(empty.container.querySelector(".task-types-empty")?.textContent ?? "", /No task types are defined/);
+    assert.match(textOf(empty.container, ".task-types-empty"), /No task types are defined/);
   });
-  const emptyCopy = empty.container.querySelector(".task-types-empty")?.textContent ?? "";
+  const emptyCopy = textOf(empty.container, ".task-types-empty");
 
   assert.equal(new Set([loadingCopy, failedCopy, emptyCopy]).size, 3);
 });
@@ -79,7 +78,7 @@ test("a response without a board renders the page rather than throwing", async (
   const { container } = renderWithQueryClient(<TaskTypesPage />);
 
   await waitFor(() => {
-    assert.ok(container.querySelector("#task-types-page"), "the page should still render");
+    assert.ok(present(container, "#task-types-page"), "the page should still render");
   });
   assert.match(container.textContent ?? "", /Task types/);
 });

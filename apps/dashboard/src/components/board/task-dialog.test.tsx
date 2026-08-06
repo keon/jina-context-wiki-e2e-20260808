@@ -58,7 +58,7 @@ function openDialog(current: BoardTask, board: BoardState = EMPTY_BOARD, events 
 test("a task with no assignee reports absence, not a humanized undefined", () => {
   openDialog(task());
   assert.equal(factValue("Assignee"), "—");
-  assert.equal(screen.queryByText("Undefined"), null);
+  assert.equal(screen.queryAllByText("Undefined").length, 0);
 });
 
 test("an assigned task still reports its role", () => {
@@ -100,9 +100,7 @@ test("nothing in the dialog leaks a formatter placeholder, however sparse the ta
 test("every fact and relationship fills the lanes its grid cuts for it", () => {
   const board: BoardState = {
     tasks: [task(), task({ id: "task_02HQ", title: "Ship the retry fix" })],
-    dependencies: [
-      { taskId: "task_01HQ", dependsOnTaskId: "task_02HQ", relationship: "blocks", required: true }
-    ]
+    dependencies: [{ taskId: "task_01HQ", dependsOnTaskId: "task_02HQ", relationship: "blocks", required: true }]
   };
   const { container } = openDialog(task(), board);
   assertGridContracts(container, "TaskDialog");

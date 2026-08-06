@@ -23,10 +23,20 @@
     },
     "packages/theme": {},
     "apps/dashboard": {
-      "entry": ["src/app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}", "src/**/*.test.ts"]
+      "entry": [
+        "src/app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}",
+        "src/**/*.test.ts",
+        "src/**/*.test.tsx",
+        "src/testing/**"
+      ]
     },
     "apps/admin": {
-      "entry": ["app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}", "lib/**/*.test.ts"]
+      "entry": [
+        "app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}",
+        "lib/**/*.test.ts",
+        "app/**/*.test.tsx",
+        "testing/**"
+      ]
     },
     "packages/review-agent": {
       "entry": ["src/index.ts", "src/review/codex-review.ts", "src/**/*.test.ts"]

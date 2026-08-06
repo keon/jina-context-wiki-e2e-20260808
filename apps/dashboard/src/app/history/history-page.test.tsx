@@ -3,9 +3,13 @@ import { test } from "node:test";
 import { screen, waitFor } from "@testing-library/react";
 import {
   assertGridContracts,
+  attrOf,
+  count,
   jsonResponse,
+  present,
   renderWithQueryClient,
-  stubFetch
+  stubFetch,
+  textOf
 } from "../../testing/render.tsx";
 import { setTenantState } from "../../testing/stubs/dashboard-providers.tsx";
 import HistoryPage from "./page.tsx";
@@ -29,14 +33,13 @@ test("no workspace selected renders a terminal message, not a spinner", () => {
 
   const { container } = renderWithQueryClient(<HistoryPage />);
 
-  const placeholder = container.querySelector(".page-placeholder");
-  assert.ok(placeholder, "expected the no-workspace placeholder");
-  assert.equal(placeholder.getAttribute("role"), "status");
-  assert.match(placeholder.textContent ?? "", /No workspace selected/);
-  assert.match(placeholder.textContent ?? "", /Select a workspace/);
+  assert.ok(present(container, ".page-placeholder"), "expected the no-workspace placeholder");
+  assert.equal(attrOf(container, ".page-placeholder", "role"), "status");
+  assert.match(textOf(container, ".page-placeholder"), /No workspace selected/);
+  assert.match(textOf(container, ".page-placeholder"), /Select a workspace/);
   // The failure this guards against: the loading copy standing in for a state
   // that can never resolve.
-  assert.equal(screen.queryByText(/Loading activity/), null);
+  assert.equal(screen.queryAllByText(/Loading activity/).length, 0);
   // And nothing was polled, because there is nothing to poll.
   assert.deepEqual(requests, []);
 });
@@ -47,8 +50,8 @@ test("a selected workspace does report loading, so the two states are distinguis
 
   const { container } = renderWithQueryClient(<HistoryPage />);
 
-  assert.equal(container.querySelector(".page-placeholder"), null);
-  assert.match(container.querySelector(".run-history-list-footer")?.textContent ?? "", /Loading activity/);
+  assert.equal(count(container, ".page-placeholder"), 0);
+  assert.match(textOf(container, ".run-history-list-footer"), /Loading activity/);
 });
 
 test("a selected workspace with activity renders rows inside the lanes the table cuts", async () => {
@@ -74,8 +77,8 @@ test("a selected workspace with activity renders rows inside the lanes the table
   const { container } = renderWithQueryClient(<HistoryPage />);
 
   await waitFor(() => {
-    assert.equal(container.querySelectorAll(".run-history-row").length, 1);
+    assert.equal(count(container, ".run-history-row"), 1);
   });
-  assert.match(container.querySelector(".run-history-list-footer")?.textContent ?? "", /1 event/);
+  assert.match(textOf(container, ".run-history-list-footer"), /1 event/);
   assertGridContracts(container, "HistoryPage");
 });
