@@ -33,6 +33,20 @@ interface Scope {
   readonly ref: string;
   readonly updatedAt: string;
 }
+interface RepositoryOption {
+  readonly name: string;
+  readonly defaultBranch: string;
+}
+interface WikiVersion {
+  readonly key: string;
+  readonly kind: "branch" | "commit";
+  readonly ref: string;
+  readonly release?: ContextRelease;
+}
+interface PendingDocument {
+  readonly releaseId: string;
+  readonly documentId: string;
+}
 
 export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) {
   const { selected } = useTenant();
@@ -60,38 +74,77 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
     [buildsResource.data]
   );
   const scopes = useMemo(() => buildScopes(repositories, releases, builds), [builds, releases, repositories]);
+  const repositoryOptions = useMemo(
+    () => buildRepositoryOptions(repositories, scopes),
+    [repositories, scopes]
+  );
   const [scopeKey, setScopeKey] = useState("");
   const [scopeWasChosen, setScopeWasChosen] = useState(false);
+  const [wikiRepository, setWikiRepository] = useState("");
+  const [wikiVersionKey, setWikiVersionKey] = useState("");
+  const [pendingDocument, setPendingDocument] = useState<PendingDocument | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [building, setBuilding] = useState(false);
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
-    if (view === "causal-graph" && buildsResource.data === undefined) return;
+    if (view !== "causal-graph" || buildsResource.data === undefined) return;
     const currentExists = scopes.some((scope) => scopeValue(scope) === scopeKey);
-    const completedGraph =
-      view === "causal-graph"
-        ? scopes.find((scope) =>
-            builds.some(
-              (build) =>
-                build.repository === scope.repository &&
-                build.ref === scope.ref &&
-                build.buildKind === "causal_graph" &&
-                build.status === "completed"
-            )
-          )
-        : undefined;
+    const completedGraph = scopes.find((scope) =>
+      builds.some(
+        (build) =>
+          build.repository === scope.repository &&
+          build.ref === scope.ref &&
+          build.buildKind === "causal_graph" &&
+          build.status === "completed"
+      )
+    );
     if (!currentExists || (!scopeWasChosen && completedGraph)) {
       const next = completedGraph ?? scopes[0];
       setScopeKey(next ? scopeValue(next) : "");
     }
   }, [builds, buildsResource.data, scopeKey, scopeWasChosen, scopes, view]);
 
-  const [repository = "", ref = ""] = scopeKey.split("\0");
-  const release = releases.find((item) => item.repository === repository && item.ref === ref);
+  useEffect(() => {
+    if (view !== "wiki") return;
+    const currentRepository = repositoryOptions.find((item) => item.name === wikiRepository);
+    const nextRepository = currentRepository ?? repositoryOptions[0];
+    if (!nextRepository) {
+      setWikiRepository("");
+      setWikiVersionKey("");
+      return;
+    }
+    const versions = buildWikiVersions(nextRepository, releases, builds);
+    const nextVersion = versions.find((item) => item.key === wikiVersionKey) ?? versions[0];
+    if (wikiRepository !== nextRepository.name) setWikiRepository(nextRepository.name);
+    if (wikiVersionKey !== nextVersion?.key) setWikiVersionKey(nextVersion?.key ?? "");
+  }, [builds, releases, repositoryOptions, view, wikiRepository, wikiVersionKey]);
+
+  const wikiRepositoryOption = repositoryOptions.find((item) => item.name === wikiRepository);
+  const wikiVersions = useMemo(
+    () => (wikiRepositoryOption ? buildWikiVersions(wikiRepositoryOption, releases, builds) : []),
+    [builds, releases, wikiRepositoryOption]
+  );
+  const wikiVersion = wikiVersions.find((item) => item.key === wikiVersionKey) ?? wikiVersions[0];
+  const [graphRepository = "", graphRef = ""] = scopeKey.split("\0");
+  const repository = view === "wiki" ? wikiRepository : graphRepository;
+  const ref = view === "wiki" ? (wikiVersion?.ref ?? wikiRepositoryOption?.defaultBranch ?? "") : graphRef;
+  const release =
+    view === "wiki"
+      ? wikiVersion?.release ?? releases.find((item) => item.repository === repository && item.ref === ref)
+      : releases.find((item) => item.repository === repository && item.ref === ref);
   const releaseHistory = releases.filter((item) => item.repository === repository && item.ref === ref);
+  const workspaceSearchReleases = useMemo(
+    () => currentRepositoryReleases(repositoryOptions, releases, release),
+    [release, releases, repositoryOptions]
+  );
+  const documentationBuildCandidates = builds.filter(
+    (item) => item.repository === repository && item.ref === ref && item.buildKind !== "causal_graph"
+  );
   const documentationBuild = newestContextBuild(
-    builds.filter((item) => item.repository === repository && item.ref === ref && item.buildKind !== "causal_graph")
+    wikiVersion?.kind === "commit" && release?.commitSha
+      ? documentationBuildCandidates.filter((item) => item.commitSha === release.commitSha)
+      : documentationBuildCandidates
   );
   const graphBuild = newestContextBuild(
     builds.filter((item) => item.repository === repository && item.ref === ref && item.buildKind === "causal_graph")
@@ -128,7 +181,15 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
           method: "POST",
           credentials: "include",
           headers: { "content-type": "application/json", accept: "application/json" },
-          body: JSON.stringify(view === "causal-graph" ? { repository, ref } : { repository })
+          body: JSON.stringify(
+            view === "causal-graph"
+              ? { repository, ref }
+              : {
+                  repository,
+                  ref,
+                  ...(wikiVersion?.kind === "commit" && release?.commitSha ? { commitSha: release.commitSha } : {})
+                }
+          )
         }
       );
       if (!response.ok) {
@@ -147,6 +208,27 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
     }
   }
 
+  function selectWikiRepository(nextRepository: string) {
+    const option = repositoryOptions.find((item) => item.name === nextRepository);
+    setWikiRepository(nextRepository);
+    setWikiVersionKey(option ? branchVersionValue(option.defaultBranch) : "");
+    setPendingDocument(null);
+    setNotice("");
+  }
+
+  function selectWikiVersion(nextVersion: string) {
+    setWikiVersionKey(nextVersion);
+    setPendingDocument(null);
+    setNotice("");
+  }
+
+  function openWikiSearchResult(nextRelease: ContextRelease, documentId: string) {
+    setWikiRepository(nextRelease.repository);
+    setWikiVersionKey(releaseVersionValue(nextRelease.id));
+    setPendingDocument({ releaseId: nextRelease.id, documentId });
+    setNotice("");
+  }
+
   return (
     <section className="knowledge-page" id={view === "wiki" ? "context-page" : "causal-graph-page"}>
       <h1 className="sr-only">{view === "wiki" ? "Context Wiki" : "Causal Graph"}</h1>
@@ -157,27 +239,85 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
           <span>{view === "wiki" ? "Repository context" : "Repository history"}</span>
         </div>
 
-        <label className="knowledge-toolbar__scope">
-          <span className="sr-only">Repository and ref</span>
-          <select
-            aria-label="Repository and ref"
-            value={scopeKey}
-            disabled={scopes.length === 0}
-            onChange={(event) => {
-              setScopeWasChosen(true);
-              setScopeKey(event.target.value);
-              setNotice("");
-            }}
-          >
-            {scopes.length === 0 ? <option value="">No repositories available</option> : null}
-            {scopes.map((scope) => (
-              <option key={scopeValue(scope)} value={scopeValue(scope)}>
-                {scope.repository} / {scope.ref}
-              </option>
-            ))}
-          </select>
-          <ChevronIcon />
-        </label>
+        {view === "wiki" ? (
+          <div className="knowledge-toolbar__selectors">
+            <label className="knowledge-toolbar__field">
+              <span>Repository</span>
+              <span className="knowledge-toolbar__scope">
+                <select
+                  aria-label="Repository"
+                  value={wikiRepository}
+                  disabled={repositoryOptions.length === 0}
+                  onChange={(event) => selectWikiRepository(event.target.value)}
+                >
+                  {repositoryOptions.length === 0 ? <option value="">No repositories available</option> : null}
+                  {repositoryOptions.map((option) => (
+                    <option key={option.name} value={option.name}>
+                      {option.name}
+                    </option>
+                  ))}
+                </select>
+                <ChevronIcon />
+              </span>
+            </label>
+            <label className="knowledge-toolbar__field knowledge-toolbar__field--version">
+              <span>Version</span>
+              <span className="knowledge-toolbar__scope">
+                <select
+                  aria-label="Wiki version"
+                  value={wikiVersion?.key ?? ""}
+                  disabled={wikiVersions.length === 0}
+                  onChange={(event) => selectWikiVersion(event.target.value)}
+                >
+                  {wikiVersions.length === 0 ? <option value="">No versions available</option> : null}
+                  <optgroup label="Branches">
+                    {wikiVersions
+                      .filter((version) => version.kind === "branch")
+                      .map((version) => (
+                        <option key={version.key} value={version.key}>
+                          {version.ref === wikiRepositoryOption?.defaultBranch
+                            ? `Default · ${version.ref}`
+                            : `Branch · ${version.ref}`}
+                        </option>
+                      ))}
+                  </optgroup>
+                  <optgroup label="Specific commits">
+                    {wikiVersions
+                      .filter((version) => version.kind === "commit" && version.release)
+                      .map((version) => (
+                        <option key={version.key} value={version.key}>
+                          {version.release!.commitSha.slice(0, 12)} · {version.ref}
+                        </option>
+                      ))}
+                  </optgroup>
+                </select>
+                <ChevronIcon />
+              </span>
+            </label>
+          </div>
+        ) : (
+          <label className="knowledge-toolbar__scope">
+            <span className="sr-only">Repository and ref</span>
+            <select
+              aria-label="Repository and ref"
+              value={scopeKey}
+              disabled={scopes.length === 0}
+              onChange={(event) => {
+                setScopeWasChosen(true);
+                setScopeKey(event.target.value);
+                setNotice("");
+              }}
+            >
+              {scopes.length === 0 ? <option value="">No repositories available</option> : null}
+              {scopes.map((scope) => (
+                <option key={scopeValue(scope)} value={scopeValue(scope)}>
+                  {scope.repository} / {scope.ref}
+                </option>
+              ))}
+            </select>
+            <ChevronIcon />
+          </label>
+        )}
 
         <div className="knowledge-toolbar__meta">
           {activeBuild ? (
@@ -256,9 +396,15 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
 
           {view === "wiki" && release ? (
             <ContextBrowser
+              key={release.id}
               release={release}
               releases={releaseHistory}
+              workspaceReleases={workspaceSearchReleases}
+              {...(pendingDocument?.releaseId === release.id
+                ? { initialDocumentId: pendingDocument.documentId }
+                : {})}
               apiBasePath={operationsApiUrl(selected.tenantId, "context")}
+              onOpenReleaseDocument={openWikiSearchResult}
             />
           ) : view === "wiki" ? (
             <KnowledgePlaceholder
@@ -325,6 +471,94 @@ function buildScopes(
       left.repository.localeCompare(right.repository) ||
       left.ref.localeCompare(right.ref)
   );
+}
+
+function buildRepositoryOptions(
+  repositories: readonly Repository[],
+  scopes: readonly Scope[]
+): RepositoryOption[] {
+  const byName = new Map<string, RepositoryOption>();
+  for (const repository of repositories) {
+    byName.set(repository.name, repository);
+  }
+  for (const scope of scopes) {
+    if (!byName.has(scope.repository)) {
+      byName.set(scope.repository, { name: scope.repository, defaultBranch: scope.ref });
+    }
+  }
+  return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function buildWikiVersions(
+  repository: RepositoryOption,
+  releases: readonly ContextRelease[],
+  builds: readonly ContextBuildSummary[]
+): WikiVersion[] {
+  const refs = new Set<string>([repository.defaultBranch]);
+  for (const release of releases) {
+    if (release.repository === repository.name) refs.add(release.ref);
+  }
+  for (const build of builds) {
+    if (build.repository === repository.name && build.buildKind !== "causal_graph") refs.add(build.ref);
+  }
+
+  const branchVersions = [...refs]
+    .sort((left, right) => {
+      if (left === repository.defaultBranch) return -1;
+      if (right === repository.defaultBranch) return 1;
+      return left.localeCompare(right);
+    })
+    .map((ref): WikiVersion => {
+      const release = releases.find((item) => item.repository === repository.name && item.ref === ref);
+      return {
+        key: branchVersionValue(ref),
+        kind: "branch",
+        ref,
+        ...(release ? { release } : {})
+      };
+    });
+
+  const commitVersions = releases
+    .filter((release) => release.repository === repository.name)
+    .sort((left, right) =>
+      (right.publishedAt ?? right.createdAt).localeCompare(left.publishedAt ?? left.createdAt)
+    )
+    .map((release): WikiVersion => ({
+      key: releaseVersionValue(release.id),
+      kind: "commit",
+      ref: release.ref,
+      release
+    }));
+
+  return [...branchVersions, ...commitVersions];
+}
+
+function currentRepositoryReleases(
+  repositories: readonly RepositoryOption[],
+  releases: readonly ContextRelease[],
+  activeRelease?: ContextRelease
+): ContextRelease[] {
+  const byRepository = new Map<string, ContextRelease>();
+  for (const repository of repositories) {
+    const current =
+      releases.find(
+        (release) => release.repository === repository.name && release.ref === repository.defaultBranch
+      ) ?? releases.find((release) => release.repository === repository.name);
+    if (current) byRepository.set(repository.name, current);
+  }
+  if (activeRelease) byRepository.set(activeRelease.repository, activeRelease);
+  return repositories.flatMap((repository) => {
+    const release = byRepository.get(repository.name);
+    return release ? [release] : [];
+  });
+}
+
+function branchVersionValue(ref: string) {
+  return `branch\0${ref}`;
+}
+
+function releaseVersionValue(releaseId: string) {
+  return `release\0${releaseId}`;
 }
 
 function scopeValue(scope: Pick<Scope, "repository" | "ref">) {

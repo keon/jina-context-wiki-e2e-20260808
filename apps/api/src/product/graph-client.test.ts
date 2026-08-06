@@ -347,6 +347,40 @@ test("a dashboard index builds the repository's default branch", async () => {
   });
 });
 
+test("a dashboard index can target an explicit branch and commit", async () => {
+  const commitSha = "d".repeat(40);
+  const { fetchImpl, bodies } = recording(async () =>
+    Response.json({
+      build: {
+        id: "cb_branch",
+        status: "active",
+        repository: "omxyz/a",
+        ref: "release/next",
+        commitSha,
+      },
+    }),
+  );
+  const client = new GraphApiClient(CONFIG, fetchImpl);
+
+  await client.buildDashboardGraph(CONTEXT, {
+    repository: "omxyz/a",
+    ref: "release/next",
+    commitSha,
+    requestKey: "dashboard-branch-key",
+    metadata: { source: "jina-dashboard" },
+  });
+
+  assert.deepEqual(bodies, [
+    {
+      repository: "omxyz/a",
+      ref: "release/next",
+      commitSha,
+      githubInstallationId: 42,
+      requestKey: "dashboard-branch-key",
+    },
+  ]);
+});
+
 test("recent Context builds are tenant-scoped again before reaching the dashboard", async () => {
   const { fetchImpl, urls } = recording(async () =>
     Response.json({

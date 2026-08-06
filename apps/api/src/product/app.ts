@@ -802,6 +802,8 @@ export function createApp(config: AppConfig): Hono {
       await requireTenantMembership(session, tenantId, { requireAdmin: true });
       const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
       const repository = typeof body.repository === "string" ? body.repository.trim() : "";
+      const ref = typeof body.ref === "string" ? body.ref.trim() : "";
+      const commitSha = typeof body.commitSha === "string" ? body.commitSha.trim() : "";
       const fullHistory = body.fullHistory === true;
       const historyLimit = parseGraphHistoryLimit(body.historyLimit);
       if (!repository) throw new ApiError(400, "repository is required");
@@ -809,6 +811,8 @@ export function createApp(config: AppConfig): Hono {
       return c.json(
         await graphs.buildDashboardGraph(context, {
           repository,
+          ...(ref ? { ref } : {}),
+          ...(commitSha ? { commitSha } : {}),
           snapshotFirst: !fullHistory,
           requestKey: `dashboard:${tenantId}:${randomUUID()}`,
           metadata: {

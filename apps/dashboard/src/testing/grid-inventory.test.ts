@@ -40,6 +40,7 @@ const DECLARED_GRIDS: Readonly<Record<string, number>> = {
   "knowledge-browser": 2,
   "knowledge-graph-loading": 2,
   "knowledge-graph__layout": 2,
+  "knowledge-toolbar__selectors": 2,
   "model-fallbacks": 1,
   "model-provider-card": 2,
   "model-setting-row": 3,

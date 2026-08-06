@@ -27,11 +27,17 @@ const PAGE_RENDER_LIMIT = 200;
 export function ContextBrowser({
   release,
   releases,
-  apiBasePath
+  workspaceReleases,
+  initialDocumentId,
+  apiBasePath,
+  onOpenReleaseDocument
 }: {
   readonly release: ContextRelease;
   readonly releases: readonly ContextRelease[];
+  readonly workspaceReleases: readonly ContextRelease[];
+  readonly initialDocumentId?: string;
   readonly apiBasePath: string;
+  readonly onOpenReleaseDocument: (release: ContextRelease, documentId: string) => void;
 }) {
   const catalog = usePoll<ContextListResponse>(
     `${apiBasePath}/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`,
@@ -42,23 +48,24 @@ export function ContextBrowser({
       ? catalog.data
       : undefined;
   const documents = currentCatalog?.documents ?? [];
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(initialDocumentId ?? "");
   const [document, setDocument] = useState<ContextReadResponse["document"] | null>(null);
   const [filter, setFilter] = useState("");
   const [mode, setMode] = useState<BrowserMode>("document");
   const [readError, setReadError] = useState("");
 
   useEffect(() => {
-    setSelectedId("");
+    setSelectedId(initialDocumentId ?? "");
     setDocument(null);
     setFilter("");
     setMode("document");
     setReadError("");
-  }, [release.id]);
+  }, [initialDocumentId, release.id]);
 
   useEffect(() => {
+    if (documents.length === 0) return;
     if (!documents.some((candidate) => candidate.id === selectedId)) {
-      setSelectedId(documents[0]?.id ?? "");
+      setSelectedId(documents[0]!.id);
     }
   }, [documents, selectedId]);
 
@@ -189,7 +196,17 @@ export function ContextBrowser({
           <span className="knowledge-reader__commit mono">{release.commitSha.slice(0, 12)}</span>
         </header>
 
-        {mode === "search" ? <ContextSearch release={release} apiBasePath={apiBasePath} onOpen={openDocument} /> : null}
+        {mode === "search" ? (
+          <ContextSearch
+            release={release}
+            workspaceReleases={workspaceReleases}
+            apiBasePath={apiBasePath}
+            onOpen={(resultRelease, documentId) => {
+              if (resultRelease.id === release.id) openDocument(documentId);
+              else onOpenReleaseDocument(resultRelease, documentId);
+            }}
+          />
+        ) : null}
         {mode === "changes" ? (
           <ContextDiff release={release} releases={releases} apiBasePath={apiBasePath} onOpen={openDocument} />
         ) : null}
@@ -272,17 +289,32 @@ function DocumentView({
   );
 }
 
-function ContextSearch({
+type SearchScope = "repository" | "workspace";
+type ContextSearchResult = ContextSearchResponse["results"][number];
+interface ContextSearchHit {
+  readonly release: ContextRelease;
+  readonly result: ContextSearchResult;
+}
+interface ContextSearchBatch {
+  readonly hits: readonly ContextSearchHit[];
+  readonly searchedRepositories: number;
+  readonly failedRepositories: number;
+}
+
+export function ContextSearch({
   release,
+  workspaceReleases,
   apiBasePath,
   onOpen
 }: {
   readonly release: ContextRelease;
+  readonly workspaceReleases: readonly ContextRelease[];
   readonly apiBasePath: string;
-  readonly onOpen: (id: string) => void;
+  readonly onOpen: (release: ContextRelease, documentId: string) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [response, setResponse] = useState<ContextSearchResponse | null>(null);
+  const [scope, setScope] = useState<SearchScope>("repository");
+  const [response, setResponse] = useState<ContextSearchBatch | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -292,18 +324,38 @@ function ContextSearch({
     setLoading(true);
     setError("");
     try {
-      const result = await fetch(`${apiBasePath}/search`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify({ repository: release.repository, releaseId: release.id, query: query.trim() })
-      });
-      if (!result.ok) throw new Error(`Search failed (${result.status}).`);
-      const body = (await result.json()) as ContextSearchResponse;
-      if (body.release.id !== release.id || body.release.repository !== release.repository) {
-        throw new Error("Search returned a different context release.");
+      const targets = scope === "workspace" ? workspaceReleases : [release];
+      const settled = await Promise.allSettled(
+        targets.map(async (target) => {
+          const result = await fetch(`${apiBasePath}/search`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "content-type": "application/json", accept: "application/json" },
+            body: JSON.stringify({ repository: target.repository, releaseId: target.id, query: query.trim() })
+          });
+          if (!result.ok) throw new Error(`Search failed for ${target.repository} (${result.status}).`);
+          const body = (await result.json()) as ContextSearchResponse;
+          if (body.release.id !== target.id || body.release.repository !== target.repository) {
+            throw new Error(`Search returned a different release for ${target.repository}.`);
+          }
+          return { release: target, response: body };
+        })
+      );
+      const successful = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      const failedRepositories = settled.length - successful.length;
+      if (successful.length === 0) {
+        const firstFailure = settled.find((result) => result.status === "rejected");
+        throw firstFailure?.status === "rejected" && firstFailure.reason instanceof Error
+          ? firstFailure.reason
+          : new Error("Search failed.");
       }
-      setResponse(body);
+      const hits = successful
+        .flatMap(({ release: resultRelease, response: body }) =>
+          body.results.map((result): ContextSearchHit => ({ release: resultRelease, result }))
+        )
+        .sort((left, right) => right.result.score - left.result.score)
+        .slice(0, 40);
+      setResponse({ hits, searchedRepositories: successful.length, failedRepositories });
     } catch (cause) {
       setResponse(null);
       setError(cause instanceof Error ? cause.message : "Search failed.");
@@ -316,21 +368,51 @@ function ContextSearch({
     <section className="knowledge-tool">
       <header>
         <span>Grounded retrieval</span>
-        <h2>Search this wiki</h2>
-        <p>Find pages and source-backed excerpts without generating an answer.</p>
+        <h2>{scope === "workspace" ? "Search all repositories" : "Search this repository"}</h2>
+        <p>
+          {scope === "workspace"
+            ? "Search the selected version here and the default branch of every other repository."
+            : "Find pages and source-backed excerpts in the selected wiki version."}
+        </p>
       </header>
+      {workspaceReleases.length > 1 ? (
+        <div className="knowledge-search-scope" role="group" aria-label="Search scope">
+          <button
+            type="button"
+            aria-pressed={scope === "repository"}
+            onClick={() => {
+              setScope("repository");
+              setResponse(null);
+              setError("");
+            }}
+          >
+            This repository
+          </button>
+          <button
+            type="button"
+            aria-pressed={scope === "workspace"}
+            onClick={() => {
+              setScope("workspace");
+              setResponse(null);
+              setError("");
+            }}
+          >
+            All repositories
+          </button>
+        </div>
+      ) : null}
       <form className="knowledge-tool__form" onSubmit={(event) => void search(event)}>
         <label className="knowledge-search knowledge-search--large">
           <SearchIcon />
           <input
             aria-label="Search Context Wiki"
-            placeholder="What should I read before changing the webhook flow?"
+            placeholder={scope === "workspace" ? "Search every repository" : "Search this repository"}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
         <button className="knowledge-button knowledge-button--primary" disabled={loading || !query.trim()}>
-          {loading ? "Searching…" : "Search"}
+          {loading ? "Searching…" : scope === "workspace" ? "Search all" : "Search"}
         </button>
       </form>
       {error ? <p className="knowledge-inline-error">{error}</p> : null}
@@ -338,21 +420,34 @@ function ContextSearch({
         <div className="knowledge-results">
           <div className="knowledge-results__summary">
             <span>
-              {response.results.length} {response.results.length === 1 ? "result" : "results"}
+              {response.hits.length} {response.hits.length === 1 ? "result" : "results"}
             </span>
-            <span>{response.retrieval.selector}</span>
+            <span>
+              {response.searchedRepositories} {response.searchedRepositories === 1 ? "repository" : "repositories"}
+            </span>
           </div>
-          {response.results.map((result) => (
-            <button type="button" key={result.documentId} onClick={() => onOpen(result.documentId)}>
+          {response.failedRepositories > 0 ? (
+            <p className="knowledge-search-note">
+              {response.failedRepositories} {response.failedRepositories === 1 ? "repository was" : "repositories were"} unavailable.
+            </p>
+          ) : null}
+          {response.hits.map(({ release: resultRelease, result }) => (
+            <button
+              type="button"
+              key={`${resultRelease.id}:${result.documentId}`}
+              onClick={() => onOpen(resultRelease, result.documentId)}
+            >
               <span>
                 <strong>{result.title}</strong>
-                <small>{result.citations.length} verified citations</small>
+                <small>
+                  {resultRelease.repository} · {result.citations.length} verified citations
+                </small>
               </span>
               <p>{result.excerpts[0]?.slice(0, 360) ?? "Open the page to read more."}</p>
               <ArrowIcon />
             </button>
           ))}
-          {response.results.length === 0 ? <ReaderState title="No results" detail="Try a broader search." /> : null}
+          {response.hits.length === 0 ? <ReaderState title="No results" detail="Try a broader search." /> : null}
         </div>
       ) : null}
     </section>

@@ -197,6 +197,8 @@ interface RequestContext {
 
 export interface DashboardGraphBuildInput {
   repository: string;
+  ref?: string;
+  commitSha?: string;
   snapshotFirst?: boolean;
   requestKey: string;
   metadata: Readonly<Record<string, string | number>>;
@@ -609,7 +611,8 @@ export class GraphApiClient {
     if (!repository) throw new ApiError(403, "repository access denied");
     return this.startBuild(context, {
       repository: repository.name,
-      ref: repository.defaultBranch,
+      ref: input.ref?.trim() || repository.defaultBranch,
+      ...(input.commitSha?.trim() ? { commitSha: input.commitSha.trim() } : {}),
       requestKey: input.requestKey,
     });
   }
