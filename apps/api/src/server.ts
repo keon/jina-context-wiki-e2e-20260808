@@ -100,6 +100,7 @@ import {
   supportedWorkerTopics,
   type IsoTimestamp
 } from "@jina/shared-kernel";
+import { constantTimeEquals } from "./secure-compare.js";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
 import {
@@ -110,7 +111,7 @@ import {
   contextPageRemediationTaskIds,
   contextTokenInterruptedTaskIds
 } from "./context-board-recovery.js";
-import { compactTerminalContextBuildHistory } from "./context-board-compaction.js";
+import { compactTerminalContextBuildHistory, compactTerminalEpochHistory } from "./context-board-compaction.js";
 import {
   applyContextBoardTaskResult,
   finalizeContextBoardTaskResult,
@@ -131,6 +132,7 @@ import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 import { isProductApiRoute } from "./product-api-router.js";
 
 const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
+const TRACKED_PULL_REQUEST_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_CONTEXT_BOARD_ARTIFACT_BYTES = 20 * 1024 * 1024;
 const MAX_CONTEXT_QUERY_REQUEST_BYTES = 128 * 1024;
 const DEFAULT_ISSUE_GRAPH_REF = "main";
@@ -615,19 +617,62 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   function compactHotBoard(): void {
+    const now = nowIso();
     const compacted = compactTerminalContextBuildHistory(intakeState.board);
-    if (compacted.prunedBuilds === 0) return;
-    intakeState = { ...intakeState, board: compacted.state };
-    logger.info("compacted terminal Context build history", {
-      event: "context.board.compacted",
-      prunedBuilds: compacted.prunedBuilds,
-      prunedTasks: compacted.prunedTasks,
-      prunedDependencies: compacted.prunedDependencies,
-      prunedOutboxMessages: compacted.prunedOutboxMessages,
-      prunedEvents: compacted.prunedEvents,
-      retainedTasks: compacted.state.tasks.length,
-      retainedEvents: compacted.state.events.length
-    });
+    if (compacted.prunedBuilds > 0) {
+      intakeState = { ...intakeState, board: compacted.state };
+      logger.info("compacted terminal Context build history", {
+        event: "context.board.compacted",
+        prunedBuilds: compacted.prunedBuilds,
+        prunedTasks: compacted.prunedTasks,
+        prunedDependencies: compacted.prunedDependencies,
+        prunedOutboxMessages: compacted.prunedOutboxMessages,
+        prunedEvents: compacted.prunedEvents,
+        retainedTasks: compacted.state.tasks.length,
+        retainedEvents: compacted.state.events.length
+      });
+    }
+    const epochCompacted = compactTerminalEpochHistory(intakeState.board, now);
+    if (epochCompacted.prunedBuilds > 0) {
+      intakeState = { ...intakeState, board: epochCompacted.state };
+      logger.info("compacted terminal epoch history", {
+        event: "board.epoch_history.compacted",
+        prunedRoots: epochCompacted.prunedBuilds,
+        prunedTasks: epochCompacted.prunedTasks,
+        prunedDependencies: epochCompacted.prunedDependencies,
+        prunedOutboxMessages: epochCompacted.prunedOutboxMessages,
+        prunedEvents: epochCompacted.prunedEvents,
+        retainedTasks: epochCompacted.state.tasks.length
+      });
+    }
+    // Tracking entries only need to survive long enough to supersede stale
+    // epochs of an active pull request; drop entries idle past the retention
+    // window so the array does not grow with all-time PR count. Entries from
+    // snapshots that predate the timestamp are stamped now and age out later.
+    const trackedCutoff = new Date(Date.parse(now) - TRACKED_PULL_REQUEST_RETENTION_MS).toISOString();
+    const prunedPullRequests = intakeState.pullRequests.filter(
+      (pullRequest) => pullRequest.updatedAt !== undefined && pullRequest.updatedAt <= trackedCutoff
+    );
+    if (
+      prunedPullRequests.length > 0 ||
+      intakeState.pullRequests.some((pullRequest) => pullRequest.updatedAt === undefined)
+    ) {
+      intakeState = {
+        ...intakeState,
+        pullRequests: intakeState.pullRequests
+          .filter((pullRequest) => pullRequest.updatedAt === undefined || pullRequest.updatedAt > trackedCutoff)
+          .map((pullRequest) =>
+            pullRequest.updatedAt === undefined ? { ...pullRequest, updatedAt: now } : pullRequest
+          )
+      };
+      if (prunedPullRequests.length > 0) {
+        logger.info("compacted idle tracked pull requests", {
+          event: "board.tracked_pull_requests.compacted",
+          pruned: prunedPullRequests.length,
+          retained: intakeState.pullRequests.length
+        });
+      }
+    }
   }
 
   async function persist(deliveryId?: string): Promise<boolean> {
@@ -3339,6 +3384,27 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             const candidate = findOutboxMessage(intakeState.board, messageId);
             const candidateTask = candidate ? findTask(intakeState.board, candidate.taskId) : undefined;
             if (!candidate || !candidateTask || !topics.includes(candidate.topic)) continue;
+            if (isTerminalTaskStatus(candidateTask.status)) {
+              // A message whose task is already terminal (superseded, canceled, failed)
+              // can never complete; leasing it would burn a full worker run per poll.
+              intakeState = {
+                ...intakeState,
+                board: appendEvent(
+                  markOutboxDispatched(intakeState.board, candidate.id, nowIso()),
+                  "task.terminal_outbox_retired",
+                  nowIso(),
+                  candidateTask.id,
+                  {
+                    messageId: candidate.id,
+                    attempt: candidate.payload.attempt,
+                    previousStatus: candidate.status,
+                    taskStatus: candidateTask.status,
+                    topic: candidate.topic
+                  }
+                )
+              };
+              continue;
+            }
             if (
               candidate.topic === contextWorkflowBoardTopics.snapshot &&
               intakeState.board.outbox.some((message) => {
@@ -3769,6 +3835,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, { accepted: true, replay: completed.replayed, terminal: completed.terminal });
       return;
     }
+    // Lease ownership and artifact verification below are decided from this
+    // instance's snapshot. Another instance may have committed the claim, so a
+    // stale snapshot here would silently skip verification and record the
+    // completion without a result digest. loadNewer makes this a version check.
+    // Release identity is verified first so a stale release generation is
+    // still rejected before any Board state is read.
+    await verifyLegacyWorkerClaimRelease(workerRelease);
+    await reload();
     const terminalOutcome: "done" | "failed" = outcome === "done" ? "done" : "failed";
     const outboxId = entityId<"board_outbox_message">(messageId) as BoardOutboxMessageId;
     const boardTaskId = entityId<"task">(taskId) as TaskId;
@@ -4305,10 +4379,15 @@ async function authenticatedPrincipal(
       forwarded: true
     };
   }
-  const internal = Boolean(config.internalApiToken && authorization === `Bearer ${config.internalApiToken}`);
+  const internal = Boolean(
+    config.internalApiToken &&
+    authorization !== undefined &&
+    constantTimeEquals(authorization, `Bearer ${config.internalApiToken}`)
+  );
   const context = Boolean(
     config.contextApiToken &&
-    authorization === `Bearer ${config.contextApiToken}` &&
+    authorization !== undefined &&
+    constantTimeEquals(authorization, `Bearer ${config.contextApiToken}`) &&
     isContextCredentialRoute(pathname, request.method ?? "GET")
   );
   if (!internal && !context) return undefined;
@@ -4395,8 +4474,11 @@ function trustsDevIdentityHeaders(config: ApiServerConfig): boolean {
 }
 
 function hasInternalApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
+  const authorization = firstHeader(request.headers.authorization);
   return Boolean(
-    config.internalApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.internalApiToken}`
+    config.internalApiToken &&
+    authorization !== undefined &&
+    constantTimeEquals(authorization, `Bearer ${config.internalApiToken}`)
   );
 }
 

@@ -41,9 +41,11 @@ export default function BillingPage() {
     // A network error / non-OK response maps to UNAVAILABLE (not "not configured");
     // the API signals unconfigured with a 200 body of status:"not_configured".
     const requestTenantId = selected?.tenantId ?? null;
-    loadBilling(() => fetch(billingUrl(selected), { credentials: "include", cache: "no-store" })).then((next) => {
-      if (isCurrentTenant(requestTenantId)) setBilling(next);
-    });
+    void loadBilling(() => fetch(billingUrl(selected), { credentials: "include", cache: "no-store" })).then(
+      (next) => {
+        if (isCurrentTenant(requestTenantId)) setBilling(next);
+      },
+    );
   }, [selected, isCurrentTenant]);
 
   useEffect(() => {

@@ -36,7 +36,7 @@ export class AutumnError extends Error {
   }
 }
 
-export type CheckResult = {
+export interface CheckResult {
   allowed: boolean;
   // Remaining balance for the feature (Autumn balance.remaining), when present.
   balance?: number;
@@ -47,27 +47,27 @@ export type CheckResult = {
   usage?: number;
   // When the current cycle's balance resets (Autumn balance.next_reset_at, ISO string), when present.
   nextResetAt?: string;
-};
+}
 
 /** A recent invoice as surfaced to the dashboard (from getCustomer expand=invoices). */
-export type AutumnInvoice = { date: string | null; amount: string; status: string; url?: string };
+export interface AutumnInvoice { date: string | null; amount: string; status: string; url?: string }
 
-export type CustomerSummary = {
+export interface CustomerSummary {
   planId: string | null;
   // Present only when getCustomer is called with { expandInvoices: true } AND Autumn returned an invoices
   // array; otherwise the key is absent (never fabricated).
   invoices?: AutumnInvoice[];
-};
+}
 
 /** Auto top-up (auto-reload) configuration for one feature, applied per customer at runtime. */
-type AutoTopupInput = {
+interface AutoTopupInput {
   featureId: string;
   enabled: boolean;
   // Balance level that triggers a top-up, and how many units to purchase each time. Ignored by Autumn
   // when disabling (enabled=false), but always sent for a consistent payload.
   threshold: number;
   quantity: number;
-};
+}
 
 export interface AutumnClient {
   ensureCustomer(
@@ -82,7 +82,7 @@ export interface AutumnClient {
   checkoutUrl(
     customerId: string,
     productId: string,
-    opts?: { successUrl?: string; featureQuantities?: Array<{ feature_id: string; quantity: number }> },
+    opts?: { successUrl?: string; featureQuantities?: { feature_id: string; quantity: number }[] },
   ): Promise<string>;
   getCustomer(customerId: string, opts?: { expandInvoices?: boolean }): Promise<CustomerSummary>;
   setAutoTopup(customerId: string, input: AutoTopupInput): Promise<void>;
@@ -204,7 +204,7 @@ class HttpAutumnClient implements AutumnClient {
   async checkoutUrl(
     customerId: string,
     productId: string,
-    opts?: { successUrl?: string; featureQuantities?: Array<{ feature_id: string; quantity: number }> },
+    opts?: { successUrl?: string; featureQuantities?: { feature_id: string; quantity: number }[] },
   ): Promise<string> {
     const body = await this.post("/billing.attach", {
       customer_id: customerId,
@@ -322,7 +322,7 @@ class HttpAutumnClient implements AutumnClient {
         body: payload ? JSON.stringify(stripUndefined(payload)) : undefined,
         signal: controller.signal,
       });
-    } catch (error) {
+    } catch {
       // Network failure or timeout — retryable. Never surface the raw error (could echo the URL
       // with the bearer token); only its class-level message.
       const reason = controller.signal.aborted ? "timeout" : "network error";

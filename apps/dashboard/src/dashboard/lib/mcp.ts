@@ -1,7 +1,7 @@
 import type { ReviewEvent } from "./types";
 
-type ReviewMcpServer = { server: string; tools: string[] };
-type ReviewMcpUsageEvent = {
+interface ReviewMcpServer { server: string; tools: string[] }
+interface ReviewMcpUsageEvent {
   id: string;
   stage: string;
   server: string;
@@ -9,13 +9,13 @@ type ReviewMcpUsageEvent = {
   status: string;
   error?: string;
   recordedAt: string;
-};
+}
 
-export type ReviewMcpTelemetry = {
+export interface ReviewMcpTelemetry {
   enabled: ReviewMcpServer[];
   usage: ReviewMcpUsageEvent[];
   availability: "enabled" | "disabled" | "unavailable" | "unknown";
-};
+}
 
 type JsonRecord = Record<string, unknown>;
 

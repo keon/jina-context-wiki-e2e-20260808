@@ -25,7 +25,7 @@ export function usePoll<T>(path: string, intervalMs: number = POLL_INTERVAL_MS) 
     try {
       const response = await fetch(path, {
         credentials: "include",
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json" }
       });
       if (!response.ok) throw new Error(`request failed with ${response.status}`);
       const body = await response.text();

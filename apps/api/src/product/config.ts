@@ -1,4 +1,4 @@
-export type AppConfig = {
+export interface AppConfig {
   port: number;
   githubWebhookSecret: string;
   githubAppInstallUrl?: string;
@@ -9,9 +9,19 @@ export type AppConfig = {
   auth: AuthConfig;
   billing: BillingConfig;
   graph?: GraphConfig;
-};
+  schedulerOidc?: SchedulerOidcConfig;
+}
 
-export type GraphConfig = {
+/**
+ * When set, Cloud Scheduler authenticates with a Google-signed OIDC identity
+ * token instead of a copy of the internal API token stored in the job resource.
+ */
+interface SchedulerOidcConfig {
+  audience: string;
+  email: string;
+}
+
+export interface GraphConfig {
   apiUrl: string;
   accessToken: string;
   timeoutMs: number;
@@ -23,13 +33,13 @@ export type GraphConfig = {
    */
   internalToken?: string;
   delegatedTokenTtlMinutes?: number;
-};
+}
 
 export type DashboardAllowedOrigins = "*" | string[];
 
 export type BillingEnforcement = "off" | "shadow" | "on";
 
-export type BillingConfig = {
+export interface BillingConfig {
   // When unset, Autumn billing is entirely disabled and every billing path degrades
   // gracefully (no customer creation, no check/track, dashboard reports configured:false).
   autumnSecretKey?: string;
@@ -43,9 +53,9 @@ export type BillingConfig = {
   // Where Stripe/Autumn checkouts return the user after success. Without this,
   // Autumn redirects completed checkouts to its own site (production bug).
   checkoutSuccessUrl?: string;
-};
+}
 
-type AuthConfig = {
+interface AuthConfig {
   mode: "disabled" | "github" | "clerk";
   githubClientId?: string;
   githubClientSecret?: string;
@@ -57,7 +67,7 @@ type AuthConfig = {
   sessionTtlSeconds: number;
   clerkPublishableKey?: string;
   clerkSecretKey?: string;
-};
+}
 
 export function loadConfig(env = process.env): AppConfig {
   const dashboardUrl = dashboardUrlFromEnv(env);
@@ -76,7 +86,18 @@ export function loadConfig(env = process.env): AppConfig {
     auth: parseAuthConfig(env),
     billing: parseBillingConfig(env, dashboardUrl),
     graph: parseGraphConfig(env),
+    ...(parseSchedulerOidcConfig(env) ? { schedulerOidc: parseSchedulerOidcConfig(env) } : {}),
   };
+}
+
+function parseSchedulerOidcConfig(env: NodeJS.ProcessEnv): SchedulerOidcConfig | undefined {
+  const audience = optionalEnv(env, "JINA_SCHEDULER_OIDC_AUDIENCE");
+  const email = optionalEnv(env, "JINA_SCHEDULER_OIDC_EMAIL");
+  if (!audience && !email) return undefined;
+  if (!audience || !email) {
+    throw new Error("JINA_SCHEDULER_OIDC_AUDIENCE and JINA_SCHEDULER_OIDC_EMAIL must be configured together");
+  }
+  return { audience, email };
 }
 
 function parseGraphConfig(env: NodeJS.ProcessEnv): GraphConfig | undefined {

@@ -5,16 +5,16 @@ import type { ReviewEvent, ReviewRun, Tone } from "./types";
 
 type ReviewWorkSource = "static" | "runtime";
 
-export type ReviewWork = {
+export interface ReviewWork {
   changeSummary: ReviewWorkChangeSummary;
   staticReview?: StaticReviewWork;
   runtimeReview?: RuntimeReviewWork;
   findings: ReviewWorkFinding[];
   notices: ReviewWorkNotice[];
   hasScenarioHistory: boolean;
-};
+}
 
-type ReviewWorkChangeSummary = {
+interface ReviewWorkChangeSummary {
   repository?: string;
   pullRequestNumber?: number;
   pullRequestTitle?: string;
@@ -25,18 +25,18 @@ type ReviewWorkChangeSummary = {
   changedFiles: string[];
   diffStat?: string;
   codegraphContext?: string;
-};
+}
 
-type ReviewWorkNotice = {
+interface ReviewWorkNotice {
   source?: ReviewWorkSource;
   status: string;
   tone: Tone;
   title: string;
   message?: string;
   recordedAt?: string;
-};
+}
 
-type ReviewWorkReview = {
+interface ReviewWorkReview {
   source: ReviewWorkSource;
   status?: string;
   summary?: string;
@@ -54,7 +54,7 @@ type ReviewWorkReview = {
   publishMessage?: string;
   githubReviewUrl?: string;
   error?: string;
-};
+}
 
 type StaticReviewWork = ReviewWorkReview & {
   source: "static";
@@ -79,7 +79,7 @@ export type RuntimeReviewWork = ReviewWorkReview & {
   findings: ReviewWorkFinding[];
 };
 
-type ReviewWorkArea = {
+interface ReviewWorkArea {
   id?: string;
   title: string;
   status?: string;
@@ -88,9 +88,9 @@ type ReviewWorkArea = {
   findings: ReviewWorkFinding[];
   blocked: ReviewWorkBlocked[];
   nonIssues: ReviewWorkNonIssue[];
-};
+}
 
-export type ReviewWorkTask = {
+export interface ReviewWorkTask {
   id?: string;
   areaId?: string;
   areaTitle?: string;
@@ -106,31 +106,31 @@ export type ReviewWorkTask = {
   confidence?: string;
   auditTrail: ReviewWorkAuditEntry[];
   issuesFound: number;
-};
+}
 
-export type ReviewWorkAuditEntry = {
+export interface ReviewWorkAuditEntry {
   type?: string;
   detail: string;
   evidence: string[];
-};
+}
 
-type ReviewWorkBlocked = {
+interface ReviewWorkBlocked {
   areaId?: string;
   areaTitle?: string;
   task?: string;
   reason?: string;
   fallbackUsed?: string;
-};
+}
 
-type ReviewWorkNonIssue = {
+interface ReviewWorkNonIssue {
   areaId?: string;
   areaTitle?: string;
   hypothesis?: string;
   whyDismissed?: string;
   evidence: string[];
-};
+}
 
-export type ReviewWorkFinding = {
+export interface ReviewWorkFinding {
   source: ReviewWorkSource;
   fingerprint?: string;
   title: string;
@@ -155,7 +155,7 @@ export type ReviewWorkFinding = {
   auditTrail: ReviewWorkAuditEntry[];
   validationMethod?: string;
   heldBack: boolean;
-};
+}
 
 type JsonRecord = Record<string, unknown>;
 

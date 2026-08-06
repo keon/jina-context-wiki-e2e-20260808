@@ -20,7 +20,7 @@ import {
   type InternalUserIdentity,
 } from "./internal-user.js";
 
-export type CreateReviewRunInput = {
+export interface CreateReviewRunInput {
   triggerRunId?: string;
   idempotencyKey?: string;
   deliveryId?: string;
@@ -50,25 +50,25 @@ export type CreateReviewRunInput = {
     baseRef?: string;
     draft?: boolean;
   };
-};
+}
 
-export type CreatedReviewRun = {
+export interface CreatedReviewRun {
   id: string;
   tenantId: string;
   created: boolean;
   orchestrator: "trigger" | "board";
   boardWorkflowId?: string;
   triggerRunId?: string;
-};
+}
 
-export type InstallationRepository = {
+export interface InstallationRepository {
   githubRepoId?: number;
   owner?: string;
   name?: string;
   fullName?: string;
   defaultBranch?: string;
   private?: boolean;
-};
+}
 
 export type InstallationLifecycle = "active" | "suspended" | "deleted";
 
@@ -246,7 +246,7 @@ export async function createReviewRunWithClient(
 }
 
 export async function listManualReviewRuns(scopeTag: string): Promise<{
-  runs: Array<{ tags: string[]; createdAt: string }>;
+  runs: { tags: string[]; createdAt: string }[];
 }> {
   const match = /^manual-pr:([1-9][0-9]*):([1-9][0-9]*):([1-9][0-9]*)$/.exec(scopeTag);
   if (!match) throw new Error("manual review scope tag is invalid");
@@ -510,14 +510,14 @@ export class InstallationTenantMoveConflictError extends Error {
   }
 }
 
-export type ConnectGithubInstallationInput = {
+export interface ConnectGithubInstallationInput {
   tenantId: string;
   installationId: number;
   account: { id: number; login: string; type: string };
   repositories: InstallationRepository[];
   movedByUserId?: string;
   movedByGithubUserId: number;
-};
+}
 
 const FRESH_INSTALLATION_MOVE_WINDOW_MS = 60 * 60 * 1_000;
 
@@ -654,7 +654,7 @@ export async function connectGithubInstallationToTenant(
             input.movedByGithubUserId,
           ],
         );
-        moveId = move.rows[0]!.id;
+        moveId = move.rows[0].id;
         // The webhook creates an account-derived org tenant before the setup
         // callback knows which Jina workspace the user selected. Hide that
         // temporary shell only when it owns no data or workspace settings.
@@ -742,11 +742,11 @@ export async function recordGithubEvent(
   );
 }
 
-export type ReviewRunRecordPage = {
+export interface ReviewRunRecordPage {
   records: ReviewRunRecord[];
   limit: number;
   nextCursor?: string;
-};
+}
 
 const DEFAULT_REVIEW_RUN_LIMIT = 50;
 const MAX_REVIEW_RUN_LIMIT = 100;
@@ -1125,22 +1125,22 @@ export async function hasInstallationForAccounts(accountIds: number[]): Promise<
   return Boolean(row);
 }
 
-export type OpenRouterIntegration = {
+export interface OpenRouterIntegration {
   configured: boolean;
   last4?: string;
   source?: string;
   label?: string;
   connected_at?: string;
-};
+}
 
 // BYOK native-provider key status (OpenAI / Anthropic) surfaced to the dashboard. Manual entry only
 // (no OAuth), so there is no source/label — just presence, the last 4 chars, and when it was connected.
 // NEVER carries the full key.
-export type ProviderKeyIntegration = {
+export interface ProviderKeyIntegration {
   configured: boolean;
   last4?: string;
   connected_at?: string;
-};
+}
 
 /** The two BYOK native providers a tenant can bring a key for, mapped to their tenant_integrations
  *  columns. The column names are a fixed whitelist (never user input) so they are safe to interpolate. */
@@ -1152,13 +1152,13 @@ const PROVIDER_KEY_COLUMNS: Record<NativeProvider, { key: string; at: string }> 
 
 // Codex harness (BYOH) status surfaced to the dashboard. NEVER carries the auth.json blob or any
 // part of it — only whether one is configured and when it was connected.
-type CodexHarnessIntegration = {
+interface CodexHarnessIntegration {
   configured: boolean;
   connected_at?: string;
   reconnect_required?: boolean;
-};
+}
 
-export type UserIntegrations = {
+export interface UserIntegrations {
   openrouter: OpenRouterIntegration;
   // BYOK native-provider keys (tenant-scoped). openai is wired into the runtime; anthropic is stored/
   // surfaced only for now (see 0016_byok_provider_keys.sql).
@@ -1167,7 +1167,7 @@ export type UserIntegrations = {
   codex_harness: CodexHarnessIntegration;
   // The user's pinned own-harness model preference (validated HARNESS_MODELS value or null = Codex default).
   codex_harness_model: HarnessModel | null;
-};
+}
 
 /**
  * Legacy viewer-scoped integrations read, kept working for deploy skew. OpenRouter now lives on the
@@ -1253,7 +1253,7 @@ export async function getUserIntegrations(githubUserId: number): Promise<UserInt
   };
 }
 
-export type SaveUserHarnessInput = {
+export interface SaveUserHarnessInput {
   // The Codex auth.json blob (encrypted at rest). An empty string disconnects (clears the blob and
   // connected_at); undefined leaves it unchanged. Validated by the caller before it reaches here.
   codexHarnessAuth?: string;
@@ -1264,7 +1264,7 @@ export type SaveUserHarnessInput = {
   // Stamped from the dashboard session on every save when provided, so run-time author-login
   // resolution can join pull_requests.author_login to user_integrations.github_login.
   githubLogin?: string;
-};
+}
 
 /**
  * Persist the INDIVIDUAL (author-scoped) Codex harness fields on user_integrations. OpenRouter keys are
@@ -1325,24 +1325,24 @@ export async function saveUserHarnessIntegration(githubUserId: number, input: Sa
 
 export type TenantRole = "admin" | "member";
 
-export type GithubTenantAdminRefreshRequirement = {
+export interface GithubTenantAdminRefreshRequirement {
   account?: { id: number; login: string; type: string };
-};
+}
 
 /** A tenant a viewer belongs to, as surfaced to the dashboard. Personal tenants sort first. */
-export type ViewerTenant = {
+export interface ViewerTenant {
   tenant_id: string;
   login: string;
   type: string; // 'User' | 'Organization'
   role: TenantRole;
   clerk_organization_id?: string;
-};
+}
 
-export type ClerkOrgMembership = {
+export interface ClerkOrgMembership {
   organizationId: string;
   name: string;
   role: TenantRole;
-};
+}
 
 /** Reconcile Clerk's authoritative organization memberships into Jina tenants. */
 export async function syncClerkTenantMemberships(input: {
@@ -1363,7 +1363,7 @@ export async function syncClerkTenantMemberships(input: {
          returning id`,
         [membership.name, membership.organizationId],
       );
-      const tenantId = tenant.rows[0]!.id;
+      const tenantId = tenant.rows[0].id;
       keepTenantIds.push(tenantId);
       await client.query(
         `insert into tenant_members
@@ -1388,32 +1388,32 @@ export async function syncClerkTenantMemberships(input: {
   });
 }
 
-export type TenantGithubConnection = {
+export interface TenantGithubConnection {
   installation_id: number;
   login: string;
   type: string;
   repository_count: number;
   status: "active" | "suspended" | "deleted";
-};
+}
 
 /**
  * A GitHub org membership as returned by GET /user/memberships/orgs. `role` is GitHub's membership
  * role ('admin' for org owners, 'member' otherwise); `organizationId` is the org account id we match
  * against tenants.github_account_id.
  */
-export type ViewerOrgMembership = {
+export interface ViewerOrgMembership {
   organizationId: number;
   login: string;
   role: TenantRole;
-};
+}
 
 /** A desired tenant_members row computed by the pure membership planner. */
-export type DesiredMembership = {
+export interface DesiredMembership {
   tenantId: string;
   githubUserId: number;
   githubLogin: string;
   role: TenantRole;
-};
+}
 
 /**
  * Pure membership planner (exported for unit testing without a database): given the viewer, their
@@ -1428,7 +1428,7 @@ export function planTenantMemberships(input: {
   githubUserId: number;
   githubLogin: string;
   personalTenantId?: string;
-  orgTenants: Array<{ tenantId: string; role: TenantRole }>;
+  orgTenants: { tenantId: string; role: TenantRole }[];
 }): DesiredMembership[] {
   const byTenant = new Map<string, DesiredMembership>();
   for (const org of input.orgTenants) {
@@ -1472,7 +1472,7 @@ export async function syncTenantMemberships(
     // tenants that have onboarded). role travels with each match.
     const orgIds = orgs.map((org) => org.organizationId);
     const roleByOrgId = new Map(orgs.map((org) => [org.organizationId, org.role]));
-    const orgTenants: Array<{ tenantId: string; role: TenantRole }> = [];
+    const orgTenants: { tenantId: string; role: TenantRole }[] = [];
     if (orgIds.length > 0) {
       const rows = await client.query<{ id: string; github_account_id: number }>(
         `select id, github_account_id
@@ -1579,7 +1579,7 @@ export async function createJinaOrganization(input: {
        returning id, name`,
       [input.name],
     );
-    const row = tenant.rows[0]!;
+    const row = tenant.rows[0];
     await client.query(
       `insert into tenant_members
          (tenant_id, github_user_id, github_login, user_id, role, source, synced_at)
@@ -1882,7 +1882,7 @@ export async function isGithubInstallationRecorded(githubInstallationId: number)
   return row?.recorded === true;
 }
 
-export type SaveTenantOpenRouterInput = {
+export interface SaveTenantOpenRouterInput {
   // undefined leaves the stored key unchanged; empty string clears it; a value sets it.
   openrouter?: string;
   openrouterSource?: string; // 'oauth' | 'manual' — applied only when a non-empty key is saved.
@@ -1890,7 +1890,7 @@ export type SaveTenantOpenRouterInput = {
   // Stamped whenever the key field is written, recording the admin who connected it.
   configuredByUserId?: number;
   configuredByLogin?: string;
-};
+}
 
 /**
  * Persist the tenant-scoped OpenRouter key. Saving a key stamps source/label/connected_at and the
@@ -1968,13 +1968,13 @@ export async function getTenantIntegrations(
   };
 }
 
-export type SaveTenantProviderKeyInput = {
+export interface SaveTenantProviderKeyInput {
   // undefined/empty clears the key; a non-empty value sets it. (The API route only calls this when the
   // field was actually present in the request, so an omitted field never reaches here.)
   key?: string;
   configuredByUserId?: number;
   configuredByLogin?: string;
-};
+}
 
 /**
  * Persist a tenant-scoped BYOK native-provider key (OpenAI or Anthropic). Setting a key stamps
@@ -2064,13 +2064,13 @@ export async function resolveIntegrationKeysForRun(reviewRunId: string): Promise
 /** The TRUE platform default stage slugs (env override with code fallbacks mirroring trigger utils).
  *  Lives here (not model-settings.ts) because the routing coverage decision below needs it and
  *  model-settings.ts imports this module. */
-export type PlatformModelDefaults = {
+export interface PlatformModelDefaults {
   planner: string;
   investigation: string;
   review: string;
   context?: string;
   mentalTrace: string;
-};
+}
 export function platformModelDefaults(env: NodeJS.ProcessEnv = process.env): PlatformModelDefaults {
   const envSlug = (value: string | undefined) => {
     const trimmed = value?.trim();
@@ -2172,7 +2172,7 @@ export function applyProviderPreference(
 /** Provider credentials resolved for a run. codexHarnessAuth is the decrypted auth.json blob (own
  *  harness); harnessOwnerLogin is the login whose harness was used, surfaced only when a blob resolved;
  *  codexHarnessModel is the author's pinned harness model (validated value or null), tied to the blob. */
-export type ResolvedIntegrationKeys = {
+export interface ResolvedIntegrationKeys {
   openrouter?: string;
   // Tenant BYOK native OpenAI key. When present (and no harness), the run routes openai/* natively to
   // api.openai.com under this key and is billed infra-only (a "user"/BYOK run).
@@ -2182,9 +2182,9 @@ export type ResolvedIntegrationKeys = {
   codexHarnessConnectedAtMs?: number;
   harnessOwnerLogin?: string;
   codexHarnessModel?: HarnessModel | null;
-};
+}
 
-type IntegrationKeyRow = {
+interface IntegrationKeyRow {
   openrouter_api_key: string | null;
   openai_api_key?: string | null;
   // Tenant provider preference; null/absent = 'auto'.
@@ -2193,7 +2193,7 @@ type IntegrationKeyRow = {
   codex_harness_connected_at?: Date | string | null;
   harness_owner_login?: string | null;
   codex_harness_model?: string | null;
-};
+}
 
 /**
  * Pure row -> resolved-keys mapping (decrypt + shape), exported so the resolve shape is unit-testable
@@ -2279,7 +2279,7 @@ function normalizeKey(value: string | undefined): string | null {
 
 /* -------------------------------------------------- model settings + usage --- */
 
-export type ModelSettings = {
+export interface ModelSettings {
   planner_model: string | null;
   investigation_model: string | null;
   review_model: string | null;
@@ -2290,7 +2290,7 @@ export type ModelSettings = {
   context_effort?: ReasoningEffort | null;
   review_fallback_policy?: FallbackPolicy;
   context_fallback_policy?: FallbackPolicy;
-};
+}
 
 export type ReasoningEffort = "low" | "medium" | "high";
 export type FallbackPolicy = "fail_notify" | "managed";
@@ -2442,7 +2442,7 @@ export async function saveTenantModelSettingsById(
   );
 }
 
-export type ContextExecutionProfile = {
+export interface ContextExecutionProfile {
   provider: ModelProvider;
   model: string;
   effort: ReasoningEffort;
@@ -2453,7 +2453,7 @@ export type ContextExecutionProfile = {
     | { kind: "codex"; value: string; revision: string }
     | { kind: "unavailable"; reason: string };
   settings_revision: string;
-};
+}
 
 /**
  * Resolve and persist a write-once Context execution profile for one Context build.
@@ -2553,7 +2553,7 @@ export async function getOrCreateContextExecutionProfile(
          from context_execution_profiles where tenant_id = $1 and build_id = $2`,
       [tenantId, buildId],
     );
-    return contextExecutionProfileFromRow(persisted.rows[0]!);
+    return contextExecutionProfileFromRow(persisted.rows[0]);
   });
 }
 
@@ -2713,7 +2713,7 @@ function safeJsonParse(raw: string): unknown {
   }
 }
 
-type ModelSettingsRow = {
+interface ModelSettingsRow {
   planner_model: string | null;
   investigation_model: string | null;
   review_model: string | null;
@@ -2724,7 +2724,7 @@ type ModelSettingsRow = {
   context_effort?: string | null;
   review_fallback_policy?: string | null;
   context_fallback_policy?: string | null;
-};
+}
 
 /* --------------------------------------------------- model provider --- */
 
@@ -2920,7 +2920,7 @@ async function ensureTenantIdForUser(client: pg.PoolClient, githubUserId: number
      returning id`,
     [githubUserId, trimmedLogin || "unknown", userId],
   );
-  return created.rows[0]!.id;
+  return created.rows[0].id;
 }
 
 /** Thrown by persistReviewUsageRecords when the review run does not exist (maps to 404). */
@@ -2931,7 +2931,7 @@ export class ReviewRunNotFoundError extends Error {
   }
 }
 
-export type ReviewUsageRecord = {
+export interface ReviewUsageRecord {
   operation: string;
   request_seq: number;
   model?: string;
@@ -2950,7 +2950,7 @@ export type ReviewUsageRecord = {
   is_byok?: boolean;
   raw_usage: unknown;
   raw_response_metadata?: unknown;
-};
+}
 
 /**
  * The single basis the credit math bills from, computed EXACTLY (string decimal, never float):
@@ -2975,14 +2975,14 @@ export function computeBillableCost(record: {
   return record.cost;
 }
 
-export type ReviewUsageInput = {
+export interface ReviewUsageInput {
   stage: "summary" | "runtime";
   sandbox_id: string;
   // "harness" mirrors the runtime credential precedence (author harness > tenant openrouter > managed).
   // Own-harness AI, like own-key ("user") AI, is never billed — see usageBillingStatus.
   key_source: "harness" | "user" | "managed";
   usage_records: ReviewUsageRecord[];
-};
+}
 
 /** The dedupe key is the generation id when present, else `{sandbox_id}:{request_seq}`. */
 export function usageDedupeKey(sandboxId: string, record: { generation_id?: string; request_seq: number }): string {
@@ -3079,7 +3079,7 @@ export async function persistReviewUsageRecords(
 
 /* --------------------------------------------------------------- billing --- */
 
-export type BillingPolicy = {
+export interface BillingPolicy {
   subsidy_rate: string; // numeric(5,4) decimal string; customer_share = 1 - subsidy_rate
   infra_credits_per_run: number;
   overage_infra_credits_per_run: number;
@@ -3088,7 +3088,7 @@ export type BillingPolicy = {
   // AUTO-triggered run whose current-cycle used credits have reached the cap is blocked at prepare.
   auto_review_limit_enabled: boolean;
   auto_review_limit_credits: number | null;
-};
+}
 
 /** Platform defaults when a tenant has no tenant_billing_policy row (spec: 0.30 / 100 / 150 / 0.00; cap off). */
 export const PLATFORM_BILLING_POLICY: BillingPolicy = {
@@ -3100,14 +3100,14 @@ export const PLATFORM_BILLING_POLICY: BillingPolicy = {
   auto_review_limit_credits: null,
 };
 
-export type BillingPolicyRow = {
+export interface BillingPolicyRow {
   subsidy_rate: string | null;
   infra_credits_per_run: number | null;
   overage_infra_credits_per_run: number | null;
   overage_subsidy_rate: string | null;
   auto_review_limit_enabled?: boolean | null;
   auto_review_limit_credits?: number | null;
-};
+}
 
 /**
  * FINDING 3: tenant_billing_policy rows are operator-editable and were previously trusted blindly — a
@@ -3189,7 +3189,7 @@ export async function getTenantBillingPolicy(tenantId: string): Promise<BillingP
 }
 
 /** The auto-review cap as surfaced to the dashboard billing overview. */
-export type AutoReviewLimit = { enabled: boolean; limit_credits: number | null };
+export interface AutoReviewLimit { enabled: boolean; limit_credits: number | null }
 
 /**
  * Persist the tenant's auto-review credit cap onto tenant_billing_policy. Other policy columns keep their
@@ -3213,7 +3213,7 @@ export async function saveTenantAutoReviewLimit(tenantId: string, input: AutoRev
 }
 
 /** Member counts for the tenant billing overview: total members and how many have a Codex harness connected. */
-export type TenantMemberStats = { total: number; with_harness: number };
+export interface TenantMemberStats { total: number; with_harness: number }
 
 /**
  * Count tenant members and how many have connected a Codex harness. tenant_members is joined to
@@ -3236,11 +3236,11 @@ export async function getTenantMemberStats(tenantId: string): Promise<TenantMemb
 
 /* ------------------------------------------------------- tenant usage summary --- */
 
-type UsageDailyPoint = { date: string; credits: number; runs: number };
+interface UsageDailyPoint { date: string; credits: number; runs: number }
 // One row PER PULL REQUEST (not per review_run): a PR re-reviewed on each push has its per-commit runs
 // rolled up here. infra_credits/ai_credits are summed across those runs; review_count is how many; the
 // status/key_source/review_run_id reflect the most recent run for that PR.
-type UsageRecentRun = {
+interface UsageRecentRun {
   review_run_id: string;
   repo_full_name: string;
   pr_number: number | null;
@@ -3251,8 +3251,8 @@ type UsageRecentRun = {
   ai_credits: number | null;
   review_count: number;
   created_at: string;
-};
-export type TenantUsageSummary = {
+}
+export interface TenantUsageSummary {
   period: { days: number };
   totals: {
     runs: number;
@@ -3270,19 +3270,19 @@ export type TenantUsageSummary = {
   cycle_credits_used: number;
   daily: UsageDailyPoint[];
   recent_runs: UsageRecentRun[];
-};
+}
 
 /** Raw run-level totals row (one row) returned by the grouped aggregate query. */
-export type UsageTotalsRow = {
+export interface UsageTotalsRow {
   runs: number;
   completed_runs: number;
   infra_credits: number;
   ai_credits: number;
   byok_runs: number;
   harness_runs: number;
-};
-type UsageDailyRow = { date: string; credits: number; runs: number };
-type UsageRecentRow = {
+}
+interface UsageDailyRow { date: string; credits: number; runs: number }
+interface UsageRecentRow {
   review_run_id: string;
   repo_full_name: string;
   pr_number: number | null;
@@ -3293,7 +3293,7 @@ type UsageRecentRow = {
   ai_credits: number | null;
   review_count: number;
   created_at: Date | string;
-};
+}
 
 /**
  * Pure shaper (exported for unit testing without a database): assemble the usage-summary response from
@@ -3449,7 +3449,7 @@ export async function getTenantUsageSummary(tenantId: string, days: number): Pro
  */
 export type BillingKeySource = "harness" | "user" | "managed";
 
-export type RunBillingContext = {
+export interface RunBillingContext {
   tenantId: string;
   // Derived from author-harness / tenant-key presence with runtime precedence (see BillingKeySource).
   keySource: BillingKeySource;
@@ -3463,14 +3463,14 @@ export type RunBillingContext = {
   // (webhook-driven first touches create the customer here, not in the dashboard).
   customerName?: string;
   policy: BillingPolicy;
-};
+}
 
-export type DispatchBillingContext = {
+export interface DispatchBillingContext {
   tenantId: string;
   keySource: BillingKeySource;
   githubAccountType?: string;
   customerName?: string;
-};
+}
 
 /**
  * Derive the billing key source from the two independent credential-presence flags, honoring the same
@@ -3674,13 +3674,13 @@ export async function getTenantIdForUser(
   return row?.id;
 }
 
-export type ReviewRunBilling = {
+export interface ReviewRunBilling {
   rate_mode: string;
   key_source: string | null;
   infra_credits_charged: number | null;
   ai_credits_charged_total: number;
   infra_billing_status: string;
-};
+}
 
 /** Pin rate_mode on review_run_billing at prepare time. rate_mode is fixed at dispatch, so an
  *  existing row is never overwritten (on conflict do nothing). */
@@ -3751,7 +3751,7 @@ export async function getReviewRunBilling(reviewRunId: string): Promise<ReviewRu
   return row ?? undefined;
 }
 
-export type PendingUsageRow = {
+export interface PendingUsageRow {
   id: string;
   review_run_id: string;
   tenant_id: string;
@@ -3763,7 +3763,7 @@ export type PendingUsageRow = {
   ai_credits_charged: number | null;
   // Stamped at claim time; present on rows read from a stale 'tracking' claim.
   autumn_event_id?: string | null;
-};
+}
 
 /** Managed usage rows for a run still held as pending_outcome (awaiting the run's terminal outcome). */
 export async function listRunUsagePendingOutcome(reviewRunId: string): Promise<PendingUsageRow[]> {
@@ -4001,14 +4001,14 @@ export async function markInfraBilled(input: {
   );
 }
 
-export type StaleTrackingInfra = {
+export interface StaleTrackingInfra {
   reviewRunId: string;
   tenantId: string;
   status: string;
   credits: number | null;
   autumnEventId: string | null;
   rateMode: string;
-};
+}
 
 /** Stale 'tracking' infra claims (claimed before `olderThan`) — for a same-event-id re-track. */
 export async function listStaleTrackingInfra(limit: number, olderThan: Date): Promise<StaleTrackingInfra[]> {
@@ -4139,7 +4139,7 @@ export async function listPendingUsageRows(limit: number): Promise<PendingUsageR
 /** Terminal runs that still have pending_outcome usage rows (late callbacks / interrupted settlement). */
 export async function listTerminalRunsWithPendingOutcome(
   limit: number,
-): Promise<Array<{ reviewRunId: string; status: string }>> {
+): Promise<{ reviewRunId: string; status: string }[]> {
   if (!databaseConfigured()) {
     return [];
   }
@@ -4155,7 +4155,7 @@ export async function listTerminalRunsWithPendingOutcome(
 }
 
 /** Terminal runs whose infra charge is still pending — for the retry job. */
-export async function listRunsWithPendingInfra(limit: number): Promise<Array<{ reviewRunId: string; status: string }>> {
+export async function listRunsWithPendingInfra(limit: number): Promise<{ reviewRunId: string; status: string }[]> {
   if (!databaseConfigured()) {
     return [];
   }
@@ -4320,7 +4320,7 @@ export async function consumeOauthState(state: string): Promise<string | undefin
 
 /* ----------------------------------------------- scenarios + simulations --- */
 
-type SimScenario = {
+interface SimScenario {
   id?: string;
   index?: number;
   title?: string;
@@ -4331,9 +4331,9 @@ type SimScenario = {
   source_files?: unknown;
   steps?: SimStep[];
   lineage_key?: string;
-};
+}
 
-type SimStep = {
+interface SimStep {
   step_index?: number;
   step_text?: string;
   step_status?: string;
@@ -4341,16 +4341,16 @@ type SimStep = {
   consensus_reached?: boolean;
   predicted_output?: string;
   confidence?: number;
-};
+}
 
-type RawFinding = {
+interface RawFinding {
   fingerprint?: unknown;
   file_path?: unknown;
   line_number?: unknown;
   severity?: unknown;
   category?: unknown;
   body?: unknown;
-};
+}
 
 export async function persistReviewFindings(reviewRunId: string, result: unknown): Promise<void> {
   if (!databaseConfigured() || !result || typeof result !== "object" || Array.isArray(result)) {
@@ -4412,7 +4412,7 @@ export async function persistScenariosAndSimulations(reviewRunId: string, result
   const simulation =
     r.simulation && typeof r.simulation === "object" ? (r.simulation as Record<string, unknown>) : undefined;
   const simScenarios: SimScenario[] = Array.isArray(simulation?.scenarios)
-    ? (simulation!.scenarios as SimScenario[])
+    ? (simulation.scenarios as SimScenario[])
     : [];
 
   if (plans.length === 0 && simScenarios.length === 0) {
@@ -4441,9 +4441,9 @@ export async function persistScenariosAndSimulations(reviewRunId: string, result
     if (runRow.rows.length === 0) {
       return;
     }
-    const tenantId = runRow.rows[0]!.tenant_id;
-    const repositoryId = runRow.rows[0]!.repository_id;
-    const prNumber = numberOrNull(runRow.rows[0]!.pr_number);
+    const tenantId = runRow.rows[0].tenant_id;
+    const repositoryId = runRow.rows[0].repository_id;
+    const prNumber = numberOrNull(runRow.rows[0].pr_number);
 
     // Idempotent: clear previous scenarios for this run (cascades steps + simulations).
     await client.query(`delete from scenarios where review_run_id = $1`, [reviewRunId]);
@@ -4526,7 +4526,7 @@ export async function persistScenariosAndSimulations(reviewRunId: string, result
           simAnswer,
         ],
       );
-      const simulationId = simRow.rows[0]!.id;
+      const simulationId = simRow.rows[0].id;
 
       const steps = Array.isArray(sim.steps) ? sim.steps : [];
       for (let i = 0; i < steps.length; i += 1) {
@@ -4584,11 +4584,11 @@ async function insertScenario(
       fingerprint,
     ],
   );
-  return rows.rows[0]!.id;
+  return rows.rows[0].id;
 }
 
-type LineageContext = { tenantId: string | null; repositoryId: string; prNumber: number; lineageKey: string };
-type LineageCaches = { lineageIdByKey: Map<string, string>; versionIdByKey: Map<string, string> };
+interface LineageContext { tenantId: string | null; repositoryId: string; prNumber: number; lineageKey: string }
+interface LineageCaches { lineageIdByKey: Map<string, string>; versionIdByKey: Map<string, string> }
 
 /** Upsert the lineage + its current version (course) for a scenario, caching both
  *  by lineage_key so the plan and simulation passes reuse the rows. */
@@ -4648,7 +4648,7 @@ async function upsertScenarioLineage(
       JSON.stringify(input.relevantPaths ?? []),
     ],
   );
-  return rows.rows[0]!.id;
+  return rows.rows[0].id;
 }
 
 /**
@@ -4686,7 +4686,7 @@ async function upsertScenarioVersion(
       input.createdBy ?? null,
     ],
   );
-  return rows.rows[0]!.id;
+  return rows.rows[0].id;
 }
 
 /** Content hash of a normalized steps array (sha256 hex, first 12 chars). */
@@ -4708,14 +4708,14 @@ function simToPlan(sim: SimScenario): ParsedScenario {
   };
 }
 
-function extractFindings(result: object): Array<{
+function extractFindings(result: object): {
   fingerprint: string;
   file_path?: string;
   line_number?: number;
   severity: string;
   category: string;
   body: string;
-}> {
+}[] {
   const record = result as Record<string, unknown>;
   const finalReview = record.final_review && typeof record.final_review === "object" && !Array.isArray(record.final_review)
     ? (record.final_review as Record<string, unknown>)
@@ -4820,7 +4820,7 @@ async function resolveTenantId(
      returning coalesce(tenants.merged_into_tenant_id, tenants.id) as id`,
     [accountId, input.accountLogin ?? "unknown", input.accountType ?? "Organization"],
   );
-  return rows.rows[0]!.id;
+  return rows.rows[0].id;
 }
 
 async function upsertInstallation(
@@ -4876,7 +4876,7 @@ async function upsertInstallation(
   if (rows.rows[0]?.tenant_id !== tenantId) {
     throw new Error(`GitHub installation ${installationId} is already bound to another tenant`);
   }
-  return rows.rows[0]!.id;
+  return rows.rows[0].id;
 }
 
 async function upsertRepository(
@@ -4917,7 +4917,7 @@ async function upsertRepository(
   if (rows.rows[0]?.tenant_id !== input.tenantId) {
     throw new Error(`GitHub repository ${input.githubRepoId} is already bound to another tenant`);
   }
-  return rows.rows[0]!.id;
+  return rows.rows[0].id;
 }
 
 async function upsertPullRequest(
@@ -4966,10 +4966,10 @@ async function upsertPullRequest(
       input.htmlUrl ?? null,
     ],
   );
-  return rows.rows[0]!.id;
+  return rows.rows[0].id;
 }
 
-type ReviewRunRow = {
+interface ReviewRunRow {
   id: string;
   trigger_run_id: string | null;
   delivery_id: string | null;
@@ -5002,17 +5002,17 @@ type ReviewRunRow = {
   billing_infra_credits: number | null;
   billing_ai_credits: number | null;
   billing_infra_status: string | null;
-};
+}
 
-type EventRow = {
+interface EventRow {
   review_run_id: string;
   status: string;
   payload_json: unknown;
   trigger_run_id: string | null;
   recorded_at: Date | string;
-};
+}
 
-type FindingRow = {
+interface FindingRow {
   id: string;
   review_run_id: string;
   fingerprint: string;
@@ -5028,7 +5028,7 @@ type FindingRow = {
   pr_number: number | null;
   pr_title: string | null;
   pr_html_url: string | null;
-};
+}
 
 function toReviewRunRecord(row: ReviewRunRow, events: ReviewEvent[]): ReviewRunRecord {
   const result = mergeRunResult(liveResultFromEvents(events), row.result_json);
@@ -5213,7 +5213,7 @@ function jsonOrNull(value: unknown): string | null {
   return JSON.stringify(value);
 }
 
-export type InstalledRepositoryForReview = {
+export interface InstalledRepositoryForReview {
   githubInstallationId: number;
   githubRepoId: number;
   owner: string;
@@ -5221,16 +5221,16 @@ export type InstalledRepositoryForReview = {
   fullName: string;
   defaultBranch: string;
   private: boolean;
-};
+}
 
-export type ReviewGraphTarget = {
+export interface ReviewGraphTarget {
   tenantId: string;
   repository: string;
   defaultBranch: string;
   workspaceLabel: string;
   githubAccountId: string;
   githubAccountType: string;
-};
+}
 
 /** Resolve a review delivery through the repository's exact GitHub connection. */
 export async function getReviewGraphTarget(input: {
@@ -5321,11 +5321,11 @@ export async function getInstalledRepositoryForReview(input: {
     : undefined;
 }
 
-export type TenantRepositoryAccess = {
+export interface TenantRepositoryAccess {
   name: string;
   defaultBranch: string;
   githubInstallationId: number;
-};
+}
 
 /** All repositories in a Jina tenant, each paired with its exact GitHub installation. */
 export async function listTenantRepositoryAccess(tenantId: string): Promise<TenantRepositoryAccess[]> {

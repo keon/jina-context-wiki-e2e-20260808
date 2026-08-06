@@ -26,11 +26,34 @@ export default async function DocPage({ params }: { params: Promise<{ slug: stri
       {doc.sections.map((section) => (
         <section className="doc-section" key={section.heading}>
           <h2>{section.heading}</h2>
-          {section.body?.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
-          {section.steps ? <ol>{section.steps.map((step) => <li key={step}>{step}</li>)}</ol> : null}
-          {section.bullets ? <ul>{section.bullets.map((bullet) => <li key={bullet}>{bullet}</li>)}</ul> : null}
-          {section.code ? <pre><code>{section.code}</code></pre> : null}
-          {section.note ? <aside className="note"><strong>Note</strong><p>{section.note}</p></aside> : null}
+          {section.body?.map((paragraph) => (
+            <p key={paragraph}>{paragraph}</p>
+          ))}
+          {section.steps ? (
+            <ol>
+              {section.steps.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ol>
+          ) : null}
+          {section.bullets ? (
+            <ul>
+              {section.bullets.map((bullet) => (
+                <li key={bullet}>{bullet}</li>
+              ))}
+            </ul>
+          ) : null}
+          {section.code ? (
+            <pre>
+              <code>{section.code}</code>
+            </pre>
+          ) : null}
+          {section.note ? (
+            <aside className="note">
+              <strong>Note</strong>
+              <p>{section.note}</p>
+            </aside>
+          ) : null}
         </section>
       ))}
     </article>

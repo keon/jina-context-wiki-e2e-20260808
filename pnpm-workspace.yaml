@@ -30,6 +30,10 @@ overrides:
   # Patched transitive releases for MCP SDK request validation and rate limiting.
   "fast-uri": "3.1.5"
   "ip-address": "10.3.1"
+  # gaxios (via @google-cloud/storage) resolves a uuid line with GHSA-w5hq-g745-h8pq.
+  "uuid": ">=11.1.1"
+  # The MCP SDK resolves a hono line with the CORS ReDoS advisory GHSA-8j4g-w8fx-2239.
+  "hono": ">=4.12.34"
 
 minimumReleaseAgeExclude:
   - knip@6.29.0

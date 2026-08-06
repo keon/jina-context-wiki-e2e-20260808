@@ -9,9 +9,9 @@ test("round-trips a secret when an encryption key is configured", async () => {
   process.env.SECRETS_ENCRYPTION_KEY = randomBytes(32).toString("base64");
   try {
     // Force the module to re-read the env by importing a fresh copy.
-    const { encryptSecret: enc, decryptSecret: dec, isEncryptedEnvelope: isEnc } = await import(
+    const { encryptSecret: enc, decryptSecret: dec, isEncryptedEnvelope: isEnc } = (await import(
       `./crypto.js?keyed=${Date.now()}`
-    );
+    )) as typeof import("./crypto.js");
     const ciphertext = enc("sk-test-secret-value");
     assert.equal(isEnc(ciphertext), true);
     assert.notEqual(ciphertext, "sk-test-secret-value");

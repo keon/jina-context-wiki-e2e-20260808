@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,9 +26,12 @@ try {
        applied_at timestamptz not null default now()
      )`,
   );
+  await pool.query(`alter table schema_migrations add column if not exists checksum char(64)`);
 
-  const applied = new Set(
-    (await pool.query<{ name: string }>("select name from schema_migrations")).rows.map((row) => row.name),
+  const applied = new Map(
+    (await pool.query<{ name: string; checksum: string | null }>("select name, checksum from schema_migrations")).rows.map(
+      (row) => [row.name, row.checksum],
+    ),
   );
 
   const files = readdirSync(migrationsDir)
@@ -35,17 +39,33 @@ try {
     .sort();
 
   for (const file of files) {
+    const sql = readFileSync(resolve(migrationsDir, file), "utf8");
+    const checksum = createHash("sha256").update(sql, "utf8").digest("hex");
+
     if (applied.has(file)) {
-      console.log(`skip ${file} (already applied)`);
+      const stored = applied.get(file);
+      if (stored == null) {
+        // Rows written before checksum tracking existed: adopt the current
+        // content as authoritative so future edits are caught.
+        await pool.query("update schema_migrations set checksum=$2 where name=$1", [file, checksum]);
+        console.log(`skip ${file} (already applied; checksum recorded)`);
+      } else if (stored !== checksum) {
+        // Editing an applied migration used to be silently ignored forever.
+        throw new Error(
+          `migration ${file} was edited after it was applied (checksum ${checksum} != applied ${stored}); ` +
+            `add a new migration file instead of editing an applied one`,
+        );
+      } else {
+        console.log(`skip ${file} (already applied)`);
+      }
       continue;
     }
 
-    const sql = readFileSync(resolve(migrationsDir, file), "utf8");
     const client = await pool.connect();
     try {
       await client.query("begin");
       await client.query(sql);
-      await client.query("insert into schema_migrations (name) values ($1)", [file]);
+      await client.query("insert into schema_migrations (name, checksum) values ($1, $2)", [file, checksum]);
       await client.query("commit");
       console.log(`applied ${file}`);
     } catch (error) {
@@ -56,7 +76,7 @@ try {
     }
   }
 } finally {
-  await lockClient.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]).catch(() => {});
+  await lockClient.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]).catch(() => undefined);
   lockClient.release();
 }
 

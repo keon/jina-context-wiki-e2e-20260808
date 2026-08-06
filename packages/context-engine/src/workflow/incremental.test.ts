@@ -117,9 +117,7 @@ test("an explicit disposition may omit only a newly added page", () => {
         { path: "architecture.md", change: "add" },
         { path: "legacy-administrator-deletion.md", change: "add" }
       ],
-      omittedPages: [
-        { path: "legacy-administrator-deletion.md", reasonCode: "unsupported_core_claims" }
-      ],
+      omittedPages: [{ path: "legacy-administrator-deletion.md", reasonCode: "unsupported_core_claims" }],
       publishedPages
     })
   );

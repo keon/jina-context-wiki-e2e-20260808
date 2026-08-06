@@ -39,6 +39,7 @@ import { GraphApiClient } from "./graph-client.js";
 import {
   acceptBackfill,
   authorizeInternal,
+  authorizeSchedule,
   completeReview,
   prepareReview,
   recordReviewEvent,
@@ -1519,8 +1520,8 @@ export function createApp(config: AppConfig): Hono {
   });
   app.post("/internal/installations/backfill", (c) => acceptBackfill(c, config, billing));
   app.post("/internal/schedules/billing-retry", async (c) => {
-    authorizeInternal(c, config);
-    const body = await c.req.json().catch(() => ({}));
+    await authorizeSchedule(c, config);
+    const body: unknown = await c.req.json().catch(() => ({}));
     const workflow = await admitScheduledBillingRetry(body);
     return c.json({ accepted: true, workflow_id: workflow.id, replayed: workflow.replayed }, 202);
   });
@@ -1706,7 +1707,15 @@ async function requireTenantMembership(
       await refreshGithubTenantAdminMembership(session.user.id, tenantId, session.userId);
     }
   }
-  return role as TenantRole;
+  return role!;
+}
+
+function containsControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0)!;
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 function numberQuery(value: string | undefined): number | undefined {
@@ -1745,7 +1754,7 @@ export function parseJinaOrganizationName(value: unknown): string {
   if (!value.trim()) {
     throw new ApiError(400, "organization name is required");
   }
-  if (/[\u0000-\u001f\u007f]/.test(value)) {
+  if (containsControlCharacters(value)) {
     throw new ApiError(400, "organization name cannot contain control characters");
   }
   const name = value.trim().replace(/[ \t]+/g, " ");

@@ -1,6 +1,6 @@
 import { apiUrl } from "./api";
 
-export type SelectedTenant = { tenantId: string };
+export interface SelectedTenant { tenantId: string }
 
 export function contextRepositoriesUrl(selected: SelectedTenant): string {
   return apiUrl(

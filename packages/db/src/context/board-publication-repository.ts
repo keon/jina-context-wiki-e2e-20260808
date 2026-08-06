@@ -173,21 +173,23 @@ export class PostgresBoardContextPublicationRepository
       );
       const currentSequence = Number(current.rows[0]?.ref_sequence ?? 0);
       const currentReleaseId = current.rows[0]?.release_id;
-      if (!contextPublicationMayAdvanceCurrent({
-        tenantId: input.scope.tenantId,
-        repository: input.scope.repository,
-        publicationSequence: input.scope.refSequence,
-        ...(currentSequence > 0 && currentReleaseId
-          ? {
-              current: {
-                refSequence: currentSequence,
-                releaseId: currentReleaseId,
-                releaseArtifact: current.rows[0]!.release_artifact
+      if (
+        !contextPublicationMayAdvanceCurrent({
+          tenantId: input.scope.tenantId,
+          repository: input.scope.repository,
+          publicationSequence: input.scope.refSequence,
+          ...(currentSequence > 0 && currentReleaseId
+            ? {
+                current: {
+                  refSequence: currentSequence,
+                  releaseId: currentReleaseId,
+                  releaseArtifact: current.rows[0]!.release_artifact
+                }
               }
-            }
-          : {}),
-        ...(input.priorRelease ? { priorRelease: input.priorRelease } : {})
-      })) {
+            : {}),
+          ...(input.priorRelease ? { priorRelease: input.priorRelease } : {})
+        })
+      ) {
         throw new BoardContextPublicationError(
           "stale_ref_sequence",
           "publication is not based on the current immutable prior Context release"

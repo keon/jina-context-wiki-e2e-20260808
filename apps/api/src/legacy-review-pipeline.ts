@@ -16,12 +16,12 @@ type PlannedTaskId = EntityId<"task">;
 
 interface PlannedTask {
   readonly id: PlannedTaskId;
-  readonly type: "pr_review" | "review_pass" | "publish";
+  readonly type: "pr_review" | "review_pass";
   readonly title: string;
-  readonly assigneeRole: "system" | "review_agent" | "publisher";
+  readonly assigneeRole: "system" | "review_agent";
   readonly dedupeKey: string;
   readonly required: boolean;
-  readonly dispatchTopic?: "run-review" | "run-publish";
+  readonly dispatchTopic?: "run-review";
   readonly parentTaskId?: PlannedTaskId;
   readonly metadata: Record<string, unknown>;
 }
@@ -83,7 +83,6 @@ interface PrReviewInput {
   readonly senderLogin?: string;
   readonly senderAccountType?: string;
   readonly needsExternalContext?: boolean;
-  readonly includePublication?: boolean;
 }
 
 export interface PrReviewPlan {
@@ -99,8 +98,6 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
   const subjectKey = `${input.tenantId}:${input.repository}:pr-${input.pullRequestNumber}:epoch-${input.epoch}`;
   const rootTaskId = entityId<"task">(`task_${subjectKey}:root`);
   const reviewTaskId = entityId<"task">(`task_${subjectKey}:review:general`);
-  const publishTaskId = entityId<"task">(`task_${subjectKey}:publish`);
-  const includePublication = input.includePublication ?? true;
   const identityMetadata = {
     tenantId: input.tenantId,
     ...(input.workspaceLabel ? { workspaceLabel: input.workspaceLabel } : {}),
@@ -150,53 +147,20 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
           headSha: input.headSha,
           needsExternalContext: input.needsExternalContext ?? true
         }
-      },
-      ...(includePublication
-        ? [
-            {
-              id: publishTaskId,
-              type: "publish" as const,
-              title: "Publish review feedback",
-              assigneeRole: "publisher" as const,
-              dedupeKey: `${subjectKey}:publish`,
-              required: true,
-              dispatchTopic: "run-publish" as const,
-              parentTaskId: rootTaskId,
-              metadata: {
-                ...identityMetadata,
-                pullRequestNumber: input.pullRequestNumber,
-                headSha: input.headSha
-              }
-            }
-          ]
-        : [])
+      }
     ],
-    dependencies: includePublication
-      ? [
-          {
-            taskId: publishTaskId,
-            dependsOnTaskId: reviewTaskId,
-            relationship: "blocks",
-            required: true,
-            blocksParentCompletion: true
-          },
-          {
-            taskId: rootTaskId,
-            dependsOnTaskId: publishTaskId,
-            relationship: "publishes",
-            required: true,
-            blocksParentCompletion: true
-          }
-        ]
-      : [
-          {
-            taskId: rootTaskId,
-            dependsOnTaskId: reviewTaskId,
-            relationship: "blocks",
-            required: true,
-            blocksParentCompletion: true
-          }
-        ]
+    // Publication rides the relational review pipeline (publish-review); the
+    // legacy board has no claimable publish topic, so a publish task here
+    // would sit unclaimable forever.
+    dependencies: [
+      {
+        taskId: rootTaskId,
+        dependsOnTaskId: reviewTaskId,
+        relationship: "blocks",
+        required: true,
+        blocksParentCompletion: true
+      }
+    ]
   };
 }
 

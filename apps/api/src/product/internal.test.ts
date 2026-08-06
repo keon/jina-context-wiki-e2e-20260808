@@ -31,7 +31,7 @@ function internalContext(body: unknown, token = "internal-token"): { c: Context;
     },
     json: (obj: unknown) => {
       captured = obj;
-      return obj as unknown as Response;
+      return obj as Response;
     },
   };
   return { c: c as unknown as Context, captured: () => captured };
@@ -222,10 +222,10 @@ function usageBody(record: Record<string, unknown>): unknown {
 }
 
 test("parseUsageRequestBody accepts is_byok true/false and defaults it to false when absent", () => {
-  assert.equal(parseUsageRequestBody(usageBody({ is_byok: true })).usage_records[0]!.is_byok, true);
-  assert.equal(parseUsageRequestBody(usageBody({ is_byok: false })).usage_records[0]!.is_byok, false);
+  assert.equal(parseUsageRequestBody(usageBody({ is_byok: true })).usage_records[0].is_byok, true);
+  assert.equal(parseUsageRequestBody(usageBody({ is_byok: false })).usage_records[0].is_byok, false);
   // Absent -> defaults to false (non-BYOK), never undefined, so the billing basis is unambiguous.
-  assert.equal(parseUsageRequestBody(usageBody({})).usage_records[0]!.is_byok, false);
+  assert.equal(parseUsageRequestBody(usageBody({})).usage_records[0].is_byok, false);
 });
 
 test("parseUsageRequestBody rejects a non-boolean is_byok (contract violation, not silent coercion)", () => {
@@ -267,7 +267,7 @@ test("botStatusFor keeps best-effort publish failures non-fatal", () => {
 
 // FINDING 2: fallback usage on an already-terminal run must settle on arrival with the SAME core the
 // /usage route uses — settleIfTerminalRun. It settles iff the run's stored status is terminal.
-type SettleCall = { reviewRunId: string; botStatus: string };
+interface SettleCall { reviewRunId: string; botStatus: string }
 
 function fakeBilling(onSettle?: () => void): {
   calls: SettleCall[];
@@ -324,17 +324,17 @@ test("keySourceDrifted is false when the pin agrees or was never set", () => {
 // runs the prepare gate: if credits are now available it passes; if still exhausted it re-completes as
 // blocked (idempotent). These exercise the real production seam prepareReview delegates to.
 
-type BlockFinalize = { status: string; botStatus: string; reason: unknown };
+interface BlockFinalize { status: string; botStatus: string; reason: unknown }
 
 function fakePrepareGateStore(reopen: boolean): {
   store: PrepareGateStore;
   reopenCalls: string[];
   completes: BlockFinalize[];
-  events: Array<{ status: string }>;
+  events: { status: string }[];
 } {
   const reopenCalls: string[] = [];
   const completes: BlockFinalize[] = [];
-  const events: Array<{ status: string }> = [];
+  const events: { status: string }[] = [];
   const store: PrepareGateStore = {
     async reopenBlockedReviewRun(id: string): Promise<boolean> {
       reopenCalls.push(id);

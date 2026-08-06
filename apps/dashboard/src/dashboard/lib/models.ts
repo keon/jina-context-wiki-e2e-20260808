@@ -5,10 +5,10 @@
 
 import { filterModels, type CatalogModel } from "./openrouter";
 
-export type ModelConnectionNotice = {
+export interface ModelConnectionNotice {
   title: string;
   message: string;
-};
+}
 
 /**
  * Current connection health for the selected provider. Historical review or
@@ -106,12 +106,12 @@ export function truncateCatalog(
   return { visible, remaining: Math.max(0, all.length - visible.length) };
 }
 
-export type CatalogPage = {
+export interface CatalogPage {
   visible: CatalogModel[];
   page: number;
   totalPages: number;
   totalMatches: number;
-};
+}
 
 /** Filter the model catalog, then return one clamped, one-based page. */
 export function paginateCatalog(
@@ -192,12 +192,12 @@ export function modelPriceLabel(model: CatalogModel): string | null {
  * ============================================================ */
 
 /** True platform-default slugs per review stage, as returned by the API. */
-export type StageDefaults = {
+export interface StageDefaults {
   planner: string | null;
   investigation: string | null;
   review: string | null;
   context: string | null;
-};
+}
 
 /** Concrete code fallbacks used by the review runtime when an API build does
  * not return its environment-derived defaults. The picker must always name the

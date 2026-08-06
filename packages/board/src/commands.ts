@@ -248,7 +248,10 @@ function commandTaskId(command: BoardCommandInput): TaskId | undefined {
 
 function findRootTaskId(state: BoardState, task: BoardTask): TaskId | undefined {
   let current: BoardTask | undefined = task;
-  while (current?.parentTaskId) {
+  // A malformed parent cycle must not hang the API inside the board lock.
+  const visited = new Set<TaskId>();
+  while (current?.parentTaskId && !visited.has(current.id)) {
+    visited.add(current.id);
     current = findTask(state, current.parentTaskId);
   }
   return current?.id;

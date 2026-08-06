@@ -92,7 +92,7 @@ export async function rollbackInstallationTenantMove(
        ) as unresolved_repository`,
     [row.id, row.installation_id, row.to_tenant_id],
   );
-  const scopeState = scope.rows[0]!;
+  const scopeState = scope.rows[0];
   if (
     scopeState.snapshot_count !== scopeState.current_count
     || scopeState.missing_snapshot_repository

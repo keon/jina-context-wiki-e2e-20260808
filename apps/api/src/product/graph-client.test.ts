@@ -26,11 +26,11 @@ function recording(handler: Stub): {
 } {
   const urls: string[] = [];
   const bodies: unknown[] = [];
-  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
     urls.push(String(input));
     if (typeof init?.body === "string") bodies.push(JSON.parse(init.body));
     return handler(input, init);
-  }) as unknown as typeof fetch;
+  };
   return { fetchImpl, urls, bodies };
 }
 
@@ -566,7 +566,7 @@ test("Jina relays the exact signed GitHub delivery to the Context-only endpoint"
 });
 
 test("Jina relays only new commits, pull requests, and issues to Context", async () => {
-  const cases: Array<[string, Record<string, unknown>, boolean]> = [
+  const cases: [string, Record<string, unknown>, boolean][] = [
     ["push", { ref: "refs/heads/main", after: "1".repeat(40), deleted: false }, true],
     ["push", { ref: "refs/tags/v1", after: "1".repeat(40), deleted: false }, false],
     ["push", { ref: "refs/heads/main", after: "0".repeat(40), deleted: true }, false],
@@ -758,7 +758,7 @@ test("a board overview is loaded under the original tenant identity", async () =
 
 test("an upstream work overview aborts when its caller disconnects", async () => {
   const controller = new AbortController();
-  const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+  const fetchImpl = async (_input: RequestInfo | URL, init?: RequestInit) => {
     controller.abort();
     await new Promise((resolve) => setTimeout(resolve, 5));
     if (init?.signal?.aborted) {
@@ -767,7 +767,7 @@ test("an upstream work overview aborts when its caller disconnects", async () =>
       throw error;
     }
     return Response.json({});
-  }) as unknown as typeof fetch;
+  };
   const client = new GraphApiClient(CONFIG, fetchImpl);
 
   await assert.rejects(

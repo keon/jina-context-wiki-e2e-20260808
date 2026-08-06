@@ -1,16 +1,16 @@
 import type pg from "pg";
 
-export type GithubIdentityProfile = {
+export interface GithubIdentityProfile {
   githubUserId: number;
   githubLogin: string;
   displayName?: string | null;
   avatarUrl?: string;
-};
+}
 
-export type InternalUserIdentity = {
+export interface InternalUserIdentity {
   userId: string;
   personalTenantId: string;
-};
+}
 
 export const INTERNAL_USER_TRANSITION_LOCK_KEY = 8231440072026;
 
@@ -64,7 +64,7 @@ export async function upsertGithubUserIdentity(
       `insert into user_identities (user_id, provider, provider_user_id, provider_login)
        values ($1, 'github', $2, $3)
        returning user_id`,
-      [user.rows[0]!.id, providerUserId, githubLogin],
+      [user.rows[0].id, providerUserId, githubLogin],
     );
   } else {
     await client.query(
@@ -81,7 +81,7 @@ export async function upsertGithubUserIdentity(
     );
   }
 
-  const userId = identity.rows[0]!.user_id;
+  const userId = identity.rows[0].user_id;
   const tenant = await client.query<{ id: string; kind: string | null }>(
     `insert into tenants
        (github_account_id, github_account_login, github_account_type, kind, name, personal_owner_user_id)
@@ -101,10 +101,10 @@ export async function upsertGithubUserIdentity(
      returning id, kind`,
     [profile.githubUserId, githubLogin, userId],
   );
-  if (tenant.rows[0]!.kind !== "personal") {
+  if (tenant.rows[0].kind !== "personal") {
     throw new Error(`GitHub user ${profile.githubUserId} is already bound to a team workspace`);
   }
-  const personalTenantId = tenant.rows[0]!.id;
+  const personalTenantId = tenant.rows[0].id;
 
   // Catch up rows written by a previous application revision or by a GitHub
   // installation webhook before the installer first signs in.

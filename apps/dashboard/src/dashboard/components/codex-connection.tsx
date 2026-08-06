@@ -690,7 +690,7 @@ function CodexDeviceFlow({ onConnected }: { onConnected: (info: CodexHarnessInfo
         return;
       }
       attempt += 1;
-      let status: "success" | "pending" | "error" = "pending";
+      let status: "success" | "pending" | "error";
       let code: { authorizationCode: string; codeVerifier: string } | null = null;
       let httpStatus: number | undefined;
       try {

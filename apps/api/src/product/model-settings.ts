@@ -21,7 +21,7 @@ import {
  * price strings (×1,000,000, never float); null when OpenRouter omits the price. context_length is null
  * when absent.
  */
-export type CatalogModel = {
+export interface CatalogModel {
   id: string;
   name: string;
   context_length: number | null;
@@ -33,18 +33,18 @@ export type CatalogModel = {
    * the per-1M `pricing` fields; it exists only to feed openAiModelPricing().
    */
   native_pricing?: { input: string | null; output: string | null; cached: string | null };
-};
+}
 
 /**
  * Per-token OpenAI pricing (exact decimal strings) for one `openai/<model>` slug. Mirrors the trigger
  * proxy's OpenaiModelPrice; the API returns a map of these from /internal/integrations/resolve so the
  * capture proxy can compute native-route cost (api.openai.com returns tokens but no cost).
  */
-export type OpenAiModelPrice = {
+export interface OpenAiModelPrice {
   input_per_token: string;
   output_per_token: string;
   cached_per_token: string;
-};
+}
 
 // platformModelDefaults lives in store.ts (the routing coverage decision needs it, and store.ts cannot
 // import this module without creating a cycle). Re-exported for existing callers.

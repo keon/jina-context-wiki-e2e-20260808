@@ -142,8 +142,8 @@ export interface BillingStorePort {
   addRunAiCreditsTotal(reviewRunId: string, credits: number): Promise<void>;
   getReviewRunStatus(reviewRunId: string): Promise<string | undefined>;
   listPendingUsageRows(limit: number): Promise<PendingUsageRow[]>;
-  listTerminalRunsWithPendingOutcome(limit: number): Promise<Array<{ reviewRunId: string; status: string }>>;
-  listRunsWithPendingInfra(limit: number): Promise<Array<{ reviewRunId: string; status: string }>>;
+  listTerminalRunsWithPendingOutcome(limit: number): Promise<{ reviewRunId: string; status: string }[]>;
+  listRunsWithPendingInfra(limit: number): Promise<{ reviewRunId: string; status: string }[]>;
 }
 
 /** The real store port, binding to store.ts. */
@@ -177,12 +177,12 @@ const realBillingStore: BillingStorePort = {
 };
 
 export type RateMode = "included" | "overage";
-export type AccessDecision = {
+export interface AccessDecision {
   allowed: boolean;
   creditsBalance?: number;
   managedAiAccess?: boolean;
   reason?: string;
-};
+}
 
 /**
  * Distinguishes an Autumn outage from a missing configuration for the dashboard:
@@ -198,16 +198,16 @@ type BillingStatus = "ok" | "unavailable" | "not_configured";
  * already fetches. `used` = the balance's usage field, else granted - remaining. All null when the
  * balance is unavailable or the fields are absent (never fabricated).
  */
-type BillingCycle = {
+interface BillingCycle {
   granted: number | null;
   remaining: number | null;
   used: number | null;
   next_reset_at: string | null;
-};
+}
 
 const EMPTY_CYCLE: BillingCycle = { granted: null, remaining: null, used: null, next_reset_at: null };
 
-export type BillingOverview = {
+export interface BillingOverview {
   configured: boolean;
   status: BillingStatus;
   plan_id: string | null;
@@ -218,7 +218,7 @@ export type BillingOverview = {
   // Recent invoices (from getCustomer expand=invoices). Empty when Autumn returns none or is not
   // configured — never fabricated.
   billing_activity: AutumnInvoice[];
-};
+}
 
 /**
  * Current-cycle used credits from an Autumn balance check, or null when it cannot be derived. Prefers the
@@ -277,7 +277,7 @@ export function autoReviewLimitReached(
  * *_failed + stale_*_rebilled breakdowns are added so a failed drain is distinguishable from an empty
  * backlog (both previously reported all-zero billed counts).
  */
-export type RetryBillingCounts = {
+export interface RetryBillingCounts {
   usage_billed: number;
   usage_failed: number;
   runs_settled: number;
@@ -286,7 +286,7 @@ export type RetryBillingCounts = {
   infra_failed: number;
   stale_usage_rebilled: number;
   stale_infra_rebilled: number;
-};
+}
 
 function emptyRetryBillingCounts(): RetryBillingCounts {
   return {
@@ -1227,7 +1227,7 @@ function logBillingWarn(event: string, fields: Record<string, unknown> & { error
       : error instanceof Error
         ? error.message
         : error !== undefined
-          ? String(error)
+          ? JSON.stringify(error)
           : undefined;
   console.warn(event, { ...rest, ...(message !== undefined ? { error: message } : {}) });
 }

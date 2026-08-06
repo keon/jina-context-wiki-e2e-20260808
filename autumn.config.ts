@@ -22,14 +22,14 @@ export const jinaCredits = feature({
   id: "jina_credits",
   name: "Jina Credits",
   type: "metered",
-  consumable: true,
+  consumable: true
 });
 
 // Entitlement flag: whether a plan may run managed-AI reviews at all. Off for BYOH-only tiers.
 export const managedAiAccess = feature({
   id: "managed_ai_access",
   name: "Managed AI Access",
-  type: "boolean",
+  type: "boolean"
 });
 
 /* --------------------------------------------------------------------- plans --- */
@@ -42,8 +42,8 @@ export const startup = plan({
   price: { amount: 100, interval: "month" },
   items: [
     item({ featureId: jinaCredits.id, included: 10_000, reset: { interval: "month" } }),
-    item({ featureId: managedAiAccess.id }),
-  ],
+    item({ featureId: managedAiAccess.id })
+  ]
 });
 
 // Growth — $500/mo, 50,000 included Jina Credits/mo, managed AI on.
@@ -54,8 +54,8 @@ export const growth = plan({
   price: { amount: 500, interval: "month" },
   items: [
     item({ featureId: jinaCredits.id, included: 50_000, reset: { interval: "month" } }),
-    item({ featureId: managedAiAccess.id }),
-  ],
+    item({ featureId: managedAiAccess.id })
+  ]
 });
 
 // Overage credit top-up — a prepaid add-on purchase: $10 buys 1,000 credits ($1 = 100
@@ -73,10 +73,10 @@ export const overageCredits = plan({
         amount: 10,
         interval: "one_off",
         billingUnits: 1_000,
-        billingMethod: "prepaid",
-      },
-    }),
-  ],
+        billingMethod: "prepaid"
+      }
+    })
+  ]
 });
 
 // Enterprise stays manual/custom: attach a hand-built Autumn plan with custom included

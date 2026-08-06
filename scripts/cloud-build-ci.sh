@@ -9,7 +9,8 @@ pnpm typecheck
 pnpm lint
 if [[ -n "${DATABASE_URL:-}" ]]; then
   pnpm --filter @jina/api build
-  pnpm --filter @jina/api migrate:product
+  # Runtime migrations must run before product ones (0030 depends on them).
+  pnpm --filter @jina/api exec node dist/product/migrate-all.js
   unset DATABASE_URL
 fi
 pnpm test

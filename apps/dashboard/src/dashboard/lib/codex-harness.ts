@@ -3,11 +3,11 @@
  * Kept free of React/DOM so they can be unit-tested with `node --test`.
  */
 
-export type CodexHarnessInfo = {
+export interface CodexHarnessInfo {
   configured: boolean;
   connected_at?: string;
   reconnect_required?: boolean;
-};
+}
 
 /**
  * Result of the client-side pre-check on pasted ~/.codex/auth.json content.
@@ -44,7 +44,7 @@ export function precheckCodexAuth(raw: string): CodexAuthPrecheck {
     return { ok: false, reason: "No “tokens” object found — did you sign in with `codex login`?" };
   }
 
-  if (Object.keys(tokens as Record<string, unknown>).length === 0) {
+  if (Object.keys(tokens).length === 0) {
     return { ok: false, reason: "The “tokens” object is empty — try `codex login` again." };
   }
 

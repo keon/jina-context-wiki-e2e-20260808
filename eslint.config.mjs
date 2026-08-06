@@ -42,6 +42,19 @@ export default tseslint.config(
     }
   },
   {
+    // src/product is excluded from apps/api/tsconfig.json (it builds with
+    // tsconfig.product.json), so the automatic project service cannot map
+    // these files; point the parser at the product project explicitly.
+    files: ["apps/api/src/product/**/*.ts"],
+    languageOptions: {
+      parserOptions: {
+        projectService: false,
+        project: ["apps/api/tsconfig.product.json"],
+        tsconfigRootDir: import.meta.dirname
+      }
+    }
+  },
+  {
     files: ["**/*.test.ts", "**/*.test.tsx"],
     rules: {
       // node:test returns promises from test registration; they must not be awaited at module scope.

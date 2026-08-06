@@ -30,7 +30,7 @@ import {
 } from "./lib/tenants";
 import { invalidateViewerSession, reconcileSessionRefresh } from "./lib/viewer-session";
 
-type DashboardContextValue = {
+interface DashboardContextValue {
   data: DashboardResponse | null;
   viewer: ViewerResponse | null;
   error: string | null;
@@ -42,10 +42,10 @@ type DashboardContextValue = {
   reload: () => void;
   reloadViewer: () => void;
   setTenantScope: (tenantId: string | null, ready: boolean) => void;
-};
+}
 
 const emptyFilters: DashboardFilters = { project: "", team: "" };
-type DashboardTenantScope = { tenantId: string | null; ready: boolean; version: number };
+interface DashboardTenantScope { tenantId: string | null; ready: boolean; version: number }
 const initialTenantScope: DashboardTenantScope = { tenantId: null, ready: false, version: 0 };
 
 const DashboardContext = createContext<DashboardContextValue | null>(null);
@@ -287,7 +287,7 @@ export function useDashboard(): DashboardContextValue {
 
 /* ------------------------------------------------------------------ tenants --- */
 
-type TenantContextValue = {
+interface TenantContextValue {
   // All tenants the viewer belongs to (personal first). Empty when the fetch
   // failed or hasn't resolved — see `switcherVisible`.
   tenants: ViewerTenant[];
@@ -309,7 +309,7 @@ type TenantContextValue = {
   // Increments when tenant authorization is lost, invalidating in-flight page requests even if both
   // the old and new selections use the legacy null scope.
   fenceVersion: number;
-};
+}
 
 const TenantContext = createContext<TenantContextValue | null>(null);
 

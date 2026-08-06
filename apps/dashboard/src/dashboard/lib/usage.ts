@@ -10,7 +10,7 @@
  * deliberate "no plan attached" signal.
  */
 
-import { CREDITS_PER_USD, creditsToUsd, formatCredits, numberOrNull } from "./billing";
+import { creditsToUsd, formatCredits, numberOrNull } from "./billing";
 
 export { creditsToUsd, formatCredits };
 
@@ -20,7 +20,7 @@ type UsageStatus = "ok" | "unavailable" | "not_configured";
 export const USAGE_PERIODS = [7, 30, 90] as const;
 export const DEFAULT_USAGE_PERIOD = 30;
 
-type UsageTotals = {
+interface UsageTotals {
   runs: number | null;
   completed_runs: number | null;
   infra_credits: number | null;
@@ -29,15 +29,15 @@ type UsageTotals = {
   model_cost_usd: number | null;
   byok_runs: number | null;
   harness_runs: number | null;
-};
+}
 
-type UsageDaily = {
+interface UsageDaily {
   date: string | null;
   credits: number;
   runs: number;
-};
+}
 
-export type UsageRecentRun = {
+export interface UsageRecentRun {
   review_run_id: string | null;
   repo_full_name: string | null;
   pr_number: number | null;
@@ -49,9 +49,9 @@ export type UsageRecentRun = {
   // Number of review_runs rolled up into this PR row (a PR reviewed on every push has one per commit).
   review_count: number | null;
   created_at: string | null;
-};
+}
 
-export type Usage = {
+export interface Usage {
   status: UsageStatus;
   configured: boolean;
   period: { days: number };
@@ -60,7 +60,7 @@ export type Usage = {
   cycle_credits_used: number | null;
   daily: UsageDaily[];
   recent_runs: UsageRecentRun[];
-};
+}
 
 const EMPTY_TOTALS: UsageTotals = {
   runs: null,
@@ -71,16 +71,6 @@ const EMPTY_TOTALS: UsageTotals = {
   model_cost_usd: null,
   byok_runs: null,
   harness_runs: null,
-};
-
-export const USAGE_NOT_CONFIGURED: Usage = {
-  status: "not_configured",
-  configured: false,
-  period: { days: DEFAULT_USAGE_PERIOD },
-  totals: EMPTY_TOTALS,
-  cycle_credits_used: null,
-  daily: [],
-  recent_runs: [],
 };
 
 export const USAGE_UNAVAILABLE: Usage = {

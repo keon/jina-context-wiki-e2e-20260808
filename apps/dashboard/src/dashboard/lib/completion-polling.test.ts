@@ -88,7 +88,7 @@ function fakeHost(initiallyVisible = true): CompletionPollingHost & {
     },
     attend: () => attention?.(),
     fireNextTimer() {
-      const next = timers.entries().next().value as [number, () => void] | undefined;
+      const next = timers.entries().next().value;
       if (!next) return;
       timers.delete(next[0]);
       next[1]();

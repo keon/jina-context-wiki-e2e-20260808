@@ -31,7 +31,7 @@ test(
            returning id`,
           [seed + tenantIds.length, `tenant-review-${seed}-${suffix}`],
         );
-        tenantIds.push(tenant.rows[0]!.id);
+        tenantIds.push(tenant.rows[0].id);
       }
       const repositoryA = await client.query<{ id: string }>(
         `insert into repositories (tenant_id, github_repo_id, owner, name, default_branch)
@@ -50,14 +50,14 @@ test(
            (tenant_id, repository_id, trigger, status, idempotency_key, head_sha)
          values ($1, $2, 'pull_request', 'completed', $3, repeat('a', 40))
          returning id`,
-        [tenantIds[0], repositoryA.rows[0]!.id, `tenant-review-a-${seed}`],
+        [tenantIds[0], repositoryA.rows[0].id, `tenant-review-a-${seed}`],
       );
       const runB = await client.query<{ id: string }>(
         `insert into review_runs
            (tenant_id, repository_id, trigger, status, idempotency_key, head_sha)
          values ($1, $2, 'pull_request', 'completed', $3, repeat('b', 40))
          returning id`,
-        [tenantIds[1], repositoryB.rows[0]!.id, `tenant-review-b-${seed}`],
+        [tenantIds[1], repositoryB.rows[0].id, `tenant-review-b-${seed}`],
       );
       await client.query(
         `insert into review_findings
@@ -65,13 +65,13 @@ test(
          values
            ($1, $2, 'finding-a', 'medium', 'correctness', 'tenant A finding'),
            ($3, $4, 'finding-b', 'high', 'security', 'tenant B finding')`,
-        [tenantIds[0], runA.rows[0]!.id, tenantIds[1], runB.rows[0]!.id],
+        [tenantIds[0], runA.rows[0].id, tenantIds[1], runB.rows[0].id],
       );
 
       const pageA = await getReviewRunRecords({ tenantId: tenantIds[0], limit: 100 });
-      assert.deepEqual(pageA.records.map((run) => run.review_run_id), [runA.rows[0]!.id]);
+      assert.deepEqual(pageA.records.map((run) => run.review_run_id), [runA.rows[0].id]);
       assert.equal(
-        await getReviewRunRecord({ reviewRunId: runB.rows[0]!.id, tenantId: tenantIds[0] }),
+        await getReviewRunRecord({ reviewRunId: runB.rows[0].id, tenantId: tenantIds[0] }),
         undefined,
       );
       assert.deepEqual(

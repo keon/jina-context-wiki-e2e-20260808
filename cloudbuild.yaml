@@ -20,6 +20,10 @@ steps:
     entrypoint: bash
     args: [scripts/cloud-build-ci.sh]
     env:
+      # DATABASE_URL additionally runs the product migration smoke test in
+      # cloud-build-ci.sh, matching cloudbuild.ci.yaml, so a regressed
+      # migration fails validation instead of the release deploy step.
+      - DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
       - TEST_DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
 
   - id: build-api
@@ -29,7 +33,6 @@ steps:
       - build
       - --file=apps/api/Dockerfile
       - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID
-      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:latest
       - .
 
   - id: build-worker
@@ -39,7 +42,6 @@ steps:
       - build
       - --file=apps/worker/Dockerfile
       - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
-      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
       - .
 
   - id: build-dashboard
@@ -68,7 +70,6 @@ steps:
       - -ceu
       - |
         docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID
-        docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:latest
 
   - id: push-worker
     name: gcr.io/cloud-builders/docker
@@ -78,7 +79,6 @@ steps:
       - -ceu
       - |
         docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
-        docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
 
   - id: push-dashboard
     name: gcr.io/cloud-builders/docker
