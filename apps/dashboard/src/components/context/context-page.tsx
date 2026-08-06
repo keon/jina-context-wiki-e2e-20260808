@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { contextBuildUrl, contextRepositoriesUrl } from "../../dashboard/lib/context.ts";
 import { isTenantWritable } from "../../dashboard/lib/tenants.ts";
@@ -107,16 +108,19 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
 
   useEffect(() => {
     if (view !== "wiki") return;
-    const currentRepository = repositoryOptions.find((item) => item.name === wikiRepository);
-    const nextRepository = currentRepository ?? repositoryOptions[0];
-    if (!nextRepository) {
-      setWikiRepository("");
-      setWikiVersionKey("");
+    if (!wikiRepository) {
+      if (wikiVersionKey) setWikiVersionKey("");
       return;
     }
-    const versions = buildWikiVersions(nextRepository, releases, builds);
+    const currentRepository = repositoryOptions.find((item) => item.name === wikiRepository);
+    if (!currentRepository) {
+      setWikiRepository("");
+      setWikiVersionKey("");
+      setPendingDocument(null);
+      return;
+    }
+    const versions = buildWikiVersions(currentRepository, releases, builds);
     const nextVersion = versions.find((item) => item.key === wikiVersionKey) ?? versions[0];
-    if (wikiRepository !== nextRepository.name) setWikiRepository(nextRepository.name);
     if (wikiVersionKey !== nextVersion?.key) setWikiVersionKey(nextVersion?.key ?? "");
   }, [builds, releases, repositoryOptions, view, wikiRepository, wikiVersionKey]);
 
@@ -222,6 +226,13 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
     setNotice("");
   }
 
+  function returnToRepositoryPicker() {
+    setWikiRepository("");
+    setWikiVersionKey("");
+    setPendingDocument(null);
+    setNotice("");
+  }
+
   function openWikiSearchResult(nextRelease: ContextRelease, documentId: string) {
     setWikiRepository(nextRelease.repository);
     setWikiVersionKey(releaseVersionValue(nextRelease.id));
@@ -233,33 +244,28 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
     <section className="knowledge-page" id={view === "wiki" ? "context-page" : "causal-graph-page"}>
       <h1 className="sr-only">{view === "wiki" ? "Context Wiki" : "Causal Graph"}</h1>
 
-      <header className="knowledge-toolbar">
-        <div className="knowledge-toolbar__identity" aria-hidden="true">
-          <span className="knowledge-toolbar__icon">{view === "wiki" ? <BookIcon /> : <GraphIcon />}</span>
-          <span>{view === "wiki" ? "Repository context" : "Repository history"}</span>
-        </div>
+      {view === "causal-graph" || wikiRepository ? (
+        <header className="knowledge-toolbar">
+          <div className="knowledge-toolbar__identity" aria-hidden="true">
+            <span className="knowledge-toolbar__icon">{view === "wiki" ? <BookIcon /> : <GraphIcon />}</span>
+            <span>{view === "wiki" ? "Repository context" : "Repository history"}</span>
+          </div>
 
         {view === "wiki" ? (
           <div className="knowledge-toolbar__selectors">
-            <label className="knowledge-toolbar__field">
-              <span>Repository</span>
-              <span className="knowledge-toolbar__scope">
-                <select
-                  aria-label="Repository"
-                  value={wikiRepository}
-                  disabled={repositoryOptions.length === 0}
-                  onChange={(event) => selectWikiRepository(event.target.value)}
-                >
-                  {repositoryOptions.length === 0 ? <option value="">No repositories available</option> : null}
-                  {repositoryOptions.map((option) => (
-                    <option key={option.name} value={option.name}>
-                      {option.name}
-                    </option>
-                  ))}
-                </select>
-                <ChevronIcon />
+            <button
+              type="button"
+              className="knowledge-toolbar__selected-repository"
+              onClick={returnToRepositoryPicker}
+              aria-label={`Change repository. Currently ${wikiRepository}`}
+            >
+              <RepositoryIcon />
+              <span>
+                <small>Repository</small>
+                <strong>{wikiRepository}</strong>
               </span>
-            </label>
+              <span className="knowledge-toolbar__change">Change</span>
+            </button>
             <label className="knowledge-toolbar__field knowledge-toolbar__field--version">
               <span>Version</span>
               <span className="knowledge-toolbar__scope">
@@ -319,7 +325,7 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
           </label>
         )}
 
-        <div className="knowledge-toolbar__meta">
+          <div className="knowledge-toolbar__meta">
           {activeBuild ? (
             <span className={`knowledge-pill knowledge-pill--${activeBuild.status}`}>
               <i aria-hidden="true" />
@@ -349,8 +355,9 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
             <RefreshIcon spinning={refreshing} />
             {refreshing ? "Refreshing" : "Refresh"}
           </button>
-        </div>
-      </header>
+          </div>
+        </header>
+      ) : null}
 
       {notice ? (
         <p className="knowledge-notice" role="status">
@@ -377,6 +384,8 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
             </button>
           }
         />
+      ) : view === "wiki" && !wikiRepository ? (
+        <RepositoryPicker repositories={repositoryOptions} onSelect={selectWikiRepository} />
       ) : scopes.length === 0 ? (
         <KnowledgePlaceholder
           kind={view}
@@ -439,6 +448,53 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
       )}
     </section>
   );
+}
+
+export function RepositoryPicker({
+  repositories,
+  onSelect
+}: {
+  readonly repositories: readonly RepositoryOption[];
+  readonly onSelect: (repository: string) => void;
+}) {
+  return (
+    <section className="knowledge-repository-picker" aria-label="Choose a repository">
+      <div className="knowledge-repository-grid">
+        <Link className="knowledge-repository-card knowledge-repository-card--add" href="/integrations">
+          <PlusIcon />
+          <span>
+            <strong>Add repo</strong>
+            <small>Connect another GitHub repository</small>
+          </span>
+          <ForwardIcon />
+        </Link>
+        {repositories.map((repository) => {
+          const { owner, name } = repositoryLabel(repository.name);
+          return (
+            <button
+              type="button"
+              className="knowledge-repository-card"
+              key={repository.name}
+              onClick={() => onSelect(repository.name)}
+            >
+              <RepositoryIcon />
+              <span>
+                <strong>{name}</strong>
+                <small>{owner}</small>
+              </span>
+              <ForwardIcon />
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function repositoryLabel(repository: string) {
+  const separator = repository.lastIndexOf("/");
+  if (separator < 0) return { owner: "Repository", name: repository };
+  return { owner: repository.slice(0, separator), name: repository.slice(separator + 1) };
 }
 
 function buildScopes(
@@ -629,6 +685,31 @@ function KnowledgeLoading() {
       <span />
       <span />
     </div>
+  );
+}
+
+function RepositoryIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <rect x="3" y="3" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.25" />
+      <path d="M7 3v14M10 7h4M10 10h4M10 13h3" stroke="currentColor" strokeWidth="1.25" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ForwardIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path d="m7 5 5 5-5 5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 

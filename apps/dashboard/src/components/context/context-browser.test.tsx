@@ -4,6 +4,7 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { jsonResponse, renderComponent } from "../../testing/render.tsx";
 import type { ContextRelease } from "../../lib/types.ts";
 import { ContextSearch } from "./context-browser.tsx";
+import { RepositoryPicker } from "./context-page.tsx";
 
 function release(repository: string, id: string): ContextRelease {
   return {
@@ -16,6 +17,22 @@ function release(repository: string, id: string): ContextRelease {
     contextStatus: "available"
   };
 }
+
+test("repository picker gates the Wiki behind explicit card selection", () => {
+  let selected = "";
+  renderComponent(
+    <RepositoryPicker
+      repositories={[{ name: "daniel/ecommerce-dashboard", defaultBranch: "main" }]}
+      onSelect={(repository) => {
+        selected = repository;
+      }}
+    />
+  );
+
+  assert.equal(screen.getByRole("link", { name: /Add repo/ }).getAttribute("href"), "/integrations");
+  fireEvent.click(screen.getByRole("button", { name: /ecommerce-dashboard/ }));
+  assert.equal(selected, "daniel/ecommerce-dashboard");
+});
 
 test("workspace search queries each repository release and labels merged results", async () => {
   const payments = release("acme/payments", "pay");
