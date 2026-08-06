@@ -6,6 +6,8 @@ export function isProductApiRoute(pathname: string): boolean {
     pathname.startsWith("/auth/") ||
     pathname === "/internal/reviews/prepare" ||
     pathname.startsWith("/internal/reviews/") ||
+    pathname === "/internal/github-webhook-inbox" ||
+    pathname.startsWith("/internal/github-webhook-inbox/") ||
     pathname === "/internal/graph/availability" ||
     pathname === "/internal/context/mcp-access" ||
     pathname === "/internal/installations/backfill" ||
