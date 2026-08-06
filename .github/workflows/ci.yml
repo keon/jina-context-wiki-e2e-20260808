@@ -50,8 +50,10 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm --filter @jina/api build
-      - run: pnpm --filter @jina/api migrate:product
-        name: Product migration smoke test
+      # migrate-all runs the runtime (jina_runtime) migrations before the
+      # product ones; product migration 0030 depends on the runtime schema.
+      - run: pnpm --filter @jina/api exec node dist/product/migrate-all.js
+        name: Migration smoke test
       - run: pnpm test
         env:
           DATABASE_URL: ""
