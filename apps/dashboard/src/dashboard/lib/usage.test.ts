@@ -9,7 +9,6 @@ import {
   normalizeUsagePeriod,
   scaleBars,
   usageParams,
-  USAGE_NOT_CONFIGURED,
   USAGE_PERIODS,
   USAGE_UNAVAILABLE,
 } from "./usage";

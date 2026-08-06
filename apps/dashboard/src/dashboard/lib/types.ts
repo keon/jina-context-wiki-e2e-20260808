@@ -1,5 +1,8 @@
-export type DashboardResponse = {
-  generated_at: string;
+export interface DashboardResponse {
+  // Newest activity in the payload (max review-run `updated_at` / issue `created_at`), null when the
+  // workspace has no rows yet. The API derives this from the data rather than the clock, which is what
+  // lets an unchanged poll revalidate to a 304 instead of shipping an identical body every 10s.
+  generated_at: string | null;
   bots: BotStatus[];
   review_runs: ReviewRun[];
   issues: ReviewIssue[];
@@ -10,13 +13,13 @@ export type DashboardResponse = {
     limit: number;
     next_cursor?: string;
   };
-};
+}
 
-export type ReviewRunDetailResponse = {
+export interface ReviewRunDetailResponse {
   review_run: ReviewRun;
-};
+}
 
-type DashboardProject = {
+interface DashboardProject {
   id: string;
   github_repo_id?: number;
   full_name: string;
@@ -25,9 +28,9 @@ type DashboardProject = {
   private?: boolean;
   html_url?: string;
   source: "github" | "observed";
-};
+}
 
-type DashboardTeam = {
+interface DashboardTeam {
   id: string;
   github_team_id: number;
   name: string;
@@ -35,11 +38,11 @@ type DashboardTeam = {
   html_url?: string;
   organization: { id?: number; login: string; avatar_url?: string };
   project_full_names: string[];
-};
+}
 
-export type ViewerResponse = {
+export interface ViewerResponse {
   auth: { mode: "disabled" | "github" | "clerk"; enabled: boolean };
-  github_app?: { install_url?: string; installed?: boolean };
+  github_app?: { install_url?: string; installed?: boolean } | undefined;
   authenticated: boolean;
   user?: {
     /** Legacy GitHub id retained during the rolling identity transition. */
@@ -51,14 +54,14 @@ export type ViewerResponse = {
     avatar_url?: string;
     html_url?: string;
   };
-  organizations: Array<{ id: number; login: string; avatar_url?: string }>;
+  organizations: { id: number; login: string; avatar_url?: string }[];
   teams: DashboardTeam[];
   projects: DashboardProject[];
-};
+}
 
-export type DashboardFilters = { project: string; team: string };
+export interface DashboardFilters { project: string; team: string }
 
-type BotStatus = {
+interface BotStatus {
   id: string;
   type: string;
   repository?: string;
@@ -66,9 +69,9 @@ type BotStatus = {
   status: string;
   last_run_at: string;
   last_error?: string;
-};
+}
 
-export type ReviewRun = {
+export interface ReviewRun {
   review_run_id: string;
   trigger_run_id?: string;
   delivery_id?: string;
@@ -140,9 +143,9 @@ export type ReviewRun = {
   created_at: string;
   updated_at: string;
   finished_at?: string;
-};
+}
 
-type ScenarioGenerationJson = {
+interface ScenarioGenerationJson {
   schemaVersion?: number;
   pr?: {
     owner?: string;
@@ -151,9 +154,9 @@ type ScenarioGenerationJson = {
     url?: string;
   };
   scenarios?: GeneratedScenarioJson[];
-};
+}
 
-type GeneratedScenarioJson = {
+interface GeneratedScenarioJson {
   id?: string;
   title?: string;
   summary?: string;
@@ -167,9 +170,9 @@ type GeneratedScenarioJson = {
   steps?: string[];
   expectedOutcome?: string[];
   rationale?: string;
-};
+}
 
-export type ReviewIssue = {
+export interface ReviewIssue {
   id: string;
   review_run_id: string;
   fingerprint: string;
@@ -184,14 +187,14 @@ export type ReviewIssue = {
   pull_request?: number;
   pull_request_title?: string;
   pull_request_url?: string;
-};
+}
 
-export type ReviewEvent = {
+export interface ReviewEvent {
   status: string;
   payload?: unknown;
   trigger_run_id?: string;
   recorded_at: string;
-};
+}
 
 export type Tone = "ok" | "warn" | "bad" | "info" | "";
 
@@ -199,7 +202,7 @@ export type ScenarioDisplayStatus = "blocking" | "generated" | "running" | "queu
 
 export type ScenarioSimulationStatus = "pass" | "fail" | "warn";
 
-type ScenarioSimulationResult = {
+interface ScenarioSimulationResult {
   mode: string;
   status: "passed" | "failed" | "warned";
   commit: string;
@@ -220,9 +223,9 @@ type ScenarioSimulationResult = {
   counts: { total: number; pass: number; fail: number; warn: number };
   scenarios: ScenarioSimulationScenario[];
   error?: string;
-};
+}
 
-export type ScenarioSimulationScenario = {
+export interface ScenarioSimulationScenario {
   id: string;
   index: number;
   lineage_key: string;
@@ -237,9 +240,9 @@ export type ScenarioSimulationScenario = {
   steps: ScenarioSimulationStep[];
   duration_ms?: number;
   warning?: string;
-};
+}
 
-export type ScenarioSimulationStep = {
+export interface ScenarioSimulationStep {
   step_index: number;
   step_text: string;
   step_status: string;
@@ -252,13 +255,13 @@ export type ScenarioSimulationStep = {
   confidence: number;
   duration_ms?: number;
   rounds?: number;
-};
+}
 
-export type ScenarioTrailEntry = {
+export interface ScenarioTrailEntry {
   marker: string;
   type: "setup" | "action" | "assertion" | "observation" | "context";
   description: string;
   detail?: string;
-};
+}
 
-export type InstallationResult = { action: string; installationId?: string };
+export interface InstallationResult { action: string; installationId?: string | undefined }

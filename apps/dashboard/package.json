@@ -5,12 +5,14 @@
   "scripts": {
     "build": "next build",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --ignore-pattern src/dashboard --max-warnings 0",
+    "lint": "eslint . --max-warnings 0",
     "test": "node --test --import tsx src/lib/*.test.ts src/server/*.test.ts src/dashboard/**/*.test.ts",
     "dev": "next dev -p 3000"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.6.4",
+    "@jina/theme": "workspace:*",
+    "@tanstack/react-query": "5.101.4",
     "geist": "^1.7.2",
     "mermaid": "^11.16.0",
     "next": "^16.2.11",

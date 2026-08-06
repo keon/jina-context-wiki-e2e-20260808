@@ -1,18 +1,18 @@
 import type { SelectedTenant } from "./tenants";
 import { isTenantWritable } from "./tenants";
 
-export type GithubInstallationCallback = {
+export interface GithubInstallationCallback {
   installationId: number;
   tenantId: string;
-};
+}
 
-export type GithubConnection = {
+export interface GithubConnection {
   installationId: number;
   login: string;
   type: string;
   repositoryCount: number;
   status: "active" | "suspended" | "deleted";
-};
+}
 
 /** Route GitHub's setup redirect back to the Jina tenant selected at install time. */
 export function githubInstallationUrl(

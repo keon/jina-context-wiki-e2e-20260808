@@ -1,7 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { reportConnection } from "./connection.ts";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback } from "react";
+import {
+  DashboardRequestError,
+  nextSnapshot,
+  pollBackoffInterval,
+  type ResponseSnapshot
+} from "../dashboard/lib/query-client.ts";
+import { pollQueryKey } from "../dashboard/lib/query-keys.ts";
 
 const POLL_INTERVAL_MS = 2500;
 
@@ -11,53 +18,57 @@ const POLL_INTERVAL_MS = 2500;
  * state update only happens when the serialized payload actually changed.
  * Polling pauses while the tab is hidden and resumes (with an immediate
  * fetch) when it becomes visible again.
+ *
+ * The path is the cache key, so a poll is only ever readable under the path it
+ * was issued for: switching paths addresses a different entry (the previous
+ * payload is not shown for the new path) and cancels the request in flight,
+ * because a response that arrives after the switch describes a resource the
+ * caller is no longer displaying. Consecutive failures back off so one
+ * unreachable endpoint cannot hold a tab at the base cadence indefinitely.
+ *
+ * Because the key is the path, every component polling the same endpoint shares
+ * one request and one scheduler — /board, /history and /tasks read one
+ * `work-overview`, and /context's four resources run off a single timer.
  */
 export function usePoll<T>(path: string, intervalMs: number = POLL_INTERVAL_MS) {
-  const [data, setData] = useState<T | undefined>(undefined);
-  const [online, setOnline] = useState<boolean | undefined>(undefined);
-  const lastBody = useRef<string | undefined>(undefined);
-  const inFlight = useRef(false);
+  const queryClient = useQueryClient();
+  const queryKey = pollQueryKey(path);
 
-  const refresh = useCallback(async () => {
-    if (!path) return;
-    if (inFlight.current) return;
-    inFlight.current = true;
-    try {
+  const { data, status, refetch } = useQuery<ResponseSnapshot<T>>({
+    queryKey,
+    queryFn: async ({ signal }) => {
       const response = await fetch(path, {
         credentials: "include",
         headers: { accept: "application/json" },
+        signal
       });
-      if (!response.ok) throw new Error(`request failed with ${response.status}`);
-      const body = await response.text();
-      if (body !== lastBody.current) {
-        lastBody.current = body;
-        setData(JSON.parse(body) as T);
+      if (!response.ok) {
+        throw new DashboardRequestError(response.status, `request failed with ${response.status}`);
       }
-      setOnline(true);
-      reportConnection(true);
-    } catch {
-      setOnline(false);
-      reportConnection(false);
-    } finally {
-      inFlight.current = false;
-    }
-  }, [path]);
+      const body = await response.text();
+      return nextSnapshot(queryClient.getQueryData<ResponseSnapshot<T>>(queryKey), body, () => JSON.parse(body) as T);
+    },
+    // An empty path means the caller has nothing to poll yet (no workspace selected).
+    enabled: path.length > 0,
+    staleTime: intervalMs,
+    refetchInterval: (query) => pollBackoffInterval(intervalMs, query.state.fetchFailureCount),
+    // Hidden tabs keep the timer but skip the request, exactly as the hand-rolled
+    // scheduler did; `"always"` then refreshes the moment the tab is visible again.
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: "always",
+    // Failures are surfaced through `online` and retried on the (backed off)
+    // interval, rather than as a burst of retries inside one poll.
+    retry: false
+  });
 
-  useEffect(() => {
-    lastBody.current = undefined;
-    void refresh();
-    const timer = setInterval(() => {
-      if (!document.hidden) void refresh();
-    }, intervalMs);
-    const onVisible = () => {
-      if (!document.hidden) void refresh();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [refresh, intervalMs]);
+  const refresh = useCallback(async () => {
+    if (!path) return;
+    await refetch();
+  }, [path, refetch]);
 
-  return { data, online, refresh };
+  return {
+    data: data?.value,
+    online: status === "success" ? true : status === "error" ? false : undefined,
+    refresh
+  };
 }

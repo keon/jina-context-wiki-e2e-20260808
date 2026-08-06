@@ -1,26 +1,27 @@
 /**
- * Pure helpers for the usage page. Mirrors the billing module's three-state
- * contract (ok / unavailable / not_configured) and keeps all meter math, period
- * handling, bar scaling, and credit/$ formatting DOM-free so it is unit-testable
- * with `node --test`.
+ * Pure helpers for the usage page, kept DOM-free so the meter math, period
+ * handling, bar scaling, and credit/$ formatting stay unit-testable with
+ * `node --test`.
  *
- * The usage endpoint (GET .../usage?days=N) returns period/totals/daily/recent_runs.
- * A transport failure or malformed body is UNAVAILABLE (the account is billed but
- * usage is momentarily unreadable); a 200 body of status:"not_configured" is the
- * deliberate "no plan attached" signal.
+ * Unlike billing, usage is two-state (ok / unavailable). Usage is a fact about
+ * what ran rather than a billing feature, so there is no "no plan attached"
+ * state to report: the endpoint (GET .../usage?days=N) returns
+ * period/totals/daily/recent_runs, and a body carrying totals is the success
+ * signal. A transport failure or malformed body is UNAVAILABLE — the account is
+ * billed, but usage is momentarily unreadable.
  */
 
-import { CREDITS_PER_USD, creditsToUsd, formatCredits, numberOrNull } from "./billing";
+import { creditsToUsd, formatCredits, numberOrNull } from "./billing";
 
 export { creditsToUsd, formatCredits };
 
-type UsageStatus = "ok" | "unavailable" | "not_configured";
+type UsageStatus = "ok" | "unavailable";
 
 /** Selectable look-back windows for the period selector. */
 export const USAGE_PERIODS = [7, 30, 90] as const;
 export const DEFAULT_USAGE_PERIOD = 30;
 
-type UsageTotals = {
+interface UsageTotals {
   runs: number | null;
   completed_runs: number | null;
   infra_credits: number | null;
@@ -29,15 +30,15 @@ type UsageTotals = {
   model_cost_usd: number | null;
   byok_runs: number | null;
   harness_runs: number | null;
-};
+}
 
-type UsageDaily = {
+interface UsageDaily {
   date: string | null;
   credits: number;
   runs: number;
-};
+}
 
-export type UsageRecentRun = {
+export interface UsageRecentRun {
   review_run_id: string | null;
   repo_full_name: string | null;
   pr_number: number | null;
@@ -49,9 +50,9 @@ export type UsageRecentRun = {
   // Number of review_runs rolled up into this PR row (a PR reviewed on every push has one per commit).
   review_count: number | null;
   created_at: string | null;
-};
+}
 
-export type Usage = {
+export interface Usage {
   status: UsageStatus;
   configured: boolean;
   period: { days: number };
@@ -60,7 +61,7 @@ export type Usage = {
   cycle_credits_used: number | null;
   daily: UsageDaily[];
   recent_runs: UsageRecentRun[];
-};
+}
 
 const EMPTY_TOTALS: UsageTotals = {
   runs: null,
@@ -71,16 +72,6 @@ const EMPTY_TOTALS: UsageTotals = {
   model_cost_usd: null,
   byok_runs: null,
   harness_runs: null,
-};
-
-export const USAGE_NOT_CONFIGURED: Usage = {
-  status: "not_configured",
-  configured: false,
-  period: { days: DEFAULT_USAGE_PERIOD },
-  totals: EMPTY_TOTALS,
-  cycle_credits_used: null,
-  daily: [],
-  recent_runs: [],
 };
 
 export const USAGE_UNAVAILABLE: Usage = {
@@ -179,9 +170,8 @@ function normalizeRecentRuns(raw: unknown): UsageRecentRun[] {
 
 /**
  * Coerce an arbitrary usage payload into a Usage shape.
- *   - status "ok"          -> parse period/totals/daily/recent_runs.
- *   - status "unavailable" -> temporarily-unavailable state.
- *   - anything else        -> not configured.
+ *   - status "unavailable", or a body with no totals object -> unavailable.
+ *   - anything else -> ok, parsing period/totals/daily/recent_runs.
  */
 export function normalizeUsage(raw: unknown): Usage {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {

@@ -178,7 +178,7 @@ export function scenarioFailureBlocks(
 
   // Corroborated by an independent final-review finding on the same file.
   const sources = new Set((simulation.source_files ?? []).filter(Boolean));
-  return sources.size > 0 && findings.some((finding) => Boolean(finding.file_path) && sources.has(finding.file_path as string));
+  return sources.size > 0 && findings.some((finding) => Boolean(finding.file_path) && sources.has(finding.file_path!));
 }
 
 export function riskMeetsThreshold(risk: ScenarioRisk, threshold: string): boolean {
@@ -226,7 +226,7 @@ function stepType(step: string): ScenarioTrailEntry["type"] {
 function firstSentence(value?: string): string | undefined {
   const cleaned = value?.replace(/\s+/g, " ").trim();
   if (!cleaned) return undefined;
-  const match = cleaned.match(/^(.+?[.!?])\s/);
+  const match = /^(.+?[.!?])\s/.exec(cleaned);
   return match?.[1] ?? cleaned.slice(0, 180);
 }
 
