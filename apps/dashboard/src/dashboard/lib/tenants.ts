@@ -26,6 +26,7 @@ export interface SelectedTenant {
   login: string;
   type: TenantType;
   role: TenantRole;
+  clerkOrganizationId?: string;
 }
 
 /** localStorage key holding the last-selected tenant id (persists the switcher choice). */

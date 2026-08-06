@@ -526,8 +526,14 @@ export function TenantProvider({ children }: { children: ReactNode }) {
           current.length === nextTenants.length &&
           current.every((tenant, index) => {
             const next = nextTenants[index];
-            return next && tenant.tenant_id === next.tenant_id && tenant.login === next.login &&
-              tenant.type === next.type && tenant.role === next.role;
+            return (
+              next &&
+              tenant.tenant_id === next.tenant_id &&
+              tenant.login === next.login &&
+              tenant.type === next.type &&
+              tenant.role === next.role &&
+              tenant.clerk_organization_id === next.clerk_organization_id
+            );
           })
             ? current
             : nextTenants,
@@ -613,7 +619,13 @@ export function TenantProvider({ children }: { children: ReactNode }) {
   const selected = useMemo<SelectedTenant | null>(
     () =>
       active
-        ? { tenantId: active.tenant_id, login: active.login, type: active.type, role: active.role }
+        ? {
+            tenantId: active.tenant_id,
+            login: active.login,
+            type: active.type,
+            role: active.role,
+            ...(active.clerk_organization_id ? { clerkOrganizationId: active.clerk_organization_id } : {}),
+          }
         : null,
     [active],
   );

@@ -51,6 +51,7 @@ const DECLARED_GRIDS: Readonly<Record<string, number>> = {
   "run-history-layout": 2,
   "run-history-row": 5,
   "run-history-table-head": 5,
+  "session-row": 4,
   "task-detail__fact": 2,
   "task-detail__relationship": 3,
   "task-type-row": 4,
