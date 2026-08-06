@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "source_repository": "https://github.com/omxyz/jina-simulation",
-  "source_commit": "322f42b5cb6d7cc3af3e4ae346b98c222aa7a822",
+  "source_repository": "https://github.com/omxyz/jina",
+  "source_commit": "ec4eacd883eafc07b99181320308a006254e6aab",
   "source_subdirectory": "trigger",
   "deployment_scope": "review-only",
   "registered_task_ids": [
@@ -161,11 +161,11 @@
     },
     {
       "path": "trigger/src/shared/utils.test.ts",
-      "sha256": "a1a4e0c223349213fe7922ed31732af34aae208e7e76f870c675ce89ca66bad9"
+      "sha256": "4aa13bbf789bd1d509a8f266515ef6026b9c9fb121207992e991d95ebd3f76af"
     },
     {
       "path": "trigger/src/shared/utils.ts",
-      "sha256": "835afacc085fa91adaf58cf336ffd6db8f3e6fb84c3034022280a146fdc32e90"
+      "sha256": "1dcd9942eaf5ef16badeb2df306903edd72581db66c2e739ea24070b000df70f"
     },
     {
       "path": "trigger/src/trigger-config.test.ts",
