@@ -9,8 +9,7 @@ import { parseInstallationResult } from "./lib/api";
 import { clerkAuthRedirect } from "./lib/auth-navigation";
 import { useSelectedClerkOrganization } from "./lib/clerk-organization";
 import { WORKSPACE_NAV_ITEMS, type WorkspaceNavKey } from "./lib/navigation";
-import { formatRelative } from "./lib/presentation";
-import type { DashboardResponse, InstallationResult, ViewerResponse } from "./lib/types";
+import type { InstallationResult, ViewerResponse } from "./lib/types";
 
 type NavKey =
   | WorkspaceNavKey
@@ -113,7 +112,7 @@ function sectionForPath(pathname: string | null): NavKey {
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { data, viewer, error, authLoading } = useDashboard();
+  const { viewer, authLoading } = useDashboard();
   const { ready: authReady, signedIn } = useAppAuth();
   const developerMode = useDeveloperMode();
   const pathname = usePathname();
@@ -257,11 +256,6 @@ export function Shell({ children }: { children: ReactNode }) {
               </button>
               <span className="header__title">{SECTION_TITLE[section]}</span>
             </div>
-            <div className="header__actions">
-              <span className="header__stamp" title={error ?? undefined}>
-                {freshnessLabel(data, error)}
-              </span>
-            </div>
           </div>
         </header>
 
@@ -282,19 +276,6 @@ export function Shell({ children }: { children: ReactNode }) {
       ) : null}
     </div>
   );
-}
-
-/**
- * Header freshness stamp. `generated_at` is the newest activity in the payload — the latest review-run
- * update or finding — not the moment the response was generated, so this answers "how current is this
- * workspace" instead of always reading "just now". A workspace with no rows has no such timestamp and
- * says so rather than rendering a relative time for a value that does not exist.
- */
-function freshnessLabel(data: DashboardResponse | null, error: string | null): string {
-  if (error) return "Live data unavailable";
-  if (!data) return "Not loaded";
-  if (!data.generated_at) return "No activity yet";
-  return `Updated ${formatRelative(data.generated_at)}`;
 }
 
 function CodexReconnectNotice() {
