@@ -156,8 +156,46 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingSerialization, /build\.get\("buildTriggerId"\) == os\.environ\["TRIGGER_ID"\]/);
   assert.match(stagingSerialization, /build\.get\("createTime", ""\) < os\.environ\["CURRENT_CREATE_TIME"\]/);
   assert.match(stagingSerialization, /active = \{"QUEUED", "PENDING", "WORKING"\}/);
+  assert.match(stagingSerialization, /json\.load\(sys\.stdin\)/);
+  assert.doesNotMatch(stagingSerialization, /BUILDS_JSON=/);
   assert.match(deploymentDocs, /`jina-staging-deploy`/);
   assert.doesNotMatch(deploymentDocs, /\.github\/workflows\/deploy-staging\.yml/);
+});
+
+test("staging deployment serialization accepts build listings larger than the environment limit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jina-staging-serialization-"));
+  const executable = join(directory, "gcloud");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2" == "builds describe" ]]; then
+  printf 'trigger-staging 2026-08-06T19:00:00Z\\n'
+  exit 0
+fi
+if [[ "$1 $2" == "builds list" ]]; then
+  python3 -c 'import json; print(json.dumps([{"id":"quality-build","buildTriggerId":"trigger-staging","createTime":"2026-08-06T19:00:00Z","status":"WORKING","padding":"x" * 3000000}]))'
+  exit 0
+fi
+exit 2
+`
+  );
+  await chmod(executable, 0o755);
+  try {
+    const { stdout } = await execFileAsync("bash", ["scripts/serialize-cloud-build-deploy.sh"], {
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        GCP_PROJECT_ID: "quality-project",
+        GCP_CLOUD_BUILD_REGION: "us-east1",
+        CLOUD_BUILD_ID: "quality-build"
+      },
+      maxBuffer: 10 * 1024 * 1024
+    });
+    assert.match(stdout, /owns the staging deployment lane/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("production compute, images, artifacts, and shared database are co-located in us-east1", () => {
