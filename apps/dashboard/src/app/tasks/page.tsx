@@ -25,7 +25,11 @@ export default function TaskTypesPage() {
   const [selectedType, setSelectedType] = useState<string | null>(null);
 
   const taskTypes = taskTypesData ?? NO_TASK_TYPES;
-  const tasks = overview?.board.tasks ?? NO_TASKS;
+  // `?.board?.` rather than `?.board.`: a 200 whose body does not carry a board
+  // is not a board with no tasks, but it must not be a blank page either — the
+  // dereference threw and took the whole route down. /board already reads the
+  // same payload this way.
+  const tasks = overview?.board?.tasks ?? NO_TASKS;
   // `data === undefined` before any completed request is "not loaded", and a
   // failed endpoint is an error — neither is "no task types match this search".
   const status = taskTypesData !== undefined ? "ready" : taskTypesOnline === false ? "unavailable" : "loading";

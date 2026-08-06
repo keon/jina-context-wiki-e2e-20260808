@@ -60,7 +60,11 @@ export default function HistoryPage() {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
   const boardEvents = data?.events ?? NO_EVENTS;
-  const tasks = data?.board.tasks ?? NO_TASKS;
+  // `?.board?.` rather than `?.board.`: a 200 whose body does not carry a board
+  // is not a board with no tasks, but it must not be a blank page either — the
+  // dereference threw and took the whole route down. /board already reads the
+  // same payload this way.
+  const tasks = data?.board?.tasks ?? NO_TASKS;
 
   // One O(events) derivation shared by the filter options, the filter pass, and
   // the rendered rows. `usePoll` only replaces `data` when the payload actually
