@@ -5,18 +5,23 @@
  *
  *   1. A DOM on the globals React DOM binds at import time (`document`,
  *      `window`, `Node`, `HTMLElement`, …).
- *   2. The module-resolution hook that swaps `next/link` for a local double, so
- *      a component can be rendered without a Next server.
+ *   2. The module-resolution hook that swaps `next/link` for a shared double,
+ *      and answers the `*.module.css` imports the `@jina/ui` primitives make, so
+ *      a component can be rendered without a Next server or a bundler.
  *
- * happy-dom rather than jsdom, matching the dashboard: it is a fraction of the
- * install and boots in single-digit milliseconds, which matters when the runner
- * starts one process per test file on every CI push. It implements everything
- * these tests touch. jsdom's extra fidelity buys nothing here — no assertion in
- * this suite reads computed geometry.
+ * The hook and the `next/link` double are `@jina/ui`'s; only the map is this
+ * app's, because only this app knows what its own components import.
+ *
+ * happy-dom rather than jsdom: it is a fraction of the install and boots in
+ * single-digit milliseconds, which matters when the runner starts one process
+ * per test file on every CI push. It implements everything these tests touch.
+ * jsdom's extra fidelity buys nothing here — no assertion in this suite reads
+ * computed geometry.
  */
 
 import { register } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { NEXT_LINK_STUB } from "@jina/ui/testing/stubs";
 
 GlobalRegistrator.register({ url: "http://localhost/" });
 
@@ -33,10 +38,10 @@ process.env.JINA_TENANT_ID = "";
 process.env.JINA_WEB_PRINCIPAL_ID = "";
 process.env.JINA_API_URL = "http://jina-api.test";
 
-register("./module-stubs.mjs", import.meta.url, {
+register("@jina/ui/testing/module-stubs.mjs", import.meta.url, {
   data: {
     specifiers: {
-      "next/link": new URL("./stubs/next-link.tsx", import.meta.url).href
+      "next/link": NEXT_LINK_STUB
     },
     paths: {}
   }

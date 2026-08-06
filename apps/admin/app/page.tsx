@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { EmptyState, ErrorState, Stat, StatRow, Unmeasured } from "@jina/ui";
 import { contextFailureText } from "../lib/context-failures";
 import { statusTone } from "../lib/status-tone";
 import {
@@ -125,10 +126,10 @@ export default async function ContextAdminPage({
         <span className="admin-scope-badge">All context</span>
       </header>
       {degraded.length > 0 ? (
-        <div className="error-state" role="alert">
-          <p className="error-state__title">
-            {degraded.length === 1 ? "1 section is not reporting" : `${degraded.length} sections are not reporting`}
-          </p>
+        <ErrorState
+          role="alert"
+          title={degraded.length === 1 ? "1 section is not reporting" : `${degraded.length} sections are not reporting`}
+        >
           <ul>
             {degraded.map((section) => (
               <li key={section.heading}>{sectionMessage(section)}</li>
@@ -138,9 +139,9 @@ export default async function ContextAdminPage({
             Counts shown as “—” were never measured and are not zero. The admin server log records the API status behind
             each failure.
           </p>
-        </div>
+        </ErrorState>
       ) : null}
-      <div className="stat-row">
+      <StatRow>
         <Stat label="Context releases" value={metricsKnown ? metrics.publishedGenerationCount : undefined} />
         <Stat label="Repositories" value={repository ? 1 : repositoriesKnown ? repositories.length : undefined} />
         <Stat label="Derived context docs" value={isLoaded(documentsSection) ? currentDocuments : undefined} />
@@ -149,7 +150,7 @@ export default async function ContextAdminPage({
         <Stat label="Active model tasks" value={metricsKnown ? activeModelTasks : undefined} />
         <Stat label="Verified checkpoints" value={isLoaded(buildProgressSection) ? verifiedCheckpoints : undefined} />
         <Stat label="Hierarchy nodes" value={metricsKnown ? metrics.hierarchyNodeCount : undefined} />
-      </div>
+      </StatRow>
 
       <section id="releases" className="context-admin-section admin-data-section">
         <div className="admin-section-heading">
@@ -183,13 +184,13 @@ export default async function ContextAdminPage({
         {!isLoaded(releasesSection) ? (
           <SectionError section={releasesSection} />
         ) : visible.length === 0 ? (
-          <div className="empty-state">
+          <EmptyState>
             <p>No context releases have been published{repository ? ` for ${repository}` : ""}.</p>
             <p>
               Verified pages remain private, resumable checkpoints until the complete catalog passes citation,
               maintenance-task, and certification gates and publishes atomically.
             </p>
-          </div>
+          </EmptyState>
         ) : (
           <TableScroll
             id="releases-table"
@@ -247,7 +248,7 @@ export default async function ContextAdminPage({
         {!isLoaded(buildsSection) ? (
           <SectionError section={buildsSection} />
         ) : visibleBuilds.length === 0 ? (
-          <div className="empty-state">No Context builds are visible for this repository scope.</div>
+          <EmptyState>No Context builds are visible for this repository scope.</EmptyState>
         ) : (
           <>
             {!isLoaded(buildProgressSection) ? <SectionError section={buildProgressSection} /> : null}
@@ -457,7 +458,7 @@ export default async function ContextAdminPage({
             </tbody>
           </TableScroll>
         ) : (
-          <div className="empty-state">No published Context index checkpoint is available.</div>
+          <EmptyState>No published Context index checkpoint is available.</EmptyState>
         )}
       </section>
 
@@ -476,9 +477,9 @@ export default async function ContextAdminPage({
         {!isLoaded(documentsSection) ? (
           <SectionError section={documentsSection} />
         ) : documents.length === 0 ? (
-          <div className="empty-state">
+          <EmptyState>
             No agent-derived context documents are published{repository ? ` for ${repository}` : ""}.
-          </div>
+          </EmptyState>
         ) : (
           <TableScroll
             id="documents-table"
@@ -575,8 +576,10 @@ function sectionMessage(section: Section<unknown>): string {
 
 function SectionError({ section }: { readonly section: Section<unknown> }) {
   return (
-    <div className="section-error">
-      <p className="section-error__title">{section.heading} is unavailable</p>
+    // `flush` because this sits directly inside a bordered section card. No
+    // `role="alert"`: the page-level banner above already announces the outage,
+    // and five simultaneous interruptions announce nothing.
+    <ErrorState flush title={`${section.heading} is unavailable`}>
       <p>
         {section.state === "blocked"
           ? `This section was not attempted because ${section.blockedBy} could not be loaded. Nothing below reflects current state.`
@@ -585,7 +588,7 @@ function SectionError({ section }: { readonly section: Section<unknown> }) {
       <p>
         Retry after checking API availability and this app’s credentials; the failure is recorded in the server log.
       </p>
-    </div>
+    </ErrorState>
   );
 }
 
@@ -619,39 +622,6 @@ function TableScroll({
 function rowCountLabel(shown: number, total: number, plural: string): string {
   if (shown !== total) return `Showing ${shown} of ${total} ${plural}`;
   return total === 1 ? `1 ${plural.replace(/s$/, "")} shown` : `${total} ${plural} shown`;
-}
-
-/**
- * A number the API never reported. It renders as an em dash and never as `0`,
- * because a zero on this page is a measurement: an operator reading "0 backlog"
- * or "0 active builds" would take it as evidence that nothing is wrong.
- */
-function Unmeasured({ title }: { readonly title: string }) {
-  return (
-    <span className="unmeasured" title={title}>
-      <span aria-hidden="true">—</span>
-      <span className="sr-only">Unavailable</span>
-    </span>
-  );
-}
-
-function Stat({ label, value }: { readonly label: string; readonly value: number | undefined }) {
-  if (value === undefined) {
-    return (
-      <div className="stat stat--unknown">
-        <div className="value">
-          <Unmeasured title="Not measured: this value was not reported, and is not zero" />
-        </div>
-        <div className="label">{label}</div>
-      </div>
-    );
-  }
-  return (
-    <div className="stat">
-      <div className="value">{value.toLocaleString("en-US")}</div>
-      <div className="label">{label}</div>
-    </div>
-  );
 }
 
 /** Formats a count for prose. `0` stays `0`; an unmeasured count reads as “—”. */

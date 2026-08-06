@@ -701,7 +701,6 @@ button.nav__item:hover {
 }
 
 /* Surface primitives ------------------------------------------------------ */
-.panel,
 .section,
 .notice,
 .sub-card,
@@ -717,7 +716,6 @@ button.nav__item:hover {
   box-shadow: none;
 }
 
-.panel__head,
 .section__title {
   display: flex;
   align-items: center;
@@ -727,27 +725,24 @@ button.nav__item:hover {
   border-bottom: 1px solid var(--line-subtle);
 }
 
-.panel__title,
 .section__title {
   color: var(--ink);
   font-size: var(--text-md);
   font-weight: 500;
 }
 
-.panel__count {
+/* The count beside a section heading. `Panel` carries its own; this is for the
+   headings the reviews pages assemble themselves. */
+.section__count {
   color: var(--ink-subtle);
   font-size: var(--text-sm);
-}
-
-.panel__actions {
-  margin-left: auto;
 }
 
 .section__title--row {
   justify-content: flex-start;
 }
 
-.section__title--row .panel__count {
+.section__title--row .section__count {
   margin-left: auto;
 }
 
@@ -776,59 +771,12 @@ button.nav__item:hover {
   margin: 0 calc(-1 * var(--space-5)) var(--space-4);
 }
 
-.list {
-  display: block;
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  min-height: 62px;
-  gap: var(--space-3);
-  padding: 13px 16px;
-  border-bottom: 1px solid var(--line-subtle);
-}
-
-.row:last-child {
-  border-bottom: 0;
-}
-
-.row--link:hover {
-  background: var(--surface-hover);
-}
-
-.row__lead,
-.row__trail {
-  flex: 0 0 auto;
-}
-
-.row__main {
-  display: grid;
-  min-width: 0;
-  flex: 1;
-  gap: 3px;
-}
-
-/* `text-overflow` only fires on a line that cannot wrap, so the `white-space`
-   here is load-bearing: without it every long row title wrapped to two or three
-   lines and the list lost its even row rhythm. */
-.row__title {
-  overflow: hidden;
-  color: var(--ink);
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.row__meta,
 .cell-meta {
   color: var(--ink-subtle);
   font-size: var(--text-sm);
 }
 
-.row__trail,
 .row__badges,
-.detail__badges,
 .review-row__badges {
   display: flex;
   align-items: center;
@@ -855,16 +803,6 @@ button.nav__item:hover {
   border-color: var(--ok-border);
   background: var(--ok-bg);
   color: var(--ok-fg);
-}
-
-.empty {
-  padding: 48px 24px;
-  color: var(--ink-subtle);
-  text-align: center;
-}
-
-.empty--compact {
-  padding: var(--space-6);
 }
 
 .page-placeholder {
@@ -913,14 +851,12 @@ button.nav__item:hover {
   font-size: var(--text-base);
 }
 
-/* One pill. `.knowledge-pill` joins the badge here for the same reason
-   `.knowledge-button` joins `.btn`: the class name belongs to the markup, so the
-   merge happens in the selector list. Its tone modifiers now carry the full
-   ok/warn/bad/info tone rather than only recolouring the text on a borrowed
-   surface. The untinted base reads --neutral-*, the tone for a chip stating a
-   fact; it used to reach for --surface-raised, a background token doing a tone
-   token's job. */
-.badge,
+/* One pill, matching `Badge` in `@jina/ui` — the class name belongs to this
+   app's markup, so the shared component cannot supply it. Its tone modifiers
+   carry the full ok/warn/bad/info tone rather than only recolouring the text on
+   a borrowed surface. The untinted base reads --neutral-*, the tone for a chip
+   stating a fact; it used to reach for --surface-raised, a background token
+   doing a tone token's job. */
 .chip,
 .knowledge-pill,
 .tenant-pill__type {
@@ -938,7 +874,6 @@ button.nav__item:hover {
   white-space: nowrap;
 }
 
-.badge--ok,
 .knowledge-pill--completed,
 .knowledge-pill--valid,
 .knowledge-pill--done {
@@ -947,13 +882,6 @@ button.nav__item:hover {
   color: var(--ok-fg);
 }
 
-.badge--warn {
-  border-color: var(--warn-border);
-  background: var(--warn-bg);
-  color: var(--warn-fg);
-}
-
-.badge--bad,
 .knowledge-pill--failed,
 .knowledge-pill--invalid {
   border-color: var(--bad-border);
@@ -961,7 +889,6 @@ button.nav__item:hover {
   color: var(--bad-fg);
 }
 
-.badge--info,
 .knowledge-pill--active,
 .knowledge-pill--in_progress,
 .knowledge-pill--pending {
@@ -970,7 +897,6 @@ button.nav__item:hover {
   color: var(--info-fg);
 }
 
-.status-dot,
 .dot {
   display: inline-block;
   width: 8px;
@@ -979,51 +905,28 @@ button.nav__item:hover {
   background: var(--ink-subtle);
 }
 
-.status-dot--ok,
 .s-pass,
 .s-complete {
   color: var(--ok-fg);
   background-color: var(--positive);
 }
 
-.status-dot--warn,
 .s-warn,
 .s-blocking {
   color: var(--warn-fg);
   background-color: var(--caution);
 }
 
-.status-dot--bad,
 .s-fail {
   color: var(--bad-fg);
   background-color: var(--negative);
 }
 
-.status-dot--info,
 .s-running,
 .s-queued,
 .s-generated {
   color: var(--info-fg);
   background-color: var(--informative);
-}
-
-.tt {
-  position: relative;
-  display: inline-flex;
-}
-
-.tt__bubble {
-  position: fixed;
-  z-index: 120;
-  transform: translate(-50%, calc(-100% - 7px));
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--tooltip-bg);
-  color: var(--tooltip-fg);
-  box-shadow: var(--shadow);
-  font-size: var(--text-sm);
-  white-space: nowrap;
 }
 
 /* Page and detail composition -------------------------------------------- */
@@ -1033,53 +936,6 @@ button.nav__item:hover {
   flex-direction: column;
   min-width: 0;
   gap: var(--space-6);
-}
-
-.back-link {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 6px;
-  color: var(--ink-muted);
-  font-size: var(--text-base);
-}
-
-.back-link:hover {
-  color: var(--ink-strong);
-}
-
-.detail__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-5);
-  padding: var(--space-1) 0 var(--space-2);
-}
-
-.detail__heading {
-  min-width: 0;
-}
-
-.detail__kicker {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--ink-subtle);
-  font-size: var(--text-sm);
-}
-
-.detail__title {
-  margin: 0;
-  color: var(--ink-strong);
-  font-size: clamp(28px, 4vw, 40px);
-  font-weight: 500;
-  line-height: 1.12;
-  letter-spacing: -0.045em;
-}
-
-.detail__actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
 }
 
 .two-col,
@@ -2356,19 +2212,9 @@ button.nav__item:hover {
     padding: 24px 16px 48px;
   }
 
-  .detail__header,
   .topup {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .detail__actions {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-
-  .detail__actions > * {
-    flex: 1;
   }
 
   .two-col,
@@ -2387,14 +2233,6 @@ button.nav__item:hover {
   .def__block {
     grid-template-columns: 1fr;
     gap: var(--space-1);
-  }
-
-  .row {
-    align-items: flex-start;
-  }
-
-  .row__trail {
-    max-width: 45%;
   }
 
   .sub-card__actions {
@@ -3205,8 +3043,10 @@ a.usage-breakdown__tab {
   max-width: 560px;
 }
 
+/* `EmptyState` is a shared component whose own class is bundler-hashed, so the
+   page hands it this class for its own spacing rather than reaching in. */
 .billing-v2 .activity-list,
-.billing-v2 .empty--compact {
+.billing-v2__empty {
   margin-top: 18px;
 }
 
@@ -4198,7 +4038,8 @@ a.usage-breakdown__tab {
 }
 
 /* A read that failed is not an empty list, so it gets its own treatment rather
-   than `.empty`: the reason, and the way to ask again. */
+   than `EmptyState`: the reason, and the way to ask again. (This page predates
+   `ErrorState`, whose shape is a banner rather than this centred retry.) */
 .organization-directory__error {
   display: grid;
   justify-items: center;

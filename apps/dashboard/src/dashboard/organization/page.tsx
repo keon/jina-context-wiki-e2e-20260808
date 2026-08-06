@@ -10,7 +10,7 @@ import {
   type AppOrganizationList,
   type AppOrganizationRole
 } from "../../components/auth/app-auth";
-import { Badge, List, Row } from "../components/ui";
+import { Badge, EmptyState, List, Panel, Row } from "../components/ui";
 import { formatRelative } from "../lib/presentation";
 import { isTenantWritable } from "../lib/tenants";
 import { useDashboard, useTenant } from "../providers";
@@ -65,11 +65,10 @@ export default function OrganizationPage() {
   return (
     <div className="organization-page">
       <h1 className="sr-only">Members &amp; Access</h1>
-      <section className="panel">
-        <div className="panel__head">
-          <span className="panel__title">Workspace</span>
-          <span className="badge">{selected.type === "Organization" ? "Organization" : "Personal"}</span>
-        </div>
+      <Panel
+        title="Workspace"
+        actions={<Badge>{selected.type === "Organization" ? "Organization" : "Personal"}</Badge>}
+      >
         <dl className="organization-summary">
           <div>
             <dt>Name</dt>
@@ -88,7 +87,7 @@ export default function OrganizationPage() {
             <dd>{tenants.length}</dd>
           </div>
         </dl>
-      </section>
+      </Panel>
 
       {isOrganization ? (
         <>
@@ -101,21 +100,15 @@ export default function OrganizationPage() {
           ) : null}
         </>
       ) : (
-        <section className="panel">
-          <div className="panel__head">
-            <span className="panel__title">Members</span>
-          </div>
-          <div className="empty empty--compact">
+        <Panel title="Members">
+          <EmptyState compact>
             A personal workspace has no organization behind it, so there is nobody to list and nobody to invite.
             Create or switch to an organization workspace to share access.
-          </div>
-        </section>
+          </EmptyState>
+        </Panel>
       )}
 
-      <section className="panel">
-        <div className="panel__head">
-          <span className="panel__title">Access boundary</span>
-        </div>
+      <Panel title="Access boundary">
         <div className="organization-access">
           <span className="page-placeholder__icon" aria-hidden="true">
             <AccessIcon />
@@ -132,7 +125,7 @@ export default function OrganizationPage() {
             Manage integrations
           </Link>
         </div>
-      </section>
+      </Panel>
     </div>
   );
 }
@@ -143,17 +136,11 @@ function MembersPanel({ directory, linked }: { directory: AppOrganizationDirecto
   const { members } = directory;
 
   return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">Members</span>
-        {linked && settledCount(directory, members) !== null ? (
-          <span className="panel__count">{members.total}</span>
-        ) : null}
-      </div>
+    <Panel title="Members" count={linked ? (settledCount(directory, members) ?? undefined) : undefined}>
       {!linked ? (
-        <div className="empty empty--compact">
+        <EmptyState compact>
           This workspace is not linked to an organization directory, so its members cannot be listed or invited here.
-        </div>
+        </EmptyState>
       ) : (
         <>
           <DirectoryBody
@@ -178,7 +165,7 @@ function MembersPanel({ directory, linked }: { directory: AppOrganizationDirecto
           <DirectoryPager list={members} noun="members" />
         </>
       )}
-    </section>
+    </Panel>
   );
 }
 
@@ -214,13 +201,7 @@ function InvitationsPanel({ directory }: { directory: AppOrganizationDirectory }
   };
 
   return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">Pending invitations</span>
-        {settledCount(directory, invitations) !== null ? (
-          <span className="panel__count">{invitations.total}</span>
-        ) : null}
-      </div>
+    <Panel title="Pending invitations" count={settledCount(directory, invitations) ?? undefined}>
       <DirectoryBody
         directory={directory}
         list={invitations}
@@ -258,7 +239,7 @@ function InvitationsPanel({ directory }: { directory: AppOrganizationDirectory }
         </p>
       ) : null}
       <DirectoryPager list={invitations} noun="invitations" />
-    </section>
+    </Panel>
   );
 }
 
@@ -278,10 +259,7 @@ function InvitePanel({
   canManage: boolean;
 }) {
   return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">Invite a member</span>
-      </div>
+    <Panel title="Invite a member">
       {directory.status === "unavailable" ? (
         <p className="organization-directory__failure" role="alert">
           {directory.error?.message ?? "This workspace's directory is unavailable, so invitations cannot be sent."}
@@ -291,7 +269,7 @@ function InvitePanel({
       ) : (
         <InviteForm directory={directory} />
       )}
-    </section>
+    </Panel>
   );
 }
 
@@ -425,9 +403,9 @@ function DirectoryBody<T>({
 }) {
   if (directory.status === "loading" || list.loading) {
     return (
-      <div className="empty empty--compact" role="status">
+      <EmptyState compact role="status">
         {loadingLabel}
-      </div>
+      </EmptyState>
     );
   }
   const failure = directory.status === "unavailable" ? directory.error : list.error;
@@ -443,9 +421,9 @@ function DirectoryBody<T>({
   }
   if (list.items.length === 0) {
     return (
-      <div className="empty empty--compact">
+      <EmptyState compact>
         {list.page > 1 ? `Nothing on this page — ${list.total} in total.` : emptyLabel}
-      </div>
+      </EmptyState>
     );
   }
   return <>{children(list.items)}</>;

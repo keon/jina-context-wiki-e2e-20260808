@@ -3,7 +3,7 @@ import { test } from "node:test";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useDashboard } from "../dashboard/providers.tsx";
-import { gridContracts } from "./css-contract.ts";
+import { gridContracts } from "@jina/ui/testing";
 import { assertGridContracts, assertNoLeakedValues, attrOf, count, renderComponent, textOf } from "./render.tsx";
 import { setDashboardState } from "./stubs/dashboard-providers.tsx";
 

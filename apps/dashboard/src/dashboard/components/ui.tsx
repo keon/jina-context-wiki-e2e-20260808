@@ -1,11 +1,51 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState, type KeyboardEventHandler, type MouseEventHandler, type ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
+import {
+  BackLink as UiBackLink,
+  Row as UiRow,
+  ToneDot as UiToneDot,
+  type LinkComponent
+} from "@jina/ui";
 import { useDashboard } from "../providers";
-import type { Tone } from "../lib/types";
 import { safeHref } from "../lib/api";
 import { statusTone } from "../lib/presentation";
+
+/**
+ * The dashboard's view of the shared primitives.
+ *
+ * Most of what this file used to define now lives in `@jina/ui`, with its styles
+ * beside it as CSS Modules — see that package's `index.ts` for why. Three kinds
+ * of thing are left here:
+ *
+ *   - Re-exports, so the pages that import from this module did not have to
+ *     change: `Badge`, `DetailHeader`, `EmptyState`, `List`, `Panel`.
+ *   - Thin bindings that supply the coupling the package deliberately does not
+ *     import — `next/link` for `Row` and `BackLink`, this app's `statusTone` for
+ *     `StatusDot`.
+ *   - Components that are genuinely this app's: `Toolbar` reads the dashboard
+ *     provider, `ExternalLink` validates through this app's `safeHref`, and
+ *     `Section`/`SectionFlush` are entangled with the `:has()` opt-outs the
+ *     reviews pages rely on.
+ */
+
+export { Badge, DetailHeader, EmptyState, List, Panel, PanelCount } from "@jina/ui";
+
+/* ---------- Routed primitives ---------- */
+
+// `next/link` accepts everything the package asks of a link and more, so the
+// app's real router component goes straight in.
+const routerLink = Link as LinkComponent;
+
+/** `Row`, wired to the app router so a list row still navigates client-side. */
+export function Row(props: Omit<ComponentProps<typeof UiRow>, "linkComponent">) {
+  return <UiRow {...props} linkComponent={routerLink} />;
+}
+
+export function BackLink(props: Omit<ComponentProps<typeof UiBackLink>, "linkComponent">) {
+  return <UiBackLink {...props} linkComponent={routerLink} />;
+}
 
 /* ---------- External links ---------- */
 
@@ -13,6 +53,9 @@ import { statusTone } from "../lib/presentation";
  * Anchor for URLs sourced from API data. Validates the protocol via `safeHref`
  * (drops `javascript:`/`data:` URLs) and always sets `rel="noopener noreferrer"`.
  * Renders a disabled-looking span when the href is missing or unsafe.
+ *
+ * Stays in the app: `safeHref` is this app's, and a shared component that
+ * carried its own copy of a URL allowlist would be a second thing to keep right.
  */
 export function ExternalLink({
   href,
@@ -34,152 +77,19 @@ export function ExternalLink({
   );
 }
 
-/* ---------- Tooltip ---------- */
+/* ---------- Status ---------- */
+
+export { ToneDot } from "@jina/ui";
 
 /**
- * Instant, fixed-positioned tooltip. We position with `fixed` so it escapes
- * any ancestor `overflow: hidden` (panels/sections clip their children), and
- * we mount on hover so there is none of the browser's native title delay.
+ * A status string, dotted in this app's reading of it.
+ *
+ * The mapping stays here rather than in the package because the two apps
+ * disagree about it: the dashboard reads substrings, while admin matches an
+ * exact allowlist and leaves anything it has not seen uncoloured.
  */
-function Tooltip({ label, children }: { label: string; children: ReactNode }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
-
-  const show = () => {
-    const rect = ref.current?.getBoundingClientRect();
-    if (rect) setPos({ x: rect.left + rect.width / 2, y: rect.top });
-  };
-  const hide = () => setPos(null);
-
-  return (
-    <span
-      ref={ref}
-      className="tt"
-      onMouseEnter={show}
-      onMouseLeave={hide}
-      onFocus={show}
-      onBlur={hide}
-    >
-      {children}
-      {pos ? (
-        <span className="tt__bubble" role="tooltip" style={{ left: pos.x, top: pos.y }}>
-          {label}
-        </span>
-      ) : null}
-    </span>
-  );
-}
-
-/* ---------- Status + labels ---------- */
-
-/** A bare status indicator: just a tone-colored dot; the label shows on hover. */
-export function ToneDot({ tone, label }: { tone: Tone; label: string }) {
-  return (
-    <Tooltip label={label}>
-      <span className={`status-dot${tone ? ` status-dot--${tone}` : ""}`} aria-label={label} role="img" />
-    </Tooltip>
-  );
-}
-
 export function StatusDot({ status }: { status: string }) {
-  return <ToneDot tone={statusTone(status)} label={status} />;
-}
-
-export function Badge({ tone = "", children }: { tone?: Tone | undefined; children: ReactNode }) {
-  return <span className={`badge${tone ? ` badge--${tone}` : ""}`}>{children}</span>;
-}
-
-/* ---------- List primitives ---------- */
-
-export function Panel({
-  title,
-  count,
-  actions,
-  children,
-}: {
-  title: string;
-  count?: number | undefined;
-  actions?: ReactNode | undefined;
-  children: ReactNode;
-}) {
-  return (
-    <section className="panel">
-      <div className="panel__head">
-        <span className="panel__title">{title}</span>
-        {count !== undefined ? <span className="panel__count">{count}</span> : null}
-        {actions ? <span className="panel__actions">{actions}</span> : null}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-export function List({ children }: { children: ReactNode }) {
-  return <div className="list">{children}</div>;
-}
-
-/**
- * The one canonical list row, shared by every list in the app:
- * [leading]  title / meta …                          trailing
- */
-export function Row({
-  href,
-  onClick,
-  leading,
-  title,
-  meta,
-  trailing,
-}: {
-  href?: string;
-  onClick?: MouseEventHandler;
-  leading?: ReactNode;
-  title: ReactNode;
-  meta?: ReactNode;
-  trailing?: ReactNode;
-}) {
-  const interactive = Boolean(href || onClick);
-  const className = `row${interactive ? " row--link" : ""}`;
-  const inner = (
-    <>
-      {leading !== undefined ? <span className="row__lead">{leading}</span> : null}
-      <span className="row__main">
-        <span className="row__title">{title}</span>
-        {meta !== undefined ? <span className="row__meta">{meta}</span> : null}
-      </span>
-      {trailing !== undefined ? <span className="row__trail">{trailing}</span> : null}
-    </>
-  );
-
-  if (href) {
-    return (
-      <Link className={className} href={href}>
-        {inner}
-      </Link>
-    );
-  }
-  const onKeyDown: KeyboardEventHandler | undefined = onClick
-    ? (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onClick(event as unknown as Parameters<MouseEventHandler>[0]);
-        }
-      }
-    : undefined;
-  return (
-    <div
-      className={className}
-      onClick={onClick}
-      role={onClick ? "button" : undefined}
-      tabIndex={onClick ? 0 : undefined}
-      onKeyDown={onKeyDown}
-    >
-      {inner}
-    </div>
-  );
-}
-
-export function EmptyState({ children }: { children: ReactNode }) {
-  return <div className="empty">{children}</div>;
+  return <UiToneDot tone={statusTone(status)} label={status} />;
 }
 
 /* ---------- Filter toolbar (shared across list pages) ---------- */
@@ -231,37 +141,13 @@ export function Toolbar() {
 
 /* ---------- Detail-page primitives ---------- */
 
-export function BackLink({ href, children }: { href: string; children: ReactNode }) {
-  return (
-    <Link className="back-link" href={href}>
-      ← {children}
-    </Link>
-  );
-}
-
-export function DetailHeader({
-  kicker,
-  title,
-  badges,
-  actions,
-}: {
-  kicker?: ReactNode;
-  title: ReactNode;
-  badges?: ReactNode;
-  actions?: ReactNode;
-}) {
-  return (
-    <header className="detail__header">
-      <div className="detail__heading">
-        {kicker !== undefined ? <div className="detail__kicker">{kicker}</div> : null}
-        <h1 className="detail__title">{title}</h1>
-        {badges !== undefined ? <div className="detail__badges">{badges}</div> : null}
-      </div>
-      {actions !== undefined ? <div className="detail__actions">{actions}</div> : null}
-    </header>
-  );
-}
-
+/**
+ * `Section` and `SectionFlush` stay in the app. Their appearance is not
+ * self-contained: `styles.css` reflows a `.section` that has no `.section__body`
+ * child, and `.review-detail-surface` opts back out of that — rules that reach
+ * across the reviews pages' own markup. Moving the markup without those rules
+ * would be the stylesheet/markup desync this extraction exists to prevent.
+ */
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="section">
@@ -277,7 +163,7 @@ export function SectionFlush({ title, count, children }: { title: string; count?
     <section className="section">
       <div className="section__title section__title--row">
         <span>{title}</span>
-        {count !== undefined ? <span className="panel__count">{count}</span> : null}
+        {count !== undefined ? <span className="section__count">{count}</span> : null}
       </div>
       {children}
     </section>

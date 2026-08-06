@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { apiUrl, safeHref } from "../lib/api";
-import { Badge } from "../components/ui";
+import { Badge, EmptyState, PanelCount } from "../components/ui";
 import { formatDate } from "../lib/presentation";
 import {
   BILLING_PLANS,
@@ -578,12 +578,12 @@ function BillingActivity({ billing }: { billing: Billing }) {
           <h2>Billing activity</h2>
           <p>Recent invoices and account balance changes.</p>
         </div>
-        {rows.length > 0 ? <span className="panel__count">{rows.length}</span> : null}
+        {rows.length > 0 ? <PanelCount>{rows.length}</PanelCount> : null}
       </div>
       {rows.length === 0 ? (
-        <div className="empty empty--compact">
+        <EmptyState compact className="billing-v2__empty">
           No billing activity yet &mdash; Stripe invoices may take up to 24 hours to appear.
-        </div>
+        </EmptyState>
       ) : (
         <div className="activity-list">
           {rows.map((row, index) => {

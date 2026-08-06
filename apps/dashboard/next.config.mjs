@@ -23,9 +23,11 @@ const nextConfig = {
   output: "standalone",
   outputFileTracingRoot: fileURLToPath(new URL("../..", import.meta.url)),
   poweredByHeader: false,
-  // The shared theme ships as source rather than a build artifact so both apps
-  // read the same tokens without a build-order dependency.
-  transpilePackages: ["@jina/theme"],
+  // The shared theme and component package both ship as source rather than a
+  // build artifact, so the two apps read the same tokens and render the same
+  // primitives without a build-order dependency. `@jina/ui` also needs to be
+  // transpiled for its co-located CSS Modules to be compiled and hashed.
+  transpilePackages: ["@jina/theme", "@jina/ui"],
   headers: () => Promise.resolve([{ source: "/:path*", headers: securityHeaders }])
 };
 

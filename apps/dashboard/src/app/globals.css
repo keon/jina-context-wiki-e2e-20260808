@@ -1729,8 +1729,9 @@
 }
 
 /* `.knowledge-button` (with its `--primary` modifier) and `.knowledge-pill` (with
-   its status modifiers) are defined alongside `.btn` and `.badge` in
-   dashboard/styles.css. Only the status dot below is particular to the pill —
+   its status modifiers) are defined alongside `.btn` in dashboard/styles.css;
+   the pill shape they share is `Badge`'s, in @jina/ui. Only the status dot below
+   is particular to the pill —
    and it takes its fill from `currentColor`, so nothing in this file may set a
    colour on the pill or on any element that contains it. */
 .knowledge-pill i {

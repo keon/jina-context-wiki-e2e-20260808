@@ -6,8 +6,13 @@
  *   1. A DOM on the globals React DOM binds at import time (`document`,
  *      `window`, `Node`, `HTMLElement`, …).
  *   2. The module-resolution hook that swaps `next/link`, `next/navigation`,
- *      `@clerk/nextjs` and the dashboard providers for local doubles, so a
- *      component can be rendered without a Next server or Clerk credentials.
+ *      `@clerk/nextjs` and the dashboard providers for local doubles, and
+ *      answers the `*.module.css` imports the `@jina/ui` primitives make, so a
+ *      component can be rendered without a Next server, Clerk credentials or a
+ *      bundler.
+ *
+ * The hook and the `next/link` double are `@jina/ui`'s; the rest of the map is
+ * this app's, because only this app knows what its own components import.
  *
  * happy-dom rather than jsdom: it is a fraction of the install and boots in
  * single-digit milliseconds, which matters when the runner starts one process
@@ -20,6 +25,7 @@
 
 import { register } from "node:module";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { NEXT_LINK_STUB } from "@jina/ui/testing/stubs";
 
 GlobalRegistrator.register({ url: "http://localhost/" });
 
@@ -29,10 +35,10 @@ GlobalRegistrator.register({ url: "http://localhost/" });
 
 const stub = (path: string) => new URL(path, import.meta.url).href;
 
-register("./module-stubs.mjs", import.meta.url, {
+register("@jina/ui/testing/module-stubs.mjs", import.meta.url, {
   data: {
     specifiers: {
-      "next/link": stub("./stubs/next-link.tsx"),
+      "next/link": NEXT_LINK_STUB,
       "next/navigation": stub("./stubs/next-navigation.ts"),
       "@clerk/nextjs": stub("./stubs/clerk.tsx"),
       "@clerk/nextjs/errors": stub("./stubs/clerk-errors.ts")

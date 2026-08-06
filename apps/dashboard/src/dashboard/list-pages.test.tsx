@@ -24,6 +24,13 @@ import type { DashboardResponse, ReviewIssue, ReviewRun } from "./lib/types.ts";
  * These tests hold each page to rendering four distinguishable things.
  */
 
+/**
+ * `EmptyState` is a shared primitive dressed by a CSS Module, so its class name
+ * is hashed by the bundler; `[data-ui]` is the contract `@jina/ui` publishes for
+ * finding one.
+ */
+const EMPTY_STATE = "[data-ui='empty-state']";
+
 const RUN: ReviewRun = {
   review_run_id: "run_1",
   status: "completed",
@@ -75,14 +82,14 @@ const PAGES: readonly PageCase[] = [
     Page: ReviewsPage,
     populated: feed({ review_runs: [RUN] }),
     emptyCopy: /No reviews recorded yet/,
-    rowSelector: ".row"
+    rowSelector: "[data-ui='row']"
   },
   {
     name: "issues",
     Page: IssuesPage,
     populated: feed({ issues: [ISSUE] }),
     emptyCopy: /No issues recorded from final reviews yet/,
-    rowSelector: ".row"
+    rowSelector: "[data-ui='row']"
   }
 ];
 
@@ -94,7 +101,7 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
     setDashboardState({ data: null, loading: true, error: null });
     const loading = renderComponent(<Page />);
     renders.set("loading", loading.container.textContent ?? "");
-    assert.equal(count(loading.container, ".empty"), 0, `/${name} claimed emptiness while loading`);
+    assert.equal(count(loading.container, EMPTY_STATE), 0, `/${name} claimed emptiness while loading`);
     assert.doesNotMatch(loading.container.textContent ?? "", emptyCopy);
     loading.unmount();
 
@@ -102,7 +109,7 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
     setDashboardState({ data: null, loading: false, error: "Dashboard API returned 503" });
     const failed = renderComponent(<Page />);
     renders.set("failed", failed.container.textContent ?? "");
-    assert.equal(count(failed.container, ".empty"), 0, `/${name} reported a failed read as empty`);
+    assert.equal(count(failed.container, EMPTY_STATE), 0, `/${name} reported a failed read as empty`);
     assert.ok(present(failed.container, ".notice--bad"), `/${name} did not surface the failure`);
     assert.doesNotMatch(failed.container.textContent ?? "", emptyCopy);
     failed.unmount();
@@ -111,7 +118,7 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
     setDashboardState({ data: feed(), loading: false, error: null });
     const empty = renderComponent(<Page />);
     renders.set("empty", empty.container.textContent ?? "");
-    assert.ok(present(empty.container, ".empty"), `/${name} did not report a genuinely empty feed`);
+    assert.ok(present(empty.container, EMPTY_STATE), `/${name} did not report a genuinely empty feed`);
     assert.match(empty.container.textContent ?? "", emptyCopy);
     empty.unmount();
 
@@ -131,7 +138,7 @@ for (const { name, Page, populated, emptyCopy, rowSelector } of PAGES) {
 
     assert.equal(count(container, rowSelector), 1, "the last good feed should stay on screen");
     assert.ok(present(container, ".notice--bad"), "the failure should be surfaced alongside it");
-    assert.equal(count(container, ".empty"), 0);
+    assert.equal(count(container, EMPTY_STATE), 0);
   });
 
   test(`/${name} renders no formatter placeholders and honours its grid contracts`, () => {
@@ -155,6 +162,6 @@ test("a row with nothing to say in its meta line uses the absence sentinel", () 
   });
   const { container } = renderComponent(<ReviewsPage />);
 
-  assert.equal(textOf(container, ".row__meta"), "—");
+  assert.equal(textOf(container, "[data-ui='row-meta']"), "—");
   assertNoLeakedValues(container, "/reviews");
 });

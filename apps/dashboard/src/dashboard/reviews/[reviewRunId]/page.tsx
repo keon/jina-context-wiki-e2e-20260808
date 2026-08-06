@@ -321,7 +321,7 @@ function RuntimeTasks({ review }: { review: RuntimeReviewWork | undefined }) {
     <section id="runtime-tasks" className="section">
       <div className="section__title section__title--row">
         <span>Runtime Tasks</span>
-        <span className="panel__count">{review.tasksCount}</span>
+        <span className="section__count">{review.tasksCount}</span>
       </div>
       <div className="section__body">
         {review.tasks.length === 0 ? (
@@ -436,7 +436,7 @@ function IssuesSection({ findings }: { findings: ReviewWorkFinding[] }) {
     <section id="issues" className="section">
       <div className="section__title section__title--row">
         <span>Issues</span>
-        <span className="panel__count">{findings.length}</span>
+        <span className="section__count">{findings.length}</span>
       </div>
       <div className="section__body">
         {findings.length === 0 ? (

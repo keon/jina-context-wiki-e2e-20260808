@@ -1,0 +1,17 @@
+/* "There is nothing here" — a fact about the data, stated calmly and centred.
+   Its counterpart, `error-state.module.css`, deliberately does not share this
+   geometry: a reader has to be able to tell "nothing is there" from "we could
+   not find out". */
+
+.empty {
+  margin: 0;
+  padding: 48px var(--space-6);
+  border: 0;
+  background: transparent;
+  color: var(--ink-subtle);
+  text-align: center;
+}
+
+.compact {
+  padding: var(--space-6);
+}

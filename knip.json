@@ -22,6 +22,9 @@
       "entry": ["src/server.ts", "src/acceptance.ts", "src/**/*.test.ts"]
     },
     "packages/theme": {},
+    "packages/ui": {
+      "entry": ["src/**/*.test.tsx", "testing/**"]
+    },
     "apps/dashboard": {
       "entry": [
         "src/app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}",

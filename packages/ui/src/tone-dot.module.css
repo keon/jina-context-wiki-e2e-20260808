@@ -1,0 +1,48 @@
+.tooltip {
+  position: relative;
+  display: inline-flex;
+}
+
+/* `fixed` so the bubble escapes the `overflow: hidden` every panel and section
+   sets on itself; the caller positions it from a measured client rect. */
+.bubble {
+  position: fixed;
+  z-index: 120;
+  transform: translate(-50%, calc(-100% - 7px));
+  padding: 5px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--tooltip-bg);
+  color: var(--tooltip-fg);
+  box-shadow: var(--shadow);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-subtle);
+}
+
+.ok {
+  color: var(--ok-fg);
+  background-color: var(--positive);
+}
+
+.warn {
+  color: var(--warn-fg);
+  background-color: var(--caution);
+}
+
+.bad {
+  color: var(--bad-fg);
+  background-color: var(--negative);
+}
+
+.info {
+  color: var(--info-fg);
+  background-color: var(--informative);
+}

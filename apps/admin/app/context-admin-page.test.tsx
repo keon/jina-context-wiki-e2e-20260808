@@ -116,15 +116,28 @@ async function renderPage(payloads: Payloads, repository?: string) {
   return { ...renderComponent(tree), requests, log };
 }
 
-/** The `.stat` carrying `label`. Only primitives derived from it reach assertions. */
+/**
+ * Selectors for the shared primitives, which are dressed by CSS Modules in
+ * `@jina/ui`: their class names are hashed by the bundler, so `[data-ui]` — the
+ * contract that package publishes — is what a test can hold on to.
+ *
+ * The two error treatments are one component. The page-level banner is the one
+ * that announces itself; a per-section notice does not, because five
+ * simultaneous interruptions announce nothing.
+ */
+const PAGE_ALERT = "[data-ui='error-state'][role='alert']";
+const SECTION_ERROR = "[data-ui='error-state']";
+const EMPTY_STATE = "[data-ui='empty-state']";
+
+/** The stat carrying `label`. Only primitives derived from it reach assertions. */
 function stat(container: HTMLElement, label: string): { value: string; unknown: boolean } {
-  const found = Array.from(container.querySelectorAll(".stat")).find(
-    (element) => element.querySelector(".label")?.textContent === label
+  const found = Array.from(container.querySelectorAll("[data-ui='stat']")).find(
+    (element) => element.querySelector("[data-ui='stat-label']")?.textContent === label
   );
   assert.ok(found !== undefined, `no stat labelled ${JSON.stringify(label)} was rendered`);
   return {
-    value: found.querySelector(".value")?.textContent ?? "",
-    unknown: found.classList.contains("stat--unknown")
+    value: found.querySelector("[data-ui='stat-value']")?.textContent ?? "",
+    unknown: found.getAttribute("data-measured") === "false"
   };
 }
 
@@ -156,10 +169,9 @@ test("counters that were never measured render an em dash, never 0", async () =>
   }
 
   // …and the page says so, rather than looking like a quiet, idle system.
-  assert.ok(present(container, ".error-state"), "a page with five failed sections must say so");
-  assert.equal(attrOf(container, ".error-state", "role"), "alert");
-  assert.match(textOf(container, ".error-state"), /5 sections are not reporting/);
-  assert.match(textOf(container, ".error-state"), /were never measured and are not zero/);
+  assert.ok(present(container, PAGE_ALERT), "a page with five failed sections must say so");
+  assert.match(textOf(container, PAGE_ALERT), /5 sections are not reporting/);
+  assert.match(textOf(container, PAGE_ALERT), /were never measured and are not zero/);
   // The operator's other half of that story is the server log.
   assert.equal(log.errors.length, 3, "each attempted section records its failure server-side");
 });
@@ -176,8 +188,8 @@ test("a counter measured at zero still renders 0", async () => {
   for (const label of EVERY_STAT) {
     assert.equal(stat(container, label).value, "0", `${label} should report its measured zero`);
   }
-  assert.equal(count(container, ".error-state"), 0, "nothing failed, so nothing should be reported as failed");
-  assert.equal(count(container, ".stat--unknown"), 0);
+  assert.equal(count(container, PAGE_ALERT), 0, "nothing failed, so nothing should be reported as failed");
+  assert.equal(count(container, "[data-ui='stat'][data-measured='false']"), 0);
 });
 
 test("a section that loaded reports its measured counters and its unmeasured ones separately", async () => {
@@ -210,11 +222,11 @@ test("a section that loaded reports its measured counters and its unmeasured one
 test("an unmeasured counter is announced, not just dashed", async () => {
   const { container } = await renderPage({});
 
-  assert.ok(present(container, ".stat .unmeasured"), "expected the unmeasured sentinel");
+  assert.ok(present(container, "[data-ui='stat'] [data-ui='unmeasured']"), "expected the unmeasured sentinel");
   // The em dash is decorative; the accessible name has to carry the meaning.
-  assert.equal(textOf(container, ".stat .unmeasured [aria-hidden='true']"), "—");
-  assert.equal(textOf(container, ".stat .unmeasured .sr-only"), "Unavailable");
-  assert.match(attrOf(container, ".stat .unmeasured", "title") ?? "", /not reported, and is not zero/);
+  assert.equal(textOf(container, "[data-ui='unmeasured'] [aria-hidden='true']"), "—");
+  assert.equal(textOf(container, "[data-ui='unmeasured'] span:not([aria-hidden])"), "Unavailable");
+  assert.match(attrOf(container, "[data-ui='unmeasured']", "title") ?? "", /not reported, and is not zero/);
 });
 
 /* -------------------------------------------------------------- status tone --- */
@@ -284,12 +296,12 @@ test("a failed read renders its degraded treatment instead of confident empty co
     builds: { builds: [] }
   });
 
-  assert.equal(count(container, "#releases .empty-state"), 0, "a failed read must not render the empty state");
+  assert.equal(count(container, `#releases ${EMPTY_STATE}`), 0, "a failed read must not render the empty state");
   assert.doesNotMatch(textOf(container, "#releases"), /No context releases have been published/);
 
-  assert.ok(present(container, "#releases .section-error"), "a failed section must say it is unavailable");
-  assert.match(textOf(container, "#releases .section-error"), /Published releases is unavailable/);
-  assert.match(textOf(container, "#releases .section-error"), /This is not an empty result/);
+  assert.ok(present(container, `#releases ${SECTION_ERROR}`), "a failed section must say it is unavailable");
+  assert.match(textOf(container, `#releases ${SECTION_ERROR}`), /Published releases is unavailable/);
+  assert.match(textOf(container, `#releases ${SECTION_ERROR}`), /This is not an empty result/);
   assert.equal(count(container, "#releases table"), 0, "no table stands in for a section that did not load");
 });
 
@@ -299,9 +311,9 @@ test("a section that depends on a failed one reports as not attempted, not as em
     builds: { builds: [] }
   });
 
-  assert.equal(count(container, "#documents .empty-state"), 0);
+  assert.equal(count(container, `#documents ${EMPTY_STATE}`), 0);
   assert.match(
-    textOf(container, "#documents .section-error"),
+    textOf(container, `#documents ${SECTION_ERROR}`),
     /not attempted because Published releases could not be loaded/
   );
   // And it really was not attempted — a blocked read must not be issued.
@@ -311,7 +323,7 @@ test("a section that depends on a failed one reports as not attempted, not as em
     "the derived-context read needs the release list it did not get"
   );
 
-  assert.match(textOf(container, ".error-state"), /2 sections are not reporting/);
+  assert.match(textOf(container, PAGE_ALERT), /2 sections are not reporting/);
 });
 
 test("an empty read still renders the empty state, so the two are distinguishable", async () => {
@@ -321,9 +333,9 @@ test("an empty read still renders the empty state, so the two are distinguishabl
     builds: { builds: [] }
   });
 
-  assert.equal(count(container, "#releases .section-error"), 0);
-  assert.match(textOf(container, "#releases .empty-state"), /No context releases have been published/);
-  assert.equal(count(container, ".error-state"), 0);
+  assert.equal(count(container, `#releases ${SECTION_ERROR}`), 0);
+  assert.match(textOf(container, `#releases ${EMPTY_STATE}`), /No context releases have been published/);
+  assert.equal(count(container, PAGE_ALERT), 0);
 });
 
 test("a repository filter names itself in the empty copy", async () => {
@@ -333,7 +345,7 @@ test("a repository filter names itself in the empty copy", async () => {
   );
 
   assert.match(
-    textOf(container, "#releases .empty-state"),
+    textOf(container, `#releases ${EMPTY_STATE}`),
     /No context releases have been published for acme\/payments/
   );
 });
