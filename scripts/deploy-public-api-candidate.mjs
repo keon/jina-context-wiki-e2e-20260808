@@ -208,6 +208,9 @@ export function validatePublicApiCandidateManifest(value) {
       name: matchingString(secret.name, /^[A-Za-z][A-Za-z0-9_-]{0,254}$/, `secrets.${environmentName}.name`),
       version: matchingString(secret.version, /^[1-9][0-9]*$/, `secrets.${environmentName}.version`)
     };
+    if (secrets[environmentName].project !== FIXED_TARGET.project) {
+      fail(`secrets.${environmentName}.project must be ${FIXED_TARGET.project}`);
+    }
   }
   for (const name of REQUIRED_SECRET_ENV) {
     if (!secrets[name]) fail(`secrets.${name} is required`);
@@ -279,7 +282,7 @@ export function buildPublicApiDeployArgs(manifest) {
     .join("~");
   const secrets = Object.entries(manifest.secrets)
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([name, secret]) => `${name}=projects/${secret.project}/secrets/${secret.name}:${secret.version}`)
+    .map(([name, secret]) => `${name}=${secret.name}:${secret.version}`)
     .join(",");
   return [
     "run",

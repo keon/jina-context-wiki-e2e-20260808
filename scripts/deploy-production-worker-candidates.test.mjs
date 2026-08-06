@@ -179,6 +179,9 @@ test("worker candidate manifest is immutable, paused, relational, and numericall
       copy.workers.context.secrets.INTERNAL_API_TOKEN.version = "latest";
     },
     (copy) => {
+      copy.workers.context.secrets.INTERNAL_API_TOKEN.project = "jina-463721";
+    },
+    (copy) => {
       copy.workers.task.secrets.JINA_WORKER_RELEASE_CREDENTIAL = {
         project: "jina-v2",
         name: "release",

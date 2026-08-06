@@ -393,10 +393,7 @@ test("manifest requires the fixed public target, a digest, and numeric secret ve
   assert.ok(args.includes("--tag=candidate"));
   assert.ok(args.includes(`--image=${raw.image}`));
   const setSecrets = args.find((arg) => arg.startsWith("--set-secrets="));
-  assert.match(
-    setSecrets,
-    /GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY=projects\/jina-463721\/secrets\/jina-github-webhook-inbox-encryption-key:7/
-  );
+  assert.match(setSecrets, /GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY=jina-github-webhook-inbox-encryption-key:7/);
   assert.doesNotMatch(setSecrets, /latest/);
 
   for (const mutate of [
@@ -408,6 +405,9 @@ test("manifest requires the fixed public target, a digest, and numeric secret ve
     },
     (copy) => {
       copy.secrets.DB_PASS.version = "latest";
+    },
+    (copy) => {
+      copy.secrets.DB_PASS.project = "jina-v2";
     },
     (copy) => {
       copy.secrets.GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY.name = "another-key";
