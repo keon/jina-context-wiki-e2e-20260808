@@ -494,12 +494,9 @@ function AccountMenu({
 }) {
   const account = useAppAccount();
   const developerMode = useDeveloperMode();
-  const { selected } = useTenant();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const accountLabel = account.displayName || viewer?.user?.login || "Account";
-  const workspaceLabel = selected?.login ?? "Jina";
-  const workspaceType = selected?.type === "Organization" ? "Organization" : "Personal workspace";
 
   useEffect(() => {
     if (commandOpen) setOpen(false);
@@ -527,13 +524,6 @@ function AccountMenu({
         <div className="user-menu__popover" role="menu" aria-label="Account menu">
           <div className="user-menu__identity">
             <strong>{account.email ?? accountLabel}</strong>
-          </div>
-          <div className="user-menu__workspace">
-            <WorkspaceAvatar label={workspaceLabel} />
-            <span>
-              <strong>{workspaceLabel}</strong>
-              <small>{workspaceType}</small>
-            </span>
           </div>
           <div className="user-menu__section">
             <Link

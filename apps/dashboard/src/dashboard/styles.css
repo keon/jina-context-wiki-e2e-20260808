@@ -403,29 +403,6 @@ button.nav__item:hover {
   font-weight: 450;
 }
 
-.user-menu__workspace {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px;
-  border-top: 1px solid var(--line-subtle);
-}
-
-.user-menu__workspace > span:last-child {
-  display: grid;
-  gap: 2px;
-}
-
-.user-menu__workspace strong {
-  color: var(--ink-strong);
-  font-weight: 500;
-}
-
-.user-menu__workspace small {
-  color: var(--ink-subtle);
-  font-size: var(--text-sm);
-}
-
 .user-menu__section {
   display: grid;
   gap: 2px;
