@@ -105,6 +105,12 @@ test("staging uses one v2 database connection and one migration job", async () =
     /inbox_scheduler_uri="https:\/\/api\.staging\.usejina\.com\/internal\/github-webhook-inbox\/process"/
   );
   assert.match(stagingDeployment, /--oidc-token-audience="\$\{scheduler_audience\}"/);
+  assert.match(
+    stagingDeployment,
+    /scheduler_oidc_service_account="\$\{JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT:-\$\{api_service_account\}\}"/
+  );
+  assert.match(stagingDeployment, /--remove-headers=Authorization/);
+  assert.doesNotMatch(stagingDeployment, /Authorization=Bearer|product_internal_token=.*secrets versions access/);
   assert.doesNotMatch(stagingDeployment, /Relational run-review (?:is|remains) blocked/);
   assert.match(
     stagingDeployment,

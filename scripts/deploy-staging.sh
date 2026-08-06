@@ -31,6 +31,7 @@ billing_retry_scheduler_job="jina-billing-retry-staging"
 github_webhook_inbox_scheduler_job="jina-github-webhook-inbox-staging"
 causal_activation_job="jina-causal-graph-release-activate-staging"
 api_service_account="jina-api-staging@${project}.iam.gserviceaccount.com"
+scheduler_oidc_service_account="${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT:-${api_service_account}}"
 context_worker_service_account="jina-context-worker-staging@${project}.iam.gserviceaccount.com"
 task_worker_service_account="jina-task-worker-staging@${project}.iam.gserviceaccount.com"
 migration_service_account="jina-migration-staging@${project}.iam.gserviceaccount.com"
@@ -105,6 +106,7 @@ required_staging_values=(
   "${review_artifact_bucket}"
   "${artifact_repository}"
   "${api_service}"
+  "${scheduler_oidc_service_account}"
   "${context_worker_service}"
   "${task_worker_service}"
   "${migration_job}"
@@ -345,9 +347,7 @@ fi
 if [[ "${review_run_topic_mode}" == "relational" ]]; then
   api_env+="~JINA_REVIEW_RUN_TOPIC_MODE=relational"
 fi
-if [[ -n "${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT:-}" ]]; then
-  api_env+="~JINA_SCHEDULER_OIDC_AUDIENCE=https://api.staging.usejina.com~JINA_SCHEDULER_OIDC_EMAIL=${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT}"
-fi
+api_env+="~JINA_SCHEDULER_OIDC_AUDIENCE=https://api.staging.usejina.com~JINA_SCHEDULER_OIDC_EMAIL=${scheduler_oidc_service_account}"
 api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
 if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
   api_secrets+=",GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY=${github_webhook_inbox_encryption_secret}:${github_webhook_inbox_encryption_key_version}"
@@ -451,28 +451,16 @@ scheduler_args=(
   --format=none
   --quiet
 )
-if [[ -n "${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT:-}" ]]; then
-  # OIDC identity: the API verifies Google's signature, audience, and the
-  # service-account email (JINA_SCHEDULER_OIDC_AUDIENCE/EMAIL on the API).
-  # No secret is persisted in the Scheduler job resource.
-  scheduler_auth_args=(
-    --oidc-service-account-email="${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT}"
-    --oidc-token-audience="${scheduler_audience}"
-  )
-  scheduler_create_headers=(--headers="Content-Type=application/json")
-  scheduler_update_headers=(--update-headers="Content-Type=application/json")
-else
-  # Legacy static bearer: this persists a copy of the internal API token in
-  # the Scheduler job where anyone with cloudscheduler.jobs.get can read it,
-  # and rotating the secret does not rotate the stored copy. Set
-  # JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT to switch to OIDC.
-  printf 'WARNING: Cloud Scheduler is using a static bearer token; set JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT to switch to OIDC.\n' >&2
-  product_internal_token="$(gcloud secrets versions access latest \
-    --secret="${product_internal_token_secret}" --project="${project}")"
-  scheduler_auth_args=()
-  scheduler_create_headers=(--headers="Authorization=Bearer ${product_internal_token},Content-Type=application/json")
-  scheduler_update_headers=(--update-headers="Authorization=Bearer ${product_internal_token},Content-Type=application/json")
-fi
+# OIDC identity: the API verifies Google's signature, audience, and the
+# service-account email (JINA_SCHEDULER_OIDC_AUDIENCE/EMAIL on the API).
+# Remove any legacy static Authorization header during the update so no copy
+# of an internal API token remains readable from the Scheduler job resource.
+scheduler_auth_args=(
+  --oidc-service-account-email="${scheduler_oidc_service_account}"
+  --oidc-token-audience="${scheduler_audience}"
+)
+scheduler_create_headers=(--headers="Content-Type=application/json")
+scheduler_update_headers=(--remove-headers=Authorization --update-headers="Content-Type=application/json")
 if gcloud scheduler jobs describe "${billing_retry_scheduler_job}" \
     --project="${project}" --location="${region}" >/dev/null 2>&1; then
   gcloud scheduler jobs update http "${billing_retry_scheduler_job}" \
@@ -485,7 +473,7 @@ else
     ${scheduler_auth_args[@]+"${scheduler_auth_args[@]}"} \
     "${scheduler_create_headers[@]}"
 fi
-unset product_internal_token scheduler_uri scheduler_args scheduler_auth_args scheduler_create_headers scheduler_update_headers
+unset scheduler_uri scheduler_args scheduler_auth_args scheduler_create_headers scheduler_update_headers
 
 if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
   inbox_scheduler_uri="https://api.staging.usejina.com/internal/github-webhook-inbox/process"
@@ -500,20 +488,12 @@ if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
     --format=none
     --quiet
   )
-  if [[ -n "${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT:-}" ]]; then
-    inbox_scheduler_auth_args=(
-      --oidc-service-account-email="${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT}"
-      --oidc-token-audience="${scheduler_audience}"
-    )
-    inbox_scheduler_create_headers=(--headers="Content-Type=application/json")
-    inbox_scheduler_update_headers=(--update-headers="Content-Type=application/json")
-  else
-    product_internal_token="$(gcloud secrets versions access latest \
-      --secret="${product_internal_token_secret}" --project="${project}")"
-    inbox_scheduler_auth_args=()
-    inbox_scheduler_create_headers=(--headers="Authorization=Bearer ${product_internal_token},Content-Type=application/json")
-    inbox_scheduler_update_headers=(--update-headers="Authorization=Bearer ${product_internal_token},Content-Type=application/json")
-  fi
+  inbox_scheduler_auth_args=(
+    --oidc-service-account-email="${scheduler_oidc_service_account}"
+    --oidc-token-audience="${scheduler_audience}"
+  )
+  inbox_scheduler_create_headers=(--headers="Content-Type=application/json")
+  inbox_scheduler_update_headers=(--remove-headers=Authorization --update-headers="Content-Type=application/json")
   if gcloud scheduler jobs describe "${github_webhook_inbox_scheduler_job}" \
       --project="${project}" --location="${region}" >/dev/null 2>&1; then
     gcloud scheduler jobs update http "${github_webhook_inbox_scheduler_job}" \
@@ -526,7 +506,7 @@ if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
       ${inbox_scheduler_auth_args[@]+"${inbox_scheduler_auth_args[@]}"} \
       "${inbox_scheduler_create_headers[@]}"
   fi
-  unset product_internal_token inbox_scheduler_uri inbox_scheduler_args \
+  unset inbox_scheduler_uri inbox_scheduler_args \
     inbox_scheduler_auth_args inbox_scheduler_create_headers inbox_scheduler_update_headers
 fi
 unset scheduler_audience
