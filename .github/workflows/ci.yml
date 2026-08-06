@@ -2,9 +2,14 @@ name: CI
 
 # Full-repository gate. validate-platform.yml is path-filtered to a few
 # workspaces, which left changes to most packages, deploy scripts, and the
-# cloudbuild configs with no CI at all. This workflow mirrors
-# scripts/cloud-build-ci.sh so merges are gated on the same checks the
-# release build runs.
+# cloudbuild configs with no CI at all.
+#
+# The `validate` job mirrors scripts/cloud-build-ci.sh step for step, so merges
+# are gated on the same checks the release build runs. Keep the two in step: a
+# step added to one belongs in the other.
+#
+# The `browser` job is deliberately *not* part of that mirror, and is explained
+# where it is defined.
 
 on:
   pull_request:
@@ -60,3 +65,61 @@ jobs:
       - run: pnpm audit --prod --audit-level=high
       - run: pnpm --filter @jina/dashboard build
       - run: pnpm --filter @jina/admin build
+
+  # Browser-level coverage: the admin console driven end to end against a
+  # stubbed upstream API, and the component gallery at /gallery. See
+  # e2e/playwright.config.ts.
+  #
+  # Why this is a job of its own rather than a step in `validate`, and why it is
+  # not in scripts/cloud-build-ci.sh: it needs a downloaded browser. That is
+  # ~180MB fetched from cdn.playwright.dev plus a system-dependency install, and
+  # the mirrored script is the *release* gate — the same commands Cloud Build
+  # runs on the way to deploying. A deploy that cannot reach a CDN for a test
+  # browser should not be a failed deploy, and Cloud Build has no equivalent of
+  # the cache below, so every release build would pay the download again.
+  # Merges are still gated: this job runs on the same pull_request and push
+  # events as `validate`, alongside it rather than after it.
+  #
+  # Nothing here needs credentials. Admin permits an unauthenticated request
+  # only when NODE_ENV !== "production", which Next inlines at build time and
+  # compiles out of every deployed image; `next dev` is exactly that case.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # The browser build is keyed to the Playwright release, because that is
+      # what decides which revision it downloads. Reading the version from the
+      # installed package rather than restating it keeps the key from going
+      # stale the first time the dependency is bumped.
+      - id: playwright
+        name: Resolve Playwright version
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: browser-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+      - if: steps.browser-cache.outputs.cache-hit != 'true'
+        run: pnpm test:e2e:browsers
+      # The browser binary is cached; the system libraries it links against are
+      # not, because they are installed outside the cached path.
+      - if: steps.browser-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium
+
+      - run: pnpm test:e2e
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: e2e/.artifacts/
+          retention-days: 7

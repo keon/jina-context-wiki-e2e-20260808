@@ -2,7 +2,13 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": {
-      "entry": ["autumn.config.ts", "evals/review/run-isolated-review.mjs", "scripts/context-production-preflight.mjs"],
+      "entry": [
+        "autumn.config.ts",
+        "evals/review/run-isolated-review.mjs",
+        "scripts/context-production-preflight.mjs",
+        "e2e/support/stub-api.ts",
+        "e2e/*.spec.ts"
+      ],
       "ignoreDependencies": ["pg"]
     },
     "apps/api": {
