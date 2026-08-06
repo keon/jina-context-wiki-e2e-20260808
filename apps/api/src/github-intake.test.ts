@@ -94,3 +94,44 @@ test("a replayed delivery for a compacted settled epoch does not dispatch a dupl
     newHead.state.board.outbox.some((message) => message.topic === "run-review" && message.status === "pending")
   );
 });
+
+test("a new commit after tracking expiry is reviewed despite retained epoch tombstones", () => {
+  const first = ingestGitHubWebhook(createGitHubIntakeState(), WEBHOOK, {
+    deliveryId: "delivery-1",
+    now: "2026-07-01T00:00:00.000Z",
+    tenantId: "tenant-a"
+  });
+  const board = terminalize(first.state.board, "2026-07-01T01:00:00.000Z");
+  const compacted = compactTerminalEpochHistory(board, "2026-07-31T00:00:00.000Z");
+
+  // The tracked pull-request entry has been compacted away (30-day idle
+  // prune), so the returning pull request restarts at epoch 1 while the
+  // terminal epoch-1 root tombstone is still on the board.
+  const returned = ingestGitHubWebhook(
+    { board: compacted.state, pullRequests: [] },
+    {
+      ...WEBHOOK,
+      event: { type: "pull_request.synchronize", pullRequestNumber: 7, headSha: "c".repeat(40) }
+    },
+    { deliveryId: "delivery-9", now: "2026-08-15T00:00:00.000Z", tenantId: "tenant-a" }
+  );
+  assert.equal(returned.outcome, "created");
+  assert.ok(
+    returned.state.board.outbox.some((message) => message.topic === "run-review" && message.status === "pending"),
+    "the returning pull request's new head must dispatch a review"
+  );
+  // The epoch advanced past the retained tombstone instead of colliding with it.
+  assert.ok(returned.state.board.tasks.some((task) => task.epoch === 2 && task.type === "pr_review"));
+  assert.equal(returned.state.pullRequests[0]?.epoch, 2);
+
+  // A replay of the settled OLD head with tracking still expired stays
+  // suppressed: it plans epoch 1, whose tombstone matches that head exactly.
+  // (With live tracking, a differing head keeps its pre-existing new-head
+  // semantics and opens a fresh epoch — reverts must still be reviewed.)
+  const oldHeadReplay = ingestGitHubWebhook({ board: returned.state.board, pullRequests: [] }, WEBHOOK, {
+    deliveryId: "delivery-10",
+    now: "2026-08-15T00:05:00.000Z",
+    tenantId: "tenant-a"
+  });
+  assert.equal(oldHeadReplay.outcome, "duplicate");
+});

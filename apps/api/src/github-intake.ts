@@ -98,10 +98,31 @@ function ingestPullRequest(
       pullRequest.number === event.pullRequestNumber
   );
   const isNewHead = existing !== undefined && existing.headSha !== event.headSha;
-  const epoch = existing ? (isNewHead ? existing.epoch + 1 : existing.epoch) : 1;
+  let epoch = existing ? (isNewHead ? existing.epoch + 1 : existing.epoch) : 1;
 
   let board = state.board;
-  if (isNewHead) {
+  // Tracked-pull-request entries are compacted after long idleness while epoch
+  // roots may be retained longer as idempotency tombstones. A returning pull
+  // request then restarts at epoch 1 and would collide with a retained root
+  // for a DIFFERENT head; the review must not be suppressed in that case, so
+  // the epoch advances past every retained root whose head differs.
+  const epochRootHeadSha = (candidateEpoch: number): string | undefined => {
+    const root = board.tasks.find(
+      (task) =>
+        task.dedupeKey ===
+        `${tenantId}:${webhook.repository}:pr-${event.pullRequestNumber}:epoch-${candidateEpoch}:root`
+    );
+    return root ? (typeof root.metadata.headSha === "string" ? root.metadata.headSha : "") : undefined;
+  };
+  for (
+    let collidingHead = epochRootHeadSha(epoch);
+    collidingHead !== undefined && collidingHead !== event.headSha;
+    collidingHead = epochRootHeadSha(epoch)
+  ) {
+    epoch += 1;
+  }
+
+  if (epoch > 1 && (isNewHead || existing === undefined)) {
     board = supersedeEpochTasks(
       board,
       epoch,
