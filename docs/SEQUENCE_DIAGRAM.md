@@ -128,10 +128,10 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant A as Coding/review agent
-    participant API as Context API
+    participant API as Wiki API
     participant PG as PostgreSQL
 
-    A->>API: POST /context/search
+    A->>API: POST /wiki/search
     API->>PG: Resolve token, tenant, principal, repository ACL
     API->>PG: Load authorized immutable release and compact tree
     API->>API: Lexically score title/summary/document text

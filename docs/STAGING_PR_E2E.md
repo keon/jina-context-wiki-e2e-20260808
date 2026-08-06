@@ -106,7 +106,7 @@ and `publish-causal-graph`.
 
 Do not count a review-only success as end-to-end success. Do not count a prior
 Context release whose commit differs from the tested PR head. A failed optional
-new Context page may be explicitly omitted; a failed revision of an existing
+new Wiki page may be explicitly omitted; a failed revision of an existing
 page must retain the last certified page rather than delete it.
 
 ## Evidence to record

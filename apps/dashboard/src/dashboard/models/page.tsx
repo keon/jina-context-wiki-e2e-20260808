@@ -57,7 +57,7 @@ const STAGES: {
   { modelKey: "planner_model", defaultKey: "planner", effortKey: "planner_effort", title: "Planning", description: "Maps the review into focused investigation areas.", defaultEffort: "medium" },
   { modelKey: "investigation_model", defaultKey: "investigation", effortKey: "investigation_effort", title: "Investigation", description: "Runs the agents that inspect code and evidence.", defaultEffort: "medium" },
   { modelKey: "review_model", defaultKey: "review", effortKey: "review_effort", title: "Final review", description: "Writes the published review and inline findings.", defaultEffort: "medium" },
-  { modelKey: "context_model", defaultKey: "context", effortKey: "context_effort", title: "Context generation", description: "Builds and refreshes repository context.", defaultEffort: "low" },
+  { modelKey: "context_model", defaultKey: "context", effortKey: "context_effort", title: "Wiki generation", description: "Builds and refreshes the repository Wiki.", defaultEffort: "low" },
 ];
 
 /** Stable identity so the catalog filter is not recomputed while the read is in flight. */
@@ -351,7 +351,7 @@ export default function ModelsPage() {
                 onChange={(value) => void saveSettings({ ...settings, review_fallback_policy: value })}
               />
               <FallbackControl
-                label="Context fallback"
+                label="Wiki fallback"
                 value={settings.context_fallback_policy}
                 disabled={!writable || saving}
                 onChange={(value) => void saveSettings({ ...settings, context_fallback_policy: value })}

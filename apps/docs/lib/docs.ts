@@ -46,7 +46,7 @@ export const docs: Doc[] = [
         heading: "What happens next",
         body: [
           "Jina plans the affected runtime surfaces, investigates them in isolated sandboxes, validates candidate findings, and publishes confirmed issues with a merge-readiness score.",
-          "Use the Reviews page for run status and evidence, Issues for findings across reviews, Context Wiki for repository documentation, and Causal Graph for commit-history relationships."
+          "Use the Reviews page for run status and evidence, Issues for findings across reviews, Wiki for repository documentation, and Causal Graph for commit-history relationships."
         ]
       }
     ]
@@ -149,15 +149,15 @@ export const docs: Doc[] = [
     ]
   },
   {
-    slug: "context-wiki",
+    slug: "wiki",
     group: "Repository intelligence",
-    title: "Context Wiki",
+    title: "Wiki",
     description: "Build and browse evidence-backed repository documentation with immutable source citations.",
     sections: [
       {
         heading: "Build repository context",
         steps: [
-          "Open Workspace → Context Wiki.",
+          "Open Workspace → Wiki.",
           "Select a connected repository and its default branch.",
           "Choose Build context. Organization admin access is required.",
           "Follow checkpoints until the catalog publishes, then browse pages and source citations."

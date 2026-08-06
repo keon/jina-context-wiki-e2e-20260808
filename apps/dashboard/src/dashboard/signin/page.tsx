@@ -9,7 +9,7 @@ export default function SignInPage() {
         <span className="auth-page__mark">J</span>
         <div>
           <h1>Sign in to Jina</h1>
-          <p>Reviews, context, models, and operations in one workspace.</p>
+          <p>Reviews, Wiki, models, and operations in one workspace.</p>
         </div>
       </header>
       <AppSignIn />

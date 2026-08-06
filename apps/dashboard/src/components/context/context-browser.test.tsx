@@ -73,13 +73,13 @@ test("workspace search queries each repository release and labels merged results
     <ContextSearch
       release={payments}
       workspaceReleases={[payments, web]}
-      apiBasePath="/api/context"
+      apiBasePath="/api/wiki"
       onOpen={() => undefined}
     />
   );
 
   fireEvent.click(screen.getByRole("button", { name: "All repositories" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "Search Context Wiki" }), {
+  fireEvent.change(screen.getByRole("textbox", { name: "Search Wiki" }), {
     target: { value: "architecture" }
   });
   fireEvent.click(screen.getByRole("button", { name: "Search all" }));
@@ -87,10 +87,7 @@ test("workspace search queries each repository release and labels merged results
   await waitFor(() => {
     assert.equal(screen.getAllByText(/architecture$/i).length, 2);
   });
-  assert.deepEqual(
-    bodies.map((body) => body.repository).sort(),
-    ["acme/payments", "acme/web"]
-  );
+  assert.deepEqual(bodies.map((body) => body.repository).sort(), ["acme/payments", "acme/web"]);
   assert.match(document.body.textContent ?? "", /2 repositories/);
   assert.match(document.body.textContent ?? "", /acme\/payments/);
   assert.match(document.body.textContent ?? "", /acme\/web/);

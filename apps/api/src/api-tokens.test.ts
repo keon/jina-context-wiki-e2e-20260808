@@ -160,14 +160,14 @@ test("a minted token authenticates as its own row and every failure looks identi
     const secret = await mintSecret(mint);
     assert.match(secret, /^jina_atk_[A-Za-z0-9_-]{43}$/);
 
-    assert.notEqual((await request("/context/releases", bearer(secret))).status, 401);
+    assert.notEqual((await request("/wiki/releases", bearer(secret))).status, 401);
 
     // Expired, revoked, unknown and malformed are one answer with one body, so
     // the response never says which tokens exist or why one stopped working.
     const unauthorized = { error: "unauthorized" };
     const listed = await store.listApiTokens(tenantId);
     await store.revokeApiToken(tenantId, listed[0]!.id, adminPrincipal, new Date().toISOString());
-    const revoked = await request("/context/releases", bearer(secret));
+    const revoked = await request("/wiki/releases", bearer(secret));
     assert.equal(revoked.status, 401);
     assert.deepEqual(await revoked.json(), unauthorized);
 
@@ -185,16 +185,16 @@ test("a minted token authenticates as its own row and every failure looks identi
       createdBy: "svc:api",
       expiresAt: "2026-01-02T00:00:00.000Z"
     });
-    const expired = await request("/context/releases", bearer(expiredSecret));
+    const expired = await request("/wiki/releases", bearer(expiredSecret));
     assert.equal(expired.status, 401);
     assert.deepEqual(await expired.json(), unauthorized);
     assert.equal((await mcpRpc(baseUrl, expiredSecret)).status, 401);
 
-    const unknown = await request("/context/releases", bearer(`jina_atk_${"z".repeat(43)}`));
+    const unknown = await request("/wiki/releases", bearer(`jina_atk_${"z".repeat(43)}`));
     assert.equal(unknown.status, 401);
     assert.deepEqual(await unknown.json(), unauthorized);
 
-    const malformed = await request("/context/releases", bearer("jina_atk_short"));
+    const malformed = await request("/wiki/releases", bearer("jina_atk_short"));
     assert.equal(malformed.status, 401);
     assert.deepEqual(await malformed.json(), unauthorized);
   });
@@ -236,14 +236,14 @@ test("Review access is short-lived, repository-scoped, and MCP-capable", async (
     assert.equal(Date.parse(body.token.expiresAt) - Date.parse(body.token.createdAt), 30 * 60_000);
     assert.deepEqual(await store.repositoriesForPrincipal(tenantId, body.token.principalId), [repository]);
 
-    const read = await request(`/context/releases?repository=${encodeURIComponent(repository)}`, bearer(body.secret));
+    const read = await request(`/wiki/releases?repository=${encodeURIComponent(repository)}`, bearer(body.secret));
     assert.equal(read.status, 200);
     const crossRepository = await request(
-      `/context/releases?repository=${encodeURIComponent(forbiddenRepository)}`,
+      `/wiki/releases?repository=${encodeURIComponent(forbiddenRepository)}`,
       bearer(body.secret)
     );
     assert.equal(crossRepository.status, 404);
-    const build = await request("/context/build", {
+    const build = await request("/wiki/build", {
       method: "POST",
       headers: {
         authorization: `Bearer ${body.secret}`,
@@ -264,24 +264,24 @@ test("headers stay assertions, and the asymmetry between them is deliberate", as
 
     // Agreeing headers are accepted; disagreeing ones are rejected rather than
     // reinterpreted. This is the cross-tenant guard.
-    assert.notEqual((await request("/context/releases", withHeaders({ "x-jina-tenant-id": tenantId }))).status, 401);
-    assert.notEqual((await request("/context/releases", withHeaders({ "x-jina-principal-id": holder }))).status, 401);
-    assert.equal((await request("/context/releases", withHeaders({ "x-jina-tenant-id": otherTenantId }))).status, 401);
+    assert.notEqual((await request("/wiki/releases", withHeaders({ "x-jina-tenant-id": tenantId }))).status, 401);
+    assert.notEqual((await request("/wiki/releases", withHeaders({ "x-jina-principal-id": holder }))).status, 401);
+    assert.equal((await request("/wiki/releases", withHeaders({ "x-jina-tenant-id": otherTenantId }))).status, 401);
     assert.equal(
-      (await request("/context/releases", withHeaders({ "x-jina-principal-id": "user:someone@example.com" }))).status,
+      (await request("/wiki/releases", withHeaders({ "x-jina-principal-id": "user:someone@example.com" }))).status,
       401
     );
     // A principal asserting tenant administration is refused like any other
     // disagreement, so the header cannot promote a token.
     assert.equal(
-      (await request("/context/releases", withHeaders({ "x-jina-principal-id": `tenant:${tenantId}` }))).status,
+      (await request("/wiki/releases", withHeaders({ "x-jina-principal-id": `tenant:${tenantId}` }))).status,
       401
     );
 
     // `normalizedForwardedPrincipal` lowercases the value, so the address is
     // case-insensitive...
     assert.notEqual(
-      (await request("/context/releases", withHeaders({ "x-jina-principal-id": "user:HOLDER@EXAMPLE.COM" }))).status,
+      (await request("/wiki/releases", withHeaders({ "x-jina-principal-id": "user:HOLDER@EXAMPLE.COM" }))).status,
       401
     );
     // ...but only after the scheme matches, and the `user:` pattern alone carries
@@ -289,14 +289,14 @@ test("headers stay assertions, and the asymmetry between them is deliberate", as
     // to undefined and is refused. Asserted because it is surprising enough that
     // somebody will otherwise "fix" it by accident.
     assert.equal(
-      (await request("/context/releases", withHeaders({ "x-jina-principal-id": "USER:holder@example.com" }))).status,
+      (await request("/wiki/releases", withHeaders({ "x-jina-principal-id": "USER:holder@example.com" }))).status,
       401
     );
     // ...while `contextCredentialTenantId` in fixed tenancy does not, so the
     // tenant header is not. This asserts a deliberate decision to compare tenants
     // exactly as the context credential already does, not a bug.
     assert.equal(
-      (await request("/context/releases", withHeaders({ "x-jina-tenant-id": tenantId.toUpperCase() }))).status,
+      (await request("/wiki/releases", withHeaders({ "x-jina-tenant-id": tenantId.toUpperCase() }))).status,
       401
     );
   });
@@ -346,12 +346,12 @@ test("scope grants route reach and nothing more", async () => {
       assert.equal(((await response.json()) as { code?: string }).code, "insufficient_scope");
     };
 
-    assert.notEqual((await request("/context/releases", bearer(readSecret))).status, 401);
-    await insufficient(await request("/context/releases", bearer(querySecret)));
-    assert.notEqual((await request("/context/list?repository=" + repository, bearer(readSecret))).status, 403);
+    assert.notEqual((await request("/wiki/releases", bearer(readSecret))).status, 401);
+    await insufficient(await request("/wiki/releases", bearer(querySecret)));
+    assert.notEqual((await request("/wiki/list?repository=" + repository, bearer(readSecret))).status, 403);
 
     const base = (await request("/health")).url.replace("/health", "");
-    await insufficient(await post(`${base}/context/build`, readSecret));
+    await insufficient(await post(`${base}/wiki/build`, readSecret));
 
     // Board traffic maps to no scope at all, so a token is refused there even
     // though the routes are not internal.
@@ -406,29 +406,29 @@ test("HTTP and MCP independently enforce read, query, build, and admin scopes", 
       assert.equal(((await response.json()) as { code?: string }).code, "insufficient_scope");
     };
 
-    assert.equal((await request("/context/releases", bearer(readSecret))).status, 200);
-    await insufficient(await request("/context/releases", bearer(querySecret)));
-    await insufficient(await post("/context/search", readSecret, { repository, query: "architecture" }));
-    assert.notEqual((await post("/context/search", querySecret, { repository, query: "architecture" })).status, 403);
+    assert.equal((await request("/wiki/releases", bearer(readSecret))).status, 200);
+    await insufficient(await request("/wiki/releases", bearer(querySecret)));
+    await insufficient(await post("/wiki/search", readSecret, { repository, query: "architecture" }));
+    assert.notEqual((await post("/wiki/search", querySecret, { repository, query: "architecture" })).status, 403);
 
-    const build = await post("/context/build", buildSecret, {
+    const build = await post("/wiki/build", buildSecret, {
       repository,
       ref: "main",
       requestKey: "token-scope-build"
     });
     assert.equal(build.status, 202, await build.text());
-    await insufficient(await request("/context/metrics", bearer(buildSecret)));
-    await insufficient(await request("/context/releases", bearer(buildSecret)));
+    await insufficient(await request("/wiki/metrics", bearer(buildSecret)));
+    await insufficient(await request("/wiki/releases", bearer(buildSecret)));
 
-    assert.equal((await request("/context/metrics", bearer(adminSecret))).status, 200);
+    assert.equal((await request("/wiki/metrics", bearer(adminSecret))).status, 200);
     await insufficient(
-      await post("/context/build", adminSecret, {
+      await post("/wiki/build", adminSecret, {
         repository,
         ref: "main",
         requestKey: "admin-cannot-build"
       })
     );
-    await insufficient(await request("/context/releases", bearer(adminSecret)));
+    await insufficient(await request("/wiki/releases", bearer(adminSecret)));
 
     const querySearch = await mcpTool(baseUrl, querySecret, "search_context", {
       repository,
@@ -476,8 +476,8 @@ test("HTTP and MCP independently enforce read, query, build, and admin scopes", 
     }
 
     for (const path of [
-      `/context/read?repository=${encodeURIComponent(repository)}&document=architecture`,
-      `/context/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=release-before&toReleaseId=release-after`
+      `/wiki/read?repository=${encodeURIComponent(repository)}&document=architecture`,
+      `/wiki/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=release-before&toReleaseId=release-after`
     ]) {
       await insufficient(await request(path, bearer(querySecret)));
       assert.notEqual((await request(path, bearer(readSecret))).status, 403);
@@ -495,7 +495,7 @@ test("HTTP and MCP expose the same repository ACL denial without cross-tenant or
     const nonexistentRepository = "omlabs/repository-that-does-not-exist";
 
     const httpRead = await request(
-      `/context/list?repository=${encodeURIComponent(forbiddenRepository)}`,
+      `/wiki/list?repository=${encodeURIComponent(forbiddenRepository)}`,
       bearer(readSecret)
     );
     assert.equal(httpRead.status, 404);
@@ -506,7 +506,7 @@ test("HTTP and MCP expose the same repository ACL denial without cross-tenant or
       error: "repository context not found"
     });
     const httpNonexistent = await request(
-      `/context/list?repository=${encodeURIComponent(nonexistentRepository)}`,
+      `/wiki/list?repository=${encodeURIComponent(nonexistentRepository)}`,
       bearer(readSecret)
     );
     assert.equal(httpNonexistent.status, httpRead.status);
@@ -522,7 +522,7 @@ test("HTTP and MCP expose the same repository ACL denial without cross-tenant or
     });
     assert.deepEqual(mcpNonexistent, mcpRead);
 
-    const httpQuery = await fetch(`${baseUrl}/context/search`, {
+    const httpQuery = await fetch(`${baseUrl}/wiki/search`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${querySecret}`,
@@ -549,13 +549,13 @@ test("HTTP and MCP expose the same repository ACL denial without cross-tenant or
       assert.deepEqual(await unknownMcp.json(), await wrongTenantMcp.json());
     }
 
-    const wrongTenantHttp = await request("/context/releases", {
+    const wrongTenantHttp = await request("/wiki/releases", {
       headers: {
         authorization: `Bearer ${readSecret}`,
         "x-jina-tenant-id": otherTenantId
       }
     });
-    const unknownHttp = await request("/context/releases", bearer(`jina_atk_${"u".repeat(43)}`));
+    const unknownHttp = await request("/wiki/releases", bearer(`jina_atk_${"u".repeat(43)}`));
     assert.equal(wrongTenantHttp.status, 401);
     assert.equal(unknownHttp.status, wrongTenantHttp.status);
     assert.deepEqual(await unknownHttp.json(), await wrongTenantHttp.json());
@@ -577,7 +577,7 @@ test("scope is not role: an admin-scoped token on an ordinary principal is still
       createdBy: "svc:api",
       expiresAt: new Date(Date.now() + 3_600_000).toISOString()
     });
-    const response = await request("/context/metrics", bearer(secret));
+    const response = await request("/wiki/metrics", bearer(secret));
     assert.equal(response.status, 403);
     // Refused by requireTenantAdmin, not by the scope check: the scope was enough
     // to reach the route.
@@ -752,7 +752,7 @@ test("revocation is immediate, idempotent, and blind to other tenants", async ()
     });
     const tokenId = ((await listed.json()) as { tokens: { id: string }[] }).tokens[0]!.id;
 
-    assert.notEqual((await request("/context/releases", bearer(secret))).status, 401);
+    assert.notEqual((await request("/wiki/releases", bearer(secret))).status, 401);
     assert.equal((await mcpRpc(baseUrl, secret)).status, 200);
     const revoke = (id: string): Promise<Response> =>
       request(`/internal/context/tokens/${encodeURIComponent(id)}/revoke`, {
@@ -765,7 +765,7 @@ test("revocation is immediate, idempotent, and blind to other tenants", async ()
     const revokedBody = (await revoked.json()) as { token: Record<string, unknown> & { revokedAt: string } };
     assert.equal("secret" in revokedBody.token, false);
     assert.equal("secretHash" in revokedBody.token, false);
-    assert.equal((await request("/context/releases", bearer(secret))).status, 401);
+    assert.equal((await request("/wiki/releases", bearer(secret))).status, 401);
     assert.equal((await mcpRpc(baseUrl, secret)).status, 401);
 
     // Revoking twice is a 200 that reports the original revocation rather than
@@ -812,7 +812,7 @@ test("an issued token revoked while retrieval is in flight cannot emit its resul
       return originalListGenerations(...args);
     };
 
-    const inFlight = request(`/context/releases?repository=${encodeURIComponent(repository)}`, bearer(secret));
+    const inFlight = request(`/wiki/releases?repository=${encodeURIComponent(repository)}`, bearer(secret));
     await started;
     const revoked = await request(`/internal/context/tokens/${encodeURIComponent(tokenId)}/revoke`, {
       method: "POST",
@@ -845,14 +845,14 @@ test("a failing token store leaves the static credentials working and never retu
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
     await store.replaceRepositoryAccess(tenantId, holder, [repository]);
-    const token = await fetch(`${baseUrl}/context/releases`, {
+    const token = await fetch(`${baseUrl}/wiki/releases`, {
       headers: { authorization: `Bearer jina_atk_${"q".repeat(43)}` }
     });
     assert.equal(token.status, 401);
     assert.deepEqual(await token.json(), { error: "unauthorized" });
 
     assert.notEqual(
-      (await fetch(`${baseUrl}/context/releases`, { headers: { authorization: `Bearer ${contextToken}` } })).status,
+      (await fetch(`${baseUrl}/wiki/releases`, { headers: { authorization: `Bearer ${contextToken}` } })).status,
       401
     );
     assert.notEqual(
@@ -891,7 +891,7 @@ test("token store failures cannot put bearer secrets or hashes in responses or l
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
-    const verify = await fetch(`${baseUrl}/context/releases`, bearer(bearerSecret));
+    const verify = await fetch(`${baseUrl}/wiki/releases`, bearer(bearerSecret));
     assert.equal(verify.status, 401);
     assert.deepEqual(await verify.json(), { error: "unauthorized" });
 
@@ -978,10 +978,10 @@ test("a tenant principal is issuable for its own tenant, and is a tenant adminis
     // It reads, and it is a tenant administrator — so it sees the tenant's
     // repositories without needing ACL rows of its own, which is the whole reason
     // v1 needs this principal rather than a `user:` one.
-    assert.equal((await request("/context/releases", bearer(secret))).status, 200);
+    assert.equal((await request("/wiki/releases", bearer(secret))).status, 200);
     // requireTenantAdmin admits it where an ordinary principal is refused, so the
     // scope reaches the route and the role permits it.
-    assert.equal((await request("/context/metrics", bearer(secret))).status, 200);
+    assert.equal((await request("/wiki/metrics", bearer(secret))).status, 200);
 
     // A minted tenant principal still cannot exceed its scopes.
     const refusedRoute = await request("/board", bearer(secret));
@@ -990,7 +990,7 @@ test("a tenant principal is issuable for its own tenant, and is a tenant adminis
 
     // And the headers v1 sends today must agree with the row rather than being
     // ignored: this is the exact pair that 401s against the static credential.
-    const withHeaders = await request("/context/releases", {
+    const withHeaders = await request("/wiki/releases", {
       headers: {
         authorization: `Bearer ${secret}`,
         "x-jina-tenant-id": uuidTenant,

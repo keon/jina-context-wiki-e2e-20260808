@@ -91,7 +91,7 @@ export function ContextBrowser({
       })
       .then((response) => {
         if (response.release.id !== release.id || response.release.repository !== release.repository) {
-          throw new Error("The page belongs to a different context release.");
+          throw new Error("The page belongs to a different Wiki release.");
         }
         setDocument(response.document);
       })
@@ -132,7 +132,7 @@ export function ContextBrowser({
   }
 
   return (
-    <section className="knowledge-browser" aria-label="Context Wiki browser">
+    <section className="knowledge-browser" aria-label="Wiki browser">
       <aside className="knowledge-index">
         <header className="knowledge-index__header">
           <div>
@@ -265,7 +265,7 @@ function DocumentView({
   return (
     <article className="knowledge-document" id={`context-document-${encodeURIComponent(document.id)}`}>
       <header className="knowledge-document__heading">
-        <span>{document.kind ?? "Context page"}</span>
+        <span>{document.kind ?? "Wiki page"}</span>
         <h2>{document.title}</h2>
         <p>{document.summary}</p>
         <div>
@@ -405,7 +405,7 @@ export function ContextSearch({
         <label className="knowledge-search knowledge-search--large">
           <SearchIcon />
           <input
-            aria-label="Search Context Wiki"
+            aria-label="Search Wiki"
             placeholder={scope === "workspace" ? "Search every repository" : "Search this repository"}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -428,7 +428,8 @@ export function ContextSearch({
           </div>
           {response.failedRepositories > 0 ? (
             <p className="knowledge-search-note">
-              {response.failedRepositories} {response.failedRepositories === 1 ? "repository was" : "repositories were"} unavailable.
+              {response.failedRepositories} {response.failedRepositories === 1 ? "repository was" : "repositories were"}{" "}
+              unavailable.
             </p>
           ) : null}
           {response.hits.map(({ release: resultRelease, result }) => (

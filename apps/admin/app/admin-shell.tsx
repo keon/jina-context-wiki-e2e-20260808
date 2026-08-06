@@ -12,7 +12,7 @@ import {
 
 const NAV_ITEMS = [
   { label: "Overview", href: "#overview", icon: OverviewIcon },
-  { label: "Context releases", href: "#releases", icon: ReleasesIcon },
+  { label: "Wiki releases", href: "#releases", icon: ReleasesIcon },
   { label: "Build state", href: "#builds", icon: BuildsIcon },
   { label: "Index health", href: "#health", icon: HealthIcon },
   { label: "Derived context", href: "#documents", icon: DocumentsIcon }
@@ -173,7 +173,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
           <kbd>⌘ K</kbd>
         </button>
 
-        <nav className="admin-nav" aria-label="Context administration">
+        <nav className="admin-nav" aria-label="Wiki administration">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const current = item.href === activeSection;
@@ -228,7 +228,7 @@ export function AdminShell({ children }: { readonly children: ReactNode }) {
             >
               <MenuIcon />
             </button>
-            <span>Context administration</span>
+            <span>Wiki administration</span>
           </div>
           <span className="admin-live">
             <i aria-hidden="true" />

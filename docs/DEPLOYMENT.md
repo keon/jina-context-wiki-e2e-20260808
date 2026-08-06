@@ -326,9 +326,9 @@ coordinated release forward; do not attempt a mixed-version rollback.
 `INTERNAL_API_TOKEN` authorizes board, worker, and administration traffic. It is also the
 only service credential accepted by `POST /internal/context/access/sync`.
 `CONTEXT_API_TOKEN` is deliberately narrower: it is accepted only by
-`POST /context/search`, `POST /mcp`, and the read-only context routes
-`GET /context/releases`, `GET /context/list`, `GET /context/read`, and
-`GET /context/diff`. These routes return citation-grounded derived context, never a
+`POST /wiki/search`, `POST /mcp`, and the read-only context routes
+`GET /wiki/releases`, `GET /wiki/list`, `GET /wiki/read`, and
+`GET /wiki/diff`. These routes return citation-grounded derived context, never a
 generated answer. The credential is bound server-side to one tenant and principal, and
 every route is repository-filtered by that principal's access. Writes, administration,
 board traffic, and metrics stay with `INTERNAL_API_TOKEN`, and the method is checked so a
@@ -361,7 +361,7 @@ cannot select different ones. Other internal-token routes send `x-jina-principal
 shared-database callers also send `x-jina-tenant-id`. Browser MCP origins, when present,
 must exactly match `JINA_MCP_ALLOWED_ORIGINS`.
 
-Public `POST /context/search` and `POST /mcp` bodies are capped at 128 KiB. A search
+Public `POST /wiki/search` and `POST /mcp` bodies are capped at 128 KiB. A search
 query is limited to 4,000 characters and may select at most 25 tree nodes. MCP applies
 the same limits through `search_context`; `list_context`, `read_context`, and
 `diff_context` are read-only release operations.
@@ -623,7 +623,7 @@ implementation has been fixed without discarding completed checkpoints:
 
 ```bash
 curl -X POST \
-  "$JINA_API_URL/context/builds/$BUILD_TASK_ID/tasks/$FAILED_TASK_ID/retry" \
+  "$JINA_API_URL/wiki/builds/$BUILD_TASK_ID/tasks/$FAILED_TASK_ID/retry" \
   -H "Authorization: Bearer $CONTEXT_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"requestKey":"operator:incident-123:planner-v2","reason":"publication-plan dependency contract fixed"}'
@@ -1192,7 +1192,7 @@ prevented from receiving that static Context token.
 
 1. uses the internal credential and `mode:"merge"` to add the fixture repository to the
    query principal's ACL without replacing unrelated repositories;
-2. uses the distinct administrator to start `POST /context/build` with the configured
+2. uses the distinct administrator to start `POST /wiki/build` with the configured
    GitHub installation ID;
 3. follows the page-oriented Board graph through snapshot, planning, parallel
    page construction, bounded repair, PageIndex construction, and atomic
@@ -1292,7 +1292,7 @@ cannot strand obsolete older deliveries.
 A tenant administrator can force a successor generation from the latest checkpoint:
 
 ```sh
-curl -X POST "${JINA_API_URL}/context/rebuild" \
+curl -X POST "${JINA_API_URL}/wiki/rebuild" \
   -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   -H "X-Jina-Principal-Id: tenant:<uuid>" \
   -H "X-Jina-Tenant-Id: <uuid>" \

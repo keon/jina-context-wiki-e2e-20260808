@@ -1,20 +1,23 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { docs, docsBySlug } from "../../lib/docs";
 
 export function generateStaticParams() {
-  return docs.map((doc) => ({ slug: [doc.slug] }));
+  return [...docs.map((doc) => ({ slug: [doc.slug] })), { slug: ["context-wiki"] }];
 }
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string[] }> }): Promise<Metadata> {
   const { slug } = await params;
-  const doc = docsBySlug.get(slug.join("/"));
+  const requestedSlug = slug.join("/");
+  const doc = docsBySlug.get(requestedSlug === "context-wiki" ? "wiki" : requestedSlug);
   return doc ? { title: doc.title, description: doc.description } : {};
 }
 
 export default async function DocPage({ params }: { params: Promise<{ slug: string[] }> }) {
   const { slug } = await params;
-  const doc = docsBySlug.get(slug.join("/"));
+  const requestedSlug = slug.join("/");
+  if (requestedSlug === "context-wiki") redirect("/wiki");
+  const doc = docsBySlug.get(requestedSlug);
   if (!doc) notFound();
   return (
     <article className="doc">

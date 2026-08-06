@@ -94,7 +94,7 @@ export type TenantWorkOverview = DashboardWorkOverview;
 
 interface GraphRepositoryAccess { name: string; defaultBranch: string }
 
-/** A knowledge document as the context page lists it. */
+/** A knowledge document as the Wiki page lists it. */
 /** A build in flight, and the pages it has finished so far. */
 export interface ContextBuildProgress {
   buildId: string;
@@ -347,7 +347,7 @@ export class GraphApiClient {
     const signature = requiredHeader(headers, "x-hub-signature-256");
     try {
       const response = await this.sendWithDeadline(
-        `${this.config.apiUrl}/context/webhooks/github`,
+        `${this.config.apiUrl}/wiki/webhooks/github`,
         {
           method: "POST",
           headers: {
@@ -474,7 +474,7 @@ export class GraphApiClient {
             name: `jina-api delegated reader (${tenantId})`,
             // Every scope this client actually uses. A tenant principal is an
             // administrator, so Context permits `context:build`; without it an explicit
-            // dashboard build would 403 on /context/build.
+            // dashboard build would 403 on /wiki/build.
             scopes: ["context:read", "context:query", "context:build"],
             expiresInMinutes: ttlMinutes,
             administrator: true,
@@ -643,7 +643,7 @@ export class GraphApiClient {
         refSequence?: number;
         commitSha?: string;
       };
-    }>("/context/build", context, {
+    }>("/wiki/build", context, {
       method: "POST",
       body: {
         repository: input.repository,
@@ -673,7 +673,7 @@ export class GraphApiClient {
    * What a build has written so far.
    *
    * A derivation runs for up to ninety minutes and finishes its pages one at a
-   * time, so this is what the context page polls to show the wiki appearing
+   * time, so this is what the Wiki page polls to show the wiki appearing
    * rather than leaving somebody watching a spinner with nothing behind it.
    */
   async contextBuildProgress(
@@ -681,7 +681,7 @@ export class GraphApiClient {
     buildId: string,
   ): Promise<ContextBuildProgress> {
     const result = await this.request<ContextBuildProgress>(
-      `/context/builds/${encodeURIComponent(buildId)}/progress`,
+      `/wiki/builds/${encodeURIComponent(buildId)}/progress`,
       context,
     );
     const allowed = new Set(
@@ -719,7 +719,7 @@ export class GraphApiClient {
   /** Recent builds for the Models page's actionable provider-failure notice. */
   async listContextBuilds(context: RequestContext): Promise<ContextBuildSummary[]> {
     const result = await this.request<{ builds?: ContextBuildSummary[] }>(
-      "/context/builds",
+      "/wiki/builds",
       context,
     );
     const allowed = new Set(
@@ -776,8 +776,8 @@ export class GraphApiClient {
     repository?: string,
   ): Promise<unknown> {
     const path = repository
-      ? `/context/releases?repository=${encodeURIComponent(repository)}`
-      : "/context/releases";
+      ? `/wiki/releases?repository=${encodeURIComponent(repository)}`
+      : "/wiki/releases";
     return this.request(path, context);
   }
 
@@ -787,7 +787,7 @@ export class GraphApiClient {
     input: { repository: string; releaseId: string },
   ): Promise<unknown> {
     return this.request(
-      `/context/list?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(input.releaseId)}`,
+      `/wiki/list?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(input.releaseId)}`,
       context,
     );
   }
@@ -798,7 +798,7 @@ export class GraphApiClient {
     input: { repository: string; releaseId: string; documentId: string },
   ): Promise<unknown> {
     return this.request(
-      `/context/read?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(input.releaseId)}&document=${encodeURIComponent(input.documentId)}`,
+      `/wiki/read?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(input.releaseId)}&document=${encodeURIComponent(input.documentId)}`,
       context,
     );
   }
@@ -813,7 +813,7 @@ export class GraphApiClient {
       fromReleaseId: input.fromReleaseId,
       toReleaseId: input.toReleaseId,
     });
-    return this.request(`/context/diff?${query.toString()}`, context);
+    return this.request(`/wiki/diff?${query.toString()}`, context);
   }
 
   /** Run the Context engine's grounded document search for the dashboard. */
@@ -821,7 +821,7 @@ export class GraphApiClient {
     context: RequestContext,
     input: { repository: string; releaseId: string; query: string },
   ): Promise<unknown> {
-    return this.request("/context/search", context, {
+    return this.request("/wiki/search", context, {
       method: "POST",
       body: input,
     });
@@ -844,7 +844,7 @@ export class GraphApiClient {
     if (!repository) return false;
     try {
       const result = await this.request<{ releases: ContextRelease[] }>(
-        `/context/releases?repository=${encodeURIComponent(repository.name)}`,
+        `/wiki/releases?repository=${encodeURIComponent(repository.name)}`,
         context,
       );
       return result.releases.some(
@@ -877,8 +877,8 @@ export class GraphApiClient {
     if (repository && !allowed.has(repository.toLowerCase())) return [];
     const releases = await this.request<{ releases: ContextRelease[] }>(
       repository
-        ? `/context/releases?repository=${encodeURIComponent(repository)}`
-        : "/context/releases",
+        ? `/wiki/releases?repository=${encodeURIComponent(repository)}`
+        : "/wiki/releases",
       context,
     );
     const selected = repositories
@@ -900,7 +900,7 @@ export class GraphApiClient {
     const catalogs = await Promise.all(
       selected.map(async (release) => {
         const result = await this.request<{ documents: ContextCatalogDocument[] }>(
-          `/context/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`,
+          `/wiki/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`,
           context,
         );
         return result.documents.map((document) => contextDocumentSummary(release, document));
@@ -918,7 +918,7 @@ export class GraphApiClient {
       release: ContextRelease;
       document: ContextCatalogDocument & { bodyMarkdown: string };
     }>(
-      `/context/read?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(input.releaseId)}&document=${encodeURIComponent(input.documentId)}`,
+      `/wiki/read?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(input.releaseId)}&document=${encodeURIComponent(input.documentId)}`,
       context,
     );
     const allowed = new Set(normalizedRepositories(context.repositories).map((entry) => entry.name.toLowerCase()));
@@ -938,8 +938,8 @@ export class GraphApiClient {
     repository?: string,
   ): Promise<ContextGeneration[]> {
     const base = repository
-      ? `/context/generations?repository=${encodeURIComponent(repository)}&limit=200`
-      : "/context/generations?limit=200";
+      ? `/wiki/generations?repository=${encodeURIComponent(repository)}&limit=200`
+      : "/wiki/generations?limit=200";
     const generations: ContextGeneration[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < 100; page += 1) {
@@ -971,7 +971,7 @@ export class GraphApiClient {
   ): Promise<GraphDetail> {
     const { generation } = await this.request<{
       generation: ContextGeneration;
-    }>(`/context/generations/${encodeURIComponent(graphId)}`, context);
+    }>(`/wiki/generations/${encodeURIComponent(graphId)}`, context);
     if (
       !context.repositories.some(
         (repository) =>
@@ -983,11 +983,11 @@ export class GraphApiClient {
     const scope = `repository=${encodeURIComponent(generation.repository)}`;
     const [structure, documents] = await Promise.all([
       this.request<{ relations: ContextStructuralRelation[] }>(
-        `/context/structure?${scope}&ref=${encodeURIComponent(generation.ref)}`,
+        `/wiki/structure?${scope}&ref=${encodeURIComponent(generation.ref)}`,
         context,
       ),
       this.request<{ documents: ContextKnowledgeSummary[] }>(
-        `/context/documents?${scope}&limit=200`,
+        `/wiki/documents?${scope}&limit=200`,
         context,
       ),
     ]);
@@ -1013,7 +1013,7 @@ export class GraphApiClient {
         try {
           const result = await this.request<{
             document: { citations?: ContextKnowledgeCitation[] };
-          }>(`/context/documents/${encodeURIComponent(document.id)}`, context);
+          }>(`/wiki/documents/${encodeURIComponent(document.id)}`, context);
           return [document.id, result.document.citations ?? []] as const;
         } catch {
           // A document that cannot be read still belongs on the graph as a node.
@@ -1040,7 +1040,7 @@ export class GraphApiClient {
     );
     if (!repository) throw new ApiError(404, "graph not found");
     const response = await this.request<ContextQueryResponse>(
-      "/context/query",
+      "/wiki/query",
       context,
       {
         method: "POST",

@@ -18,32 +18,32 @@ test("allows dashboard reads, blocks internal and unknown routes", () => {
     "/api/events",
     "/api/overview",
     "/api/task-types",
-    "/api/context/metrics",
-    "/api/context/releases",
-    "/api/context/list",
-    "/api/context/read",
-    "/api/context/diff",
+    "/api/wiki/metrics",
+    "/api/wiki/releases",
+    "/api/wiki/list",
+    "/api/wiki/read",
+    "/api/wiki/diff",
     "/api/causal-graph",
     "/api/causal-graph/issues",
     "/api/causal-graph/issues/issue-1",
     "/api/causal-graph/issues/issue-1/trace",
-    "/api/context/builds",
-    "/api/context/builds/build-1/progress"
+    "/api/wiki/builds",
+    "/api/wiki/builds/build-1/progress"
   ]) {
     assert.equal(isAllowedDashboardApiRequest("GET", pathname, true), true, pathname);
   }
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/search", true), true);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/rebuild", true), false);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/knowledge/revision-1/review", true), false);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/build", true), false);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/erasure", true), false);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/wiki/search", true), true);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/wiki/rebuild", true), false);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/wiki/knowledge/revision-1/review", true), false);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/wiki/build", true), false);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/wiki/erasure", true), false);
   assert.equal(isAllowedDashboardApiRequest("GET", "/api/internal/worker/claim", true), false);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/board", true), false);
-  assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/generations", true), false);
-  assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/documents", true), false);
-  assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/structure", true), false);
-  assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/documents/revision-1/events", true), false);
-  assert.equal(isAllowedDashboardApiRequest("DELETE", "/api/context/documents/revision-1", true), false);
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/wiki/generations", true), false);
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/wiki/documents", true), false);
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/wiki/structure", true), false);
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/wiki/documents/revision-1/events", true), false);
+  assert.equal(isAllowedDashboardApiRequest("DELETE", "/api/wiki/documents/revision-1", true), false);
 });
 
 test("demo webhook endpoint is local-only", () => {
@@ -63,7 +63,7 @@ test("product API routes share /api while preserving their Clerk auth boundary",
     assert.equal(isProductDashboardApiRequest(method, pathname), true, pathname);
     assert.equal(isAllowedDashboardApiRequest(method, pathname, true), true, pathname);
   }
-  assert.equal(isProductDashboardApiRequest("GET", "/api/context/releases"), false);
+  assert.equal(isProductDashboardApiRequest("GET", "/api/wiki/releases"), false);
   assert.equal(isProductDashboardApiRequest("POST", "/api/internal/reviews/prepare"), false);
   assert.equal(isProductDashboardApiRequest("GET", "/api/v1/dashboard/me"), false);
   assert.equal(isAllowedDashboardApiRequest("GET", "/api/v1/dashboard/me", true), false);

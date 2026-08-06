@@ -79,7 +79,7 @@ const SECTION_TITLE: Record<NavKey, string> = {
   reviews: "Reviews",
   issues: "Issues",
   "task-board": "Task Board",
-  context: "Context Wiki",
+  context: "Wiki",
   "causal-graph": "Causal Graph",
   models: "Models",
   integrations: "Integrations",
@@ -97,8 +97,9 @@ function sectionForPath(pathname: string | null): NavKey {
   if (path.startsWith("/issues")) return "issues";
   if (path.startsWith("/board")) return "task-board";
   if (path.startsWith("/causal-graph")) return "causal-graph";
-  if (path.startsWith("/operations/context")) return "context";
-  if (path.startsWith("/context")) return "context";
+  if (path.startsWith("/wiki") || path.startsWith("/operations/context") || path.startsWith("/context")) {
+    return "context";
+  }
   if (path.startsWith("/models")) return "models";
   if (path.startsWith("/integrations")) return "integrations";
   if (path.startsWith("/organization/settings")) return "organization-settings";

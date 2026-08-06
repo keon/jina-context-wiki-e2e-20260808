@@ -671,7 +671,7 @@ export function createApp(config: AppConfig): Hono {
   // The context plane: knowledge documents, browsable as a tree. `logicalId` is
   // `kind:repository:subject`, so the client can build the folder structure
   // without a second round trip per level.
-  app.get("/dashboard/tenants/:tenantId/context/repositories", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/wiki/repositories", async (c) => {
     const startedAt = Date.now();
     const session = await requireDashboardSession(c, config);
     const sessionMs = Date.now() - startedAt;
@@ -696,7 +696,7 @@ export function createApp(config: AppConfig): Hono {
     return c.json({ repositories: context.repositories });
   });
 
-  app.get("/dashboard/tenants/:tenantId/context/documents", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/wiki/documents", async (c) => {
     const startedAt = Date.now();
     const session = await requireDashboardSession(c, config);
     const sessionMs = Date.now() - startedAt;
@@ -738,9 +738,9 @@ export function createApp(config: AppConfig): Hono {
     });
   });
 
-  // Polled by the context page while a build runs, so the wiki can be watched
+  // Polled by the Wiki page while a build runs, so the wiki can be watched
   // appearing instead of waiting on a spinner for ninety minutes.
-  app.get("/dashboard/tenants/:tenantId/context/builds/:buildId/progress", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/wiki/builds/:buildId/progress", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -750,7 +750,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/dashboard/tenants/:tenantId/context/builds/:buildId/cancel",
+    "/dashboard/tenants/:tenantId/wiki/builds/:buildId/cancel",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -763,7 +763,7 @@ export function createApp(config: AppConfig): Hono {
     },
   );
 
-  app.get("/dashboard/tenants/:tenantId/context/builds", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/wiki/builds", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -772,7 +772,7 @@ export function createApp(config: AppConfig): Hono {
     });
   });
 
-  app.get("/dashboard/tenants/:tenantId/context/documents/:documentId", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/wiki/documents/:documentId", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -790,10 +790,10 @@ export function createApp(config: AppConfig): Hono {
     });
   });
 
-  // Triggering a build from the context page. Same operation the indexing route
+  // Triggering a build from the Wiki page. Same operation the indexing route
   // performs; named for what it does rather than for the old graph framing.
   app.post(
-    "/dashboard/tenants/:tenantId/context/build",
+    "/dashboard/tenants/:tenantId/wiki/build",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
@@ -867,7 +867,7 @@ export function createApp(config: AppConfig): Hono {
     );
   });
 
-  app.get("/dashboard/tenants/:tenantId/operations/context/releases", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/wiki/releases", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -880,7 +880,7 @@ export function createApp(config: AppConfig): Hono {
     );
   });
 
-  app.get("/dashboard/tenants/:tenantId/operations/context/list", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/wiki/list", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -894,7 +894,7 @@ export function createApp(config: AppConfig): Hono {
     );
   });
 
-  app.get("/dashboard/tenants/:tenantId/operations/context/read", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/wiki/read", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -910,7 +910,7 @@ export function createApp(config: AppConfig): Hono {
     );
   });
 
-  app.get("/dashboard/tenants/:tenantId/operations/context/diff", async (c) => {
+  app.get("/dashboard/tenants/:tenantId/operations/wiki/diff", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
@@ -927,7 +927,7 @@ export function createApp(config: AppConfig): Hono {
   });
 
   app.post(
-    "/dashboard/tenants/:tenantId/operations/context/search",
+    "/dashboard/tenants/:tenantId/operations/wiki/search",
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {

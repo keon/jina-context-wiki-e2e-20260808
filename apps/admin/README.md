@@ -74,6 +74,6 @@ When `JINA_WEB_PRINCIPAL_ID` is a user principal, that principal must also be co
 as a tenant administrator by the API. The admin client fails before making a request when
 `INTERNAL_API_TOKEN` is configured without either principal-binding variable.
 
-The admin uses `/context/releases`, `/context/list`, `/context/builds`,
-`/context/builds/{id}/progress`, and `/context/metrics`. Metrics access is
+The admin uses `/wiki/releases`, `/wiki/list`, `/wiki/builds`,
+`/wiki/builds/{id}/progress`, and `/wiki/metrics`. Metrics access is
 tenant-administrator only.

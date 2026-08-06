@@ -26,8 +26,8 @@ test("keeps Context, causal graph, MCP, worker, and Jina health routes on the Co
   for (const path of [
     "/health",
     "/healthz",
-    "/context/build",
-    "/context/webhooks/github",
+    "/wiki/build",
+    "/wiki/webhooks/github",
     "/causal-graph",
     "/mcp",
     "/internal/context/tokens",

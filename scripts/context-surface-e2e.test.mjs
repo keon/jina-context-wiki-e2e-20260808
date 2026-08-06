@@ -229,7 +229,7 @@ test("surface harness validates the real HTTP and MCP contracts against a determ
       if (!queryCredential && !issuedCredential) return json(response, 401, { error: "unauthorized" });
       return handleMcp(request, response);
     }
-    if (url.pathname === "/context/metrics") {
+    if (url.pathname === "/wiki/metrics") {
       return internal ? json(response, 200, metrics) : json(response, 403, { code: "insufficient_scope" });
     }
     if (url.pathname === "/board") {
@@ -237,12 +237,12 @@ test("surface harness validates the real HTTP and MCP contracts against a determ
         ? json(response, 403, { code: "insufficient_scope" })
         : json(response, 200, { tasks: [] });
     }
-    if (url.pathname === "/context/build" && request.method === "POST") {
+    if (url.pathname === "/wiki/build" && request.method === "POST") {
       return issuedCredential
         ? json(response, 403, { code: "insufficient_scope" })
         : json(response, 401, { error: "unauthorized" });
     }
-    if (url.pathname === "/context/builds") {
+    if (url.pathname === "/wiki/builds") {
       if (!internal) return json(response, 403, { code: "insufficient_scope" });
       return json(response, 200, {
         builds: [
@@ -258,7 +258,7 @@ test("surface harness validates the real HTTP and MCP contracts against a determ
         ]
       });
     }
-    if (url.pathname === `/context/builds/${BUILD_ID}/progress`) {
+    if (url.pathname === `/wiki/builds/${BUILD_ID}/progress`) {
       if (!internal) return json(response, 403, { code: "insufficient_scope" });
       return json(response, 200, {
         buildId: BUILD_ID,
@@ -297,13 +297,13 @@ test("surface harness validates the real HTTP and MCP contracts against a determ
         updatedAt: release.publishedAt
       });
     }
-    if (url.pathname === "/context/releases") {
+    if (url.pathname === "/wiki/releases") {
       return json(response, 200, { releases: [release, oldRelease] });
     }
-    if (url.pathname === "/context/list") return json(response, 200, catalog);
-    if (url.pathname === "/context/read") return json(response, 200, read);
-    if (url.pathname === "/context/diff") return json(response, 200, diff);
-    if (url.pathname === "/context/search" && request.method === "POST") {
+    if (url.pathname === "/wiki/list") return json(response, 200, catalog);
+    if (url.pathname === "/wiki/read") return json(response, 200, read);
+    if (url.pathname === "/wiki/diff") return json(response, 200, diff);
+    if (url.pathname === "/wiki/search" && request.method === "POST") {
       return json(response, 200, search);
     }
     return json(response, 404, { error: "not found" });
@@ -332,7 +332,7 @@ test("surface harness validates the real HTTP and MCP contracts against a determ
     assert.equal(report.ui.status, "prerequisite");
     assert.equal(report.ui.prerequisite.length, 2);
     assert.ok(
-      requests.some((entry) => entry.path === "/context/metrics" && entry.authorization === `Bearer ${QUERY_TOKEN}`)
+      requests.some((entry) => entry.path === "/wiki/metrics" && entry.authorization === `Bearer ${QUERY_TOKEN}`)
     );
     assert.ok(requests.some((entry) => entry.tenant !== TENANT));
     assert.equal(
@@ -452,7 +452,7 @@ test("issued mode revokes and proves HTTP and MCP rejection when acceptance fail
     if (request.headers.authorization === `Bearer ${ISSUED_SECRET}` && revoked) {
       return json(response, 401, { error: "unauthorized" });
     }
-    if (url.pathname === "/context/releases") {
+    if (url.pathname === "/wiki/releases") {
       return json(response, 500, { error: "deliberate acceptance failure" });
     }
     return json(response, 404, { error: "not found" });
@@ -488,8 +488,7 @@ test("issued mode revokes and proves HTTP and MCP rejection when acceptance fail
     );
     assert.ok(
       paths.some(
-        (entry) =>
-          entry.path === "/context/releases" && entry.authorization === `Bearer ${ISSUED_SECRET}` && entry.revoked
+        (entry) => entry.path === "/wiki/releases" && entry.authorization === `Bearer ${ISSUED_SECRET}` && entry.revoked
       )
     );
     assert.ok(

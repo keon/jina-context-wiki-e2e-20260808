@@ -80,7 +80,7 @@ durable time-series store.
 
 ## Context health endpoint
 
-Tenant administrators can call `GET /context/metrics`. The response is backed by context
+Tenant administrators can call `GET /wiki/metrics`. The response is backed by context
 storage and includes:
 
 - `outboxDepthByConsumer` and `oldestPendingAt`;
@@ -207,7 +207,7 @@ curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   "${JINA_API_URL}/internal/observability"
 curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   -H "X-Jina-Principal-Id: user:operator@example.com" \
-  "${JINA_API_URL}/context/metrics"
+  "${JINA_API_URL}/wiki/metrics"
 ```
 
 The context metrics caller must use the internal credential and be configured as a tenant

@@ -593,7 +593,7 @@ test("tenant-scoped review routes require an authenticated tenant member", async
     `/dashboard/tenants/${tenantId}/review-runs`,
     `/dashboard/tenants/${tenantId}/review-runs/${runId}`,
     `/dashboard/tenants/${tenantId}/review-runs/${runId}/scenario-lineage/scenario-1`,
-    `/dashboard/tenants/${tenantId}/context/repositories`,
+    `/dashboard/tenants/${tenantId}/wiki/repositories`,
   ];
   for (const path of paths) {
     const response = await app.request(path);
@@ -673,7 +673,7 @@ test("PUT tenant model-settings rejects a non-JSON content type with 415", async
 test("POST Context build cancellation rejects cross-site requests before authentication", async () => {
   const app = createApp(testConfig());
   const response = await app.request(
-    "/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
+    "/dashboard/tenants/tenant-1/wiki/builds/build-1/cancel",
     {
       method: "POST",
       headers: { origin: "https://evil.example", ...JSON_HEADERS },
@@ -687,7 +687,7 @@ test("POST Context build cancellation rejects cross-site requests before authent
 test("POST Context build cancellation requires JSON before authentication", async () => {
   const app = createApp(testConfig());
   const response = await app.request(
-    "/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
+    "/dashboard/tenants/tenant-1/wiki/builds/build-1/cancel",
     {
       method: "POST",
       headers: { origin: "https://dash.example", "content-type": "text/plain" },
@@ -700,7 +700,7 @@ test("POST Context build cancellation requires JSON before authentication", asyn
 test("POST Context build cancellation requires an authenticated tenant admin", async () => {
   const app = createApp(testConfig());
   const response = await app.request(
-    "/dashboard/tenants/tenant-1/context/builds/build-1/cancel",
+    "/dashboard/tenants/tenant-1/wiki/builds/build-1/cancel",
     {
       method: "POST",
       headers: { origin: "https://dash.example", ...JSON_HEADERS },

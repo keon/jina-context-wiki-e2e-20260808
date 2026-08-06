@@ -165,8 +165,8 @@ server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
   });
   if (enableDevEndpoints) {
     console.log(`jina api server: http://localhost:${port}`);
-    console.log("  GET  /board  /events  /context/releases  /context/list  /context/read  /context/diff  /health");
-    console.log("  POST /context/build  /context/search  /mcp");
+    console.log("  GET  /board  /events  /wiki/releases  /wiki/list  /wiki/read  /wiki/diff  /health");
+    console.log("  POST /wiki/build  /wiki/search  /mcp");
     console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
     console.log("  POST /dev/webhooks/github  (unsigned local demo events)");
   }

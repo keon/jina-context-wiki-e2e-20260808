@@ -882,7 +882,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await acceptSignedWebhook(request, response);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/context/webhooks/github") {
+    if (request.method === "POST" && url.pathname === "/wiki/webhooks/github") {
       await acceptSignedContextWebhook(request, response);
       return;
     }
@@ -1026,7 +1026,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
       return;
     }
-    if (url.pathname.startsWith("/context/") || url.pathname.startsWith("/causal-graph")) {
+    if (url.pathname.startsWith("/wiki/") || url.pathname.startsWith("/causal-graph")) {
       requireBoundPrincipal(principal, config);
     }
     if (request.method === "POST" && url.pathname === "/causal-graph/build") {
@@ -1142,7 +1142,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/context/build") {
+    if (request.method === "POST" && url.pathname === "/wiki/build") {
       requireTenantAdmin(principal);
       const body = parseJsonObject(await readRawBody(request));
       const repository = requiredRepositoryName(body.repository, "repository");
@@ -1756,7 +1756,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/context/search") {
+    if (request.method === "POST" && url.pathname === "/wiki/search") {
       await config.contextQuotaService?.admitQuery({
         tenantId: principal.tenantId,
         requestId: quotaRequestId(request)
@@ -1857,7 +1857,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, result);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/context/releases") {
+    if (request.method === "GET" && url.pathname === "/wiki/releases") {
       await config.contextQuotaService?.admitQuery({
         tenantId: principal.tenantId,
         requestId: quotaRequestId(request)
@@ -1880,7 +1880,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, releases);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/context/list") {
+    if (request.method === "GET" && url.pathname === "/wiki/list") {
       await config.contextQuotaService?.admitQuery({
         tenantId: principal.tenantId,
         requestId: quotaRequestId(request)
@@ -1899,7 +1899,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, result);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/context/read") {
+    if (request.method === "GET" && url.pathname === "/wiki/read") {
       await config.contextQuotaService?.admitQuery({
         tenantId: principal.tenantId,
         requestId: quotaRequestId(request)
@@ -1920,7 +1920,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, result);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/context/diff") {
+    if (request.method === "GET" && url.pathname === "/wiki/diff") {
       await config.contextQuotaService?.admitQuery({
         tenantId: principal.tenantId,
         requestId: quotaRequestId(request)
@@ -1945,7 +1945,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // reachable by id, which meant a build was watchable only by whoever had
     // just started it -- a webhook build, or one started from another tab, was
     // invisible while it ran.
-    if (request.method === "GET" && url.pathname === "/context/builds") {
+    if (request.method === "GET" && url.pathname === "/wiki/builds") {
       await reload();
       const allowed = isTenantAdmin(principal) ? undefined : new Set(await permittedRepositories(principal));
       const activeOnly = url.searchParams.get("status") === "active";
@@ -1976,8 +1976,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // One page's text before the build that wrote it has committed. Kept out of
     // the listing, which is polled every few seconds, and fetched for a page
     // somebody has actually opened.
-    if (request.method === "GET" && url.pathname.startsWith("/context/builds/") && url.pathname.endsWith("/page")) {
-      const buildId = url.pathname.slice("/context/builds/".length, -"/page".length);
+    if (request.method === "GET" && url.pathname.startsWith("/wiki/builds/") && url.pathname.endsWith("/page")) {
+      const buildId = url.pathname.slice("/wiki/builds/".length, -"/page".length);
       const documentPath = requiredDerivationProgressDocumentPath(url.searchParams.get("path"), "path");
       if (!buildId) throw invalidRequest("build id is required");
       await reload();
@@ -1999,8 +1999,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // What a build has written so far. Readable with the same scope as the
     // finished catalog, because watching a build is a read of the tenant's own
     // context rather than an administrative action.
-    if (request.method === "GET" && url.pathname.startsWith("/context/builds/") && url.pathname.endsWith("/progress")) {
-      const buildId = url.pathname.slice("/context/builds/".length, -"/progress".length);
+    if (request.method === "GET" && url.pathname.startsWith("/wiki/builds/") && url.pathname.endsWith("/progress")) {
+      const buildId = url.pathname.slice("/wiki/builds/".length, -"/progress".length);
       if (!buildId) throw notFound("build not found");
       await reload();
       const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, buildId);
@@ -2061,7 +2061,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
 
-    if (request.method === "GET" && url.pathname === "/context/metrics") {
+    if (request.method === "GET" && url.pathname === "/wiki/metrics") {
       requireTenantAdmin(principal);
       json(response, 200, await contextMetrics(principal.tenantId, url.searchParams.get("repository") ?? undefined));
       return;
@@ -4648,25 +4648,25 @@ function requireIssuedTokenScope(principal: Principal, required: ContextScope): 
  */
 function requiredScope(pathname: string, method: string): ContextScope | "internal-only" {
   if (method === "POST") {
-    if (pathname === "/mcp" || pathname === "/context/search") return "context:query";
-    if (pathname === "/context/build" || pathname === "/causal-graph/build") return "context:build";
+    if (pathname === "/mcp" || pathname === "/wiki/search") return "context:query";
+    if (pathname === "/wiki/build" || pathname === "/causal-graph/build") return "context:build";
     if (contextBuildRetryRoute(pathname) || contextTaskRetryRoute(pathname) || contextBuildTokenBudgetRoute(pathname)) {
       return "context:admin";
     }
     return "internal-only";
   }
   if (method !== "GET") return "internal-only";
-  if (pathname === "/context/metrics") return "context:admin";
+  if (pathname === "/wiki/metrics") return "context:admin";
   if (
-    pathname === "/context/builds" ||
-    (pathname.startsWith("/context/builds/") && (pathname.endsWith("/progress") || pathname.endsWith("/page")))
+    pathname === "/wiki/builds" ||
+    (pathname.startsWith("/wiki/builds/") && (pathname.endsWith("/progress") || pathname.endsWith("/page")))
   ) {
     return "context:read";
   }
-  return pathname === "/context/releases" ||
-    pathname === "/context/list" ||
-    pathname === "/context/read" ||
-    pathname === "/context/diff" ||
+  return pathname === "/wiki/releases" ||
+    pathname === "/wiki/list" ||
+    pathname === "/wiki/read" ||
+    pathname === "/wiki/diff" ||
     pathname === "/causal-graph/issues" ||
     pathname === "/causal-graph" ||
     pathname.startsWith("/causal-graph/issues/")
@@ -6424,24 +6424,24 @@ const METRICS_ROUTES = new Set([
   "/healthz",
   "/task-types",
   "/webhooks/github",
-  "/context/webhooks/github",
+  "/wiki/webhooks/github",
   "/dev/webhooks/github",
   "/mcp",
   "/board",
   "/overview",
   "/events",
-  "/context/build",
+  "/wiki/build",
   "/causal-graph/build",
-  "/context/search",
+  "/wiki/search",
   "/causal-graph/issues",
   "/causal-graph/issues/:id",
   "/causal-graph/issues/:id/trace",
   "/causal-graph",
-  "/context/releases",
-  "/context/list",
-  "/context/read",
-  "/context/diff",
-  "/context/metrics",
+  "/wiki/releases",
+  "/wiki/list",
+  "/wiki/read",
+  "/wiki/diff",
+  "/wiki/metrics",
   "/internal/context/access/sync",
   "/internal/context/review-access",
   "/internal/context/tokens",
@@ -6465,14 +6465,14 @@ const METRICS_ROUTES = new Set([
 ]);
 
 function metricsRoute(pathname: string): string {
-  if (pathname === "/context/builds") return "/context/builds";
+  if (pathname === "/wiki/builds") return "/wiki/builds";
   if (pathname === "/causal-graph/build") return "/causal-graph/build";
   if (causalGraphIssueTraceRoute(pathname)) return "/causal-graph/issues/:id/trace";
   if (routeId(pathname, "/causal-graph/issues/")) return "/causal-graph/issues/:id";
-  if (pathname.startsWith("/context/builds/") && pathname.endsWith("/progress")) return "/context/builds/:id/progress";
-  if (contextBuildRetryRoute(pathname)) return "/context/builds/:id/retry";
-  if (contextTaskRetryRoute(pathname)) return "/context/builds/:id/tasks/:taskId/retry";
-  if (contextBuildTokenBudgetRoute(pathname)) return "/context/builds/:id/token-budget";
+  if (pathname.startsWith("/wiki/builds/") && pathname.endsWith("/progress")) return "/wiki/builds/:id/progress";
+  if (contextBuildRetryRoute(pathname)) return "/wiki/builds/:id/retry";
+  if (contextTaskRetryRoute(pathname)) return "/wiki/builds/:id/tasks/:taskId/retry";
+  if (contextBuildTokenBudgetRoute(pathname)) return "/wiki/builds/:id/token-budget";
   if (routeId(pathname, "/internal/context/builds/", "/worker-completions")) {
     return "/internal/context/builds/:id/worker-completions";
   }
@@ -6490,8 +6490,8 @@ function isReadOnlyContextRoute(method: string | undefined, pathname: string): b
       (pathname === "/health" ||
         pathname === "/healthz" ||
         pathname === "/task-types" ||
-        pathname.startsWith("/context/"))) ||
-    (method === "POST" && (pathname === "/context/search" || pathname === "/mcp"))
+        pathname.startsWith("/wiki/"))) ||
+    (method === "POST" && (pathname === "/wiki/search" || pathname === "/mcp"))
   );
 }
 
@@ -6507,18 +6507,18 @@ function routeId(pathname: string, prefix: string, suffix = ""): string | undefi
 }
 
 function contextTaskRetryRoute(pathname: string): { readonly buildId: string; readonly taskId: string } | undefined {
-  const match = /^\/context\/builds\/([^/]+)\/tasks\/([^/]+)\/retry$/.exec(pathname);
+  const match = /^\/wiki\/builds\/([^/]+)\/tasks\/([^/]+)\/retry$/.exec(pathname);
   if (!match?.[1] || !match[2]) return undefined;
   return { buildId: match[1], taskId: match[2] };
 }
 
 function contextBuildRetryRoute(pathname: string): string | undefined {
-  const match = /^\/context\/builds\/([^/]+)\/retry$/.exec(pathname);
+  const match = /^\/wiki\/builds\/([^/]+)\/retry$/.exec(pathname);
   return match?.[1];
 }
 
 function contextBuildTokenBudgetRoute(pathname: string): string | undefined {
-  const match = /^\/context\/builds\/([^/]+)\/token-budget$/.exec(pathname);
+  const match = /^\/wiki\/builds\/([^/]+)\/token-budget$/.exec(pathname);
   return match?.[1];
 }
 

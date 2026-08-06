@@ -94,14 +94,14 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
   };
 
   const repositoryQuery = query({ repository: config.repository });
-  const releasesResponse = await ok(`/context/releases?${repositoryQuery}`);
+  const releasesResponse = await ok(`/wiki/releases?${repositoryQuery}`);
   const releases = array(releasesResponse.releases, "releases");
   const scopedReleases = releases.filter(
     (release) => object(release, "release").repository === config.repository && release.ref === config.ref
   );
   assert.ok(scopedReleases.length > 0, `no release exists for ${config.repository}@${config.ref}`);
 
-  const buildsResponse = await ok("/context/builds", { credential: "internal" });
+  const buildsResponse = await ok("/wiki/builds", { credential: "internal" });
   const builds = array(buildsResponse.builds, "builds");
   const build = object(
     builds.find((candidate) => object(candidate, "build").id === config.buildId),
@@ -111,7 +111,7 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
   assert.equal(build.ref, config.ref);
   assert.equal(build.status, "completed", `build ${config.buildId} is not completed`);
 
-  const progress = await ok(`/context/builds/${encodeURIComponent(config.buildId)}/progress`, {
+  const progress = await ok(`/wiki/builds/${encodeURIComponent(config.buildId)}/progress`, {
     credential: "internal"
   });
   assert.equal(progress.status, "completed");
@@ -144,13 +144,13 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
   assert.equal(release.ref, config.ref);
   if (typeof build.commitSha === "string") assert.equal(release.commitSha, build.commitSha);
 
-  const metricsBefore = await ok("/context/metrics", { credential: "internal" });
+  const metricsBefore = await ok("/wiki/metrics", { credential: "internal" });
   assertMetrics(metricsBefore);
   assert.equal(object(object(metricsBefore.quotas, "metrics.quotas").active, "quotas.active").modelTasks, 0);
 
   // These three operations are deterministic projection reads. The model quota
   // ledger must remain byte-for-byte stable across them.
-  const list = await ok(`/context/list?${query({ repository: config.repository, releaseId: release.id })}`);
+  const list = await ok(`/wiki/list?${query({ repository: config.repository, releaseId: release.id })}`);
   assert.equal(object(list.release, "list.release").id, release.id);
   const documents = array(list.documents, "list.documents").map((document) => object(document, "document"));
   assert.ok(documents.length > 0, "release contains no derived context documents");
@@ -159,7 +159,7 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
 
   const firstDocument = documents[0];
   const read = await ok(
-    `/context/read?${query({
+    `/wiki/read?${query({
       repository: config.repository,
       releaseId: release.id,
       document: firstDocument.id
@@ -175,7 +175,7 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
     scopedReleases.find((candidate) => object(candidate, "release").id !== release.id) ??
     release;
   const diff = await ok(
-    `/context/diff?${query({
+    `/wiki/diff?${query({
       repository: config.repository,
       fromReleaseId: previousRelease.id,
       toReleaseId: release.id
@@ -193,7 +193,7 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
   assert.ok(citationStats.urls > 0, "public context has no provider citation URLs");
   assert.ok(citationStats.ranges > 0, "public context has no exact source line ranges");
 
-  const metricsAfterProjectionReads = await ok("/context/metrics", { credential: "internal" });
+  const metricsAfterProjectionReads = await ok("/wiki/metrics", { credential: "internal" });
   assertMetrics(metricsAfterProjectionReads);
   assert.deepEqual(
     modelQuota(metricsAfterProjectionReads),
@@ -212,7 +212,7 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
   }
 
   const searchQuery = config.searchQuery ?? `${firstDocument.title ?? firstDocument.logicalId} architecture`;
-  const search = await ok("/context/search", {
+  const search = await ok("/wiki/search", {
     method: "POST",
     body: {
       repository: config.repository,
@@ -243,11 +243,11 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
     timeoutMs: config.timeoutMs
   });
 
-  const queryMetrics = await request("/context/metrics");
+  const queryMetrics = await request("/wiki/metrics");
   assert.ok([401, 403].includes(queryMetrics.status), `query token reached admin metrics: ${queryMetrics.status}`);
   const queryBoard = await request("/board");
   assert.ok([401, 403].includes(queryBoard.status), `query token reached Board internals: ${queryBoard.status}`);
-  const noToken = await fetchImplementation(new URL(`/context/releases?${repositoryQuery}`, config.apiUrl), {
+  const noToken = await fetchImplementation(new URL(`/wiki/releases?${repositoryQuery}`, config.apiUrl), {
     headers: {
       "x-jina-tenant-id": config.tenantId,
       "x-jina-principal-id": config.principalId
@@ -257,7 +257,7 @@ export async function runContextSurfaceAcceptance(options, dependencies = {}) {
   assert.equal(noToken.status, 401, "release catalog accepted a request without a credential");
 
   const wrongTenant = wrongTenantId(config.tenantId);
-  const isolated = await request(`/context/releases?${repositoryQuery}`, {
+  const isolated = await request(`/wiki/releases?${repositoryQuery}`, {
     credential: "query",
     tenantId: wrongTenant
   });
@@ -422,7 +422,7 @@ async function runWithIssuedCredential(config, dependencies) {
 }
 
 async function verifyIssuedCredentialBoundaries(fetchImplementation, config, issued) {
-  const build = await jsonRequest(fetchImplementation, config, "/context/build", {
+  const build = await jsonRequest(fetchImplementation, config, "/wiki/build", {
     method: "POST",
     token: issued.secret,
     principalId: issued.principalId,
@@ -430,7 +430,7 @@ async function verifyIssuedCredentialBoundaries(fetchImplementation, config, iss
   });
   assert.equal(build.status, 403, `read/query token reached build: HTTP ${build.status}`);
 
-  const admin = await jsonRequest(fetchImplementation, config, "/context/metrics", {
+  const admin = await jsonRequest(fetchImplementation, config, "/wiki/metrics", {
     token: issued.secret,
     principalId: issued.principalId
   });
@@ -456,7 +456,7 @@ async function verifyIssuedCredentialBoundaries(fetchImplementation, config, iss
   const crossTenant = await jsonRequest(
     fetchImplementation,
     config,
-    `/context/releases?${query({
+    `/wiki/releases?${query({
       repository: config.repository
     })}`,
     {
@@ -497,7 +497,7 @@ async function revokeAndProveIssuedCredential(fetchImplementation, config, issue
   const http = await jsonRequest(
     fetchImplementation,
     config,
-    `/context/releases?${query({
+    `/wiki/releases?${query({
       repository: config.repository
     })}`,
     {
@@ -639,14 +639,14 @@ async function verifyUiSurfaces(config, input) {
       assert.equal(response.status, 200, `dashboard ${path}: HTTP ${response.status}: ${text.slice(0, 500)}`);
       return JSON.parse(text);
     };
-    const releases = await dashboardRequest(`/api/context/releases?${query({ repository: config.repository })}`);
+    const releases = await dashboardRequest(`/api/wiki/releases?${query({ repository: config.repository })}`);
     assert.ok(array(releases.releases, "dashboard releases").some((release) => release.id === input.releaseId));
     const list = await dashboardRequest(
-      `/api/context/list?${query({ repository: config.repository, releaseId: input.releaseId })}`
+      `/api/wiki/list?${query({ repository: config.repository, releaseId: input.releaseId })}`
     );
     assert.ok(array(list.documents, "dashboard documents").length > 0);
-    await dashboardRequest("/api/context/metrics");
-    const progress = await dashboardRequest(`/api/context/builds/${encodeURIComponent(config.buildId)}/progress`);
+    await dashboardRequest("/api/wiki/metrics");
+    const progress = await dashboardRequest(`/api/wiki/builds/${encodeURIComponent(config.buildId)}/progress`);
     assert.equal(progress.status, "completed");
     result.dashboard = "passed";
   }

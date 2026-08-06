@@ -2,7 +2,7 @@ import type { GraphCitation, GraphDetail, GraphEdge, GraphNode, GraphQueryResult
 
 /**
  * Shapes the context engine's responses into the two-plane graph the dashboard
- * already renders. The engine has no node collection: `/context/structure`
+ * already renders. The engine has no node collection: `/wiki/structure`
  * returns an edge list over `from`/`to` strings, and knowledge lives in cited
  * documents. Nodes are therefore synthesized here, files and symbols forming the
  * code plane and documents the knowledge plane, linked to the files they cite.

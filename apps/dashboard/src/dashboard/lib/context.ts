@@ -2,23 +2,23 @@ import { apiUrl } from "./api";
 
 export interface SelectedTenant { tenantId: string }
 
-export function contextRepositoriesUrl(selected: SelectedTenant): string {
+export function wikiRepositoriesUrl(selected: SelectedTenant): string {
   return apiUrl(
-    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/repositories`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/wiki/repositories`,
   );
 }
 
-export function contextBuildUrl(selected: SelectedTenant): string {
+export function wikiBuildUrl(selected: SelectedTenant): string {
   return apiUrl(
-    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/build`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/wiki/build`,
   );
 }
 
-export function contextBuildProgressUrl(
+export function wikiBuildProgressUrl(
   selected: SelectedTenant,
   buildId: string,
 ): string {
   return apiUrl(
-    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/context/builds/${encodeURIComponent(buildId)}/progress`,
+    `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/wiki/builds/${encodeURIComponent(buildId)}/progress`,
   );
 }

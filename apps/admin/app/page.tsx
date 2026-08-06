@@ -25,7 +25,7 @@ const HEADINGS = {
   releases: "Published releases",
   builds: "Build and checkpoint state",
   checkpoints: "Build and checkpoint state — checkpoint counts",
-  health: "Context index health",
+  health: "Wiki index health",
   documents: "Agent-derived context"
 } as const;
 
@@ -120,7 +120,7 @@ export default async function ContextAdminPage({
       <header className="admin-page-heading">
         <div>
           <span className="admin-eyebrow">Repository context</span>
-          <h1>Context operations</h1>
+          <h1>Wiki operations</h1>
           <p>Monitor immutable releases, resumable builds, index health, and agent-derived context.</p>
         </div>
         <span className="admin-scope-badge">All context</span>
@@ -142,7 +142,7 @@ export default async function ContextAdminPage({
         </ErrorState>
       ) : null}
       <StatRow>
-        <Stat label="Context releases" value={metricsKnown ? metrics.publishedGenerationCount : undefined} />
+        <Stat label="Wiki releases" value={metricsKnown ? metrics.publishedGenerationCount : undefined} />
         <Stat label="Repositories" value={repository ? 1 : repositoriesKnown ? repositories.length : undefined} />
         <Stat label="Derived context docs" value={isLoaded(documentsSection) ? currentDocuments : undefined} />
         <Stat label="Projection backlog" value={metricsKnown ? pending : undefined} />
@@ -203,7 +203,7 @@ export default async function ContextAdminPage({
                 <th scope="col">Commit</th>
                 <th scope="col">Published</th>
                 <th scope="col">Publication</th>
-                <th scope="col">Context</th>
+                <th scope="col">Wiki</th>
                 <th scope="col">Release ID</th>
               </tr>
             </thead>
@@ -248,7 +248,7 @@ export default async function ContextAdminPage({
         {!isLoaded(buildsSection) ? (
           <SectionError section={buildsSection} />
         ) : visibleBuilds.length === 0 ? (
-          <EmptyState>No Context builds are visible for this repository scope.</EmptyState>
+          <EmptyState>No Wiki builds are visible for this repository scope.</EmptyState>
         ) : (
           <>
             {!isLoaded(buildProgressSection) ? <SectionError section={buildProgressSection} /> : null}
@@ -458,7 +458,7 @@ export default async function ContextAdminPage({
             </tbody>
           </TableScroll>
         ) : (
-          <EmptyState>No published Context index checkpoint is available.</EmptyState>
+          <EmptyState>No published Wiki index checkpoint is available.</EmptyState>
         )}
       </section>
 

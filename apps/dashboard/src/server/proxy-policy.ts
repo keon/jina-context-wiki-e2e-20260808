@@ -10,18 +10,18 @@ export function isAllowedDashboardApiRequest(
       pathname === "/api/events" ||
       pathname === "/api/overview" ||
       pathname === "/api/task-types" ||
-      pathname === "/api/context/metrics" ||
-      pathname === "/api/context/releases" ||
-      pathname === "/api/context/list" ||
-      pathname === "/api/context/read" ||
-      pathname === "/api/context/diff" ||
+      pathname === "/api/wiki/metrics" ||
+      pathname === "/api/wiki/releases" ||
+      pathname === "/api/wiki/list" ||
+      pathname === "/api/wiki/read" ||
+      pathname === "/api/wiki/diff" ||
       pathname === "/api/causal-graph" ||
       pathname === "/api/causal-graph/issues" ||
       /^\/api\/causal-graph\/issues\/[^/]+(?:\/trace)?$/.test(pathname) ||
-      pathname === "/api/context/builds" ||
-      /^\/api\/context\/builds\/[^/]+\/progress$/.test(pathname));
+      pathname === "/api/wiki/builds" ||
+      /^\/api\/wiki\/builds\/[^/]+\/progress$/.test(pathname));
   const allowedLocalDemo = !hasInternalApiToken && method === "POST" && pathname === "/api/dev/webhooks/github";
-  const allowedContextSearch = method === "POST" && pathname === "/api/context/search";
+  const allowedContextSearch = method === "POST" && pathname === "/api/wiki/search";
 
   return allowedRead || allowedLocalDemo || allowedContextSearch;
 }
