@@ -1,6 +1,8 @@
 import {
   applyCommand,
   createEmptyBoardState,
+  findTask,
+  isTerminalTaskStatus,
   reduceBoard,
   supersedeEpochTasks,
   type BoardState,
@@ -129,6 +131,15 @@ function ingestPullRequest(
     ...(webhook.sender?.accountType ? { senderAccountType: webhook.sender.accountType } : {}),
     needsExternalContext: false
   });
+  // A settled epoch's root survives compaction as an idempotency tombstone
+  // while its child graph is pruned. Task-level dedupe alone cannot stop a
+  // replayed delivery for the same epoch from recreating the pruned review
+  // child and dispatching a duplicate run, so a terminal root ends intake for
+  // this epoch here.
+  const existingRoot = findTask(board, plan.rootTaskId);
+  if (existingRoot && isTerminalTaskStatus(existingRoot.status)) {
+    return state;
+  }
   board = applyPrReviewPlan(board, plan, {
     actor: githubActor(webhook, options.deliveryId),
     now: options.now,
