@@ -30,6 +30,7 @@ migration_job="jina-v2-migrate-staging"
 billing_retry_scheduler_job="jina-billing-retry-staging"
 github_webhook_inbox_scheduler_job="jina-github-webhook-inbox-staging"
 causal_activation_job="jina-causal-graph-release-activate-staging"
+worker_release_activation_job="jina-worker-release-activate-staging"
 api_service_account="jina-api-staging@${project}.iam.gserviceaccount.com"
 scheduler_oidc_service_account="${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT:-${api_service_account}}"
 context_worker_service_account="jina-context-worker-staging@${project}.iam.gserviceaccount.com"
@@ -55,6 +56,7 @@ github_app_private_key_secret="jina-staging-github-app-private-key"
 github_clone_token_secret="jina-staging-github-clone-token"
 openai_secret="jina-staging-openai-api-key"
 causal_release_credential_secret="jina-staging-causal-graph-worker-release-credential"
+worker_release_credential_secret="jina-staging-worker-release-credential"
 review_trigger_secret="${JINA_REVIEW_TRIGGER_SECRET:-jina-staging-trigger-secret-key}"
 review_board_pipeline_mode="${JINA_REVIEW_BOARD_PIPELINE_MODE:-v1}"
 review_board_v2_repositories="${JINA_REVIEW_BOARD_V2_REPOSITORIES:-}"
@@ -113,6 +115,7 @@ required_staging_values=(
   "${billing_retry_scheduler_job}"
   "${github_webhook_inbox_scheduler_job}"
   "${causal_activation_job}"
+  "${worker_release_activation_job}"
   "${owner_password_secret}"
   "${runtime_password_secret}"
   "${webhook_secret}"
@@ -132,6 +135,7 @@ required_staging_values=(
   "${github_clone_token_secret}"
   "${openai_secret}"
   "${causal_release_credential_secret}"
+  "${worker_release_credential_secret}"
 )
 if [[ "${project}" == "jina-463721" || "${project}" == "jina-v2" ]]; then
   printf 'Refusing to deploy staging services into production project: %s\n' "${project}" >&2
@@ -187,6 +191,7 @@ for secret_name in \
   "${openai_secret}"; do
   gcloud secrets versions describe latest --secret="${secret_name}" --project="${project}" >/dev/null
 done
+gcloud secrets describe "${worker_release_credential_secret}" --project="${project}" >/dev/null
 gcloud storage buckets describe "gs://${artifact_bucket}" --project="${project}" >/dev/null
 gcloud storage buckets describe "gs://${review_artifact_bucket}" --project="${project}" >/dev/null
 
@@ -245,15 +250,48 @@ print(release_id, version)
 '
 }
 
+main_release_state() {
+  local context_revision="$1"
+  local task_revision="$2"
+  local context_description task_description
+  context_description="$(gcloud run revisions describe "${context_revision}" \
+    --project="${project}" --region="${region}" --format=json)"
+  task_description="$(gcloud run revisions describe "${task_revision}" \
+    --project="${project}" --region="${region}" --format=json)"
+  CONTEXT_DESCRIPTION="${context_description}" TASK_DESCRIPTION="${task_description}" python3 -c '
+import json
+import os
+
+def release(description):
+    environment = json.loads(description).get("spec", {}).get("containers", [])[0].get("env", [])
+    release_id = next((item.get("value", "") for item in environment if item.get("name") == "JINA_WORKER_RELEASE_ID"), "")
+    credential = next((item.get("valueFrom", {}).get("secretKeyRef", {}) for item in environment if item.get("name") == "JINA_WORKER_RELEASE_CREDENTIAL"), {})
+    return release_id, credential.get("name", ""), credential.get("key", "")
+
+context = release(os.environ["CONTEXT_DESCRIPTION"])
+task = release(os.environ["TASK_DESCRIPTION"])
+if context == ("", "", "") and task == ("", "", ""):
+    print("disabled")
+elif context == task and context[0] and context[1] == "jina-staging-worker-release-credential" and context[2].isdigit():
+    print("enabled", context[0], context[2])
+else:
+    raise SystemExit(f"serving Context/task workers do not expose one restorable release identity: context={context}, task={task}")
+'
+}
+
 previous_api_revision="$(serving_revision "${api_service}")"
 previous_context_revision="$(serving_revision "${context_worker_service}")"
 previous_task_revision="$(serving_revision "${task_worker_service}")"
 previous_causal_revision="$(serving_revision "${causal_worker_service}")"
+read -r previous_main_release_mode previous_main_release_id previous_main_secret_version \
+  < <(main_release_state "${previous_context_revision}" "${previous_task_revision}")
 read -r previous_causal_release_id previous_causal_secret_version \
   < <(causal_release_state "${previous_causal_revision}")
 
 traffic_mutation_started="false"
 causal_deploy_started="false"
+main_release_mutation_started="false"
+release_secret_version=""
 
 restore_revision() {
   local service="$1"
@@ -281,6 +319,55 @@ restore_causal_release_control() {
     --project="${project}" --region="${region}" --wait
 }
 
+activate_main_release() {
+  local mode="$1"
+  local release_id="$2"
+  local secret_version="$3"
+  local context_revision="$4"
+  local task_revision="$5"
+  local enabled="false"
+  local activation_environment
+  if [[ "${mode}" == "enabled" ]]; then
+    enabled="true"
+  elif [[ "${mode}" != "disabled" ]]; then
+    printf 'Unsupported worker release activation mode: %s\n' "${mode}" >&2
+    return 2
+  fi
+  activation_environment="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${owner_user}~RUNTIME_DB_USER=${runtime_user}~JINA_WORKER_RELEASE_ENABLED=${enabled}"
+  if [[ "${enabled}" == "true" ]]; then
+    activation_environment+="~JINA_WORKER_RELEASE_ID=${release_id}~JINA_CONTEXT_WORKER_REVISION=${context_revision}~JINA_TASK_WORKER_REVISION=${task_revision}"
+  fi
+  gcloud run jobs deploy "${worker_release_activation_job}" \
+    --project="${project}" \
+    --region="${region}" \
+    --image="${api_image}" \
+    --service-account="${migration_service_account}" \
+    --set-cloudsql-instances="${sql_instance}" \
+    --set-env-vars="${activation_environment}" \
+    --set-secrets="DB_PASS=${owner_password_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${secret_version}" \
+    --args=node_modules/@jina/db/dist/activate-worker-release.js \
+    --tasks=1 \
+    --max-retries=0 \
+    --task-timeout=10m \
+    --quiet
+  gcloud run jobs execute "${worker_release_activation_job}" \
+    --project="${project}" --region="${region}" --wait
+}
+
+restore_main_release_control() {
+  local restore_secret_version="${previous_main_secret_version:-${release_secret_version}}"
+  if [[ ! "${restore_secret_version}" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'No worker credential version is available to restore release control\n' >&2
+    return 2
+  fi
+  activate_main_release \
+    "${previous_main_release_mode}" \
+    "${previous_main_release_id:-disabled}" \
+    "${restore_secret_version}" \
+    "${previous_context_revision}" \
+    "${previous_task_revision}"
+}
+
 rollback_failed_staging_release() {
   local status=$?
   local rollback_failed="false"
@@ -291,6 +378,9 @@ rollback_failed_staging_release() {
     if [[ "${causal_deploy_started}" == "true" ]]; then
       restore_causal_release_control || rollback_failed="true"
       restore_revision "${causal_worker_service}" "${previous_causal_revision}" || rollback_failed="true"
+    fi
+    if [[ "${main_release_mutation_started}" == "true" ]]; then
+      restore_main_release_control || rollback_failed="true"
     fi
     restore_revision "${context_worker_service}" "${previous_context_revision}" || rollback_failed="true"
     restore_revision "${task_worker_service}" "${previous_task_revision}" || rollback_failed="true"
@@ -512,8 +602,24 @@ fi
 unset scheduler_audience
 
 context_topics="run-context-input-snapshot|run-context-page-plan|run-context-page-build|run-context-publication"
-context_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${context_topics}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=jina-staging-context-openai~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex~CONTEXT_DAYTONA_SNAPSHOT=jina-context-board-codex-0-145-0-bwrap-v2"
-context_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
+release_id="${IMAGE_TAG}"
+release_credential="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+release_secret_version_name="$(
+  printf '%s' "${release_credential}" |
+    gcloud secrets versions add "${worker_release_credential_secret}" \
+      --project="${project}" \
+      --data-file=- \
+      --format='value(name)'
+)"
+release_secret_version="${release_secret_version_name##*/}"
+if [[ ! "${release_secret_version}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'Staging worker credential did not produce a Secret Manager version\n' >&2
+  exit 2
+fi
+unset release_credential release_secret_version_name
+
+context_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${context_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=jina-staging-context-openai~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex~CONTEXT_DAYTONA_SNAPSHOT=jina-context-board-codex-0-145-0-bwrap-v2"
+context_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
 gcloud --quiet run deploy "${context_worker_service}" \
   --project="${project}" \
   --region="${region}" \
@@ -544,14 +650,11 @@ gcloud --quiet run deploy "${context_worker_service}" \
   --set-env-vars="^~^OTELCOL_CONFIG=${otel_collector_config}" \
   --startup-probe="initialDelaySeconds=0,timeoutSeconds=10,periodSeconds=10,failureThreshold=5,httpGet.path=/,httpGet.port=13133" \
   --liveness-probe="timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/,httpGet.port=13133"
-gcloud run services update-traffic "${context_worker_service}" \
-  --project="${project}" \
-  --region="${region}" \
-  --to-latest \
-  --quiet
+context_release_revision="$(gcloud run services describe "${context_worker_service}" \
+  --project="${project}" --region="${region}" --format='value(status.latestCreatedRevisionName)')"
 
-task_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~DASHBOARD_URL=https://app.staging.usejina.com~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${review_topics}~JINA_REVIEW_GCS_BUCKET=${review_artifact_bucket}~JINA_GRAPH_MCP_ENABLED=true~DAYTONA_RUN_TIMEOUT_SECONDS=3600~DAYTONA_SETUP_TIMEOUT_SECONDS=300~DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS=120~DAYTONA_SANDBOX_IMAGE=node:22-bookworm~DAYTONA_SANDBOX_CPU=4~DAYTONA_SANDBOX_MEMORY=8~DAYTONA_SANDBOX_DISK=10~REVIEW_CODEX_MODEL=openai/gpt-5.6-luna~REVIEW_CODEX_EFFORT=medium~RUNTIME_PLANNER_MODEL=openai/gpt-5.6-sol~RUNTIME_AGENT_MODEL=openai/gpt-5.6-luna~RUNTIME_MENTAL_TRACE_MODEL=openai/gpt-5.6-luna"
-task_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,OPENAI_API_KEY=${openai_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
+task_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~DASHBOARD_URL=https://app.staging.usejina.com~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${review_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REVIEW_GCS_BUCKET=${review_artifact_bucket}~JINA_GRAPH_MCP_ENABLED=true~DAYTONA_RUN_TIMEOUT_SECONDS=3600~DAYTONA_SETUP_TIMEOUT_SECONDS=300~DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS=120~DAYTONA_SANDBOX_IMAGE=node:22-bookworm~DAYTONA_SANDBOX_CPU=4~DAYTONA_SANDBOX_MEMORY=8~DAYTONA_SANDBOX_DISK=10~REVIEW_CODEX_MODEL=openai/gpt-5.6-luna~REVIEW_CODEX_EFFORT=medium~RUNTIME_PLANNER_MODEL=openai/gpt-5.6-sol~RUNTIME_AGENT_MODEL=openai/gpt-5.6-luna~RUNTIME_MENTAL_TRACE_MODEL=openai/gpt-5.6-luna"
+task_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,OPENAI_API_KEY=${openai_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
 if [[ "${review_run_topic_mode}" == "relational" ]]; then
   task_env+="~JINA_REVIEW_RUN_TOPIC_MODE=relational"
   task_secrets+=",TRIGGER_SECRET_KEY=${review_trigger_secret}:latest"
@@ -586,10 +689,25 @@ gcloud --quiet run deploy "${task_worker_service}" \
   --set-env-vars="^~^OTELCOL_CONFIG=${otel_collector_config}" \
   --startup-probe="initialDelaySeconds=0,timeoutSeconds=10,periodSeconds=10,failureThreshold=5,httpGet.path=/,httpGet.port=13133" \
   --liveness-probe="timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/,httpGet.port=13133"
+task_release_revision="$(gcloud run services describe "${task_worker_service}" \
+  --project="${project}" --region="${region}" --format='value(status.latestCreatedRevisionName)')"
+
+main_release_mutation_started="true"
+activate_main_release \
+  enabled \
+  "${release_id}" \
+  "${release_secret_version}" \
+  "${context_release_revision}" \
+  "${task_release_revision}"
+gcloud run services update-traffic "${context_worker_service}" \
+  --project="${project}" \
+  --region="${region}" \
+  --to-revisions="${context_release_revision}=100" \
+  --quiet
 gcloud run services update-traffic "${task_worker_service}" \
   --project="${project}" \
   --region="${region}" \
-  --to-latest \
+  --to-revisions="${task_release_revision}=100" \
   --quiet
 
 retry_health "${api_url}/health"
@@ -627,5 +745,6 @@ IMAGE_TAG="${IMAGE_TAG}" \
 bash "${script_dir}/deploy-staging-causal-graph.sh"
 
 traffic_mutation_started="false"
+main_release_mutation_started="false"
 printf 'Jina staging deployed successfully\n'
 printf 'API: %s\n' "${api_url}"

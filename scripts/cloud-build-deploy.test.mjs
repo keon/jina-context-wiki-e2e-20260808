@@ -92,6 +92,17 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--max-instances=10/);
   assert.match(stagingDeployment, /--max-instances=5/);
   assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
+  assert.match(stagingCloudBuild, /JINA_REQUIRE_WORKER_RELEASE_GATE=true/);
+  assert.match(stagingDeployment, /jina-staging-worker-release-credential/);
+  assert.match(stagingDeployment, /activate-worker-release\.js/);
+  assert.match(stagingDeployment, /JINA_WORKER_RELEASE_ID=\$\{release_id\}/);
+  assert.match(
+    stagingDeployment,
+    /JINA_WORKER_RELEASE_CREDENTIAL=\$\{worker_release_credential_secret\}:\$\{release_secret_version\}/
+  );
+  assert.match(stagingDeployment, /--to-revisions="\$\{context_release_revision\}=100"/);
+  assert.match(stagingDeployment, /--to-revisions="\$\{task_release_revision\}=100"/);
+  assert.match(stagingDeployment, /restore_main_release_control/);
   assert.match(stagingDeployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
   assert.match(stagingDeployment, /TRIGGER_SECRET_KEY=\$\{review_trigger_secret\}:latest/);
   assert.match(
