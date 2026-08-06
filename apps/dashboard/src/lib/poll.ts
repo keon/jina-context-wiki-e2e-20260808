@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import {
   DashboardRequestError,
+  isAccessRevoked,
   nextSnapshot,
   pollBackoffInterval,
   type ResponseSnapshot
@@ -34,7 +35,7 @@ export function usePoll<T>(path: string, intervalMs: number = POLL_INTERVAL_MS) 
   const queryClient = useQueryClient();
   const queryKey = pollQueryKey(path);
 
-  const { data, status, refetch } = useQuery<ResponseSnapshot<T>>({
+  const { data, status, error, refetch } = useQuery<ResponseSnapshot<T>>({
     queryKey,
     queryFn: async ({ signal }) => {
       const response = await fetch(path, {
@@ -66,8 +67,20 @@ export function usePoll<T>(path: string, intervalMs: number = POLL_INTERVAL_MS) 
     await refetch();
   }, [path, refetch]);
 
+  // A 401/403 withdraws access to what is already cached. TanStack keeps the
+  // last successful `data` when a query errors, so without this the previous
+  // payload stays on screen after access is revoked — board, history, tasks and
+  // context would all keep rendering it for the lifetime of the cache entry.
+  //
+  // Withheld here rather than evicted: `removeQueries` on a live observer
+  // triggers an immediate refetch, which fails the same way and would spin. The
+  // entry is still cleared by `evictTenantScopedQueries` when the session-level
+  // 401/403 lands (`poll` is a tenant-scoped resource), and every reader of this
+  // key goes through this hook, so withholding covers all of them.
+  const revoked = isAccessRevoked(error);
+
   return {
-    data: data?.value,
+    data: revoked ? undefined : data?.value,
     online: status === "success" ? true : status === "error" ? false : undefined,
     refresh
   };

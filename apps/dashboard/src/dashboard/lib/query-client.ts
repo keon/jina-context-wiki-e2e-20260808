@@ -1,5 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 
+import { shouldDiscardDashboardData } from "./dashboard-refresh";
 import { isTenantScopedQueryKey } from "./query-keys";
 
 /** An HTTP failure that carries its status, so retry and discard policy can read it. */
@@ -16,6 +17,19 @@ export class DashboardRequestError extends Error {
 /** The HTTP status behind a query failure, or null for a transport/parse error. */
 export function requestStatus(error: unknown): number | null {
   return error instanceof DashboardRequestError ? error.status : null;
+}
+
+/**
+ * Whether a query failure withdrew access to what is already cached.
+ *
+ * This is the difference between "we could not refresh" and "you may no longer
+ * see this". A query keeps its last successful `data` when it errors, so a
+ * caller that renders `data` without consulting this will keep showing a
+ * payload after the tenant's access to it was revoked.
+ */
+export function isAccessRevoked(error: unknown): boolean {
+  const status = requestStatus(error);
+  return status !== null && shouldDiscardDashboardData(status);
 }
 
 /**
@@ -65,9 +79,7 @@ export const MAX_POLL_BACKOFF_MS = 30_000;
  * on the first success, restoring the base interval.
  */
 export function pollBackoffInterval(intervalMs: number, consecutiveFailures: number): number {
-  return consecutiveFailures > 0
-    ? Math.min(intervalMs * 2 ** consecutiveFailures, MAX_POLL_BACKOFF_MS)
-    : intervalMs;
+  return consecutiveFailures > 0 ? Math.min(intervalMs * 2 ** consecutiveFailures, MAX_POLL_BACKOFF_MS) : intervalMs;
 }
 
 /** A cached payload alongside the exact bytes it was parsed from. */
@@ -89,7 +101,7 @@ export interface ResponseSnapshot<T> {
 export function nextSnapshot<T>(
   previous: ResponseSnapshot<T> | undefined,
   body: string,
-  parse: () => T,
+  parse: () => T
 ): ResponseSnapshot<T> {
   if (previous && previous.body === body) return previous;
   return { body, value: parse() };

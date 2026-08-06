@@ -9,10 +9,11 @@ import {
   MAX_QUERY_RETRIES,
   createDashboardQueryClient,
   evictTenantScopedQueries,
+  isAccessRevoked,
   nextSnapshot,
   pollBackoffInterval,
   requestStatus,
-  shouldRetryDashboardQuery,
+  shouldRetryDashboardQuery
 } from "./query-client";
 import { pollQueryKey, tenantQueryKey, type TenantQueryScope } from "./query-keys";
 
@@ -20,7 +21,7 @@ const SCOPE: TenantQueryScope = { viewerUserId: 7, fenceVersion: 2, tenantId: "o
 
 function seedTenantCache(client: QueryClient) {
   client.setQueryData(tenantQueryKey("dashboard-review-runs", SCOPE, "", ""), {
-    review_runs: [{ review_run_id: "run-1" }],
+    review_runs: [{ review_run_id: "run-1" }]
   });
   client.setQueryData(tenantQueryKey("usage", SCOPE, 30), { status: "ok" });
   client.setQueryData(tenantQueryKey("review-run-detail", SCOPE, "run-1"), { review_run_id: "run-1" });
@@ -45,6 +46,22 @@ test("a revoked tenant's payload is removed from the cache, not left readable", 
   assert.equal(client.getQueryData(tenantQueryKey("review-run-detail", SCOPE, "run-1")), undefined);
   assert.equal(client.getQueryData(pollQueryKey("/api/dashboard/tenants/org-a/work-overview")), undefined);
   assert.equal(client.getQueryCache().getAll().length, 0);
+});
+
+test("an authorization failure counts as revoked access, a transient one does not", () => {
+  // A query keeps its last successful `data` when it errors, so `usePoll` reads
+  // this to decide whether the payload it already holds may still be shown.
+  // Treating a 500 or an offline blip as a revocation would blank the board on
+  // every hiccup; treating a 401 as transient would keep a revoked tenant's data
+  // on screen.
+  assert.equal(isAccessRevoked(new DashboardRequestError(401)), true);
+  assert.equal(isAccessRevoked(new DashboardRequestError(403)), true);
+  assert.equal(isAccessRevoked(new DashboardRequestError(500)), false);
+  assert.equal(isAccessRevoked(new DashboardRequestError(429)), false);
+  assert.equal(isAccessRevoked(new DashboardRequestError(404)), false);
+  assert.equal(isAccessRevoked(new Error("network down")), false);
+  assert.equal(isAccessRevoked(null), false);
+  assert.equal(isAccessRevoked(undefined), false);
 });
 
 test("eviction is scoped to tenant data and leaves everything else alone", () => {
