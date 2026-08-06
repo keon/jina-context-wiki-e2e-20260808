@@ -332,6 +332,7 @@ activate_main_release() {
   local secret_version="$3"
   local context_revision="$4"
   local task_revision="$5"
+  local accepts_claims="${6:-true}"
   local enabled="false"
   local activation_environment
   if [[ "${mode}" == "enabled" ]]; then
@@ -340,7 +341,11 @@ activate_main_release() {
     printf 'Unsupported worker release activation mode: %s\n' "${mode}" >&2
     return 2
   fi
-  activation_environment="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${owner_user}~RUNTIME_DB_USER=${runtime_user}~JINA_WORKER_RELEASE_ENABLED=${enabled}"
+  if [[ "${accepts_claims}" != "true" && "${accepts_claims}" != "false" ]]; then
+    printf 'Worker release claim admission must be true or false\n' >&2
+    return 2
+  fi
+  activation_environment="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${owner_user}~RUNTIME_DB_USER=${runtime_user}~JINA_WORKER_RELEASE_ENABLED=${enabled}~JINA_WORKER_ACCEPTS_CLAIMS=${accepts_claims}"
   if [[ "${enabled}" == "true" ]]; then
     activation_environment+="~JINA_WORKER_RELEASE_ID=${release_id}~JINA_CONTEXT_WORKER_REVISION=${context_revision}~JINA_TASK_WORKER_REVISION=${task_revision}"
   fi
@@ -372,7 +377,21 @@ restore_main_release_control() {
     "${previous_main_release_id:-disabled}" \
     "${restore_secret_version}" \
     "${previous_context_revision}" \
-    "${previous_task_revision}"
+    "${previous_task_revision}" \
+    false
+}
+
+resume_previous_main_release_claims() {
+  if [[ "${previous_main_release_mode}" != "enabled" ]]; then
+    return 0
+  fi
+  activate_main_release \
+    enabled \
+    "${previous_main_release_id}" \
+    "${previous_main_secret_version}" \
+    "${previous_context_revision}" \
+    "${previous_task_revision}" \
+    true
 }
 
 rollback_failed_staging_release() {
@@ -392,6 +411,9 @@ rollback_failed_staging_release() {
     restore_revision "${context_worker_service}" "${previous_context_revision}" || rollback_failed="true"
     restore_revision "${task_worker_service}" "${previous_task_revision}" || rollback_failed="true"
     restore_revision "${api_service}" "${previous_api_revision}" || rollback_failed="true"
+    if [[ "${main_release_mutation_started}" == "true" ]]; then
+      resume_previous_main_release_claims || rollback_failed="true"
+    fi
     if [[ "${rollback_failed}" == "true" ]]; then
       printf 'Staging compensation was incomplete; inspect all four serving revisions before retrying\n' >&2
     else
@@ -702,7 +724,8 @@ activate_main_release \
   "${release_id}" \
   "${release_secret_version}" \
   "${context_release_revision}" \
-  "${task_release_revision}"
+  "${task_release_revision}" \
+  false
 gcloud run services update-traffic "${context_worker_service}" \
   --project="${project}" \
   --region="${region}" \
@@ -737,6 +760,17 @@ for attempt in $(seq 1 20); do
   fi
   sleep 3
 done
+
+# The new workers and API now share one pinned product credential and the API
+# release gate names the exact serving worker revisions. Only now may the new
+# generation claim work.
+activate_main_release \
+  enabled \
+  "${release_id}" \
+  "${release_secret_version}" \
+  "${context_release_revision}" \
+  "${task_release_revision}" \
+  true
 
 # Keep the isolated causal lane on the same source image during every
 # coordinated staging deploy. The standalone script remains available for a

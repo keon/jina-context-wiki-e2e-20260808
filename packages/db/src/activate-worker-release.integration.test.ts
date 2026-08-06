@@ -35,6 +35,7 @@ test(
           TEST_DATABASE_URL: databaseUrl,
           RUNTIME_DB_USER: runtimeUser,
           JINA_WORKER_RELEASE_ENABLED: "true",
+          JINA_WORKER_ACCEPTS_CLAIMS: "false",
           JINA_WORKER_RELEASE_ID: "staging-release-test",
           JINA_WORKER_RELEASE_CREDENTIAL: credential,
           JINA_CONTEXT_WORKER_REVISION: "jina-context-worker-staging-release-test",
@@ -43,6 +44,7 @@ test(
       });
       assert.deepEqual(JSON.parse(enabled.stdout), {
         enabled: true,
+        acceptsClaims: false,
         releaseId: "staging-release-test",
         contextRevision: "jina-context-worker-staging-release-test",
         taskRevision: "jina-task-worker-staging-release-test"
@@ -54,12 +56,32 @@ test(
       );
       assert.deepEqual(active.rows[0], {
         worker_claims_enabled: true,
-        worker_accepts_claims: true,
+        worker_accepts_claims: false,
         worker_release_id: "staging-release-test",
         worker_credential_sha256: createHash("sha256").update(credential, "utf8").digest("hex"),
         context_worker_revision: "jina-context-worker-staging-release-test",
         task_worker_revision: "jina-task-worker-staging-release-test"
       });
+
+      const reopened = await execFileAsync(process.execPath, [activationScript], {
+        env: {
+          ...process.env,
+          TEST_DATABASE_URL: databaseUrl,
+          RUNTIME_DB_USER: runtimeUser,
+          JINA_WORKER_RELEASE_ENABLED: "true",
+          JINA_WORKER_ACCEPTS_CLAIMS: "true",
+          JINA_WORKER_RELEASE_ID: "staging-release-test",
+          JINA_WORKER_RELEASE_CREDENTIAL: credential,
+          JINA_CONTEXT_WORKER_REVISION: "jina-context-worker-staging-release-test",
+          JINA_TASK_WORKER_REVISION: "jina-task-worker-staging-release-test"
+        }
+      });
+      assert.equal(JSON.parse(reopened.stdout).acceptsClaims, true);
+      assert.equal(
+        (await pool.query("select worker_accepts_claims from jina_runtime.release_control where id=1")).rows[0]
+          .worker_accepts_claims,
+        true
+      );
 
       const disabled = await execFileAsync(process.execPath, [activationScript], {
         env: {
