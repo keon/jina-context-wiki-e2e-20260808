@@ -63,10 +63,26 @@ export interface GithubWebhookInboxSnapshot {
   readonly retryWait: number;
   readonly completed: number;
   readonly deadLetter: number;
+  /** Bounded diagnostic classification for every retained dead-letter row. */
+  readonly deadLetterByErrorCode: Readonly<Record<string, number>>;
+  /** Newest retained dead letters, capped by the store so the control response stays bounded. */
+  readonly recentDeadLetters: readonly GithubWebhookInboxDeadLetterSummary[];
   readonly priorGenerationLeases: number;
-  /** Counts for every non-completed row, keyed by its pinned Secret Manager version. */
+  /** Counts for rows that can still be claimed/retried, keyed by their pinned key version. */
   readonly activeKeyVersions: Readonly<Record<string, number>>;
+  /** Terminal retained evidence by pinned key version; these rows are never claimed or retried. */
+  readonly deadLetterKeyVersions: Readonly<Record<string, number>>;
   readonly oldestPendingAt?: Date;
+}
+
+interface GithubWebhookInboxDeadLetterSummary {
+  readonly deliveryId: string;
+  readonly event: string;
+  readonly action?: string;
+  readonly repositoryFullName?: string;
+  readonly errorCode: string;
+  readonly attemptCount: number;
+  readonly deadLetteredAt: Date;
 }
 
 export interface GithubWebhookInboxRepository {
@@ -95,6 +111,10 @@ export interface GithubWebhookInboxRepository {
     readonly lease: GithubWebhookInboxLease;
     readonly errorCode: string;
     readonly retryAfterMs: number;
+  }): Promise<void>;
+  deadLetter(input: {
+    readonly lease: GithubWebhookInboxLease;
+    readonly errorCode: string;
   }): Promise<void>;
   transitionMode(input: {
     readonly expectedGeneration: number;
@@ -410,6 +430,34 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
     if (!rows[0]) throw new GithubWebhookInboxLeaseLostError(input.lease.deliveryId);
   }
 
+  async deadLetter(input: {
+    readonly lease: GithubWebhookInboxLease;
+    readonly errorCode: string;
+  }): Promise<void> {
+    const rows = await query<{ github_delivery_id: string }>(
+      `update github_webhook_inbox
+          set status='dead_letter',
+              completed_at=now(),
+              lease_id=null,
+              lease_expires_at=null,
+              lease_generation=null,
+              last_error_code=$4,
+              last_error_at=now()
+        where github_delivery_id=$1
+          and status='leased'
+          and lease_id=$2
+          and lease_generation=$3
+      returning github_delivery_id`,
+      [
+        input.lease.deliveryId,
+        input.lease.leaseId,
+        input.lease.leaseGeneration,
+        safeErrorCode(input.errorCode),
+      ],
+    );
+    if (!rows[0]) throw new GithubWebhookInboxLeaseLostError(input.lease.deliveryId);
+  }
+
   async transitionMode(input: {
     readonly expectedGeneration: number;
     readonly mode: GithubWebhookInboxMode;
@@ -474,9 +522,47 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
     }>(
       `select encryption_key_version,count(*)::int as active_count
          from github_webhook_inbox
-        where status <> 'completed'
+        where status in ('pending','leased','retry_wait')
         group by encryption_key_version
-        order by encryption_key_version`,
+      order by encryption_key_version`,
+    );
+    const deadLetterKeyVersions = await query<{
+      encryption_key_version: string;
+      dead_letter_count: number;
+    }>(
+      `select encryption_key_version,count(*)::int as dead_letter_count
+         from github_webhook_inbox
+        where status='dead_letter'
+        group by encryption_key_version
+      order by encryption_key_version`,
+    );
+    const deadLetterCodes = await query<{
+      last_error_code: string;
+      dead_letter_count: number;
+    }>(
+      `select coalesce(last_error_code,'unknown') as last_error_code,
+              count(*)::int as dead_letter_count
+         from github_webhook_inbox
+        where status='dead_letter'
+        group by coalesce(last_error_code,'unknown')
+        order by dead_letter_count desc,last_error_code
+        limit 50`,
+    );
+    const recentDeadLetters = await query<{
+      github_delivery_id: string;
+      github_event: string;
+      action: string | null;
+      repository_full_name: string | null;
+      last_error_code: string | null;
+      attempt_count: number;
+      completed_at: Date;
+    }>(
+      `select github_delivery_id,github_event,action,repository_full_name,
+              last_error_code,attempt_count,completed_at
+         from github_webhook_inbox
+        where status='dead_letter'
+        order by completed_at desc,github_delivery_id
+        limit 25`,
     );
     return {
       control,
@@ -485,9 +571,27 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
       retryWait: counts?.retry_wait ?? 0,
       completed: counts?.completed ?? 0,
       deadLetter: counts?.dead_letter ?? 0,
+      deadLetterByErrorCode: Object.fromEntries(
+        deadLetterCodes.map((row) => [row.last_error_code, Number(row.dead_letter_count)]),
+      ),
+      recentDeadLetters: recentDeadLetters.map((row) => ({
+        deliveryId: row.github_delivery_id,
+        event: row.github_event,
+        ...(row.action ? { action: row.action } : {}),
+        ...(row.repository_full_name ? { repositoryFullName: row.repository_full_name } : {}),
+        errorCode: row.last_error_code ?? "unknown",
+        attemptCount: Number(row.attempt_count),
+        deadLetteredAt: row.completed_at,
+      })),
       priorGenerationLeases: counts?.prior_generation_leases ?? 0,
       activeKeyVersions: Object.fromEntries(
         keyVersions.map((row) => [row.encryption_key_version, Number(row.active_count)]),
+      ),
+      deadLetterKeyVersions: Object.fromEntries(
+        deadLetterKeyVersions.map((row) => [
+          row.encryption_key_version,
+          Number(row.dead_letter_count),
+        ]),
       ),
       ...(counts?.oldest_pending_at ? { oldestPendingAt: counts.oldest_pending_at } : {}),
     };

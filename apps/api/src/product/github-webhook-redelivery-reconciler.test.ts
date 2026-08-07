@@ -115,6 +115,10 @@ class ReconcileRepository implements GithubWebhookInboxRepository {
     throw new Error("unused");
   }
 
+  async deadLetter(): Promise<void> {
+    throw new Error("unused");
+  }
+
   async transitionMode(): Promise<GithubWebhookInboxControl> {
     throw new Error("unused");
   }

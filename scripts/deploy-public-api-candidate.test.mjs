@@ -19,6 +19,7 @@ import {
 
 const OLD_REVISION = "jina-code-review-api-old123";
 const CANDIDATE_REVISION = "jina-code-review-api-candidate-a";
+const CONCURRENT_REVISION = "jina-code-review-api-writer-x";
 
 function rawManifest() {
   const secrets = {};
@@ -159,19 +160,43 @@ function cloudRunService(manifest, servingRevision, { candidateTag = false } = {
   };
 }
 
+function cloudRunV2Service(manifest, service, generation) {
+  const traffic = service.status.traffic.map((target) => ({
+    type: "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+    revision: target.revisionName,
+    ...(Number(target.percent) > 0 ? { percent: Number(target.percent) } : {}),
+    ...(target.tag ? { tag: target.tag } : {})
+  }));
+  return {
+    name: `projects/${manifest.target.project}/locations/${manifest.target.region}/services/${manifest.target.service}`,
+    etag: `etag-${generation}`,
+    generation: String(generation),
+    observedGeneration: String(generation),
+    traffic,
+    trafficStatuses: traffic
+  };
+}
+
 function fakeCloud(manifest, options = {}) {
   const calls = [];
+  const conditionalPatches = [];
   let service = cloudRunService(manifest, OLD_REVISION);
+  let serviceGeneration = 1;
+  let trafficMutations = 0;
   let scheduler = options.existingSchedulerEndpoint
     ? schedulerForEndpoint(options.existingSchedulerEndpoint, options.existingSchedulerState ?? "ENABLED", manifest)
     : undefined;
   let schedulerUpdateFailures = options.schedulerUpdateFailures ?? 0;
   let trafficUpdateFailures = options.trafficUpdateFailures ?? 0;
+  let servingInboxVersion = options.servingInboxVersion;
+  let servingInboxMountedVersion = options.servingInboxMountedVersion;
+  let servingInboxSecretName = options.servingInboxSecretName;
   let pauseCalls = 0;
   const runner = async (command, args) => {
     calls.push([command, ...args]);
     const joined = [command, ...args].join(" ");
     if (joined.includes("run services describe")) return JSON.stringify(service);
+    if (joined.includes("auth print-access-token")) return "fake-access-token\n";
     if (joined.includes("artifacts docker images describe")) return `${manifest.image}\n`;
     if (joined.includes("secrets versions describe")) return "ENABLED\n";
     if (joined.includes("secrets versions access")) return "internal-token\n";
@@ -213,6 +238,13 @@ function fakeCloud(manifest, options = {}) {
     if (joined.includes("scheduler jobs run")) return "";
     if (joined.includes("logging read")) {
       const status = options.failSchedulerExecution ? 401 : 200;
+      if (options.mutateServingRevisionOnSchedulerFailure && status !== 200) {
+        service = cloudRunService(manifest, CONCURRENT_REVISION);
+        serviceGeneration += 1;
+      }
+      if (options.mutateServiceEtagOnSchedulerFailure && status !== 200) {
+        serviceGeneration += 1;
+      }
       return JSON.stringify([
         {
           timestamp: new Date(Date.now() + 1_000).toISOString(),
@@ -254,16 +286,16 @@ function fakeCloud(manifest, options = {}) {
     }
     if (joined.includes(`run revisions describe ${OLD_REVISION}`)) {
       const env = [];
-      if (options.servingInboxVersion) {
+      if (servingInboxVersion) {
         env.push(
           { name: "JINA_GITHUB_WEBHOOK_INBOX_ENABLED", value: "true" },
-          { name: "GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION", value: options.servingInboxVersion },
+          { name: "GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION", value: servingInboxVersion },
           {
             name: "GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY",
             valueFrom: {
               secretKeyRef: {
-                name: options.servingInboxSecretName ?? "jina-github-webhook-inbox-encryption-key",
-                key: options.servingInboxMountedVersion ?? options.servingInboxVersion
+                name: servingInboxSecretName ?? "jina-github-webhook-inbox-encryption-key",
+                key: servingInboxMountedVersion ?? servingInboxVersion
               }
             }
           }
@@ -281,34 +313,74 @@ function fakeCloud(manifest, options = {}) {
     }
     if (joined.includes("run deploy")) {
       service = cloudRunService(manifest, OLD_REVISION, { candidateTag: true });
-      return "";
-    }
-    if (joined.includes("run services update-traffic")) {
-      if (trafficUpdateFailures > 0) {
-        trafficUpdateFailures -= 1;
-        throw new Error("traffic update failed");
-      }
-      const target = args
-        .find((arg) => arg.startsWith("--to-revisions="))
-        ?.slice("--to-revisions=".length)
-        .split("=")[0];
-      service = cloudRunService(manifest, target, {
-        candidateTag: target === CANDIDATE_REVISION
-      });
+      serviceGeneration += 1;
       return "";
     }
     throw new Error(`unexpected fake command: ${joined}`);
   };
+  const request = async (url, init = {}) => {
+    const method = init.method ?? "GET";
+    const serviceUrl = `https://run.googleapis.com/v2/projects/${manifest.target.project}/locations/${manifest.target.region}/services/${manifest.target.service}`;
+    if (url === serviceUrl && method === "GET") {
+      return new Response(JSON.stringify(cloudRunV2Service(manifest, service, serviceGeneration)), {
+        status: 200
+      });
+    }
+    if (url === `${serviceUrl}?updateMask=traffic` && method === "PATCH") {
+      const body = JSON.parse(init.body);
+      conditionalPatches.push(body);
+      calls.push(["gcloud", "run", "services", "update-traffic", manifest.target.service, "--etag-conditional"]);
+      if (trafficUpdateFailures > 0) {
+        trafficUpdateFailures -= 1;
+        return new Response("traffic update failed", { status: 500 });
+      }
+      if (body.etag !== `etag-${serviceGeneration}`) {
+        return new Response("stale etag", { status: 412 });
+      }
+      const target = body.traffic.find((entry) => Number(entry.percent) === 100)?.revision;
+      service = cloudRunService(manifest, target, {
+        candidateTag: target === CANDIDATE_REVISION
+      });
+      serviceGeneration += 1;
+      trafficMutations += 1;
+      const acceptedService = cloudRunV2Service(manifest, service, serviceGeneration);
+      if (options.mutateServingRevisionAfterConditionalPatch && target === CANDIDATE_REVISION) {
+        service = cloudRunService(manifest, CONCURRENT_REVISION);
+        serviceGeneration += 1;
+      }
+      return new Response(JSON.stringify({ done: true, response: acceptedService }), { status: 200 });
+    }
+    throw new Error(`unexpected fake request: ${method} ${url}`);
+  };
+  runner.request = request;
   return {
     calls,
+    request,
     runner,
     setServingRevision(revision) {
       service = cloudRunService(manifest, revision, {
         candidateTag: revision === CANDIDATE_REVISION
       });
+      serviceGeneration += 1;
     },
     setCandidateDeployed() {
       service = cloudRunService(manifest, OLD_REVISION, { candidateTag: true });
+      serviceGeneration += 1;
+    },
+    setServingInboxVersion(version, mountedVersion = version) {
+      servingInboxVersion = version;
+      servingInboxMountedVersion = mountedVersion;
+      servingInboxSecretName = "jina-github-webhook-inbox-encryption-key";
+      serviceGeneration += 1;
+    },
+    trafficMutations() {
+      return trafficMutations;
+    },
+    servingRevision() {
+      return service.status.traffic.find((target) => Number(target.percent) === 100)?.revisionName;
+    },
+    conditionalPatches() {
+      return conditionalPatches;
     },
     scheduler() {
       return scheduler;
@@ -494,6 +566,19 @@ test("promotion and rollback accept only the manifest revisions and verify 100 p
     loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
     now: new Date("2026-08-06T18:00:00.000Z")
   });
+  assert.equal(cloud.trafficMutations(), 1);
+  assert.equal(cloud.conditionalPatches().length, 1);
+  assert.match(cloud.conditionalPatches()[0].etag, /^etag-[1-9][0-9]*$/);
+  assert.deepEqual(cloud.conditionalPatches()[0].traffic[0], {
+    type: "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+    revision: CANDIDATE_REVISION,
+    percent: 100
+  });
+  assert.ok(
+    cloud
+      .conditionalPatches()[0]
+      .traffic.some((target) => target.revision === CANDIDATE_REVISION && target.tag === manifest.candidate.tag)
+  );
   cloud.setServingRevision(CANDIDATE_REVISION);
   await updatePublicApiTraffic(manifest, OLD_REVISION, {
     runner: cloud.runner,
@@ -544,6 +629,18 @@ test("promotion rejects active inbox rows encrypted by an unavailable key versio
   assert.equal(
     cloud.calls.some((call) => call.join(" ").includes("update-traffic")),
     false
+  );
+});
+
+test("promotion permits retained terminal dead letters encrypted by an old key version", () => {
+  const manifest = validatePublicApiCandidateManifest(rawManifest());
+  assert.deepEqual(
+    validateInboxKeyCompatibility({ activeKeyVersions: { 7: 1 }, deadLetterKeyVersions: { 6: 2 } }, manifest),
+    {
+      expectedVersion: "7",
+      activeKeyVersions: { 7: 1 },
+      deadLetterKeyVersions: { 6: 2 }
+    }
   );
 });
 
@@ -681,6 +778,96 @@ test("promotion rejects a serving writer on another secret resource with the sam
   );
 });
 
+test("promotion aborts on a stale service etag when the serving writer changes after final validation", async () => {
+  const manifest = validatePublicApiCandidateManifest(rawManifest());
+  const cloud = fakeCloud(manifest, { servingInboxVersion: "7" });
+  cloud.setCandidateDeployed();
+  let snapshotLoads = 0;
+  await assert.rejects(
+    updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
+      runner: cloud.runner,
+      ...fakeInboxFenceDependencies,
+      acceptanceEvidence: acceptanceEvidence(manifest),
+      loadInboxSnapshot: async () => {
+        snapshotLoads += 1;
+        if (snapshotLoads === 2) cloud.setServingInboxVersion("6");
+        return { activeKeyVersions: { 7: 1 } };
+      },
+      now: new Date("2026-08-06T18:00:00.000Z")
+    }),
+    /aborted before traffic mutation.*stale service etag/
+  );
+  assert.equal(snapshotLoads, 2);
+  assert.equal(cloud.trafficMutations(), 0);
+  assert.equal(cloud.scheduler().state, "PAUSED");
+});
+
+test("failed post-PATCH verification never overwrites a newer traffic writer during compensation", async () => {
+  const manifest = validatePublicApiCandidateManifest(rawManifest());
+  const cloud = fakeCloud(manifest, { mutateServingRevisionAfterConditionalPatch: true });
+  cloud.setCandidateDeployed();
+  await assert.rejects(
+    updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
+      runner: cloud.runner,
+      ...fakeInboxFenceDependencies,
+      acceptanceEvidence: acceptanceEvidence(manifest),
+      loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
+      now: new Date("2026-08-06T18:00:00.000Z")
+    }),
+    /traffic ownership changed.*no newer traffic decision was overwritten/
+  );
+  assert.equal(cloud.trafficMutations(), 1);
+  assert.equal(cloud.conditionalPatches().length, 1);
+  assert.equal(cloud.servingRevision(), CONCURRENT_REVISION);
+  assert.equal(cloud.scheduler().state, "PAUSED");
+});
+
+test("scheduler failure never overwrites a newer traffic writer during compensation", async () => {
+  const manifest = validatePublicApiCandidateManifest(rawManifest());
+  const cloud = fakeCloud(manifest, {
+    failSchedulerExecution: true,
+    mutateServingRevisionOnSchedulerFailure: true
+  });
+  cloud.setCandidateDeployed();
+  await assert.rejects(
+    updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
+      runner: cloud.runner,
+      ...fakeInboxFenceDependencies,
+      acceptanceEvidence: acceptanceEvidence(manifest),
+      loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
+      now: new Date("2026-08-06T18:00:00.000Z")
+    }),
+    /traffic ownership changed.*no newer traffic decision was overwritten/
+  );
+  assert.equal(cloud.trafficMutations(), 1);
+  assert.equal(cloud.conditionalPatches().length, 1);
+  assert.equal(cloud.servingRevision(), CONCURRENT_REVISION);
+  assert.equal(cloud.scheduler().state, "PAUSED");
+});
+
+test("scheduler compensation cannot overwrite a newer etag even when the same revision still serves", async () => {
+  const manifest = validatePublicApiCandidateManifest(rawManifest());
+  const cloud = fakeCloud(manifest, {
+    failSchedulerExecution: true,
+    mutateServiceEtagOnSchedulerFailure: true
+  });
+  cloud.setCandidateDeployed();
+  await assert.rejects(
+    updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
+      runner: cloud.runner,
+      ...fakeInboxFenceDependencies,
+      acceptanceEvidence: acceptanceEvidence(manifest),
+      loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
+      now: new Date("2026-08-06T18:00:00.000Z")
+    }),
+    /traffic ownership changed.*etag no longer belongs to this release/
+  );
+  assert.equal(cloud.trafficMutations(), 1);
+  assert.equal(cloud.conditionalPatches().length, 1);
+  assert.equal(cloud.servingRevision(), CANDIDATE_REVISION);
+  assert.equal(cloud.scheduler().state, "PAUSED");
+});
+
 test("production inbox scheduler is created dormant, paused, and rebound to the accepted tag", async () => {
   const manifest = validatePublicApiCandidateManifest(rawManifest());
   const cloud = fakeCloud(manifest);
@@ -749,7 +936,7 @@ test("a failed scheduler rebind restores the prior endpoint and enabled state", 
   assert.equal(cloud.scheduler().state, "ENABLED");
 });
 
-test("a traffic mutation failure restores the prior scheduler endpoint and state", async () => {
+test("an ambiguous traffic mutation failure leaves Scheduler and inbox processing fenced", async () => {
   const manifest = validatePublicApiCandidateManifest(rawManifest());
   const priorEndpoint =
     "https://prior---jina-code-review-api-abc123-ue.a.run.app/internal/github-webhook-inbox/process";
@@ -766,10 +953,16 @@ test("a traffic mutation failure restores the prior scheduler endpoint and state
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
     }),
-    /traffic update failed/
+    /ambiguous traffic request.*no release-owned service etag.*traffic update failed/
   );
-  assert.equal(cloud.scheduler().httpTarget.uri, priorEndpoint);
-  assert.equal(cloud.scheduler().state, "ENABLED");
+  assert.equal(
+    cloud.scheduler().httpTarget.uri,
+    "https://candidate---jina-code-review-api-abc123-ue.a.run.app/internal/github-webhook-inbox/process"
+  );
+  assert.equal(cloud.scheduler().state, "PAUSED");
+  assert.equal(cloud.trafficMutations(), 0);
+  assert.equal(cloud.conditionalPatches().length, 1);
+  assert.equal(cloud.servingRevision(), OLD_REVISION);
 });
 
 test("an unsuccessful authenticated scheduler execution rolls traffic back", async () => {

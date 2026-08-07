@@ -34,7 +34,7 @@ interface GithubWebhookProcessInput {
 
 export interface GithubWebhookProcessResult {
   readonly deliveryId: string;
-  readonly disposition: "not_claimed" | "completed" | "retry_wait";
+  readonly disposition: "not_claimed" | "completed" | "retry_wait" | "dead_letter";
   readonly mode?: Exclude<GithubWebhookInboxMode, "capture_only">;
   readonly response?: WebhookResponse;
 }
@@ -153,19 +153,17 @@ export class GithubWebhookInboxService {
         ...(response ? { response } : {}),
       };
     } catch (error) {
-      await this.repository.retry({
-        lease,
-        errorCode: processingErrorCode(error),
-        retryAfterMs: retryDelayMs(lease.attemptCount),
-      });
-      console.warn("github_webhook_inbox_processing_deferred", {
+      const disposition = await this.settleProcessingFailure(lease, error);
+      console.warn(disposition === "dead_letter"
+        ? "github_webhook_inbox_processing_dead_lettered"
+        : "github_webhook_inbox_processing_deferred", {
         delivery_id: lease.deliveryId,
         event: lease.event,
         mode: lease.mode,
         attempt_count: lease.attemptCount,
         error_code: processingErrorCode(error),
       });
-      return { deliveryId, disposition: "retry_wait", mode: lease.mode };
+      return { deliveryId, disposition, mode: lease.mode };
     }
   }
 
@@ -233,17 +231,30 @@ export class GithubWebhookInboxService {
         response,
       };
     } catch (error) {
-      await this.repository.retry({
-        lease,
-        errorCode: processingErrorCode(error),
-        retryAfterMs: retryDelayMs(lease.attemptCount),
-      });
+      const disposition = await this.settleProcessingFailure(lease, error);
       return {
         deliveryId: lease.deliveryId,
-        disposition: "retry_wait",
+        disposition,
         mode: lease.mode,
       };
     }
+  }
+
+  private async settleProcessingFailure(
+    lease: GithubWebhookInboxLease,
+    error: unknown,
+  ): Promise<"retry_wait" | "dead_letter"> {
+    const errorCode = processingErrorCode(error);
+    if (isTerminalProcessingFailure(error, errorCode, lease.attemptCount)) {
+      await this.repository.deadLetter({ lease, errorCode });
+      return "dead_letter";
+    }
+    await this.repository.retry({
+      lease,
+      errorCode,
+      retryAfterMs: retryDelayMs(lease.attemptCount),
+    });
+    return "retry_wait";
   }
 
   private decryptLease(lease: GithubWebhookInboxLease): Buffer {
@@ -256,11 +267,16 @@ export class GithubWebhookInboxService {
       payloadSha256: lease.payloadSha256,
       encryptionKeyVersion: lease.encryptionKeyVersion,
     };
-    const rawBody = decryptGithubWebhookPayload(
-      lease.payloadCiphertext,
-      this.inboxConfig.encryptionKey,
-      binding,
-    );
+    let rawBody: Buffer;
+    try {
+      rawBody = decryptGithubWebhookPayload(
+        lease.payloadCiphertext,
+        this.inboxConfig.encryptionKey,
+        binding,
+      );
+    } catch {
+      throw new Error("webhook_inbox_ciphertext_invalid");
+    }
     if (githubWebhookPayloadDigest(rawBody) !== lease.payloadSha256) {
       throw new Error("webhook_inbox_payload_digest_mismatch");
     }
@@ -405,6 +421,7 @@ function processingErrorCode(error: unknown): string {
       [
         "legacy_forward_target_unavailable",
         "webhook_inbox_key_version_unavailable",
+        "webhook_inbox_ciphertext_invalid",
         "webhook_inbox_payload_digest_mismatch",
       ].includes(error.message)
     )
@@ -412,4 +429,21 @@ function processingErrorCode(error: unknown): string {
   return error instanceof Error
     ? error.name.toLowerCase().replace(/[^a-z0-9_.-]+/g, "_")
     : "processing_failed";
+}
+
+const MAX_PROCESSING_ATTEMPTS = 25;
+
+function isTerminalProcessingFailure(
+  error: unknown,
+  errorCode: string,
+  attemptCount: number,
+): boolean {
+  if (attemptCount >= MAX_PROCESSING_ATTEMPTS) return true;
+  if (error instanceof ApiError && [400, 413, 422].includes(error.status)) return true;
+  // AES-GCM cannot distinguish corrupt stored bytes from a deployment that
+  // loaded the wrong key material under the expected numeric version. Keep an
+  // authentication failure retryable so the candidate can be rolled back
+  // without skipping queued deliveries. The global attempt bound still
+  // prevents a truly corrupt row from blocking its ordering key forever.
+  return errorCode === "webhook_inbox_payload_digest_mismatch";
 }

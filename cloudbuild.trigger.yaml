@@ -1,0 +1,95 @@
+steps:
+  - id: deploy-trigger
+    name: node:22-bookworm
+    dir: trigger
+    entrypoint: bash
+    secretEnv:
+      - TRIGGER_ACCESS_TOKEN
+      - INTERNAL_API_TOKEN
+      - DAYTONA_API_KEY
+      - GITHUB_APP_ID
+      - GITHUB_APP_PRIVATE_KEY
+      - GITHUB_CLONE_TOKEN
+      - OPENROUTER_API_KEY
+      - OPENAI_API_KEY
+    env:
+      - TRIGGER_PROJECT_REF=${_TRIGGER_PROJECT_REF}
+      - EXPECTED_TRIGGER_PROJECT_NAME=${_TRIGGER_PROJECT_NAME}
+      - EXPECTED_TRIGGER_ORGANIZATION_SLUG=om-labs-77da
+      - TRIGGER_API_URL=https://api.trigger.dev
+      - API_BASE_URL=${_API_BASE_URL}
+      - DASHBOARD_URL=${_DASHBOARD_URL}
+      - DAYTONA_SANDBOX_IMAGE=node:22-bookworm
+      - DAYTONA_SANDBOX_CPU=4
+      - DAYTONA_SANDBOX_MEMORY=8
+      - DAYTONA_SANDBOX_DISK=10
+      - JINA_GRAPH_MCP_ENABLED=true
+      - REVIEW_CODEX_MODEL=${_REVIEW_CODEX_MODEL}
+      - REVIEW_CODEX_EFFORT=${_REVIEW_CODEX_EFFORT}
+      - RUNTIME_PLANNER_MODEL=${_RUNTIME_PLANNER_MODEL}
+      - RUNTIME_AGENT_MODEL=${_RUNTIME_AGENT_MODEL}
+      - RUNTIME_MENTAL_TRACE_MODEL=${_RUNTIME_MENTAL_TRACE_MODEL}
+    args:
+      - -ceu
+      - |
+        npm ci
+        node ../scripts/verify-trigger-project.mjs
+        node ../scripts/verify-trigger-source-manifest.mjs
+        npm run typecheck
+        npm test
+        npm run deploy -- \
+          --env="${_TRIGGER_ENV}" \
+          --project-ref="${_TRIGGER_PROJECT_REF}" \
+          --api-url="https://api.trigger.dev" \
+          --skip-update-check
+
+substitutions:
+  _TRIGGER_ENV: staging
+  _TRIGGER_PROJECT_REF: proj_replace_me
+  _TRIGGER_PROJECT_NAME: replace-me
+  _API_BASE_URL: https://api.staging.usejina.com
+  _DASHBOARD_URL: https://app.staging.usejina.com
+  _TRIGGER_ACCESS_TOKEN_SECRET: jina-trigger-access-token
+  _TRIGGER_ACCESS_TOKEN_VERSION: "1"
+  _INTERNAL_API_TOKEN_SECRET: jina-staging-internal-api-token
+  _INTERNAL_API_TOKEN_VERSION: "1"
+  _DAYTONA_API_KEY_SECRET: jina-staging-daytona-api-key
+  _DAYTONA_API_KEY_VERSION: "1"
+  _GITHUB_APP_ID_SECRET: jina-staging-github-app-id
+  _GITHUB_APP_ID_VERSION: "1"
+  _GITHUB_APP_PRIVATE_KEY_SECRET: jina-staging-github-app-private-key
+  _GITHUB_APP_PRIVATE_KEY_VERSION: "1"
+  _GITHUB_CLONE_TOKEN_SECRET: jina-staging-github-clone-token
+  _GITHUB_CLONE_TOKEN_VERSION: "1"
+  _OPENROUTER_API_KEY_SECRET: jina-staging-openrouter-api-key
+  _OPENROUTER_API_KEY_VERSION: "1"
+  _OPENAI_API_KEY_SECRET: jina-staging-openai-api-key
+  _OPENAI_API_KEY_VERSION: "1"
+  _REVIEW_CODEX_MODEL: openai/gpt-5.6-luna
+  _REVIEW_CODEX_EFFORT: high
+  _RUNTIME_PLANNER_MODEL: openai/gpt-5.6-sol
+  _RUNTIME_AGENT_MODEL: openai/gpt-5.6-luna
+  _RUNTIME_MENTAL_TRACE_MODEL: openai/gpt-5.6-luna
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/${_TRIGGER_ACCESS_TOKEN_SECRET}/versions/${_TRIGGER_ACCESS_TOKEN_VERSION}
+      env: TRIGGER_ACCESS_TOKEN
+    - versionName: projects/$PROJECT_ID/secrets/${_INTERNAL_API_TOKEN_SECRET}/versions/${_INTERNAL_API_TOKEN_VERSION}
+      env: INTERNAL_API_TOKEN
+    - versionName: projects/$PROJECT_ID/secrets/${_DAYTONA_API_KEY_SECRET}/versions/${_DAYTONA_API_KEY_VERSION}
+      env: DAYTONA_API_KEY
+    - versionName: projects/$PROJECT_ID/secrets/${_GITHUB_APP_ID_SECRET}/versions/${_GITHUB_APP_ID_VERSION}
+      env: GITHUB_APP_ID
+    - versionName: projects/$PROJECT_ID/secrets/${_GITHUB_APP_PRIVATE_KEY_SECRET}/versions/${_GITHUB_APP_PRIVATE_KEY_VERSION}
+      env: GITHUB_APP_PRIVATE_KEY
+    - versionName: projects/$PROJECT_ID/secrets/${_GITHUB_CLONE_TOKEN_SECRET}/versions/${_GITHUB_CLONE_TOKEN_VERSION}
+      env: GITHUB_CLONE_TOKEN
+    - versionName: projects/$PROJECT_ID/secrets/${_OPENROUTER_API_KEY_SECRET}/versions/${_OPENROUTER_API_KEY_VERSION}
+      env: OPENROUTER_API_KEY
+    - versionName: projects/$PROJECT_ID/secrets/${_OPENAI_API_KEY_SECRET}/versions/${_OPENAI_API_KEY_VERSION}
+      env: OPENAI_API_KEY
+
+timeout: 3600s
+options:
+  logging: CLOUD_LOGGING_ONLY

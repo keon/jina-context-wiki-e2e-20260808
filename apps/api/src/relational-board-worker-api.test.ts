@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
 import type { PostgresRelationalBoardWorkerStore } from "@jina/db";
+import { canonicalReviewTriggerRequest } from "@jina/shared-kernel";
 
 import { createApiServer, normalizedTenantId } from "./server.js";
 
@@ -38,14 +40,27 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
       calls.push(
         `claim:${input.topics.join(",")}:${input.tenantId}:${input.workerService}:${input.workerRelease}:${input.workerRevision}`
       );
+      const runReview = input.topics.includes("run-review");
+      const triggerPayload = {
+        action: "opened",
+        repository: { full_name: "omxyz/jina" },
+        pull_request: { number: 312 }
+      };
+      const triggerOptions = { idempotencyKey: "review:d599444c-5752-52e5-9502-6179269a53bc" };
+      const requestDigest = createHash("sha256")
+        .update(
+          canonicalReviewTriggerRequest({ taskIdentifier: "review", payload: triggerPayload, options: triggerOptions }),
+          "utf8"
+        )
+        .digest("hex");
       return {
         tenantId,
         workflowId,
         workflowType: "pr_review",
-        pipelineVersion: "pr_review.board.v1",
+        pipelineVersion: runReview ? "pr_review.board.v2" : "pr_review.board.v1",
         taskId,
-        taskType: "prepare-review",
-        topic: "prepare-review",
+        taskType: runReview ? "run-review" : "prepare-review",
+        topic: runReview ? "run-review" : "prepare-review",
         attempt: 1,
         maxAttempts: 3,
         claim: 1,
@@ -56,7 +71,15 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
         leaseExpiresAt: "2026-08-04T12:00:00.000Z",
         traceId: "a".repeat(32),
         spanId: "b".repeat(16),
-        metadata: { review_run_id: "52d68f74-8f64-45ee-8fef-9d0e58ae75ab" },
+        metadata: runReview
+          ? {
+              schema_version: 2,
+              request_digest: requestDigest,
+              trigger_task_id: "review",
+              trigger_payload: triggerPayload,
+              trigger_options: triggerOptions
+            }
+          : { review_run_id: "52d68f74-8f64-45ee-8fef-9d0e58ae75ab" },
         workflowMetadata: { review_payload: { action: "opened" } },
         dependencyResults: [],
         effectReceipts: []
@@ -151,6 +174,21 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
       workerRuntimeRevision: "jina-task-worker-staging-00012-p9b"
     });
     assert.equal(v2Claim.status, 200);
+    const v2ClaimBody = (await v2Claim.json()) as Record<string, Record<string, unknown>>;
+    assert.equal(v2ClaimBody.message?.topic, "run-review");
+    assert.equal(v2ClaimBody.task?.id, taskId);
+    const v2Metadata = v2ClaimBody.task?.metadata as Record<string, unknown>;
+    assert.equal(v2Metadata.tenantId, tenantId);
+    assert.equal(v2Metadata.workflowId, workflowId);
+    assert.equal(v2Metadata.workflowType, "pr_review");
+    assert.equal(v2Metadata.pipelineVersion, "pr_review.board.v2");
+    assert.equal(v2Metadata.schema_version, 2);
+    assert.equal(v2Metadata.trigger_task_id, "review");
+    assert.equal(typeof v2Metadata.trigger_payload, "object");
+    assert.equal(typeof v2Metadata.trigger_options, "object");
+    assert.match(String(v2Metadata.request_digest), /^[0-9a-f]{64}$/);
+    assert.deepEqual(v2Metadata.workflowMetadata, { review_payload: { action: "opened" } });
+    assert.deepEqual(v2Metadata.effectReceipts, []);
 
     const fence = {
       messageId: deliveryId,

@@ -506,7 +506,19 @@ export function validateInboxKeyCompatibility(snapshotValue, manifest) {
   if (incompatible.length > 0) {
     fail(`inbox key version ${expectedVersion} cannot process active rows encrypted by ${incompatible.join(",")}`);
   }
-  return { expectedVersion, activeKeyVersions: versions };
+  const deadLetterVersions =
+    snapshot.deadLetterKeyVersions === undefined
+      ? {}
+      : object(snapshot.deadLetterKeyVersions, "GitHub webhook inbox deadLetterKeyVersions");
+  for (const [version, rawCount] of Object.entries(deadLetterVersions)) {
+    if (!/^[1-9][0-9]*$/.test(version)) fail(`inbox snapshot has invalid dead-letter key version ${version}`);
+    integer(rawCount, 0, Number.MAX_SAFE_INTEGER, `inbox dead-letter key version ${version}`);
+  }
+  return {
+    expectedVersion,
+    activeKeyVersions: versions,
+    deadLetterKeyVersions: deadLetterVersions
+  };
 }
 
 export function validateServingInboxWriterKey(revision, manifest) {
@@ -848,8 +860,40 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
     const loadInboxSnapshot = dependencies.loadInboxSnapshot ?? defaultLoadInboxSnapshot;
     validateInboxKeyCompatibility(await loadInboxSnapshot(manifest, acceptance.taggedUrl, runner), manifest);
     const transition = await ensureProductionInboxSchedulerPaused(manifest, acceptance.taggedUrl, runner);
+    let candidateTrafficOwnership;
     try {
-      await setPublicApiTraffic(manifest, revision, runner);
+      candidateTrafficOwnership = await setPublicApiTrafficWithEtag(
+        manifest,
+        revision,
+        before.servingRevision,
+        runner,
+        dependencies.request ?? runner.request ?? fetch,
+        async (etagServingRevision) => {
+          const finalState = await validatePublicApiCandidateState(manifest, runner, {
+            allowedServingRevisions
+          });
+          if (
+            finalState.servingRevision !== before.servingRevision ||
+            finalState.servingRevision !== etagServingRevision
+          ) {
+            throw new Error(`serving revision changed from ${before.servingRevision} to ${finalState.servingRevision}`);
+          }
+          const finalServingState = JSON.parse(
+            await runner("gcloud", [
+              "run",
+              "revisions",
+              "describe",
+              finalState.servingRevision,
+              `--project=${manifest.target.project}`,
+              `--region=${manifest.target.region}`,
+              "--format=json"
+            ])
+          );
+          validateServingInboxWriterKey(finalServingState, manifest);
+          validateInboxKeyCompatibility(await loadInboxSnapshot(manifest, acceptance.taggedUrl, runner), manifest);
+        }
+      );
+      await verifyPublicApiTraffic(manifest, revision, runner);
       await runAndVerifyProductionInboxScheduler(
         manifest,
         transition.endpoint,
@@ -857,6 +901,20 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
         dependencies.waitForSchedulerSuccess ?? defaultWaitForSchedulerSuccess
       );
     } catch (error) {
+      if (error instanceof PublicApiTrafficPreconditionError) {
+        try {
+          await restoreProductionInboxScheduler(manifest, transition, runner);
+        } catch (restoreError) {
+          throw new Error(
+            `candidate promotion aborted before traffic mutation, but prior scheduler state could not be restored: ${errorMessage(error)}; scheduler: ${errorMessage(restoreError)}`,
+            { cause: restoreError }
+          );
+        }
+        throw new Error(
+          `candidate promotion aborted before traffic mutation because a final traffic precondition changed: ${errorMessage(error)}`,
+          { cause: error }
+        );
+      }
       let inboxTransition;
       try {
         inboxTransition = await (dependencies.fenceInboxProcessor ?? defaultFenceInboxProcessor)(
@@ -877,9 +935,30 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
           `candidate activation failed and scheduler fencing failed; traffic was not rolled back: ${errorMessage(error)}; fence: ${errorMessage(fenceError)}`
         );
       }
+      if (!candidateTrafficOwnership) {
+        throw new Error(
+          `candidate activation failed after an ambiguous traffic request; scheduler and inbox remain fenced because no release-owned service etag was returned: ${errorMessage(error)}`,
+          { cause: error }
+        );
+      }
       try {
-        await setPublicApiTraffic(manifest, before.servingRevision, runner);
+        await setPublicApiTrafficWithEtag(
+          manifest,
+          before.servingRevision,
+          [candidate, before.servingRevision],
+          runner,
+          dependencies.request ?? runner.request ?? fetch,
+          async () => undefined,
+          candidateTrafficOwnership.etag
+        );
+        await verifyPublicApiTraffic(manifest, before.servingRevision, runner);
       } catch (trafficError) {
+        if (trafficError instanceof PublicApiTrafficPreconditionError) {
+          throw new Error(
+            `candidate activation failed and traffic ownership changed; scheduler and inbox remain fenced and no newer traffic decision was overwritten: ${errorMessage(error)}; traffic: ${errorMessage(trafficError)}`,
+            { cause: trafficError }
+          );
+        }
         throw new Error(
           `candidate activation failed; scheduler is paused but prior traffic could not be restored: ${errorMessage(error)}; traffic: ${errorMessage(trafficError)}`
         );
@@ -928,13 +1007,26 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
     throw error;
   }
   try {
-    await setPublicApiTraffic(manifest, revision, runner);
+    await setPublicApiTrafficWithEtag(
+      manifest,
+      revision,
+      [candidate, revision],
+      runner,
+      dependencies.request ?? runner.request ?? fetch,
+      async () => undefined
+    );
+    await verifyPublicApiTraffic(manifest, revision, runner);
   } catch (error) {
-    if (previousJob) {
-      await restoreProductionInboxScheduler(manifest, { previousJob, endpoint: previousJob.httpTarget.uri }, runner);
+    if (error instanceof PublicApiTrafficPreconditionError) {
+      throw new Error(
+        `rollback aborted because traffic ownership changed; scheduler and inbox remain fenced and no newer traffic decision was overwritten: ${errorMessage(error)}`,
+        { cause: error }
+      );
     }
-    await restoreInboxProcessor(manifest, tagged.url, inboxTransition, runner);
-    throw error;
+    throw new Error(
+      `rollback outcome is ambiguous; scheduler and inbox remain fenced for explicit recovery: ${errorMessage(error)}`,
+      { cause: error }
+    );
   }
   return revision;
 }
@@ -1044,21 +1136,122 @@ export function isInboxFenceComplete(snapshotValue) {
   return snapshot.control.mode === "capture_only" && snapshot.leased === 0 && snapshot.priorGenerationLeases === 0;
 }
 
-async function setPublicApiTraffic(manifest, revision, runner) {
-  await runner(
-    "gcloud",
-    [
-      "run",
-      "services",
-      "update-traffic",
-      manifest.target.service,
-      `--project=${manifest.target.project}`,
-      `--region=${manifest.target.region}`,
-      `--to-revisions=${revision}=100`,
-      "--quiet"
-    ],
-    { inherit: true }
+class PublicApiTrafficPreconditionError extends Error {
+  constructor(message, cause) {
+    super(message, { cause });
+    this.name = "PublicApiTrafficPreconditionError";
+  }
+}
+
+async function setPublicApiTrafficWithEtag(
+  manifest,
+  revision,
+  expectedServingRevisionOrRevisions,
+  runner,
+  request,
+  validateAfterPrecondition,
+  requiredCurrentEtag
+) {
+  const expectedServingRevisions = new Set(
+    Array.isArray(expectedServingRevisionOrRevisions)
+      ? expectedServingRevisionOrRevisions
+      : [expectedServingRevisionOrRevisions]
   );
+  const serviceName = `projects/${manifest.target.project}/locations/${manifest.target.region}/services/${manifest.target.service}`;
+  const serviceUrl = `https://run.googleapis.com/v2/${serviceName}`;
+  let token;
+  let service;
+  try {
+    token = (await runner("gcloud", ["auth", "print-access-token"])).trim();
+    if (!token) fail("gcloud returned an empty Cloud Run access token");
+    const response = await request(serviceUrl, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    if (!response.ok) {
+      fail(`Cloud Run v2 service precondition read failed with HTTP ${response.status}`);
+    }
+    service = object(await response.json(), "Cloud Run v2 service");
+    if (service.name !== serviceName) fail("Cloud Run v2 service identity changed");
+    if (typeof service.etag !== "string" || service.etag.length === 0) {
+      fail("Cloud Run v2 service did not return an etag");
+    }
+    if (requiredCurrentEtag !== undefined && service.etag !== requiredCurrentEtag) {
+      fail("Cloud Run v2 service etag no longer belongs to this release");
+    }
+    if (service.reconciling === true || service.generation !== service.observedGeneration) {
+      fail("Cloud Run v2 service is reconciling or has an unobserved generation");
+    }
+    const servingRevision = v2ServingRevisionAtOneHundredPercent(service);
+    if (!expectedServingRevisions.has(servingRevision)) {
+      fail(`serving revision changed from ${[...expectedServingRevisions].join(",")} to ${servingRevision}`);
+    }
+    await validateAfterPrecondition(servingRevision);
+  } catch (error) {
+    if (error instanceof PublicApiTrafficPreconditionError) throw error;
+    throw new PublicApiTrafficPreconditionError(errorMessage(error), error);
+  }
+
+  const traffic = [
+    {
+      type: "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+      revision,
+      percent: 100
+    },
+    ...(service.traffic ?? [])
+      .filter((target) => typeof target?.tag === "string" && target.tag.length > 0)
+      .map((target) => ({
+        type: "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+        revision: target.revision,
+        tag: target.tag
+      }))
+  ];
+  const response = await request(`${serviceUrl}?updateMask=traffic`, {
+    method: "PATCH",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ name: serviceName, etag: service.etag, traffic })
+  });
+  if (response.status === 409 || response.status === 412) {
+    throw new PublicApiTrafficPreconditionError(`Cloud Run rejected stale service etag with HTTP ${response.status}`);
+  }
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => "")).slice(0, 300);
+    throw new Error(`Cloud Run traffic update failed with HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+  let operation = object(await response.json(), "Cloud Run traffic update operation");
+  for (let attempt = 0; !operation.done && attempt < 90; attempt += 1) {
+    if (typeof operation.name !== "string" || operation.name.length === 0) {
+      fail("Cloud Run traffic update returned an unnamed pending operation");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    const operationResponse = await request(`https://run.googleapis.com/v2/${operation.name}`, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    if (operationResponse.status === 404) continue;
+    if (!operationResponse.ok) {
+      fail(`Cloud Run traffic operation read failed with HTTP ${operationResponse.status}`);
+    }
+    operation = object(await operationResponse.json(), "Cloud Run traffic update operation");
+  }
+  if (!operation.done) fail("Cloud Run traffic update did not finish within 90 seconds");
+  if (operation.error) {
+    fail(`Cloud Run traffic update operation failed: ${String(operation.error.message ?? "unknown").slice(0, 300)}`);
+  }
+  const ownedService = object(operation.response, "Cloud Run traffic update response service");
+  if (
+    ownedService.name !== serviceName ||
+    typeof ownedService.etag !== "string" ||
+    ownedService.etag.length === 0 ||
+    v2ServingRevisionAtOneHundredPercent(ownedService) !== revision
+  ) {
+    fail("Cloud Run traffic update did not return the exact release-owned service state");
+  }
+  return { serviceName, etag: ownedService.etag, servingRevision: revision };
+}
+
+async function verifyPublicApiTraffic(manifest, revision, runner) {
   const after = JSON.parse(
     await runner("gcloud", [
       "run",
@@ -1073,6 +1266,16 @@ async function setPublicApiTraffic(manifest, revision, runner) {
   if (servingRevisionAtOneHundredPercent(after) !== revision) {
     fail(`traffic verification failed for ${revision}`);
   }
+}
+
+function v2ServingRevisionAtOneHundredPercent(service) {
+  const targets = (service.trafficStatuses ?? service.traffic ?? []).filter(
+    (target) => Number(target.percent ?? 0) > 0
+  );
+  if (targets.length !== 1 || Number(targets[0].percent) !== 100 || !targets[0].revision) {
+    fail("Cloud Run v2 service must have exactly one explicit revision at 100 percent");
+  }
+  return targets[0].revision;
 }
 
 function schedulerDescribeArgs(manifest) {

@@ -1555,6 +1555,167 @@ event. The inbox was returned by compare-and-set to `capture_only` generation 3 
 zero pending, leased, retry-wait, dead-letter, prior-generation, or active-key-version
 rows. The fixture branch and all evidence remain retained; no data was deleted.
 
+### Execution update: release-review remediation and production-safe deployment defaults
+
+The release PR runtime review identified six conditions that had to be resolved before
+`staging` could be merged into `main`. The remediation branch implements the following
+contracts. These are source and test results only until the branch is merged and the
+exact merge SHA is deployed; they do not authorize production traffic, migration,
+secret, Trigger, Vercel-alias, or scheduler changes.
+
+| Review condition                                                                             | Code-level disposition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Verification and operational meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A normal `main` build could begin production mechanics before acceptance                     | [`cloudbuild.yaml`](../cloudbuild.yaml), [`scripts/cloud-build-deploy.sh`](../scripts/cloud-build-deploy.sh), and [`scripts/cloud-build-deploy.test.mjs`](../scripts/cloud-build-deploy.test.mjs) make `deferred` the default production acceptance mode. Deferred mode stops after read-only prerequisite checks and immutable image verification, before the mutation-capable rollback trap, Daytona jobs, secret-version resolution, backup creation, drains, migrations, candidate revisions, worker changes, schedulers, or traffic. `mechanical` and `full` remain explicit operator-only modes.                                                                                                                                                                                                                                                                  | The deployment harness passes and asserts cleanup is not armed during deferred preflight. Merging `main` therefore cannot silently perform the cutover, including when a deferred prerequisite fails; the coordinated window needs an explicit acceptance mode and exact manifest.                                                                                                                                                                                                                                                        |
+| A permanently invalid inbox item could retry forever and block its per-PR ordering key       | [`github-webhook-inbox.ts`](../apps/api/src/product/github-webhook-inbox.ts) terminalizes deterministic 400/413/422 handler failures and payload-digest mismatch immediately, and bounds unknown failures to 25 attempts. AES-GCM authentication failures remain retryable until that bound because they can also mean a candidate loaded the wrong key material, allowing rollback before any delivery is skipped. [`github-webhook-inbox-store.ts`](../apps/api/src/product/github-webhook-inbox-store.ts) applies a lease-generation-fenced `leased` to `dead_letter` transition, clears the lease, records bounded diagnostic metadata, and retains the encrypted row and completion time.                                                                                                                                                                          | Unit coverage and the disposable-PostgreSQL integration fixture prove a dead-lettered head delivery no longer blocks the next delivery for the same ordering key. No webhook row or payload is deleted. Key-version-unavailable, AES-GCM authentication, and transient failures continue through bounded retry policy.                                                                                                                                                                                                                    |
+| The worker claim response was alleged to omit the v2 review envelope                         | [`relational-board-worker-api.test.ts`](../apps/api/src/relational-board-worker-api.test.ts) now asserts the real `run-review` v2 response: tenant/workflow/type, pipeline/schema versions, Trigger task, payload, options, canonical digest, workflow metadata, and effects.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | The focused API contract suite passes, and the accepted staging E2E independently proves the worker could dispatch the exact Trigger request. No extra review dispatcher or webhook-side Trigger call is introduced.                                                                                                                                                                                                                                                                                                                      |
+| A malformed claimed task could lose its worker lease and remain nonterminal                  | [`apps/worker/src/server.ts`](../apps/worker/src/server.ts) parses claim responses as untrusted input. If the task metadata contract is invalid but its minimal task/lease/generation fence is trustworthy, the worker calls the fenced completion endpoint with terminal `failed`, `worker_execution`, a bounded schema diagnostic, and its runtime/release identity. A 409 is treated as a lost lease; an invalid fence fails visibly and is never used for mutation.                                                                                                                                                                                                                                                                                                                                                                                                 | The completion suite proves one malformed relational `run-review` claim produces exactly one terminal completion and no polling failure. This prevents a claimed poison task from silently occupying a lease.                                                                                                                                                                                                                                                                                                                             |
+| The monorepo dashboard assumed Clerk while production still uses the existing GitHub session | [`app-auth.tsx`](../apps/dashboard/src/components/auth/app-auth.tsx) provides a build-time Clerk/GitHub adapter boundary; [`api.ts`](../apps/dashboard/src/dashboard/lib/api.ts) targets the canonical API directly in production with credentialed requests; [`proxy.ts`](../apps/dashboard/src/proxy.ts) bypasses Clerk middleware in GitHub mode; and [`shell.tsx`](../apps/dashboard/src/dashboard/shell.tsx) never invokes Clerk hooks in GitHub mode and hides/redirects Clerk-only profile/member routes while keeping API-backed billing and usage available. [`apps/dashboard/Dockerfile`](../apps/dashboard/Dockerfile) accepts the public API/auth-mode arguments. Production image arguments in [`cloudbuild.yaml`](../cloudbuild.yaml) pin `https://api.usejina.com` and `github`; the isolated staging Vercel project remains Clerk-backed and unchanged. | Dashboard typecheck, lint, all unit/component tests, an optimized GitHub-mode production build, and a no-Clerk-key HTTP smoke test pass. The old production Vercel deployment remains the rollback target until an unrouted monorepo preview passes authenticated API, tenant, review, billing, logout, and direct-route smoke tests.                                                                                                                                                                                                     |
+| Trigger deployment could use the wrong product token/project or depend on GitHub Actions     | [`cloudbuild.trigger.yaml`](../cloudbuild.trigger.yaml) verifies the pinned Trigger project identity and source manifest, typechecks/tests it, and deploys using Secret Manager-backed runtime values. [`deploy-trigger-gcloud.sh`](../scripts/deploy-trigger-gcloud.sh) fixes isolated staging to `proj_rqckjugodcaghbpgggbz`/`staging` and production to the dedicated `proj_yrxsqjznkghpwsolfmjp`/`prod`. It resolves every enabled secret to a numeric version before submission and records those version numbers in Cloud Build substitutions. The in-build identity probe requires the exact project ref, project name, and `om-labs-77da` organization before deployment.                                                                                                                                                                                       | The Trigger Cloud Build contract suite and shell syntax pass. Empty additive project `jina-review-production` was created on 2026-08-06 solely for this review workflow; it has never owned the legacy mixed-project schedules. `jina-trigger-access-token` version 1 exists separately in `jina-staging-20260802` and `jina-v2`; staging also owns `jina-staging-openrouter-api-key` version 1. Cloud Build service accounts have secret-level accessor grants only for declared inputs. Values were never printed or added to evidence. |
+
+The current-head runtime review then exercised these controls and found two additional
+release-path gaps. Both are closed before merge:
+
+- [`deploy-trigger-gcloud.sh`](../scripts/deploy-trigger-gcloud.sh) now normalizes both
+  the numeric basename returned by current `gcloud` and a fully-qualified Secret
+  Manager version resource before numeric sorting and validation. Its wrapper test uses
+  realistic fully-qualified resource names, and the same wrapper was also probed
+  read-only against live Secret Manager output.
+- [`cloudbuild.yaml`](../cloudbuild.yaml) labels every default production image with the
+  exact `COMMIT_SHA` and canonical source repository. A later explicit `mechanical` or
+  `full` invocation may set `_JINA_EXISTING_IMAGE_TAG` and
+  `_JINA_REUSE_EXISTING_IMAGE_TAG=true`; all build/push steps then become no-ops, while
+  `validate-image-selection` pulls API, worker, dashboard, and admin images and requires
+  both source labels to match the exact source-triggered commit. The deploy script
+  separately rejects every non-current `IMAGE_TAG` unless the explicit reuse flag is
+  present. This keeps the later deployment ID/revision names distinct while deploying
+  the already-tested immutable image digests instead of silently rebuilding them.
+
+For production, rerun the source-bound `jina-main-deploy` trigger at the exact accepted
+main SHA and pass the successful deferred build ID as `_JINA_EXISTING_IMAGE_TAG`; never
+submit a different local source tree with a manually asserted SHA. The expected
+operator substitutions are:
+
+```text
+_JINA_DEPLOYMENT_ACCEPTANCE_MODE=mechanical|full
+_JINA_EXISTING_IMAGE_TAG=<successful deferred build ID>
+_JINA_REUSE_EXISTING_IMAGE_TAG=true
+```
+
+The focused deployment, release-build, and Trigger wrapper suite passes 57/57 after
+these changes. The default source-triggered path remains `deferred`, retains empty/false
+reuse substitutions, and still exits before the mutation-capable rollback trap.
+
+A later current-head review found one observability gap and raised one topology
+concern. The observability gap is fixed: the authenticated inbox snapshot now reports
+up to 50 dead-letter error-code counts plus the newest 25 retained delivery summaries
+(delivery/event/action/repository, bounded error code, attempt count, and terminal
+timestamp). It never returns ciphertext or decrypted payload. The disposable
+PostgreSQL proof verifies the summary for a fenced poison delivery and confirms the next
+same-PR delivery remains claimable.
+
+The topology concern treated private `jina-v2/jina-api` as though it served
+`api.usejina.com`. It does not. [`cloud-build-deploy.sh`](../scripts/cloud-build-deploy.sh)
+now makes the boundary machine-verifiable by explicitly setting
+`DASHBOARD_AUTH_MODE=disabled` on that private coordinated Board/Context API and by
+continuing to omit public OAuth/App/encryption secrets. The production dashboard image
+is compiled to call `https://api.usejina.com`; that hostname remains the old public API
+until [`deploy-public-api-candidate.mjs`](../scripts/deploy-public-api-candidate.mjs)
+creates the no-traffic monorepo revision on fixed service
+`jina-463721/us-east1/jina-code-review-api`. The public candidate manifest—not the
+private API—requires GitHub auth mode, canonical dashboard/API URLs, secure cross-site
+cookie settings, the OAuth client ID, and numeric OAuth/App/session-encryption secrets.
+The cross-file topology test asserts all of these boundaries, and the focused private
+deployment plus public-candidate suite passes 74/74.
+
+The next exact-head runtime review found that the inbox snapshot still classified
+retained terminal `dead_letter` rows as active encryption-key users. That made the
+public-API promotion fence unable to distinguish a decrypt-required pending/retry row
+from retained evidence, so one poison delivery encrypted by an older key could block
+every future key rotation. The store now defines `activeKeyVersions` narrowly as
+`pending`, `leased`, and `retry_wait` rows and exposes terminal evidence separately as
+`deadLetterKeyVersions`. Promotion continues to fail closed for any processable row on
+an unavailable version, while retained dead letters remain visible without blocking
+traffic promotion. Dead-letter replay is not an implicit operation: adding it later
+requires an explicit replay/key-retention policy and a new acceptance gate. The public
+candidate suite proves both the active-row rejection and terminal-row allowance, and a
+disposable PostgreSQL integration instance proved the exact split after a poison row
+released its same-PR successor. The stopped test container is retained; no test data
+was deleted.
+
+That review exposed one remaining time-of-check/time-of-use gap: a normal Cloud Run
+deployment could change the serving inbox writer after its key was inspected but
+before the former unconditional traffic command. Candidate promotion now obtains the
+fixed production service through the Cloud Run v2 API, requires equal generation and
+observed generation plus a single 100-percent serving revision, and retains its
+system etag. Only after acquiring that etag does it revalidate the same serving
+revision, its exact inbox secret/version binding, and the active-key snapshot. It then
+patches only `traffic` with `updateMask=traffic` and the retained etag while preserving
+every existing traffic tag. Cloud Run documents the etag as the resource fingerprint
+for modification-conflict detection. A 409/412 abort restores the prior Scheduler
+state without fencing the inbox or issuing a compensating traffic update, so the
+release cannot overwrite the concurrent operator. Ambiguous failures after a request
+still use the existing generation fence and an ownership-checked rollback path.
+The completed PATCH operation must return the exact service identity, serving revision,
+and new release-owned etag. Compensation is allowed only against that exact etag; a
+same-revision tag/config update is therefore protected just like a move to a third
+revision. Explicit rollback also uses the v2 etag mutation. If another writer changes
+traffic after PATCH acceptance or during Scheduler verification, the release leaves
+that traffic decision untouched and keeps both Scheduler and inbox processing fenced
+for explicit recovery. If the PATCH outcome is ambiguous and never returns an owned
+etag, compensation makes no traffic guess. The fake-cloud race proofs cover a stale
+pre-PATCH etag, a writer change before final verification, a writer change during
+Scheduler failure, a same-revision etag change, and an ambiguous PATCH failure; none
+overwrites newer state. An ambiguous explicit-rollback result likewise leaves Scheduler
+and inbox processing fenced instead of restoring execution against unknown traffic.
+The focused promotion suite passes 28/28.
+
+The exact production allowlist `proj_yrxsqjznkghpwsolfmjp` is a safety control, not a
+temporary convenience. Legacy project `proj_gmesnthgwwqledarlfip` still owns
+`billing-retry`, `github-installation-backfill`, and `scheduled-review-scan` in addition
+to review tasks. Replacing it from the review-only monorepo would remove live task
+definitions. Production must instead use a dedicated review project/environment, bind
+the relational task worker to that exact project key, dark-test `review`,
+`review-runtime`, and `review-summary`, and leave the old project's non-review schedules
+intact until each has an explicit successor.
+
+The production dashboard and API candidate paths are intentionally not the same as the
+private `jina-v2/jina-api` Board/Context candidate. The dashboard image is compiled to
+send credentialed product requests only to `https://api.usejina.com`. During the dark
+dashboard test and until the public API transition, that hostname remains the old
+GitHub-auth service. The monorepo public API is later deployed, with zero traffic, as a
+revision of the fixed existing service
+`jina-463721/us-east1/jina-code-review-api` through
+[`deploy-public-api-candidate.mjs`](../scripts/deploy-public-api-candidate.mjs). That
+manifest requires GitHub auth mode, canonical dashboard URL and explicit origin,
+secure/SameSite cookie settings, the existing OAuth client ID, and numeric OAuth,
+session-encryption, product, GitHub App, billing, graph, inbox, and database secret
+versions. No browser request is routed to the private `jina-v2/jina-api` candidate, so
+copying customer OAuth credentials into that service would expand credential exposure
+without serving the production auth path.
+
+The newer isolated-staging acceptance at source
+`e35b95b98f88913ed1cbc80668913a35bb9e190d` used Cloud Build
+`3916f14b-bafc-4ec4-9432-5bb25047ea57` and serves API revision
+`jina-api-staging-00080-xjr`, Context revision
+`jina-context-worker-staging-00079-r5h`, and task revision
+`jina-task-worker-staging-00072-bbf` at 100% traffic. The original review source was
+deployed as Trigger version `20260806.10`, deployment `oosmmqfk`, with exactly
+`review`, `review-runtime`, and `review-summary`. Fixture PR
+`omxyz/jina-staging-e2e-20260802#4` produced Board workflow
+`fbf20353-b95b-5ff5-98f6-f65577b004fb`, Board task
+`2a093c9d-e490-534c-9c60-d5abf4b5afbf`, Trigger root
+`run_06ftii7j124dekvtctjb9i8601`, and product review
+`ef922aed-d110-4f3c-84d7-9ab7685a2fa6`, followed by GitHub comment/review
+publication. Final acceptance of the remediation branch still requires repeating this
+chain from its exact merge SHA and recording the new identities.
+
+Before the production window can open, the remediation branch must pass CI, merge to
+`staging`, deploy there, deploy Trigger through the GCP wrapper, and repeat the full PR
+canary. Only then may the release PR update and merge to `main`. The default `main`
+Cloud Build is expected to exit in deferred mode with production unchanged. A separate
+operator invocation will create dark candidates and later apply the generation-fenced
+cutover steps in this runbook.
+
 The following implementation/operational work remains blocking:
 
 1. merge the reviewed deterministic release branch through `staging` and `main`, then

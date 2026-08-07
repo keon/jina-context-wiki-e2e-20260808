@@ -9,6 +9,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cloud-release-cleanup-lib.
 
 gar="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/jina"
 image_tag="${IMAGE_TAG:-${CLOUD_BUILD_ID}}"
+reuse_existing_image_tag="${JINA_REUSE_EXISTING_IMAGE_TAG:-false}"
 api_image="${gar}/api:${image_tag}"
 worker_image="${gar}/worker:${image_tag}"
 dashboard_image="${gar}/dashboard:${image_tag}"
@@ -56,7 +57,7 @@ acceptance_derivation_budget_seconds="${JINA_ACCEPTANCE_DERIVATION_BUDGET_SECOND
 acceptance_derivation_token_budget="${JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET:-24000000}"
 acceptance_timeout_ms="${JINA_ACCEPTANCE_TIMEOUT_MS:-10800000}"
 acceptance_job_timeout_seconds="${JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS:-11700}"
-deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-mechanical}"
+deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-deferred}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
 context_worker_min_instances="${JINA_CONTEXT_WORKER_MIN_INSTANCES:-20}"
 context_worker_max_instances="${JINA_CONTEXT_WORKER_MAX_INSTANCES:-100}"
@@ -94,12 +95,21 @@ worker_release_credential_sha256="$(
 production_preflight_path="/opt/jina/context-production-preflight.mjs"
 production_trigger_acceptance_path="/opt/jina/context-production-trigger-e2e.mjs"
 
-if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
-  echo "Deployment must deploy images built by the current coordinated Cloud Build" >&2
+if [[ "${deployment_acceptance_mode}" != "full" && "${deployment_acceptance_mode}" != "mechanical" && "${deployment_acceptance_mode}" != "deferred" ]]; then
+  echo "JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full, mechanical, or deferred" >&2
   exit 2
 fi
-if [[ "${deployment_acceptance_mode}" != "full" && "${deployment_acceptance_mode}" != "mechanical" ]]; then
-  echo "JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full or mechanical" >&2
+if [[ "${reuse_existing_image_tag}" != "true" && "${reuse_existing_image_tag}" != "false" ]]; then
+  echo "JINA_REUSE_EXISTING_IMAGE_TAG must be true or false" >&2
+  exit 2
+fi
+if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
+  if [[ "${reuse_existing_image_tag}" != "true" ]]; then
+    echo "A non-current IMAGE_TAG requires JINA_REUSE_EXISTING_IMAGE_TAG=true" >&2
+    exit 2
+  fi
+elif [[ "${reuse_existing_image_tag}" == "true" ]]; then
+  echo "JINA_REUSE_EXISTING_IMAGE_TAG=true requires a prior IMAGE_TAG" >&2
   exit 2
 fi
 if [[ ! "${image_tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
@@ -329,7 +339,11 @@ deploy_candidate_args=(
   --revision-suffix="${release_suffix}"
 )
 
-api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=true~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_POOL_MAX=${api_db_pool_max}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_GCS_BUCKET=${context_artifact_bucket}"
+# This jina-v2 service is the private coordinated Board/Context candidate, not
+# the public GitHub-session product API. Keep browser auth explicitly disabled;
+# the public candidate is deployed separately to jina-463721/jina-code-review-api
+# with the complete numeric-secret-pinned GitHub runtime manifest.
+api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~DASHBOARD_AUTH_MODE=disabled~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=true~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_POOL_MAX=${api_db_pool_max}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_GCS_BUCKET=${context_artifact_bucket}"
 api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=jina-context-private-checkpoint-key:latest"
 
 case "${tenancy_mode}" in
@@ -1197,8 +1211,6 @@ ROLLFORWARD
   exit "${status}"
 }
 
-trap rollback_failed_release EXIT
-
 # Platform operators create and secure this bucket once. Requiring it before
 # secret checks, image resolution, Daytona execution, or Cloud SQL mutation
 # makes an incomplete bootstrap fail cheaply and clearly. The build identity
@@ -1241,6 +1253,21 @@ api_image="$(resolve_release_image "${api_image}")"
 worker_image="$(resolve_release_image "${worker_image}")"
 dashboard_image="$(resolve_release_image "${dashboard_image}")"
 admin_image="$(resolve_release_image "${admin_image}")"
+
+# The default path is intentionally build-only. It proves every referenced
+# image and deployment prerequisite, then exits before creating jobs, release
+# credentials, revisions, backups, schema changes, worker drains, or traffic
+# mutations. An operator must rerun the exact immutable source revision with an
+# explicit mechanical/full mode to begin the coordinated release protocol.
+if [[ "${deployment_acceptance_mode}" == "deferred" ]]; then
+  echo "Deferred deployment complete: immutable images verified; production state and traffic unchanged"
+  exit 0
+fi
+
+# Cleanup is mutation-capable: it can delete a candidate control job and
+# destroy candidate-only credential versions. Install it only after deferred
+# mode has exited, so even a failed default preflight cannot mutate production.
+trap rollback_failed_release EXIT
 
 # Validate Daytona access, the immutable sandbox source, and remote command
 # execution before touching production. Model credentials are deliberately not
@@ -1689,7 +1716,7 @@ if [[ "${deployment_acceptance_mode}" == "full" ]]; then
     exit "${acceptance_status}"
   fi
 else
-  echo "Mechanical deployment mode: candidate readiness passed; full Context acceptance deferred"
+  echo "${deployment_acceptance_mode^} deployment mode: candidate readiness passed; full Context acceptance deferred"
 fi
 
 # Full acceptance, when selected, used only tagged candidate URLs. Mechanical

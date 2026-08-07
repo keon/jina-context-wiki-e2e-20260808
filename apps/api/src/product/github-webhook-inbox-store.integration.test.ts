@@ -163,12 +163,57 @@ test(
         undefined,
       );
 
+      await repository.capture(capture("delivery-poison", "f".repeat(64), 202));
+      await repository.capture(capture("delivery-after-poison", "1".repeat(64), 202));
+      const poisonLease = await repository.claim({
+        leaseMs: 120_000,
+        canaryRepositories: new Set(["omxyz/private-repo"]),
+      });
+      assert.equal(poisonLease?.deliveryId, "delivery-poison");
+      await repository.deadLetter({
+        lease: poisonLease,
+        errorCode: "webhook_inbox_ciphertext_invalid",
+      });
+      const successorLease = await repository.claim({
+        leaseMs: 120_000,
+        canaryRepositories: new Set(["omxyz/private-repo"]),
+      });
+      assert.equal(successorLease?.deliveryId, "delivery-after-poison");
+      await repository.complete({ lease: successorLease });
+
       const snapshot = await repository.snapshot();
       assert.equal(snapshot.pending, 1);
       assert.equal(snapshot.leased, 0);
-      assert.equal(snapshot.completed, 3);
+      assert.equal(snapshot.completed, 4);
+      assert.equal(snapshot.deadLetter, 1);
+      assert.deepEqual(snapshot.deadLetterByErrorCode, {
+        webhook_inbox_ciphertext_invalid: 1,
+      });
+      assert.deepEqual(
+        snapshot.recentDeadLetters.map((row) => ({
+          deliveryId: row.deliveryId,
+          event: row.event,
+          action: row.action,
+          repositoryFullName: row.repositoryFullName,
+          errorCode: row.errorCode,
+          attemptCount: row.attemptCount,
+          timestampIsDate: row.deadLetteredAt instanceof Date,
+        })),
+        [
+          {
+            deliveryId: "delivery-poison",
+            event: "pull_request",
+            action: "synchronize",
+            repositoryFullName: "omxyz/private-repo",
+            errorCode: "webhook_inbox_ciphertext_invalid",
+            attemptCount: 1,
+            timestampIsDate: true,
+          },
+        ],
+      );
       assert.equal(snapshot.priorGenerationLeases, 0);
       assert.deepEqual(snapshot.activeKeyVersions, { "7": 1 });
+      assert.deepEqual(snapshot.deadLetterKeyVersions, { "7": 1 });
     } finally {
       await getPool().end().catch(() => undefined);
       restoreEnvironment("JINA_PRODUCT_DATABASE_URL", previousProductUrl);
