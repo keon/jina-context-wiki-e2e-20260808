@@ -867,6 +867,37 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     },
   );
 
+  app.post(
+    "/dashboard/tenants/:tenantId/causal-graph/build",
+    requireDashboardOrigin,
+    requireJsonContentType,
+    async (c) => {
+      const session = await requireDashboardSession(c, config);
+      const tenantId = tenantIdParam(c);
+      await requireTenantMembership(session, tenantId, { requireAdmin: true });
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      const repository = typeof body.repository === "string" ? body.repository.trim() : "";
+      const ref = typeof body.ref === "string" ? body.ref.trim() : "";
+      const commitSha = typeof body.commitSha === "string" ? body.commitSha.trim() : "";
+      if (!repository) throw new ApiError(400, "repository is required");
+      const context = await tenantGraphContext(tenantId, repository);
+      return c.json(
+        await graphs.buildDashboardCausalGraph(context, {
+          repository,
+          ...(ref ? { ref } : {}),
+          ...(commitSha ? { commitSha } : {}),
+          requestKey: `dashboard-causal:${tenantId}:${randomUUID()}`,
+          metadata: {
+            source: "jina-dashboard",
+            senderGithubUserId: session!.user.id,
+            senderLogin: session!.user.login,
+          },
+        }),
+        202,
+      );
+    },
+  );
+
   app.get("/dashboard/tenants/:tenantId/work-overview", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
