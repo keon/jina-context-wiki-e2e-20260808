@@ -1,6 +1,6 @@
 "use client";
 
-import { ClerkProvider, SignIn, useClerk, useAuth, useUser } from "@clerk/nextjs";
+import { ClerkProvider, SignIn, useClerk, useAuth, useOrganization, useUser } from "@clerk/nextjs";
 import { isClerkAPIResponseError } from "@clerk/nextjs/errors";
 import { themeTokens } from "@jina/theme/tokens";
 import { apiUrl, loginUrl } from "../../dashboard/lib/api.ts";
@@ -9,10 +9,10 @@ import {
   parseOnboardingProgress,
   type OnboardingIntent,
   type OnboardingProgress,
-  type OnboardingStep,
-  type OnboardingWorkspaceKind
+  type OnboardingStep
 } from "../../dashboard/lib/onboarding.ts";
 import type { ViewerResponse } from "../../dashboard/lib/types.ts";
+import type { ViewerTenant } from "../../dashboard/lib/tenants.ts";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 interface DeveloperModeContextValue {
@@ -44,7 +44,6 @@ interface AppAuthContextValue {
 type OnboardingPatch = Partial<{
   status: OnboardingProgress["status"];
   step: OnboardingStep;
-  workspaceKind: OnboardingWorkspaceKind;
   selectedTenantId: string;
   intent: OnboardingIntent;
 }>;
@@ -61,8 +60,14 @@ interface AppOnboardingState {
 }
 
 interface AppOrganizationSetup {
+  readonly mode: "clerk" | "github";
   readonly supported: boolean;
-  readonly create: (name: string) => Promise<{ readonly id: string; readonly name: string }>;
+  readonly activeOrganization?: { readonly id: string; readonly name: string };
+  readonly create: (name: string) => Promise<{
+    readonly id: string;
+    readonly name: string;
+    readonly tenant?: ViewerTenant;
+  }>;
   readonly activate: (organizationId: string) => Promise<void>;
 }
 
@@ -87,6 +92,7 @@ export function AppAuthProvider({ children }: { readonly children: ReactNode }) 
 function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
   const { user, isLoaded } = useUser();
   const { isSignedIn } = useAuth();
+  const { organization } = useOrganization();
   const clerk = useClerk();
   const { signOut } = clerk;
   const persistedProgress = parseOnboardingProgress(user?.unsafeMetadata.jinaOnboarding);
@@ -166,7 +172,9 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
         clearError: clearOnboardingError
       },
       organizationSetup: {
+        mode: "clerk",
         supported: true,
+        ...(organization ? { activeOrganization: { id: organization.id, name: organization.name } } : {}),
         create: async (name: string) => {
           const organization = await clerk.createOrganization({ name });
           await clerk.setActive({ organization: organization.id });
@@ -188,6 +196,7 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
       isSignedIn,
       onboardingError,
       onboardingSaving,
+      organization,
       restart,
       signOut,
       update,
@@ -315,9 +324,23 @@ function GithubAuthAdapter({ children }: { readonly children: ReactNode }) {
         clearError: () => setOnboardingError(null)
       },
       organizationSetup: {
-        supported: false,
-        create: async () => {
-          throw new Error("Team workspace creation requires Clerk authentication.");
+        mode: "github",
+        supported: true,
+        create: async (name: string) => {
+          const response = await fetch(apiUrl("/dashboard/tenants"), {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name })
+          });
+          const payload = (await response.json().catch(() => ({}))) as {
+            readonly tenant?: ViewerTenant;
+            readonly error?: string;
+          };
+          if (!response.ok || !payload.tenant) {
+            throw new Error(payload.error ?? `Organization creation returned ${response.status}.`);
+          }
+          return { id: payload.tenant.tenant_id, name: payload.tenant.login, tenant: payload.tenant };
         },
         activate: async () => undefined
       }

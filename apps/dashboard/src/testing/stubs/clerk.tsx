@@ -22,9 +22,14 @@ interface StubUser {
 }
 
 let user: StubUser | null = null;
+let organization: { readonly id: string; readonly name: string } | null = null;
 
 export function setClerkUser(next: StubUser | null): void {
   user = next;
+}
+
+export function setClerkOrganization(next: { readonly id: string; readonly name: string } | null): void {
+  organization = next;
 }
 
 export function ClerkProvider({ children }: { readonly children: ReactNode }) {
@@ -53,6 +58,10 @@ export function useUser() {
         }
       : null
   };
+}
+
+export function useOrganization() {
+  return { isLoaded: true, organization };
 }
 
 export function useClerk() {

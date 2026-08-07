@@ -23,7 +23,6 @@ import {
   parseInviteEmails,
   type OnboardingIntent,
   type OnboardingStep,
-  type OnboardingWorkspaceKind,
 } from "../lib/onboarding";
 import { isTenantWritable, normalizeViewerTenants, type ViewerTenant } from "../lib/tenants";
 import { useCodexHarness, useDashboard, useTenant } from "../providers";
@@ -121,7 +120,7 @@ export default function OnboardingPage() {
   }
 
   const progress = onboarding.progress;
-  const position = onboardingPosition(progress.step, progress.workspaceKind);
+  const position = onboardingPosition(progress.step);
   const move = async (step: OnboardingStep) => {
     setLocalError(null);
     await onboarding.update({ step }).catch((cause) => {
@@ -129,25 +128,11 @@ export default function OnboardingPage() {
       throw cause;
     });
   };
-  const back = adjacentOnboardingStep(progress.step, progress.workspaceKind, "previous");
-  const next = adjacentOnboardingStep(progress.step, progress.workspaceKind, "next");
+  const back = adjacentOnboardingStep(progress.step, "previous");
+  const next = adjacentOnboardingStep(progress.step, "next");
 
   return (
     <OnboardingFrame account={account} progress={`${position.current} / ${position.total}`}>
-      {progress.step === "workspace" ? (
-        <WorkspaceStep
-          tenants={tenant.tenants}
-          saving={onboarding.saving}
-          onContinue={async (kind, personalTenant) => {
-            if (personalTenant) tenant.selectTenant(personalTenant.tenant_id);
-            await onboarding.update({
-              workspaceKind: kind,
-              ...(personalTenant ? { selectedTenantId: personalTenant.tenant_id } : {}),
-              step: kind === "team" ? "organization" : "intent",
-            });
-          }}
-        />
-      ) : null}
       {progress.step === "organization" ? (
         <OrganizationStep
           tenants={tenant.tenants}
@@ -187,7 +172,7 @@ export default function OnboardingPage() {
           harness={harness}
           setHarness={setHarness}
           saving={onboarding.saving}
-          onContinue={() => move(progress.workspaceKind === "team" ? "invite" : "finish")}
+          onContinue={() => move("invite")}
         />
       ) : null}
       {progress.step === "invite" ? (
@@ -250,34 +235,6 @@ function LoadingState() {
   return <div className="onboarding-loading" role="status">Loading…</div>;
 }
 
-function WorkspaceStep({
-  tenants,
-  saving,
-  onContinue,
-}: {
-  tenants: ViewerTenant[];
-  saving: boolean;
-  onContinue: (kind: OnboardingWorkspaceKind, personal?: ViewerTenant) => Promise<void>;
-}) {
-  const [choice, setChoice] = useState<OnboardingWorkspaceKind | null>(null);
-  const personal = tenants.find((tenant) => tenant.type === "User");
-  return (
-    <Step title="Who are you setting Jina up for?" description="Choose a personal workspace for your projects or a shared organization for your team.">
-      <div className="onboarding-choice-grid">
-        <ChoiceCard selected={choice === "personal"} title="Personal" description="A private workspace for your own projects" onClick={() => setChoice("personal")} />
-        <ChoiceCard selected={choice === "team"} title="Team" description="A shared workspace for your organization" onClick={() => setChoice("team")} />
-      </div>
-      <PrimaryAction disabled={!choice || saving || choice === "personal" && !personal} onClick={() => {
-        if (!choice) return;
-        return onContinue(choice, choice === "personal" ? personal : undefined);
-      }}>
-        Continue →
-      </PrimaryAction>
-      {choice === "personal" && !personal ? <p className="onboarding-hint">Your personal workspace is still being prepared. Try again in a moment.</p> : null}
-    </Step>
-  );
-}
-
 function OrganizationStep({
   tenants,
   setup,
@@ -295,12 +252,27 @@ function OrganizationStep({
   saving: boolean;
   onContinue: (tenant: ViewerTenant) => Promise<void>;
 }) {
-  const organizations = tenants.filter((tenant) => tenant.type === "Organization" && tenant.clerk_organization_id);
-  const [selectedId, setSelectedId] = useState<string>(organizations[0]?.tenant_id ?? "new");
-  const [name, setName] = useState("");
-  const [createdOrganization, setCreatedOrganization] = useState<{ id: string; name: string } | null>(null);
+  const organizations = tenants.filter(
+    (tenant) => tenant.type === "Organization" && (setup.mode === "github" || tenant.clerk_organization_id),
+  );
+  const pendingOrganization = setup.mode === "clerk" && setup.activeOrganization &&
+    !organizations.some((tenant) => tenant.clerk_organization_id === setup.activeOrganization?.id)
+    ? setup.activeOrganization
+    : null;
+  const [selectedId, setSelectedId] = useState<string>(pendingOrganization ? "new" : organizations[0]?.tenant_id ?? "new");
+  const [name, setName] = useState(pendingOrganization?.name ?? "");
+  const [createdOrganization, setCreatedOrganization] = useState<{ id: string; name: string } | null>(pendingOrganization);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!pendingOrganization || createdOrganization?.id === pendingOrganization.id) return;
+    // Clerk can resolve the active organization after the first render. Adopt it
+    // before another create is enabled so a reload cannot produce a duplicate.
+    setSelectedId("new");
+    setName(pendingOrganization.name);
+    setCreatedOrganization(pendingOrganization);
+  }, [createdOrganization?.id, pendingOrganization]);
 
   const submit = async () => {
     setBusy(true);
@@ -308,14 +280,23 @@ function OrganizationStep({
     try {
       if (selectedId !== "new") {
         const existing = organizations.find((tenant) => tenant.tenant_id === selectedId);
-        if (!existing?.clerk_organization_id) throw new Error("That organization is no longer available.");
-        await setup.activate(existing.clerk_organization_id);
+        if (!existing) throw new Error("That organization is no longer available.");
+        if (setup.mode === "clerk") {
+          if (!existing.clerk_organization_id) throw new Error("That organization is no longer available.");
+          await setup.activate(existing.clerk_organization_id);
+        }
         selectTenant(existing.tenant_id);
         await onContinue(existing);
         return;
       }
       if (!setup.supported) throw new Error("Organization creation is not available with this authentication mode.");
       const created = createdOrganization ?? await setup.create(name.trim());
+      if ("tenant" in created && created.tenant) {
+        addTenant(created.tenant);
+        selectTenant(created.tenant.tenant_id);
+        await onContinue(created.tenant);
+        return;
+      }
       setCreatedOrganization(created);
       reloadViewer();
       const mirrored = await waitForMirroredTenant(created.id);
@@ -422,7 +403,7 @@ function ReviewStep({ tenant, saving, onContinue }: { tenant: ViewerTenant | und
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const writable = tenant?.type === "User" || tenant?.role === "admin";
+  const writable = tenant?.type === "Organization" && tenant.role === "admin";
   const url = tenant ? apiUrl(`/dashboard/tenants/${encodeURIComponent(tenant.tenant_id)}/review-trigger`) : null;
 
   useEffect(() => {

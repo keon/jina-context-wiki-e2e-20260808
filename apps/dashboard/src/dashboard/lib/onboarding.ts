@@ -1,10 +1,9 @@
-const ONBOARDING_VERSION = 1 as const;
+const ONBOARDING_VERSION = 2 as const;
+const LEGACY_ONBOARDING_VERSION = 1 as const;
 
 type OnboardingStatus = "in_progress" | "complete";
-export type OnboardingWorkspaceKind = "personal" | "team";
 export type OnboardingIntent = "reviews" | "wiki" | "issues";
 export type OnboardingStep =
-  | "workspace"
   | "organization"
   | "intent"
   | "github"
@@ -17,7 +16,6 @@ export interface OnboardingProgress {
   readonly version: typeof ONBOARDING_VERSION;
   readonly status: OnboardingStatus;
   readonly step: OnboardingStep;
-  readonly workspaceKind?: OnboardingWorkspaceKind;
   readonly selectedTenantId?: string;
   readonly intent?: OnboardingIntent;
   readonly startedAt: string;
@@ -25,17 +23,7 @@ export interface OnboardingProgress {
   readonly completedAt?: string;
 }
 
-const PERSONAL_STEPS: readonly OnboardingStep[] = [
-  "workspace",
-  "intent",
-  "github",
-  "review",
-  "model",
-  "finish",
-];
-
-const TEAM_STEPS: readonly OnboardingStep[] = [
-  "workspace",
+const ORGANIZATION_STEPS: readonly OnboardingStep[] = [
   "organization",
   "intent",
   "github",
@@ -45,27 +33,24 @@ const TEAM_STEPS: readonly OnboardingStep[] = [
   "finish",
 ];
 
-const ALL_STEPS = new Set<OnboardingStep>(TEAM_STEPS);
+const ALL_STEPS = new Set<OnboardingStep>(ORGANIZATION_STEPS);
+const LEGACY_STEPS = new Set<string>(["workspace", ...ORGANIZATION_STEPS]);
 
-export function onboardingSteps(kind: OnboardingWorkspaceKind | undefined): readonly OnboardingStep[] {
-  return kind === "team" ? TEAM_STEPS : PERSONAL_STEPS;
+export function onboardingSteps(): readonly OnboardingStep[] {
+  return ORGANIZATION_STEPS;
 }
 
-export function onboardingPosition(
-  step: OnboardingStep,
-  kind: OnboardingWorkspaceKind | undefined,
-): { current: number; total: number } {
-  const steps = onboardingSteps(kind);
+export function onboardingPosition(step: OnboardingStep): { current: number; total: number } {
+  const steps = onboardingSteps();
   const index = steps.indexOf(step);
   return { current: index >= 0 ? index + 1 : 1, total: steps.length };
 }
 
 export function adjacentOnboardingStep(
   step: OnboardingStep,
-  kind: OnboardingWorkspaceKind | undefined,
   direction: "next" | "previous",
 ): OnboardingStep | null {
-  const steps = onboardingSteps(kind);
+  const steps = onboardingSteps();
   const index = steps.indexOf(step);
   if (index < 0) return steps[0] ?? null;
   return steps[index + (direction === "next" ? 1 : -1)] ?? null;
@@ -75,7 +60,7 @@ export function createOnboardingProgress(now = new Date().toISOString()): Onboar
   return {
     version: ONBOARDING_VERSION,
     status: "in_progress",
-    step: "workspace",
+    step: "organization",
     startedAt: now,
     updatedAt: now,
   };
@@ -84,11 +69,18 @@ export function createOnboardingProgress(now = new Date().toISOString()): Onboar
 export function parseOnboardingProgress(raw: unknown): OnboardingProgress | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const value = raw as Record<string, unknown>;
-  if (value.version !== ONBOARDING_VERSION) return null;
+  if (value.version !== ONBOARDING_VERSION && value.version !== LEGACY_ONBOARDING_VERSION) return null;
   if (value.status !== "in_progress" && value.status !== "complete") return null;
-  if (typeof value.step !== "string" || !ALL_STEPS.has(value.step as OnboardingStep)) return null;
+  if (typeof value.step !== "string") return null;
+  if (value.version === ONBOARDING_VERSION && !ALL_STEPS.has(value.step as OnboardingStep)) return null;
+  if (value.version === LEGACY_ONBOARDING_VERSION && !LEGACY_STEPS.has(value.step)) return null;
   if (!isIsoDate(value.startedAt) || !isIsoDate(value.updatedAt)) return null;
-  if (value.workspaceKind !== undefined && value.workspaceKind !== "personal" && value.workspaceKind !== "team") {
+  if (
+    value.version === LEGACY_ONBOARDING_VERSION &&
+    value.workspaceKind !== undefined &&
+    value.workspaceKind !== "personal" &&
+    value.workspaceKind !== "team"
+  ) {
     return null;
   }
   if (value.intent !== undefined && value.intent !== "reviews" && value.intent !== "wiki" && value.intent !== "issues") {
@@ -97,21 +89,25 @@ export function parseOnboardingProgress(raw: unknown): OnboardingProgress | null
   if (value.selectedTenantId !== undefined && !nonEmptyString(value.selectedTenantId)) return null;
   if (value.completedAt !== undefined && !isIsoDate(value.completedAt)) return null;
 
-  const workspaceKind = value.workspaceKind;
-  const steps = onboardingSteps(workspaceKind);
+  // Version 1 defaulted an omitted workspace kind to the personal path. Only an
+  // explicit team choice is safe to preserve in the organization-only flow.
+  const legacyPersonal = value.version === LEGACY_ONBOARDING_VERSION && value.workspaceKind !== "team";
+  const requiresOrganization = legacyPersonal || value.step === "workspace";
   const requestedStep = value.step as OnboardingStep;
-  const step = steps.includes(requestedStep) ? requestedStep : "workspace";
+  const step = requiresOrganization || !ALL_STEPS.has(requestedStep) ? "organization" : requestedStep;
+  const status = requiresOrganization ? "in_progress" : value.status;
 
   return {
     version: ONBOARDING_VERSION,
-    status: value.status,
+    status,
     step,
-    ...(workspaceKind ? { workspaceKind } : {}),
-    ...(typeof value.selectedTenantId === "string" ? { selectedTenantId: value.selectedTenantId.trim() } : {}),
+    ...(!requiresOrganization && typeof value.selectedTenantId === "string"
+      ? { selectedTenantId: value.selectedTenantId.trim() }
+      : {}),
     ...(value.intent ? { intent: value.intent } : {}),
     startedAt: value.startedAt,
     updatedAt: value.updatedAt,
-    ...(typeof value.completedAt === "string" ? { completedAt: value.completedAt } : {}),
+    ...(!requiresOrganization && typeof value.completedAt === "string" ? { completedAt: value.completedAt } : {}),
   };
 }
 

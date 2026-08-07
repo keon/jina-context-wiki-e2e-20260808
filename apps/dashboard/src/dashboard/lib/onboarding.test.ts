@@ -11,10 +11,8 @@ import {
   parseOnboardingProgress,
 } from "./onboarding";
 
-test("personal and team onboarding sequences derive stable progress", () => {
-  assert.deepEqual(onboardingSteps("personal"), ["workspace", "intent", "github", "review", "model", "finish"]);
-  assert.deepEqual(onboardingSteps("team"), [
-    "workspace",
+test("organization onboarding derives one stable seven-step sequence", () => {
+  assert.deepEqual(onboardingSteps(), [
     "organization",
     "intent",
     "github",
@@ -23,24 +21,74 @@ test("personal and team onboarding sequences derive stable progress", () => {
     "invite",
     "finish",
   ]);
-  assert.deepEqual(onboardingPosition("model", "personal"), { current: 5, total: 6 });
-  assert.deepEqual(onboardingPosition("model", "team"), { current: 6, total: 8 });
-  assert.equal(adjacentOnboardingStep("workspace", "personal", "previous"), null);
-  assert.equal(adjacentOnboardingStep("workspace", "team", "next"), "organization");
-  assert.equal(adjacentOnboardingStep("model", "personal", "next"), "finish");
-  assert.equal(adjacentOnboardingStep("model", "team", "next"), "invite");
+  assert.deepEqual(onboardingPosition("model"), { current: 5, total: 7 });
+  assert.equal(adjacentOnboardingStep("organization", "previous"), null);
+  assert.equal(adjacentOnboardingStep("organization", "next"), "intent");
+  assert.equal(adjacentOnboardingStep("model", "next"), "invite");
 });
 
 test("onboarding progress is versioned, validated, and reconciled to its path", () => {
   const started = createOnboardingProgress("2026-08-07T12:00:00.000Z");
   assert.deepEqual(parseOnboardingProgress(started), started);
-  assert.equal(parseOnboardingProgress({ ...started, version: 2 }), null);
+  assert.equal(parseOnboardingProgress({ ...started, version: 3 }), null);
   assert.equal(parseOnboardingProgress({ ...started, step: "secret-step" }), null);
   assert.equal(parseOnboardingProgress({ ...started, startedAt: "not-a-date" }), null);
-  assert.equal(
-    parseOnboardingProgress({ ...started, workspaceKind: "personal", step: "invite" })?.step,
-    "workspace",
-  );
+});
+
+test("legacy personal progress is reopened at organization setup", () => {
+  const legacy = {
+    version: 1,
+    status: "complete",
+    step: "finish",
+    workspaceKind: "personal",
+    selectedTenantId: "tenant-personal",
+    intent: "reviews",
+    startedAt: "2026-08-07T12:00:00.000Z",
+    updatedAt: "2026-08-07T12:01:00.000Z",
+    completedAt: "2026-08-07T12:01:00.000Z",
+  };
+  assert.deepEqual(parseOnboardingProgress(legacy), {
+    version: 2,
+    status: "in_progress",
+    step: "organization",
+    intent: "reviews",
+    startedAt: legacy.startedAt,
+    updatedAt: legacy.updatedAt,
+  });
+});
+
+test("legacy team progress keeps its organization path", () => {
+  const parsed = parseOnboardingProgress({
+    version: 1,
+    status: "in_progress",
+    step: "model",
+    workspaceKind: "team",
+    selectedTenantId: "tenant-acme",
+    startedAt: "2026-08-07T12:00:00.000Z",
+    updatedAt: "2026-08-07T12:01:00.000Z",
+  });
+  assert.equal(parsed?.version, 2);
+  assert.equal(parsed?.step, "model");
+  assert.equal(parsed?.selectedTenantId, "tenant-acme");
+});
+
+test("legacy progress without a workspace kind follows the old personal default", () => {
+  const parsed = parseOnboardingProgress({
+    version: 1,
+    status: "complete",
+    step: "finish",
+    selectedTenantId: "tenant-personal",
+    startedAt: "2026-08-07T12:00:00.000Z",
+    updatedAt: "2026-08-07T12:01:00.000Z",
+    completedAt: "2026-08-07T12:01:00.000Z",
+  });
+  assert.deepEqual(parsed, {
+    version: 2,
+    status: "in_progress",
+    step: "organization",
+    startedAt: "2026-08-07T12:00:00.000Z",
+    updatedAt: "2026-08-07T12:01:00.000Z",
+  });
 });
 
 test("invite parsing normalizes, deduplicates, and retains invalid addresses", () => {
