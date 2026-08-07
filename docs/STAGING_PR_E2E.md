@@ -8,19 +8,16 @@ workflow that a pull-request webhook is expected to create. It is staging-only.
 Never create or update a fixture pull request until repository access has been
 checked for both GitHub Apps.
 
-- The fixture repository must be installed on `jina-staging-gcloud-omxyz`.
+- The fixture repository must be installed on `jina-staging`.
 - The fixture repository must not be installed on `jina-review-bot`.
 - The webhook, API, database, workers, artifact buckets, and logs must all belong
   to GCP project `jina-staging-20260802`.
 - The dashboard link published by the bot must start with
   `https://app.staging.usejina.com/`.
 
-At the time this runbook was added, the production app had access to every
-`omxyz` repository and the private staging app could only be installed on its
-owner organization. Consequently, an `omxyz` fixture is not isolated. Provision
-a staging-only GitHub organization or change the app ownership/installation
-design before using a new PR as an unattended acceptance trigger. Do not weaken,
-suspend, or reconfigure the production installation to make a staging test pass.
+The public staging App must still be installed on an isolated fixture repository
+that is not covered by the production App. Do not weaken, suspend, or reconfigure
+the production installation to make a staging test pass.
 
 ## Staging surfaces
 

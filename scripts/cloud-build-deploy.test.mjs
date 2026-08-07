@@ -97,6 +97,14 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--max-instances=5/);
   assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
   assert.match(stagingDeployment, /JINA_GRAPH_REQUEST_TIMEOUT_MS=30000/);
+  assert.match(stagingDeployment, /github_app_slug="\$\{JINA_GITHUB_APP_SLUG:-jina-staging\}"/);
+  assert.match(
+    stagingDeployment,
+    /github_app_install_url="\$\{JINA_GITHUB_APP_INSTALL_URL:-https:\/\/github\.com\/apps\/\$\{github_app_slug\}\/installations\/new\}"/
+  );
+  assert.match(stagingDeployment, /GITHUB_APP_INSTALL_URL=\$\{github_app_install_url\}/);
+  assert.match(stagingDeployment, /GITHUB_APP_SLUG=\$\{github_app_slug\}/);
+  assert.doesNotMatch(stagingDeployment, /jina-staging-gcloud-omxyz/);
   assert.match(stagingCloudBuild, /JINA_REQUIRE_WORKER_RELEASE_GATE=true/);
   assert.match(stagingDeployment, /jina-staging-worker-release-credential/);
   assert.match(stagingDeployment, /activate-worker-release\.js/);
