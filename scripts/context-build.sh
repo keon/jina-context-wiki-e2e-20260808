@@ -129,14 +129,14 @@ if [[ -n "$page_path" ]]; then
     echo "--page requires --watch <build-id>" >&2
     exit 2
   fi
-  api_get "/context/builds/$(urlencode "$watch_build")/page?path=$(urlencode "$page_path")" |
+  api_get "/wiki/builds/$(urlencode "$watch_build")/page?path=$(urlencode "$page_path")" |
     python3 -c 'import json,sys; print(json.load(sys.stdin)["page"]["bodyMarkdown"])'
   exit 0
 fi
 
 if [[ -n "$retry_failed_build" ]]; then
   encoded_build="$(urlencode "$retry_failed_build")"
-  progress="$(api_get "/context/builds/${encoded_build}/progress")" || {
+  progress="$(api_get "/wiki/builds/${encoded_build}/progress")" || {
     echo "Could not read retry eligibility for build $retry_failed_build." >&2
     exit 1
   }
@@ -168,7 +168,7 @@ print(json.dumps({
 ' "$retry_reason"
   )" || exit 1
   echo "Retrying $(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["taskIds"]))' <<<"$retry_body") failed Board leaf/leaves…"
-  retry_response="$(api_post "/context/builds/${encoded_build}/retry" "$retry_body")" || {
+  retry_response="$(api_post "/wiki/builds/${encoded_build}/retry" "$retry_body")" || {
     echo "Could not schedule the atomic batch retry." >&2
     exit 1
   }
@@ -209,7 +209,7 @@ PY
   echo "Starting Board-native Context for $repository (budget ${budget}s${detail:+, $detail})…"
   response="$(
     curl -fsS "${auth[@]}" -H 'content-type: application/json' \
-      -d "$body" "$API/context/build"
+      -d "$body" "$API/wiki/build"
   )" || {
     echo "Could not start the build." >&2
     exit 1
@@ -295,7 +295,7 @@ progress = None
 
 while True:
     try:
-        progress = get(f"/context/builds/{urllib.parse.quote(build_id, safe='')}/progress")
+        progress = get(f"/wiki/builds/{urllib.parse.quote(build_id, safe='')}/progress")
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:500]
         print(f"Build progress request failed with HTTP {error.code}: {detail}", file=sys.stderr)
@@ -379,7 +379,7 @@ if progress.get("status") == "failed":
 # is part of the board root, so a completed build must expose the final release.
 query = urllib.parse.urlencode({"repository": repository, "ref": ref})
 try:
-    catalog = get(f"/context/list?{query}")
+    catalog = get(f"/wiki/list?{query}")
 except Exception as error:
     print(f"Build completed but the public catalog could not be read: {error}", file=sys.stderr)
     sys.exit(1)

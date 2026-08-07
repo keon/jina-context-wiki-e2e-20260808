@@ -350,10 +350,10 @@ function productionFixture(configuration = {}) {
       if (url.pathname === "/board" && method === "GET") {
         return json({ tasks: state.roots, events: [] });
       }
-      if (url.pathname === "/context/releases" && method === "GET") {
+      if (url.pathname === "/wiki/releases" && method === "GET") {
         return json({ releases: state.releases });
       }
-      if (url.pathname === "/context/build" && method === "POST") {
+      if (url.pathname === "/wiki/build" && method === "POST") {
         state.manualBuildCalls += 1;
         const existing = state.roots.find((candidate) => candidate.metadata?.requestKey === body.requestKey);
         if (existing) return json({ duplicate: true, build: { id: existing.id } });

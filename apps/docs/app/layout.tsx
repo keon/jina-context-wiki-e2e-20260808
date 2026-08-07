@@ -6,7 +6,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: { default: "Jina Documentation", template: "%s · Jina Documentation" },
-  description: "Guides for onboarding, code reviews, Context Wiki, Causal Graph, integrations, and .jina configuration."
+  description: "Guides for onboarding, code reviews, Wiki, Causal Graph, integrations, and .jina configuration."
 };
 
 export default function RootLayout({ children }: { readonly children: ReactNode }) {

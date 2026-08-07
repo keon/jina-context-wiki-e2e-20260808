@@ -131,7 +131,7 @@ export async function runProductionTriggerAcceptance(options, dependencies = {})
     await assertNoNewScopedRoots(api, config, baselineRoots, config.commentQuietMs, sleep);
 
     const manualRequestKey = `production-trigger:${config.runId}:full-initialization`;
-    const manualResponse = await api("/context/build", {
+    const manualResponse = await api("/wiki/build", {
       method: "POST",
       body: {
         repository: config.repository,
@@ -160,7 +160,7 @@ export async function runProductionTriggerAcceptance(options, dependencies = {})
       },
       sleep
     );
-    const manualReplay = await api("/context/build", {
+    const manualReplay = await api("/wiki/build", {
       method: "POST",
       body: {
         repository: config.repository,
@@ -1032,7 +1032,7 @@ function contextDescendants(tasks, rootId) {
 }
 
 async function readReleases(api, repository) {
-  const response = await api(`/context/releases?repository=${encodeURIComponent(repository)}`);
+  const response = await api(`/wiki/releases?repository=${encodeURIComponent(repository)}`);
   return requiredArray(response.body.releases, "Context releases")
     .filter(isObject)
     .map((release) => ({

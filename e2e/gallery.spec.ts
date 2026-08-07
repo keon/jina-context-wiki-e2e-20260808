@@ -176,7 +176,7 @@ test("an unmeasured figure renders the sentinel, never 0, and stays announced", 
   const zero = stats.locator('[data-ui="stat"]', { hasText: "Active builds" });
   await expect(zero).toHaveAttribute("data-measured", "true");
   await expect(zero.locator('[data-ui="stat-value"]')).toHaveText("0");
-  await expect(stats.locator('[data-ui="stat"]', { hasText: "Context releases" })).toContainText("1,234,567");
+  await expect(stats.locator('[data-ui="stat"]', { hasText: "Wiki releases" })).toContainText("1,234,567");
 
   // "Unavailable" carries the meaning for a screen reader, so it has to still be
   // in the accessibility tree while being invisible — a distinction that only

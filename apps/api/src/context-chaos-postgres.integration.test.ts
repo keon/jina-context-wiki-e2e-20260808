@@ -204,14 +204,13 @@ test(
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
-      const admitted = await fetch(
-        `${serverUrl(server)}/context/releases?repository=${encodeURIComponent(REPOSITORY)}`,
-        { headers: { authorization: `Bearer ${secret}` } }
-      );
+      const admitted = await fetch(`${serverUrl(server)}/wiki/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
+        headers: { authorization: `Bearer ${secret}` }
+      });
       assert.equal(admitted.status, 200, await admitted.text());
 
       blockRetrieval = true;
-      const inFlight = fetch(`${serverUrl(server)}/context/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
+      const inFlight = fetch(`${serverUrl(server)}/wiki/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
         headers: { authorization: `Bearer ${secret}` }
       });
       await started;

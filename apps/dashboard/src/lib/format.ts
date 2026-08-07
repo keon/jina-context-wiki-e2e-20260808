@@ -49,8 +49,8 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   "review.completed": "Review completed",
   "publish.completed": "Publication comment",
   "github.issue_opened": "GitHub issue received",
-  "context.generation_published": "Context release published",
-  "context.build_failed": "Context build failed"
+  "context.generation_published": "Wiki release published",
+  "context.build_failed": "Wiki build failed"
 };
 
 export function eventLabel(event: { readonly type: string }): string {

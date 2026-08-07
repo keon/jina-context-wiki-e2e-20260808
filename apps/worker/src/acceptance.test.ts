@@ -65,7 +65,7 @@ test("production acceptance cancels its exact build when the polling deadline ex
     const url = new URL(String(input));
     requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
     if (url.pathname === "/internal/context/access/sync") return json({ accepted: true });
-    if (url.pathname === "/context/build") return json({ build: { id: "cb_timeout" } }, 202);
+    if (url.pathname === "/wiki/build") return json({ build: { id: "cb_timeout" } }, 202);
     if (url.pathname === "/internal/context/builds/cb_timeout/cancel") {
       assert.deepEqual(JSON.parse(String(init?.body)), { reason: "production acceptance timeout" });
       return json({
@@ -95,7 +95,7 @@ test("production acceptance cancels its exact build when the polling deadline ex
   );
   assert.deepEqual(requests, [
     "POST /internal/context/access/sync",
-    "POST /context/build",
+    "POST /wiki/build",
     "POST /internal/context/builds/cb_timeout/cancel"
   ]);
 });
@@ -164,7 +164,7 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
   );
   assert.deepEqual(
     requests.map((request) => request.path),
-    ["/context/builds/task_build/progress", "/context/builds/task_build/retry"]
+    ["/wiki/builds/task_build/progress", "/wiki/builds/task_build/retry"]
   );
   assert.deepEqual(requests[1]?.body?.taskIds, ["task_page_failed"]);
   assert.equal(
@@ -358,7 +358,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
       if (tokenId === "atk_stale_acceptance") staleTokenRevoked = true;
       return json({ token: { ...issuedToken, id: tokenId, revokedAt: new Date().toISOString() } });
     }
-    if (url.pathname === "/context/build") {
+    if (url.pathname === "/wiki/build") {
       if (authorization === `Bearer ${issuedSecret}`) {
         return json({ error: "token scope does not permit this route", code: "insufficient_scope" }, 403);
       }
@@ -460,7 +460,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
         }))
       });
     }
-    if (url.pathname === "/context/releases") {
+    if (url.pathname === "/wiki/releases") {
       if (
         authorization === `Bearer ${issuedSecret}` &&
         headers.get("x-jina-principal-id") !== issuedToken.principalId
@@ -486,7 +486,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
         ]
       });
     }
-    if (url.pathname === "/context/list") {
+    if (url.pathname === "/wiki/list") {
       const requestedRepository = url.searchParams.get("repository");
       if (requestedRepository !== "omlabs/repo") {
         return json({ accepted: false, code: "not_found", error: "repository context not found" }, 404);
@@ -529,7 +529,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
         ]
       });
     }
-    if (url.pathname === "/context/read") {
+    if (url.pathname === "/wiki/read") {
       return json({
         release: {
           id: "ig_current",
@@ -554,7 +554,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
         }
       });
     }
-    if (url.pathname === "/context/diff") {
+    if (url.pathname === "/wiki/diff") {
       const release = {
         id: "ig_current",
         repository: "omlabs/repo",
@@ -570,7 +570,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
         unchanged: ["architecture"]
       });
     }
-    if (url.pathname === "/context/search") {
+    if (url.pathname === "/wiki/search") {
       return json({
         release: {
           id: "ig_current",
@@ -597,7 +597,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
         retrieval: { method: "lexical_tree", selector: "pageindex-lexical-tree-v1" }
       });
     }
-    if (url.pathname === "/context/metrics") {
+    if (url.pathname === "/wiki/metrics") {
       metricsRepositories.push(url.searchParams.get("repository"));
       return authorization === `Bearer ${issuedSecret}`
         ? json({ error: "token scope does not permit this route", code: "insufficient_scope" }, 403)
@@ -686,32 +686,32 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
     "GET /health",
     "GET /health",
     "POST /internal/context/access/sync",
-    "POST /context/build",
+    "POST /wiki/build",
     "GET /board",
     "GET /board",
     "GET /board",
     "GET /internal/context/builds/cb_acceptance/worker-completions",
     "POST /internal/context/tokens",
-    "POST /context/build",
-    "GET /context/metrics",
+    "POST /wiki/build",
+    "GET /wiki/metrics",
     "GET /board",
-    "GET /context/releases",
-    "GET /context/releases",
+    "GET /wiki/releases",
+    "GET /wiki/releases",
     "POST /internal/context/tokens",
-    "GET /context/releases",
-    "GET /context/list",
-    "GET /context/list",
-    "GET /context/list",
-    "GET /context/read",
-    "GET /context/diff",
-    "POST /context/search",
+    "GET /wiki/releases",
+    "GET /wiki/list",
+    "GET /wiki/list",
+    "GET /wiki/list",
+    "GET /wiki/read",
+    "GET /wiki/diff",
+    "POST /wiki/search",
     "POST /internal/context/tokens/atk_acceptance/revoke",
     "GET /internal/context/tokens",
     "POST /internal/context/tokens/atk_stale_acceptance/revoke",
     "GET /internal/context/tokens",
-    "GET /context/releases",
+    "GET /wiki/releases",
     "POST /mcp",
-    "GET /context/metrics"
+    "GET /wiki/metrics"
   ]);
   assert.deepEqual(requestedAuthorization, [
     "Bearer context-worker-identity",
@@ -760,7 +760,7 @@ test("production acceptance revokes and verifies the issued token when a query a
     const headers = new Headers(init?.headers);
     const authorization = headers.get("authorization");
     if (url.pathname === "/internal/context/access/sync") return json({ repositoryCount: 1 });
-    if (url.pathname === "/context/build") {
+    if (url.pathname === "/wiki/build") {
       return authorization === `Bearer ${issuedSecret}`
         ? json({ error: "token scope does not permit this route", code: "insufficient_scope" }, 403)
         : json({ build: { id: "cb_failure_cleanup" } }, 202);
@@ -815,10 +815,10 @@ test("production acceptance revokes and verifies the issued token when a query a
       revoked = true;
       return json({ token: { id: tokenId, revokedAt: new Date().toISOString() } });
     }
-    if (url.pathname === "/context/metrics") {
+    if (url.pathname === "/wiki/metrics") {
       return json({ error: "token scope does not permit this route", code: "insufficient_scope" }, 403);
     }
-    if (url.pathname === "/context/releases") {
+    if (url.pathname === "/wiki/releases") {
       if (headers.get("x-jina-principal-id") !== "user:reader@example.com") {
         return json({ error: "unauthorized" }, 401);
       }
@@ -1008,9 +1008,9 @@ test("production web acceptance exercises the dashboard proxy and admin server r
     if (url.hostname === "dashboard.example.test") {
       assert.equal(headers.get("authorization"), "Bearer dashboard-cloud-run");
       assert.equal(headers.get("x-jina-web-authorization"), "Basic dashboard");
-      if (url.pathname === "/context") {
+      if (url.pathname === "/wiki") {
         return new Response(
-          '<!doctype html><html><body><section id="context-page"><h1>Evidence-backed workspace</h1></section></body></html>',
+          '<!doctype html><html><body><section id="wiki-page"><h1>Evidence-backed workspace</h1></section></body></html>',
           { headers: { "content-type": "text/html; charset=utf-8" } }
         );
       }
@@ -1038,8 +1038,8 @@ test("production web acceptance exercises the dashboard proxy and admin server r
     3
   );
   assert.deepEqual(requests, [
-    "dashboard.example.test/api/context/releases",
-    "dashboard.example.test/context",
+    "dashboard.example.test/api/wiki/releases",
+    "dashboard.example.test/wiki",
     "admin.example.test/"
   ]);
 });
@@ -1236,7 +1236,7 @@ async function runTokenContractFailureScenario(mode: "invalid-json" | "missing-i
     const headers = new Headers(init?.headers);
     const authorization = headers.get("authorization");
     if (url.pathname === "/internal/context/access/sync") return json({ repositoryCount: 1 });
-    if (url.pathname === "/context/build") return json({ build: { id: "cb_mint_cleanup" } }, 202);
+    if (url.pathname === "/wiki/build") return json({ build: { id: "cb_mint_cleanup" } }, 202);
     if (url.pathname === "/board") {
       return json({
         tasks: [
@@ -1290,7 +1290,7 @@ async function runTokenContractFailureScenario(mode: "invalid-json" | "missing-i
       matchingActive = false;
       return json({ token: { id: revokedId, revokedAt: new Date().toISOString() } });
     }
-    if (url.pathname === "/context/releases" && authorization === `Bearer ${issuedSecret}` && !matchingActive) {
+    if (url.pathname === "/wiki/releases" && authorization === `Bearer ${issuedSecret}` && !matchingActive) {
       revokedHttpRejected = true;
       return json({ error: "unauthorized" }, 401);
     }

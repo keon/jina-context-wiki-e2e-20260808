@@ -246,7 +246,7 @@ export async function runContextTriggerAdmissionAcceptance(options, dependencies
         })
       },
       () =>
-        request("/context/build", {
+        request("/wiki/build", {
           method: "POST",
           body: {
             repository: config.repositoryInput,
@@ -271,7 +271,7 @@ export async function runContextTriggerAdmissionAcceptance(options, dependencies
         existingBuildId: manualBuildId
       },
       () =>
-        request("/context/build", {
+        request("/wiki/build", {
           method: "POST",
           body: {
             repository: config.repositoryInput,

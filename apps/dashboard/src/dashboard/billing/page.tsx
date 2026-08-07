@@ -62,10 +62,9 @@ export default function BillingPage() {
   if (billing.status === "not_configured") {
     return (
       <BillingFrame selected={selected}>
-        <BillingState
-          title="Billing is not configured"
-          detail="Contact Jina to activate billing for this workspace. Nothing has been charged."
-        />
+        <PlanHero billing={billing} selected={selected} writable={writable} isCurrentTenant={isCurrentTenant} />
+        <BillingDetails billing={billing} selected={selected} isOrg={isOrg} />
+        <BillingEmptyControls />
       </BillingFrame>
     );
   }
@@ -102,17 +101,10 @@ export default function BillingPage() {
 function BillingFrame({ selected, children }: { selected: SelectedTenant | null; children: ReactNode }) {
   return (
     <div className="billing-v2">
-      <header className="route-intro">
-        <div>
-          <h1>Billing</h1>
-          <p>Manage your plan, credit balance, and automatic review spending.</p>
-        </div>
+      <header className="billing-v2__header">
+        <h1>Billing</h1>
         {selected ? <span className="route-intro__scope">{selected.login}</span> : null}
       </header>
-      <nav className="billing-v2__tabs" aria-label="Usage and billing">
-        <Link href="/usage">Review usage</Link>
-        <span aria-current="page">Billing and limits</span>
-      </nav>
       {children}
     </div>
   );
@@ -181,7 +173,6 @@ function PlanHero({
     <section className="billing-v2__plan">
       <div className="billing-v2__plan-head">
         <div className="plan-hero__lead">
-          <span className="plan-hero__kicker">Current plan</span>
           {currentPlan ? (
             <span className="plan-hero__name">
               {currentPlan}
@@ -196,11 +187,11 @@ function PlanHero({
           <p className="plan-hero__sub">
             {currentPlan
               ? "Included credits refresh each billing cycle."
-              : "Choose a plan to unlock included credits each cycle."}
+              : "Choose a plan to unlock included usage."}
           </p>
         </div>
         {writable ? (
-          <button type="button" className="btn btn--sm" onClick={() => setChoosing((prev) => !prev)}>
+          <button type="button" className="btn btn--primary" onClick={() => setChoosing((prev) => !prev)}>
             {choosing ? "Cancel" : currentPlan ? "Change plan" : "Choose a plan"}
           </button>
         ) : null}
@@ -253,62 +244,52 @@ function BillingDetails({
   selected: SelectedTenant | null;
   isOrg: boolean;
 }) {
-  const { cycle, members } = billing;
-  // Cycle accounting supersedes the flat balance where present.
-  const includedValue =
-    cycle.remaining !== null && cycle.granted !== null
-      ? `${formatCredits(cycle.remaining)} / ${formatCredits(cycle.granted)}`
-      : "—";
+  const { members } = billing;
+  const memberCount = members.total;
 
   return (
     <section className="billing-v2__section">
       <div className="billing-v2__section-head">
+        <h2>Billing details</h2>
+      </div>
+      <div className="billing-v2__panel billing-v2__details">
         <div>
-          <h2>Balance</h2>
-          <p>Credits available to this workspace.</p>
-        </div>
-        {selected ? (
-          <span className="cell-meta">
-            Account: {selected.login} · {selected.type === "Organization" ? "Organization" : "Personal"}
+          <strong>{memberCount === null ? "Member count unavailable" : `${memberCount} ${memberCount === 1 ? "member" : "members"}`}</strong>
+          <span>
+            {isOrg
+              ? members.with_harness === null
+                ? "Organization billing"
+                : `${members.with_harness} using their own harness`
+              : "Personal workspace"}
           </span>
-        ) : null}
-      </div>
-      <div className="billing-v2__metrics">
-        <div className="billing-v2__metric">
-          <span className="metric__label">Included credits left</span>
-          <span className="metric__value">{includedValue}</span>
-          {cycle.next_reset_at ? (
-            <span className="metric__sub">Resets {formatDate(cycle.next_reset_at)}</span>
-          ) : (
-            <span className="metric__sub">this cycle</span>
-          )}
         </div>
-        <div className="billing-v2__metric">
-          <span className="metric__label">Extra balance</span>
-          <span className="metric__value">{formatCredits(billing.credits_balance)}</span>
-          <span className="metric__sub">{creditsToUsd(billing.credits_balance)} at $1 = 100 credits</span>
-        </div>
-        {isOrg ? (
-          <div className="billing-v2__metric">
-            <span className="metric__label">Members</span>
-            <span className="metric__value">
-              {members.total ?? "—"}
-              {members.with_harness !== null ? (
-                <span className="metric__sub">· {members.with_harness} with own harness</span>
-              ) : null}
-            </span>
-          </div>
-        ) : null}
+        <Link className="btn" href={isOrg ? "/organization" : "/settings"}>
+          Manage
+        </Link>
       </div>
-
-      {isOrg ? (
-        <p className="billing-v2__note">
-          Balances shown are for {selected?.login}.
-        </p>
-      ) : (
-        <p className="billing-v2__note">Personal account.</p>
-      )}
+      {selected ? <p className="billing-v2__note">Billing account: {selected.login}</p> : null}
     </section>
+  );
+}
+
+function BillingEmptyControls() {
+  return (
+    <>
+      <section className="billing-v2__section">
+        <div className="billing-v2__section-head">
+          <h2>Auto-review limit</h2>
+        </div>
+        <div className="billing-v2__panel billing-v2__empty-control">
+          Choose a plan to configure automatic review limits.
+        </div>
+      </section>
+      <section className="billing-v2__section">
+        <div className="billing-v2__section-head">
+          <h2>Billing activity</h2>
+        </div>
+        <div className="billing-v2__panel billing-v2__empty-control">No billing activity yet</div>
+      </section>
+    </>
   );
 }
 
@@ -391,50 +372,55 @@ function AutoReviewLimit({
   return (
     <section className="billing-v2__section">
       <div className="billing-v2__section-head">
-        <div>
-          <h2>Auto-review limit</h2>
-          <p>Pause automatic reviews after a credit threshold. Manual reviews are unaffected.</p>
-        </div>
+        <h2>Auto-review limit</h2>
       </div>
-      <div className="billing-v2__setting">
+      <div className="billing-v2__panel billing-v2__setting">
         {!writable ? (
           <p className="tenant-gate-note">Managed by org admins.</p>
         ) : null}
 
-        <label className="toggle-row">
-          <input
-            type="checkbox"
-            className="toggle-row__input"
-            checked={enabled}
-            disabled={!writable || busy}
-            onChange={(event) => setEnabled(event.target.checked)}
-          />
-          <span className="toggle-row__label">Pause automatic reviews at a spend limit</span>
-        </label>
+        <div className="billing-v2__setting-row">
+          <div className="billing-v2__setting-copy">
+            <strong>Auto-review limit</strong>
+            <span>Pause automatic reviews when usage-cycle review usage reaches a cap.</span>
+          </div>
+          <label className="toggle-row" aria-label="Enable auto-review limit">
+            <input
+              type="checkbox"
+              className="toggle-row__input"
+              checked={enabled}
+              disabled={!writable || busy}
+              onChange={(event) => setEnabled(event.target.checked)}
+            />
+          </label>
+        </div>
 
-        {enabled ? (
-          <label className="form-field limit-field">
-            <span className="form-field__label">Limit (credits)</span>
-            <div className="limit-field__control">
+        <div className="billing-v2__setting-row">
+          <div className="billing-v2__setting-copy">
+            <strong>Usage-cycle limit</strong>
+            <span>Auto-review pauses for the rest of the usage cycle when usage reaches this limit.</span>
+            {usedLabel ? <small>{usedLabel}</small> : null}
+          </div>
+          <div className="billing-v2__limit-control">
+            <label>
+              <span className="sr-only">Limit in credits</span>
               <input
-                className="input limit-field__input"
+                className="input"
                 type="number"
                 min="0"
                 step="100"
                 inputMode="numeric"
                 placeholder="e.g. 10000"
                 value={draft}
-                disabled={!writable || busy}
+                disabled={!writable || busy || !enabled}
                 onChange={(event) => setDraft(event.target.value)}
               />
-              <span className="limit-field__usd">{parsed !== null ? `${creditsToUsd(parsed)} equivalent` : "No cap set"}</span>
-            </div>
-          </label>
-        ) : null}
+            </label>
+            <span>{parsed !== null ? `${creditsToUsd(parsed)} equivalent` : "No cap set"}</span>
+          </div>
+        </div>
 
-        {usedLabel ? <p className="cell-meta">{usedLabel}</p> : null}
-
-        <div className="billing-v2__actions">
+        <div className="billing-v2__actions billing-v2__setting-actions">
           <span className={status?.kind === "error" ? "error-text" : "cell-meta"}>
             {status?.kind === "error" ? status.message : status?.kind === "saved" ? "Saved" : ""}
           </span>
@@ -505,17 +491,30 @@ function AutoReload({
   };
 
   return (
-    <section className="billing-v2__section">
+    <section className="billing-v2__section" id="add-balance">
       <div className="billing-v2__section-head">
-        <div>
-          <h2>Add balance</h2>
-          <p>Purchase additional credits for reviews beyond the included plan balance.</p>
-        </div>
+        <h2>Auto-reload</h2>
       </div>
-      <div className="billing-v2__setting">
-        <div className="topup">
+      <div className="billing-v2__panel billing-v2__setting">
+        <div className="billing-v2__setting-row">
+          <div className="billing-v2__setting-copy">
+            <strong>Auto-reload</strong>
+            <span>Automatically add balance when it runs low.</span>
+            <small>Automatic reload is coming soon. You can add balance manually below.</small>
+          </div>
+          <button
+            type="button"
+            className="toggle-row__input billing-v2__disabled-toggle"
+            role="switch"
+            aria-checked="false"
+            aria-label="Auto-reload is not available yet"
+            disabled
+          />
+        </div>
+        <div className="billing-v2__topup-row">
+          <div className="topup">
           <label className="form-field topup__amount">
-            <span className="form-field__label">Top-up amount</span>
+            <span className="form-field__label">Manual balance amount</span>
             <select
               className="input"
               value={choice}
@@ -547,20 +546,24 @@ function AutoReload({
               />
             </label>
           ) : null}
-        </div>
+          </div>
 
-        <div className="billing-v2__actions">
-          <span className={message ? "error-text" : "cell-meta"}>
-            {message ?? (credits !== null ? `You'll be charged ${creditsToUsd(credits)} for ${formatCredits(credits)} credits.` : "")}
-          </span>
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={() => void topup()}
-            disabled={busy || !writable || credits === null}
-          >
-            {busy ? "Redirecting…" : "Add balance"}
-          </button>
+          <div className="billing-v2__actions">
+            <span className={message ? "error-text" : "cell-meta"}>
+              {message ??
+                (credits !== null
+                  ? `You'll be charged ${creditsToUsd(credits)} for ${formatCredits(credits)} credits.`
+                  : "")}
+            </span>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => void topup()}
+              disabled={busy || !writable || credits === null}
+            >
+              {busy ? "Redirecting…" : "Add balance"}
+            </button>
+          </div>
         </div>
       </div>
     </section>

@@ -581,7 +581,7 @@ test("collapsed Context planner can be operator-retried after a terminal failure
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   try {
-    const response = await fetch(`${baseUrl}/context/builds/${created.buildTaskId}/tasks/${planner.id}/retry`, {
+    const response = await fetch(`${baseUrl}/wiki/builds/${created.buildTaskId}/tasks/${planner.id}/retry`, {
       method: "POST",
       headers: devHeaders(tenantId, principalId),
       body: JSON.stringify({
@@ -669,7 +669,7 @@ test("Context execution budgets ignore queue time and merge parallel lease windo
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   try {
-    const response = await fetch(`${baseUrl}/context/builds/${created.buildTaskId}/progress`, {
+    const response = await fetch(`${baseUrl}/wiki/builds/${created.buildTaskId}/progress`, {
       headers: devHeaders(tenantId, principalId)
     });
     assert.equal(response.status, 200);
@@ -741,13 +741,13 @@ test("tenant administrators can extend and resume only the task canceled by a bu
       body: JSON.stringify({ workerId: "deadline-recovery-test", topics: [contextBoardTopics.snapshot] })
     });
     assert.equal(expiredClaim.status, 204);
-    const expired = await fetch(`${baseUrl}/context/builds/${created.buildTaskId}/progress`, {
+    const expired = await fetch(`${baseUrl}/wiki/builds/${created.buildTaskId}/progress`, {
       headers: devHeaders(tenantId, principalId)
     });
     assert.equal(expired.status, 200);
     assert.equal((await expired.json()).failureCode, "build_time_budget_exceeded");
 
-    const retryUrl = `${baseUrl}/context/builds/${created.buildTaskId}/tasks/${created.snapshotTaskId}/retry`;
+    const retryUrl = `${baseUrl}/wiki/builds/${created.buildTaskId}/tasks/${created.snapshotTaskId}/retry`;
     const retryBody = {
       requestKey: "operator:deadline-recovery",
       reason: "the provider outage consumed the original build envelope",
@@ -825,7 +825,7 @@ test("new build admission reconciles terminal and orphaned quota reservations ag
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   try {
-    const response = await fetch(`${baseUrl}/context/build`, {
+    const response = await fetch(`${baseUrl}/wiki/build`, {
       method: "POST",
       headers: {
         ...devHeaders(tenantId, principalId),
@@ -921,7 +921,7 @@ test("a newer PR delivery queues behind leased work without settling or cancelin
   });
   const signature = `sha256=${createHmac("sha256", webhookSecret).update(rawBody).digest("hex")}`;
   const deliver = () =>
-    fetch(`${baseUrl}/context/webhooks/github`, {
+    fetch(`${baseUrl}/wiki/webhooks/github`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

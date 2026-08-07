@@ -39,7 +39,6 @@ const PROVIDERS: {
   id: keyof Integrations;
   name: string;
   mark: string;
-  description: string;
   field: ProviderField;
   placeholder: string;
   oauth?: boolean;
@@ -48,7 +47,6 @@ const PROVIDERS: {
     id: "openrouter",
     name: "OpenRouter",
     mark: "OR",
-    description: "Use one key for models from multiple providers.",
     field: "openrouter_api_key",
     placeholder: "sk-or-…",
     oauth: true,
@@ -57,7 +55,6 @@ const PROVIDERS: {
     id: "openai",
     name: "OpenAI",
     mark: "AI",
-    description: "Run reviews with models billed to your OpenAI account.",
     field: "openai_api_key",
     placeholder: "sk-…",
   },
@@ -65,7 +62,6 @@ const PROVIDERS: {
     id: "anthropic",
     name: "Anthropic",
     mark: "AN",
-    description: "Use Claude models through your own provider key.",
     field: "anthropic_api_key",
     placeholder: "sk-ant-…",
   },
@@ -224,10 +220,7 @@ export default function IntegrationsPage() {
   return (
     <div className="integrations-v2">
       <header className="route-intro">
-        <div>
-          <h1>Integrations</h1>
-          <p>Connect source control and model providers to this workspace.</p>
-        </div>
+        <h1>Integrations</h1>
         {selected ? <span className="route-intro__scope">{selected.login}</span> : null}
       </header>
 
@@ -238,7 +231,7 @@ export default function IntegrationsPage() {
         </div>
       ) : null}
 
-      <IntegrationGroup title="Source control" description="Repositories and pull requests">
+      <IntegrationGroup title="Source control">
         <GitHubRow
           state={connectionState}
           connections={connections}
@@ -247,13 +240,12 @@ export default function IntegrationsPage() {
         />
       </IntegrationGroup>
 
-      <IntegrationGroup title="Model providers" description="Credentials used to run reviews">
+      <IntegrationGroup title="Model providers">
         {providerState === "loading" ? (
-          <CompactState title="Loading providers" detail="Checking the connections for this workspace." />
+          <CompactState title="Loading providers" />
         ) : providerState === "unavailable" ? (
           <CompactState
             title="Provider connections are unavailable"
-            detail="Nothing has been disconnected or changed. Try again when the service is reachable."
             action={<button type="button" className="btn btn--sm" onClick={reloadProviders}>Retry</button>}
           />
         ) : (
@@ -279,20 +271,15 @@ export default function IntegrationsPage() {
 
 function IntegrationGroup({
   title,
-  description,
   children,
 }: {
   title: string;
-  description: string;
   children: React.ReactNode;
 }) {
   return (
     <section className="integration-group">
       <div className="integration-group__head">
-        <div>
-          <h2>{title}</h2>
-          <p>{description}</p>
-        </div>
+        <h2>{title}</h2>
       </div>
       {children}
     </section>
@@ -301,11 +288,9 @@ function IntegrationGroup({
 
 function CompactState({
   title,
-  detail,
   action,
 }: {
   title: string;
-  detail: string;
   action?: React.ReactNode;
 }) {
   return (
@@ -313,7 +298,6 @@ function CompactState({
       <span className="integration-mark integration-mark--muted">•••</span>
       <div>
         <strong>{title}</strong>
-        <p>{detail}</p>
       </div>
       {action ? <div className="integration-state__action">{action}</div> : null}
     </div>
@@ -349,7 +333,6 @@ function GitHubRow({
           <strong>GitHub</strong>
           <Badge tone={connected.length > 0 ? "ok" : undefined}>{statusLabel}</Badge>
         </div>
-        <p>Sync organizations and repositories for pull-request reviews.</p>
         {connected.length > 0 ? (
           <div className="integration-row__connections">
             {connected.map((connection) => (
@@ -479,7 +462,6 @@ function ProviderRow({
           <strong>{provider.name}</strong>
           <Badge tone={info.configured ? "ok" : undefined}>{info.configured ? "Connected" : "Not connected"}</Badge>
         </div>
-        <p>{provider.description}</p>
         {info.configured ? (
           <div className="integration-row__metadata">
             <span className="cell-mono">••••{info.last4 ?? ""}</span>

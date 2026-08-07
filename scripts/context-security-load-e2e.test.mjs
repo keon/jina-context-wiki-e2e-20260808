@@ -95,7 +95,7 @@ test("security/load harness validates concurrent deterministic traffic and secur
     assert.equal(report.publicPayloadInspection.leaks, 0);
     assert.ok(state.maxConcurrent >= 2, "load requests did not overlap");
     assert.equal(
-      state.requests.some((entry) => entry.pathname === "/context/search"),
+      state.requests.some((entry) => entry.pathname === "/wiki/search"),
       false
     );
     assert.equal(state.issuedRevoked, true);
@@ -358,13 +358,13 @@ async function withFakeContextServer(configuration, run) {
         code: internal ? "not_found" : "insufficient_scope"
       });
     }
-    if (url.pathname === "/context/metrics") {
+    if (url.pathname === "/wiki/metrics") {
       return internal ? json(response, 200, { status: "ready" }) : json(response, 403, { code: "insufficient_scope" });
     }
     if (url.pathname === "/board") {
       return internal ? json(response, 200, { tasks: [] }) : json(response, 403, { code: "insufficient_scope" });
     }
-    if (url.pathname === "/context/builds") {
+    if (url.pathname === "/wiki/builds") {
       if (!internal) return json(response, 403, { code: "insufficient_scope" });
       return json(response, 200, {
         builds: [
@@ -379,7 +379,7 @@ async function withFakeContextServer(configuration, run) {
         ]
       });
     }
-    if (url.pathname === `/context/builds/${BUILD_ID}/progress`) {
+    if (url.pathname === `/wiki/builds/${BUILD_ID}/progress`) {
       if (!internal) return json(response, 403, { code: "insufficient_scope" });
       return json(response, 200, {
         buildId: BUILD_ID,
@@ -405,7 +405,7 @@ async function withFakeContextServer(configuration, run) {
     if (requestedRepository !== REPOSITORY) {
       return json(response, 404, { error: "not found" });
     }
-    if (url.pathname === "/context/releases") {
+    if (url.pathname === "/wiki/releases") {
       return json(response, 200, { releases: [release, previousRelease] });
     }
 
@@ -424,7 +424,7 @@ async function withFakeContextServer(configuration, run) {
 }
 
 async function serveOperation(url, configuration, state) {
-  if (!["/context/list", "/context/read", "/context/diff"].includes(url.pathname)) {
+  if (!["/wiki/list", "/wiki/read", "/wiki/diff"].includes(url.pathname)) {
     return undefined;
   }
   state.active += 1;
@@ -433,7 +433,7 @@ async function serveOperation(url, configuration, state) {
     if (configuration.operationDelayMs) {
       await new Promise((resolve) => setTimeout(resolve, configuration.operationDelayMs));
     }
-    if (url.pathname === "/context/list") {
+    if (url.pathname === "/wiki/list") {
       state.loadListCalls += 1;
       if (configuration.failFirstLoadList && state.loadListCalls === 2) {
         return {
@@ -463,7 +463,7 @@ async function serveOperation(url, configuration, state) {
             ? {
                 prompt: "private worker instructions",
                 artifactUri: "gs://private-context-bucket/checkpoints/task.json",
-                artifactPath: "context/tenants/t1/repositories/acme/context/builds/task_abc/output.json",
+                artifactPath: "context/tenants/t1/repositories/acme/wiki/builds/task_abc/output.json",
                 diagnostic: "Error: private failure\n    at worker (/srv/private-worker.js:1:2)",
                 rawEvidence: { providerPayload: "private provider body" }
               }
@@ -471,7 +471,7 @@ async function serveOperation(url, configuration, state) {
         }
       };
     }
-    if (url.pathname === "/context/read") {
+    if (url.pathname === "/wiki/read") {
       state.loadReadCalls += 1;
       if (url.searchParams.get("document") !== document.id) {
         return { status: 404, body: { error: "not found" } };

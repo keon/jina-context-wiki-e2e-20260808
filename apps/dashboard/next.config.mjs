@@ -28,7 +28,12 @@ const nextConfig = {
   // primitives without a build-order dependency. `@jina/ui` also needs to be
   // transpiled for its co-located CSS Modules to be compiled and hashed.
   transpilePackages: ["@jina/theme", "@jina/ui"],
-  headers: () => Promise.resolve([{ source: "/:path*", headers: securityHeaders }])
+  headers: () => Promise.resolve([{ source: "/:path*", headers: securityHeaders }]),
+  redirects: () =>
+    Promise.resolve([
+      { source: "/context", destination: "/wiki", permanent: true },
+      { source: "/operations/context", destination: "/wiki", permanent: true }
+    ])
 };
 
 export default nextConfig;

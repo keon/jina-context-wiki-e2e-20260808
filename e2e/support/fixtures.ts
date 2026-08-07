@@ -35,7 +35,7 @@ export function isScenario(value: string): value is Scenario {
 export const HEADINGS = {
   releases: "Published releases",
   builds: "Build and checkpoint state",
-  health: "Context index health",
+  health: "Wiki index health",
   documents: "Agent-derived context"
 } as const;
 
@@ -298,26 +298,26 @@ const FAILED: StubReply = { status: 500, body: { error: "stub: upstream unavaila
  * ever issues these five shapes.
  */
 export function replyFor(scenario: Scenario, pathname: string, search: URLSearchParams): StubReply | undefined {
-  if (pathname === "/context/releases") {
+  if (pathname === "/wiki/releases") {
     if (scenario === "degraded") return FAILED;
     return { status: 200, body: { releases: scenario === "empty" ? [] : RELEASES } };
   }
 
-  if (pathname === "/context/metrics") {
+  if (pathname === "/wiki/metrics") {
     if (scenario === "degraded") return FAILED;
     return { status: 200, body: scenario === "empty" ? EMPTY_METRICS : PARTIAL_METRICS };
   }
 
-  if (pathname === "/context/builds") {
+  if (pathname === "/wiki/builds") {
     return { status: 200, body: { builds: scenario === "empty" ? [] : BUILDS } };
   }
 
-  if (pathname === "/context/list") {
+  if (pathname === "/wiki/list") {
     const releaseId = search.get("releaseId") ?? "";
     return { status: 200, body: { documents: DOCUMENTS[releaseId] ?? [] } };
   }
 
-  const progressMatch = /^\/context\/builds\/([^/]+)\/progress$/.exec(pathname);
+  const progressMatch = /^\/wiki\/builds\/([^/]+)\/progress$/.exec(pathname);
   if (progressMatch) {
     const buildId = decodeURIComponent(progressMatch[1] ?? "");
     const progress = BUILD_PROGRESS[buildId];

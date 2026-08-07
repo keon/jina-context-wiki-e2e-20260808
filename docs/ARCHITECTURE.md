@@ -296,14 +296,14 @@ pack.
 HTTP:
 
 ```text
-POST /context/search
-GET  /context/releases
-GET  /context/list
-GET  /context/read
-GET  /context/diff
-GET  /context/builds
-GET  /context/builds/:id/progress
-GET  /context/builds/:id/page
+POST /wiki/search
+GET  /wiki/releases
+GET  /wiki/list
+GET  /wiki/read
+GET  /wiki/diff
+GET  /wiki/builds
+GET  /wiki/builds/:id/progress
+GET  /wiki/builds/:id/page
 POST /mcp
 ```
 

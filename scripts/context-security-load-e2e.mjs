@@ -205,7 +205,7 @@ export async function runContextSecurityLoadAcceptance(options, dependencies = {
   };
 
   try {
-    const releasesResult = await requireOk(`/context/releases?${query({ repository: config.repository })}`);
+    const releasesResult = await requireOk(`/wiki/releases?${query({ repository: config.repository })}`);
     scanPublicPayload("releases", releasesResult.body, publicScans);
     const releases = requiredArray(requiredObject(releasesResult.body, "releases response").releases, "releases");
     const release = releases
@@ -217,7 +217,7 @@ export async function runContextSecurityLoadAcceptance(options, dependencies = {
       throw new Error(`required release ${config.releaseId} is not available`);
     }
 
-    const buildsResult = await requireOk("/context/builds", { credential: "internal" });
+    const buildsResult = await requireOk("/wiki/builds", { credential: "internal" });
     const builds = requiredArray(requiredObject(buildsResult.body, "builds response").builds, "builds");
     const build = builds.map((value) => requiredObject(value, "build")).find((value) => value.id === config.buildId);
     if (!build) throw new Error(`required build ${config.buildId} was not returned`);
@@ -229,7 +229,7 @@ export async function runContextSecurityLoadAcceptance(options, dependencies = {
       throw new Error("published release commit does not match the required completed build");
     }
 
-    const progressResult = await requireOk(`/context/builds/${encodeURIComponent(config.buildId)}/progress`, {
+    const progressResult = await requireOk(`/wiki/builds/${encodeURIComponent(config.buildId)}/progress`, {
       credential: "internal"
     });
     const progress = requiredObject(progressResult.body, "build progress");
@@ -244,7 +244,7 @@ export async function runContextSecurityLoadAcceptance(options, dependencies = {
       if (!stage || stage.status !== "done") throw new Error(`required completed build is missing successful ${type}`);
     }
 
-    const listPath = `/context/list?${query({
+    const listPath = `/wiki/list?${query({
       repository: config.repository,
       releaseId: config.releaseId
     })}`;
@@ -260,7 +260,7 @@ export async function runContextSecurityLoadAcceptance(options, dependencies = {
       throw new Error(`requested document ${documentId} is not in release ${config.releaseId}`);
     }
 
-    const readPath = `/context/read?${query({
+    const readPath = `/wiki/read?${query({
       repository: config.repository,
       releaseId: config.releaseId,
       document: documentId
@@ -269,7 +269,7 @@ export async function runContextSecurityLoadAcceptance(options, dependencies = {
     scanPublicPayload("read", readResult.body, publicScans);
     validateReadResponse(readResult.body, release, documentId);
 
-    const diffPath = `/context/diff?${query({
+    const diffPath = `/wiki/diff?${query({
       repository: config.repository,
       fromReleaseId: config.fromReleaseId,
       toReleaseId: config.releaseId
@@ -400,13 +400,13 @@ export async function runContextSecurityLoadAcceptance(options, dependencies = {
 
 async function runSecurityChecks(input) {
   const { config, request, publicScans, violations, release, documentId } = input;
-  const noCredential = await request(`/context/releases?${query({ repository: config.repository })}`, {
+  const noCredential = await request(`/wiki/releases?${query({ repository: config.repository })}`, {
     credential: "none"
   });
   scanPublicPayload("unauthorized", noCredential.body, publicScans);
   expectDenial(noCredential, [401], "missing credential", violations);
 
-  const metrics = await request("/context/metrics");
+  const metrics = await request("/wiki/metrics");
   scanPublicPayload("admin.metrics", metrics.body, publicScans);
   expectDenial(metrics, [401, 403], "query token admin metrics", violations);
   const board = await request("/board");
@@ -417,20 +417,20 @@ async function runSecurityChecks(input) {
   expectDenial(tokenAdministration, [401, 403], "query token token administration", violations);
 
   const wrongTenant = wrongTenantId(config.tenantId);
-  const tenantResult = await request(`/context/releases?${query({ repository: config.repository })}`, {
+  const tenantResult = await request(`/wiki/releases?${query({ repository: config.repository })}`, {
     tenantId: wrongTenant
   });
   scanPublicPayload("isolation.tenant", tenantResult.body, publicScans);
   expectDenial(tenantResult, [401, 403, 404], "cross-tenant repository catalog", violations);
   rejectOracleData(tenantResult.body, { config, release, documentId }, "cross-tenant response", violations);
 
-  const repositoryResult = await request(`/context/releases?${query({ repository: config.isolationRepository })}`);
+  const repositoryResult = await request(`/wiki/releases?${query({ repository: config.isolationRepository })}`);
   scanPublicPayload("isolation.repository", repositoryResult.body, publicScans);
   expectDenial(repositoryResult, [403, 404], "unauthorized repository catalog", violations);
   rejectOracleData(repositoryResult.body, { config, release, documentId }, "repository isolation response", violations);
 
   const directReleaseResult = await request(
-    `/context/list?${query({
+    `/wiki/list?${query({
       repository: config.isolationRepository,
       releaseId: config.releaseId
     })}`
@@ -501,14 +501,14 @@ async function mintRevokeAndProve(input) {
   }
   if (!revoked || !secret) return { status: "failed" };
 
-  const revokedCatalog = await request(`/context/releases?${query({ repository: config.repository })}`, {
+  const revokedCatalog = await request(`/wiki/releases?${query({ repository: config.repository })}`, {
     token: secret,
     principalId: config.issuedPrincipalId
   });
   scanPublicPayload("revoked-token.releases", revokedCatalog.body, publicScans);
   expectDenial(revokedCatalog, [401], "revoked token release catalog", violations);
   const revokedList = await request(
-    `/context/list?${query({ repository: config.repository, releaseId: config.releaseId })}`,
+    `/wiki/list?${query({ repository: config.repository, releaseId: config.releaseId })}`,
     {
       token: secret,
       principalId: config.issuedPrincipalId

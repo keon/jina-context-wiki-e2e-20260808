@@ -184,7 +184,7 @@ export function Gallery() {
             wide
           >
             <StatRow>
-              <Stat label="Context releases" value={1234567} />
+              <Stat label="Wiki releases" value={1234567} />
               <Stat label="Active builds" value={0} />
               <Stat label="Projection backlog" value={undefined} />
               <Stat label="Hierarchy nodes" value={42} />

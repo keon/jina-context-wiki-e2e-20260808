@@ -4,7 +4,6 @@ import { use, useMemo } from "react";
 import {
   Badge,
   BackLink,
-  DetailHeader,
   EmptyState,
   ExternalLink,
   List,
@@ -82,19 +81,7 @@ function ReviewRunDetail({ run, detailError }: { run: ReviewRun; detailError: st
     <article className="detail">
       <BackLink href="/reviews">Reviews</BackLink>
 
-      <DetailHeader
-        kicker="Review run"
-        title={runTitle(run)}
-        badges={
-          <>
-            <StatusDot status={run.status} />
-            <span className="cell-meta">{run.repository.full_name ?? "unknown repository"}</span>
-            {run.pull_request.head_ref ? <span className="cell-meta">{run.pull_request.head_ref}</span> : null}
-            <span className="cell-mono">{shortSha(run.pull_request.head_sha)}</span>
-          </>
-        }
-        actions={<RunActions run={run} work={work} />}
-      />
+      <ReviewRunHeader run={run} work={work} />
 
       <div className="review-detail-surface">
         <ChangeSummary work={work} />
@@ -110,6 +97,27 @@ function ReviewRunDetail({ run, detailError }: { run: ReviewRun; detailError: st
         <CodexOutput run={run} />
       </div>
     </article>
+  );
+}
+
+function ReviewRunHeader({ run, work }: { run: ReviewRun; work: ReviewWork }) {
+  return (
+    <header className="review-run-hero">
+      <div className="review-run-hero__heading">
+        <span className="review-run-hero__kicker">Review run</span>
+        <h1>{runTitle(run)}</h1>
+        <div className="review-run-hero__meta" aria-label="Review run details">
+          <span className="review-run-hero__status">
+            <StatusDot status={run.status} />
+            {titleCase(run.status)}
+          </span>
+          <span>{run.repository.full_name ?? "Unknown repository"}</span>
+          {run.pull_request.head_ref ? <span>{run.pull_request.head_ref}</span> : null}
+          <span className="cell-mono">{shortSha(run.pull_request.head_sha)}</span>
+        </div>
+      </div>
+      <RunActions run={run} work={work} />
+    </header>
   );
 }
 
@@ -180,16 +188,16 @@ function RunActions({ run, work }: { run: ReviewRun; work: ReviewWork }) {
   links.push({ href: result?.github_check_run_url, label: "Check run" });
   links.push({ href: work.staticReview?.githubReviewUrl, label: "Static review" });
   links.push({ href: work.runtimeReview?.githubReviewUrl, label: "Runtime review" });
+  const visibleLinks = links.filter((link) => Boolean(link.href));
+  if (visibleLinks.length === 0) return null;
   return (
-    <>
-      {links
-        .filter((link) => Boolean(link.href))
-        .map((link) => (
-          <ExternalLink key={link.label} className="btn btn--sm" href={link.href}>
-            {link.label}
-          </ExternalLink>
-        ))}
-    </>
+    <nav className="review-run-actions" aria-label="Review artifacts">
+      {visibleLinks.map((link) => (
+        <ExternalLink key={link.label} className="btn btn--sm" href={link.href}>
+          {link.label}
+        </ExternalLink>
+      ))}
+    </nav>
   );
 }
 

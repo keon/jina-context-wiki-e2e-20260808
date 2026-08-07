@@ -3,7 +3,7 @@
 The GitHub App sends deliveries to the unified Jina API at
 `https://api.usejina.com/webhooks/github`. The review handler verifies and records the
 delivery, then hands the exact raw body plus the three GitHub headers to the Context
-handler at `POST /context/webhooks/github`. Context verifies `X-Hub-Signature-256` again, uses
+handler at `POST /wiki/webhooks/github`. Context verifies `X-Hub-Signature-256` again, uses
 `X-GitHub-Delivery` for durable idempotency, and admits only Context Board work. The relay
 cannot manufacture provider events or create a second review.
 
@@ -20,7 +20,7 @@ route is an internal handoff and is never a second public webhook target.
 | Issues          | `opened`                | Creates manual triage and starts a Board Context build on the default branch so the new issue is evidence |
 | Everything else | any                     | Acknowledged and ignored; comments, edits, closes, labels, and reviews do not schedule Context builds     |
 
-The integrated `POST /context/webhooks/github` route produces only the Context result in
+The integrated `POST /wiki/webhooks/github` route produces only the Context result in
 this table. The review handler owns all review tasks.
 
 An unchanged latest head deduplicates redelivery. Pull-request heads supersede their
@@ -118,7 +118,7 @@ admitting Board work. Without that subscription, absence of a build would not te
 no-trigger contract.
 
 Trusted manual callers may include a positive `githubInstallationId` in
-`POST /context/build`. A build with no installation ID falls back to
+`POST /wiki/build`. A build with no installation ID falls back to
 `GITHUB_API_TOKEN`, then `GITHUB_CLONE_TOKEN`, when configured; public repositories need
 neither. Keep any fallback token fine-grained, read-only, and limited to the required
 repositories. Jina does not currently publish review comments or checks.
@@ -168,7 +168,7 @@ For a push, verify that the page-oriented Board root, snapshot, planner, page ta
 publication task refer to the expected repository/ref; that the snapshot task carries
 the expected GitHub installation ID; and that it records the event's full head SHA only
 if it still matches the fetched remote head. Publication includes PageIndex construction.
-An immutable release returned by `/context/releases` must use that same commit. The
+An immutable release returned by `/wiki/releases` must use that same commit. The
 context catalog should include an agent-derived change summary cited to the checkpoint
 commit and changed paths when the evidence supports one.
 

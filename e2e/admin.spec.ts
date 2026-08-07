@@ -29,7 +29,7 @@ import { DERIVED_DOCUMENT_COUNT, HEADINGS, VERIFIED_CHECKPOINTS } from "./suppor
  */
 
 const STAT_LABELS = [
-  "Context releases",
+  "Wiki releases",
   "Repositories",
   "Derived context docs",
   "Projection backlog",
@@ -73,7 +73,7 @@ test("telemetry the API never sent renders as an em dash, and a measured zero st
   // rendered alike an operator could no longer tell an idle system from one
   // nobody managed to read.
   expect(values["Active model tasks"]).toBe("0");
-  expect(values["Context releases"]).toBe("3");
+  expect(values["Wiki releases"]).toBe("3");
   expect(values.Repositories).toBe("3");
   expect(values["Derived context docs"]).toBe(String(DERIVED_DOCUMENT_COUNT));
   expect(values["Verified checkpoints"]).toBe(String(VERIFIED_CHECKPOINTS));
@@ -261,7 +261,7 @@ test("a read that succeeded and found nothing is a different render entirely", a
 
   // Measured at nothing is a measurement: these read 0, not "—".
   const values = await statValues(page);
-  expect(values["Context releases"]).toBe("0");
+  expect(values["Wiki releases"]).toBe("0");
   expect(values["Projection backlog"]).toBe("0");
   expect(values["Active builds"]).toBe("0");
 });
@@ -283,7 +283,7 @@ test("a collapsed sidebar hides its labels and names each item in a tooltip inst
   await setScenario("partial");
   await page.goto("/");
 
-  const item = page.locator('.admin-nav__item[data-label="Context releases"]');
+  const item = page.locator('.admin-nav__item[data-label="Wiki releases"]');
   await expect(item.locator(".admin-nav__label")).toBeVisible();
 
   await page.getByRole("button", { name: "Collapse sidebar" }).click();
@@ -296,7 +296,7 @@ test("a collapsed sidebar hides its labels and names each item in a tooltip inst
   // markup's own `data-label`. There is no node for it: no DOM-level harness can
   // see this at all, and a collapsed rail with no tooltip is an unlabelled row
   // of icons.
-  expect(await computed(item, "content", "::after")).toBe('"Context releases"');
+  expect(await computed(item, "content", "::after")).toBe('"Wiki releases"');
   expect(await computed(item, "display", "::after")).toBe("none");
   await item.hover();
   expect(await computed(item, "display", "::after")).toBe("block");
