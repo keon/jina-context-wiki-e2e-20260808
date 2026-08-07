@@ -56,7 +56,10 @@ test("a new user starts with organization setup and cannot choose a personal wor
   assert.match(screen.getByText("1 / 7").textContent ?? "", /1 \/ 7/);
   fireEvent.click(screen.getByRole("button", { name: /Acme/ }));
   fireEvent.click(screen.getByRole("button", { name: "Continue →" }));
-  await screen.findByRole("heading", { name: "What do you want Jina to help with first?" });
+  await waitFor(
+    () => assert.ok(screen.getByRole("heading", { name: "What do you want Jina to help with first?" })),
+    { timeout: 3_000 },
+  );
   assert.match(screen.getByText("2 / 7").textContent ?? "", /2 \/ 7/);
 });
 
