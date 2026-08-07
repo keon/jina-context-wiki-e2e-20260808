@@ -39,6 +39,23 @@ test("Trigger build validates the pinned source before deploying", () => {
   assert.match(build, /npm run typecheck[\s\S]+?npm test[\s\S]+?npm run deploy/);
 });
 
+test("Trigger tests cannot inherit deployment credentials", () => {
+  const testCommand = build.slice(build.indexOf("        env "), build.indexOf("npm run deploy"));
+  for (const secret of [
+    "TRIGGER_ACCESS_TOKEN",
+    "INTERNAL_API_TOKEN",
+    "DAYTONA_API_KEY",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_CLONE_TOKEN",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY"
+  ]) {
+    assert.match(testCommand, new RegExp(`-u ${secret}`));
+  }
+  assert.match(testCommand, /npm test/);
+});
+
 test("every Trigger build secret is pinned to a submitted numeric version", () => {
   assert.doesNotMatch(build, /versions\/latest/);
   assert.equal((build.match(/versionName:/g) ?? []).length, 8);
