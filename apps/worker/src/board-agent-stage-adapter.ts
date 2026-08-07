@@ -205,11 +205,14 @@ function configuredManagedProfileRunner(
         ? configuredModel
         : `openai/${configuredModel}`
       : configuredModel.replace(/^openai\//, "");
+  const managedApiKey = environment.JINA_MANAGED_MODEL_API_KEY?.trim();
   return runnerFactory(environment, protectedValues, {
-    credential: {
-      kind: "secret",
-      secret: { environmentVariable, secretName: requiredDaytonaModelSecretName(environment) }
-    },
+    credential: managedApiKey
+      ? { kind: "api-key", environmentVariable, value: managedApiKey }
+      : {
+          kind: "secret",
+          secret: { environmentVariable, secretName: requiredDaytonaModelSecretName(environment) }
+        },
     model: managedModel,
     effort,
     domains: commaSeparated(

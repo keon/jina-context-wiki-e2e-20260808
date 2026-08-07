@@ -1028,7 +1028,7 @@ test("production context worker claims exactly the Board topics", () => {
   assert.match(deployment, /WORKER_PREFERRED_REPOSITORY=\$\{acceptance_repository\}/);
 });
 
-test("production Board agents are Daytona-only and do not receive the host model key", () => {
+test("production Board agents are Daytona-only and mount the managed fallback under its narrow name", () => {
   assert.match(deployment, /CONTEXT_BOARD_EXECUTOR=daytona/);
   assert.match(deployment, /CONTEXT_DAYTONA_MODEL_SECRET=/);
   assert.match(deployment, /CONTEXT_DAYTONA_MODEL_SECRET_ENV=/);
@@ -1036,7 +1036,7 @@ test("production Board agents are Daytona-only and do not receive the host model
   assert.match(deployment, /CONTEXT_DAYTONA_(?:SNAPSHOT|IMAGE)=/);
   assert.match(
     deployment,
-    /--set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=\$\{product_internal_token_secret\}:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=/
+    /--set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=\$\{product_internal_token_secret\}:latest,JINA_MANAGED_MODEL_API_KEY=jina-openai-api-key:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=/
   );
 
   const workerDeployment =
@@ -1044,6 +1044,7 @@ test("production Board agents are Daytona-only and do not receive the host model
       /gcloud run deploy jina-context-worker[\s\S]+?wait_for_candidate_revision "jina-context-worker"/
     )?.[0] ?? "";
   assert.ok(workerDeployment);
+  assert.match(workerDeployment, /JINA_MANAGED_MODEL_API_KEY=jina-openai-api-key:latest/);
   assert.doesNotMatch(workerDeployment, /OPENAI_API_KEY=jina-openai-api-key/);
 });
 

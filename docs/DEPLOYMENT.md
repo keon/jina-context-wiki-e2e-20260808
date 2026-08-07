@@ -441,6 +441,9 @@ CONTEXT_DAYTONA_SNAPSHOT=<immutable Daytona snapshot containing Codex>
 CONTEXT_DAYTONA_MODEL_SECRET=<Daytona organization Secret name>
 CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY
 CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com
+# Optional Secret Manager-mounted managed credential. When present, this is
+# injected into the private ephemeral sandbox instead of the Daytona Secret.
+JINA_MANAGED_MODEL_API_KEY=<managed provider credential>
 CONTEXT_CODEX_MODEL=gpt-5.6-terra
 CONTEXT_CODEX_EFFORT=low
 CONTEXT_CODEX_VERBOSITY=high
@@ -481,7 +484,10 @@ internal token rotates; only the Context worker
 service account receives accessor permission.
 
 `CONTEXT_DAYTONA_MODEL_SECRET` is the Jina-managed fallback's Daytona organization
-Secret name, never its credential value. Tenant BYOK or Codex credentials arrive
+Secret name, never its credential value. Production may instead mount
+`JINA_MANAGED_MODEL_API_KEY` from Secret Manager when Daytona opaque-placeholder
+substitution is unavailable; the worker treats it as a protected value and passes it
+only to the build's private, provider-domain-restricted ephemeral sandbox. Tenant BYOK or Codex credentials arrive
 through the authenticated execution-profile endpoint, are added to redaction, and
 are injected only into the build's private ephemeral sandbox. They are not mounted as
 static Cloud Run configuration or persisted by the Context service. The sandbox receives only the exact

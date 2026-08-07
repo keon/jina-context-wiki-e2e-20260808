@@ -1419,7 +1419,7 @@ gcloud run deploy jina-context-worker \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(context_worker_environment "${serving_api_url}" "paused")" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_MANAGED_MODEL_API_KEY=jina-openai-api-key:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --no-traffic \
   --revision-suffix="${drain_suffix}" \
   --quiet
@@ -1560,7 +1560,7 @@ gcloud run deploy jina-context-worker \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="${context_worker_env_vars}" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_MANAGED_MODEL_API_KEY=jina-openai-api-key:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   "${deploy_candidate_args[@]}" \
   --quiet
 

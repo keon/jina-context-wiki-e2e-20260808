@@ -585,7 +585,10 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
     return {
       mode: "daytona",
       async run() {
-        if (execution?.credential.kind === "api-key") {
+        if (
+          execution?.credential.kind === "api-key" &&
+          execution.credential.environmentVariable === "OPENROUTER_API_KEY"
+        ) {
           throw new Error("OpenRouter provider service unavailable");
         }
         return envelope(Buffer.from('{"text":"completed"}'), []);
@@ -693,6 +696,35 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
     const managed = executions.find((execution) => execution?.credential.kind === "secret");
     assert.equal(managed?.model, "gpt-5.6-luna");
     assert.equal(managed?.effort, "medium");
+
+    executions.length = 0;
+    const managedApiKey = "sk-managed-production-key";
+    const managedKeyRunner = configuredPortableContextBoardAgentStageRunner({
+      environment: { ...environment, JINA_MANAGED_MODEL_API_KEY: managedApiKey },
+      attemptContext,
+      runnerFactory,
+      profileFetch: async () =>
+        profileResponse({
+          provider: "managed",
+          model: "openai/gpt-5.6-luna",
+          effort: "medium",
+          fallback_policy: "fail_notify",
+          credential: { kind: "managed" },
+          settings_revision: "settings-managed-key"
+        })
+    });
+    await managedKeyRunner.run({
+      id: "managed-key-stage",
+      prompt: "Complete the stage.",
+      workingDirectory: root,
+      readOnly: true,
+      budgetSeconds: 30
+    });
+    const managedKey = executions.find(
+      (execution) => execution?.credential.kind === "api-key" && execution.credential.value === managedApiKey
+    );
+    assert.equal(managedKey?.model, "gpt-5.6-luna");
+    assert.equal(managedKey?.effort, "medium");
 
     executions.length = 0;
     const codexRunner = configuredPortableContextBoardAgentStageRunner({
