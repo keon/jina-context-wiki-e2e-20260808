@@ -1572,6 +1572,39 @@ secret, Trigger, Vercel-alias, or scheduler changes.
 | The monorepo dashboard assumed Clerk while production still uses the existing GitHub session | [`app-auth.tsx`](../apps/dashboard/src/components/auth/app-auth.tsx) provides a build-time Clerk/GitHub adapter boundary; [`api.ts`](../apps/dashboard/src/dashboard/lib/api.ts) targets the canonical API directly in production with credentialed requests; [`proxy.ts`](../apps/dashboard/src/proxy.ts) bypasses Clerk middleware in GitHub mode; and [`shell.tsx`](../apps/dashboard/src/dashboard/shell.tsx) never invokes Clerk hooks in GitHub mode and hides/redirects Clerk-only profile/member routes while keeping API-backed billing and usage available. [`apps/dashboard/Dockerfile`](../apps/dashboard/Dockerfile) accepts the public API/auth-mode arguments. Production image arguments in [`cloudbuild.yaml`](../cloudbuild.yaml) pin `https://api.usejina.com` and `github`; the isolated staging Vercel project remains Clerk-backed and unchanged. | Dashboard typecheck, lint, all unit/component tests, an optimized GitHub-mode production build, and a no-Clerk-key HTTP smoke test pass. The old production Vercel deployment remains the rollback target until an unrouted monorepo preview passes authenticated API, tenant, review, billing, logout, and direct-route smoke tests.                                                                                                                                                                                                     |
 | Trigger deployment could use the wrong product token/project or depend on GitHub Actions     | [`cloudbuild.trigger.yaml`](../cloudbuild.trigger.yaml) verifies the pinned Trigger project identity and source manifest, typechecks/tests it, and deploys using Secret Manager-backed runtime values. [`deploy-trigger-gcloud.sh`](../scripts/deploy-trigger-gcloud.sh) fixes isolated staging to `proj_rqckjugodcaghbpgggbz`/`staging` and production to the dedicated `proj_yrxsqjznkghpwsolfmjp`/`prod`. It resolves every enabled secret to a numeric version before submission and records those version numbers in Cloud Build substitutions. The in-build identity probe requires the exact project ref, project name, and `om-labs-77da` organization before deployment.                                                                                                                                                                                       | The Trigger Cloud Build contract suite and shell syntax pass. Empty additive project `jina-review-production` was created on 2026-08-06 solely for this review workflow; it has never owned the legacy mixed-project schedules. `jina-trigger-access-token` version 1 exists separately in `jina-staging-20260802` and `jina-v2`; staging also owns `jina-staging-openrouter-api-key` version 1. Cloud Build service accounts have secret-level accessor grants only for declared inputs. Values were never printed or added to evidence. |
 
+The current-head runtime review then exercised these controls and found two additional
+release-path gaps. Both are closed before merge:
+
+- [`deploy-trigger-gcloud.sh`](../scripts/deploy-trigger-gcloud.sh) now normalizes both
+  the numeric basename returned by current `gcloud` and a fully-qualified Secret
+  Manager version resource before numeric sorting and validation. Its wrapper test uses
+  realistic fully-qualified resource names, and the same wrapper was also probed
+  read-only against live Secret Manager output.
+- [`cloudbuild.yaml`](../cloudbuild.yaml) labels every default production image with the
+  exact `COMMIT_SHA` and canonical source repository. A later explicit `mechanical` or
+  `full` invocation may set `_JINA_EXISTING_IMAGE_TAG` and
+  `_JINA_REUSE_EXISTING_IMAGE_TAG=true`; all build/push steps then become no-ops, while
+  `validate-image-selection` pulls API, worker, dashboard, and admin images and requires
+  both source labels to match the exact source-triggered commit. The deploy script
+  separately rejects every non-current `IMAGE_TAG` unless the explicit reuse flag is
+  present. This keeps the later deployment ID/revision names distinct while deploying
+  the already-tested immutable image digests instead of silently rebuilding them.
+
+For production, rerun the source-bound `jina-main-deploy` trigger at the exact accepted
+main SHA and pass the successful deferred build ID as `_JINA_EXISTING_IMAGE_TAG`; never
+submit a different local source tree with a manually asserted SHA. The expected
+operator substitutions are:
+
+```text
+_JINA_DEPLOYMENT_ACCEPTANCE_MODE=mechanical|full
+_JINA_EXISTING_IMAGE_TAG=<successful deferred build ID>
+_JINA_REUSE_EXISTING_IMAGE_TAG=true
+```
+
+The focused deployment, release-build, and Trigger wrapper suite passes 57/57 after
+these changes. The default source-triggered path remains `deferred`, retains empty/false
+reuse substitutions, and still exits before the mutation-capable rollback trap.
+
 The exact production allowlist `proj_yrxsqjznkghpwsolfmjp` is a safety control, not a
 temporary convenience. Legacy project `proj_gmesnthgwwqledarlfip` still owns
 `billing-retry`, `github-installation-backfill`, and `scheduled-review-scan` in addition

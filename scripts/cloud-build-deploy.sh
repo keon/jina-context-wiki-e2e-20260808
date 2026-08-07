@@ -9,6 +9,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cloud-release-cleanup-lib.
 
 gar="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/jina"
 image_tag="${IMAGE_TAG:-${CLOUD_BUILD_ID}}"
+reuse_existing_image_tag="${JINA_REUSE_EXISTING_IMAGE_TAG:-false}"
 api_image="${gar}/api:${image_tag}"
 worker_image="${gar}/worker:${image_tag}"
 dashboard_image="${gar}/dashboard:${image_tag}"
@@ -94,12 +95,21 @@ worker_release_credential_sha256="$(
 production_preflight_path="/opt/jina/context-production-preflight.mjs"
 production_trigger_acceptance_path="/opt/jina/context-production-trigger-e2e.mjs"
 
-if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
-  echo "Deployment must deploy images built by the current coordinated Cloud Build" >&2
-  exit 2
-fi
 if [[ "${deployment_acceptance_mode}" != "full" && "${deployment_acceptance_mode}" != "mechanical" && "${deployment_acceptance_mode}" != "deferred" ]]; then
   echo "JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full, mechanical, or deferred" >&2
+  exit 2
+fi
+if [[ "${reuse_existing_image_tag}" != "true" && "${reuse_existing_image_tag}" != "false" ]]; then
+  echo "JINA_REUSE_EXISTING_IMAGE_TAG must be true or false" >&2
+  exit 2
+fi
+if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
+  if [[ "${reuse_existing_image_tag}" != "true" ]]; then
+    echo "A non-current IMAGE_TAG requires JINA_REUSE_EXISTING_IMAGE_TAG=true" >&2
+    exit 2
+  fi
+elif [[ "${reuse_existing_image_tag}" == "true" ]]; then
+  echo "JINA_REUSE_EXISTING_IMAGE_TAG=true requires a prior IMAGE_TAG" >&2
   exit 2
 fi
 if [[ ! "${image_tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then

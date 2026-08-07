@@ -79,12 +79,16 @@ secret_versions=(
 for binding in "${secret_versions[@]}"; do
   substitution_key="${binding%%:*}"
   secret_name="${binding#*:}"
-  numeric_version="$(
+  version_name="$(
     gcloud secrets versions list "${secret_name}" \
       --project="${project_id}" \
       --filter='state=ENABLED' \
-      --format='value(name)' | sort -n | tail -n 1
+      --format='value(name)' | sed 's#^.*/##' | sort -n | tail -n 1
   )"
+  # gcloud currently prints the basename for this field, while some surfaces
+  # return the fully-qualified resource name. Accept both shapes and submit
+  # only the numeric terminal component to Cloud Build.
+  numeric_version="${version_name##*/}"
   if [[ ! "${numeric_version}" =~ ^[1-9][0-9]*$ ]]; then
     echo "No enabled numeric version found for ${project_id}/${secret_name}" >&2
     exit 2

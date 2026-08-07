@@ -309,6 +309,18 @@ test("deferred deployment is the non-routing default and explicit acceptance mod
   );
 });
 
+test("explicit production acceptance reuses the deferred build's source-bound images", () => {
+  assert.match(cloudBuild, /id: validate-image-selection[\s\S]+?org\.opencontainers\.image\.revision/);
+  assert.match(cloudBuild, /test "\$\$\{revision\}" = "\$COMMIT_SHA"/);
+  assert.match(cloudBuild, /test "\$\$\{source\}" = "https:\/\/github\.com\/omxyz\/jina"/);
+  assert.match(cloudBuild, /IMAGE_TAG=\$\{_JINA_EXISTING_IMAGE_TAG\}/);
+  assert.match(cloudBuild, /JINA_REUSE_EXISTING_IMAGE_TAG=\$\{_JINA_REUSE_EXISTING_IMAGE_TAG\}/);
+  assert.match(cloudBuild, /_JINA_EXISTING_IMAGE_TAG: ""/);
+  assert.match(cloudBuild, /_JINA_REUSE_EXISTING_IMAGE_TAG: "false"/);
+  assert.match(deployment, /A non-current IMAGE_TAG requires JINA_REUSE_EXISTING_IMAGE_TAG=true/);
+  assert.match(deployment, /JINA_REUSE_EXISTING_IMAGE_TAG=true requires a prior IMAGE_TAG/);
+});
+
 test("the polling Context pool keeps twenty real executors warm", () => {
   assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MIN_INSTANCES: "20"/);
   assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MAX_INSTANCES: "100"/);

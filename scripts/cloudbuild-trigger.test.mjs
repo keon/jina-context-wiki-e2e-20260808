@@ -59,14 +59,14 @@ test("the staging wrapper resolves numeric versions for the matching named secre
 set -euo pipefail
 if [[ "\${1:-}" == "secrets" && "\${2:-}" == "versions" && "\${3:-}" == "list" ]]; then
   case "\${4:-}" in
-    jina-trigger-access-token) echo 11 ;;
-    jina-staging-internal-api-token) echo 12 ;;
-    jina-staging-daytona-api-key) echo 13 ;;
-    jina-staging-github-app-id) echo 14 ;;
-    jina-staging-github-app-private-key) echo 15 ;;
-    jina-staging-github-clone-token) echo 16 ;;
-    jina-staging-openrouter-api-key) echo 17 ;;
-    jina-staging-openai-api-key) echo 18 ;;
+    jina-trigger-access-token) echo projects/jina-staging-20260802/secrets/jina-trigger-access-token/versions/11 ;;
+    jina-staging-internal-api-token) echo projects/jina-staging-20260802/secrets/jina-staging-internal-api-token/versions/12 ;;
+    jina-staging-daytona-api-key) echo projects/jina-staging-20260802/secrets/jina-staging-daytona-api-key/versions/13 ;;
+    jina-staging-github-app-id) echo projects/jina-staging-20260802/secrets/jina-staging-github-app-id/versions/14 ;;
+    jina-staging-github-app-private-key) echo projects/jina-staging-20260802/secrets/jina-staging-github-app-private-key/versions/15 ;;
+    jina-staging-github-clone-token) echo projects/jina-staging-20260802/secrets/jina-staging-github-clone-token/versions/16 ;;
+    jina-staging-openrouter-api-key) echo projects/jina-staging-20260802/secrets/jina-staging-openrouter-api-key/versions/17 ;;
+    jina-staging-openai-api-key) echo projects/jina-staging-20260802/secrets/jina-staging-openai-api-key/versions/18 ;;
     *) exit 3 ;;
   esac
   exit 0
