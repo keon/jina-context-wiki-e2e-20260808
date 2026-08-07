@@ -36,7 +36,19 @@ steps:
         node ../scripts/verify-trigger-project.mjs
         node ../scripts/verify-trigger-source-manifest.mjs
         npm run typecheck
-        npm test
+        # Deployment credentials belong to the deploy step, not the test
+        # process. Keep tests hermetic so the presence of managed provider
+        # keys cannot silently change proxy routing assertions.
+        env \
+          -u TRIGGER_ACCESS_TOKEN \
+          -u INTERNAL_API_TOKEN \
+          -u DAYTONA_API_KEY \
+          -u GITHUB_APP_ID \
+          -u GITHUB_APP_PRIVATE_KEY \
+          -u GITHUB_CLONE_TOKEN \
+          -u OPENROUTER_API_KEY \
+          -u OPENAI_API_KEY \
+          npm test
         npm run deploy -- \
           --env="${_TRIGGER_ENV}" \
           --project-ref="${_TRIGGER_PROJECT_REF}" \
