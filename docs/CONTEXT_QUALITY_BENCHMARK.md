@@ -86,7 +86,7 @@ engineering Markdown with ordinary source links.
 
 The context set must progress from repository overview to the features, components, flows, interfaces, state, operations, decisions, and history that are material in that repository. The agent owns the taxonomy; there is no fixed page template.
 
-Pages use meaningful heading hierarchy and link to related context pages. All relative context links must resolve. A reader should be able to move from a concept to its implementation details without reconstructing the repository structure from search results.
+Pages use meaningful heading hierarchy and link to related Wiki pages. All relative Wiki links must resolve. A reader should be able to move from a concept to its implementation details without reconstructing the repository structure from search results.
 
 Every public document must be reachable from `architecture.md` through document links. This tests the generated hierarchy independently of the dashboard's fallback file tree.
 
@@ -190,7 +190,7 @@ title queries to retrieve every owning document.
 ## Live retrieval coverage
 
 `pnpm evaluate:questions` sends Markdown bullet queries to a running
-`POST /context/search` API. Headings become report categories. Each result records
+`POST /wiki/search` API. Headings become report categories. Each result records
 the immutable release, selected context documents, citations, deterministic
 retrieval method, and latency; the endpoint must never return a generated answer.
 

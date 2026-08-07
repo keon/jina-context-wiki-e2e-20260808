@@ -91,7 +91,7 @@ test("listing returns the newest published default-branch generation per reposit
   ]);
   // The tenant principal already carries authorization, so nothing synchronizes ACLs.
   assert.deepEqual(urls, [
-    "https://graph.example/context/generations?limit=200",
+    "https://graph.example/wiki/generations?limit=200",
   ]);
 });
 
@@ -116,8 +116,8 @@ test("listing follows every generation cursor page", async () => {
   const result = await client.listGraphs(CONTEXT);
 
   assert.deepEqual(urls, [
-    "https://graph.example/context/generations?limit=200",
-    "https://graph.example/context/generations?limit=200&cursor=next-page",
+    "https://graph.example/wiki/generations?limit=200",
+    "https://graph.example/wiki/generations?limit=200&cursor=next-page",
   ]);
   assert.deepEqual(
     result.graphs.map((graph) => graph.id),
@@ -128,9 +128,9 @@ test("listing follows every generation cursor page", async () => {
 test("a generation assembles a code plane and a knowledge plane", async () => {
   const { fetchImpl, urls } = recording(async (input) => {
     const url = String(input);
-    if (url.includes("/context/generations/ig_1"))
+    if (url.includes("/wiki/generations/ig_1"))
       return Response.json({ generation: generation() });
-    if (url.includes("/context/structure")) {
+    if (url.includes("/wiki/structure")) {
       return Response.json({
         relations: [
           {
@@ -150,7 +150,7 @@ test("a generation assembles a code plane and a knowledge plane", async () => {
         ],
       });
     }
-    if (url.includes("/context/documents/kr_1")) {
+    if (url.includes("/wiki/documents/kr_1")) {
       return Response.json({
         document: {
           citations: [
@@ -168,7 +168,7 @@ test("a generation assembles a code plane and a knowledge plane", async () => {
         },
       });
     }
-    if (url.includes("/context/documents")) {
+    if (url.includes("/wiki/documents")) {
       return Response.json({
         documents: [
           {
@@ -210,7 +210,7 @@ test("a generation assembles a code plane and a knowledge plane", async () => {
   assert.equal(detail.edgeCount, 2);
   assert.ok(
     urls.includes(
-      "https://graph.example/context/structure?repository=omxyz%2Fa&ref=main",
+      "https://graph.example/wiki/structure?repository=omxyz%2Fa&ref=main",
     ),
   );
 });
@@ -263,7 +263,7 @@ test("a question is sent as a repository-scoped context query", async () => {
 
   // The engine routes retrieval and resolves the generation itself, so no graph
   // id is sent upstream and the answer reports what actually served it.
-  assert.deepEqual(urls, ["https://graph.example/context/query"]);
+  assert.deepEqual(urls, ["https://graph.example/wiki/query"]);
   assert.deepEqual(bodies, [
     {
       repository: "omxyz/a",
@@ -326,7 +326,7 @@ test("a dashboard index builds the repository's default branch", async () => {
     metadata: { source: "jina-dashboard" },
   });
 
-  assert.deepEqual(urls, ["https://graph.example/context/build"]);
+  assert.deepEqual(urls, ["https://graph.example/wiki/build"]);
   assert.deepEqual(bodies, [
     {
       repository: "omxyz/a",
@@ -345,6 +345,40 @@ test("a dashboard index builds the repository's default branch", async () => {
       commitSha: "c".repeat(40),
     },
   });
+});
+
+test("a dashboard index can target an explicit branch and commit", async () => {
+  const commitSha = "d".repeat(40);
+  const { fetchImpl, bodies } = recording(async () =>
+    Response.json({
+      build: {
+        id: "cb_branch",
+        status: "active",
+        repository: "omxyz/a",
+        ref: "release/next",
+        commitSha,
+      },
+    }),
+  );
+  const client = new GraphApiClient(CONFIG, fetchImpl);
+
+  await client.buildDashboardGraph(CONTEXT, {
+    repository: "omxyz/a",
+    ref: "release/next",
+    commitSha,
+    requestKey: "dashboard-branch-key",
+    metadata: { source: "jina-dashboard" },
+  });
+
+  assert.deepEqual(bodies, [
+    {
+      repository: "omxyz/a",
+      ref: "release/next",
+      commitSha,
+      githubInstallationId: 42,
+      requestKey: "dashboard-branch-key",
+    },
+  ]);
 });
 
 test("recent Context builds are tenant-scoped again before reaching the dashboard", async () => {
@@ -378,7 +412,7 @@ test("recent Context builds are tenant-scoped again before reaching the dashboar
 
   const result = await client.listContextBuilds(CONTEXT);
 
-  assert.deepEqual(urls, ["https://graph.example/context/builds"]);
+  assert.deepEqual(urls, ["https://graph.example/wiki/builds"]);
   assert.deepEqual(result.map((build) => build.id), ["cb_failed"]);
 });
 
@@ -419,7 +453,7 @@ test("Context build progress preserves the exact Context stage, checkpoint, and 
   const client = new GraphApiClient(CONFIG, fetchImpl);
 
   assert.deepEqual(await client.contextBuildProgress(CONTEXT, "cb_active"), progress);
-  assert.deepEqual(urls, ["https://graph.example/context/builds/cb_active/progress"]);
+  assert.deepEqual(urls, ["https://graph.example/wiki/builds/cb_active/progress"]);
 });
 
 test("Context build cancellation uses the internal tenant-admin endpoint with a fixed safe reason", async () => {
@@ -499,7 +533,7 @@ test("availability probes the repository scope and accepts only a usable Context
     false,
   );
   assert.deepEqual(building.urls, [
-    "https://graph.example/context/releases?repository=omxyz%2Fa",
+    "https://graph.example/wiki/releases?repository=omxyz%2Fa",
   ]);
 
   const published = recording(async () =>
@@ -556,7 +590,7 @@ test("Jina relays the exact signed GitHub delivery to the Context-only endpoint"
 
   await new GraphApiClient(CONFIG, fetchImpl).relayGithubContext(headers, body);
 
-  assert.equal(forwarded?.url, "https://graph.example/context/webhooks/github");
+  assert.equal(forwarded?.url, "https://graph.example/wiki/webhooks/github");
   assert.equal(forwarded?.init?.body, body);
   const sent = new Headers(forwarded?.init?.headers);
   assert.equal(sent.get("authorization"), null);
@@ -634,7 +668,7 @@ test("review access returns a direct MCP credential bound to the tenant and repo
 test("dashboard Context selects and reads an exact published ref", async () => {
   const { fetchImpl, urls } = recording(async (input) => {
     const url = String(input);
-    if (url.includes("/context/releases")) {
+    if (url.includes("/wiki/releases")) {
       return Response.json({
         releases: [
           {
@@ -658,7 +692,7 @@ test("dashboard Context selects and reads an exact published ref", async () => {
         ],
       });
     }
-    if (url.includes("/context/list?")) {
+    if (url.includes("/wiki/list?")) {
       return Response.json({
         documents: [{
           id: "document-1",
@@ -670,7 +704,7 @@ test("dashboard Context selects and reads an exact published ref", async () => {
         }],
       });
     }
-    if (url.includes("/context/read?")) {
+    if (url.includes("/wiki/read?")) {
       return Response.json({
         release: {
           id: "release-1",
@@ -980,7 +1014,7 @@ test("a delegated token carries context:build, so graph builds are not refused",
     metadata: {},
   });
 
-  // /context/build demands `context:build`. Minting read-and-query only would
+  // /wiki/build demands `context:build`. Minting read-and-query only would
   // have made every dashboard index and review rebuild a 502.
   assert.deepEqual(mintBody?.scopes, [
     "context:read",

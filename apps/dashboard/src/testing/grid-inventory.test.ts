@@ -40,6 +40,9 @@ const DECLARED_GRIDS: Readonly<Record<string, number>> = {
   "knowledge-browser": 2,
   "knowledge-graph-loading": 2,
   "knowledge-graph__layout": 2,
+  "knowledge-repository-card": 2,
+  "knowledge-toolbar__selectors": 2,
+  "knowledge-toolbar__selected-repository": 3,
   "model-fallbacks": 1,
   "model-provider-card": 2,
   "model-setting-row": 3,
@@ -60,8 +63,7 @@ const DECLARED_GRIDS: Readonly<Record<string, number>> = {
   "task-types-layout": 2,
   "task-types-table-head": 4,
   trail__row: 4,
-  "usage-overview": 2,
-  "usage-recent__row": 5
+  "usage-activity__row": 5
 };
 
 const STYLESHEETS = ["../dashboard/styles.css", "../app/globals.css"].map((path) =>

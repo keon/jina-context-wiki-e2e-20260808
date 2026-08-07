@@ -43,7 +43,7 @@ test("the stylesheet's fixed grid track counts are read, and open-ended ones are
   // Four lanes: marker, dot, body, type — the exact contract `TrailRow` fills.
   assert.equal(contracts.get("trail__row")?.tracks, 4);
   assert.equal(contracts.get("activity-row")?.tracks, 4);
-  assert.equal(contracts.get("usage-recent__row")?.tracks, 5);
+  assert.equal(contracts.get("usage-activity__row")?.tracks, 5);
   // `repeat(2, …)` sizes itself to its content, so item count is not a contract.
   assert.equal(contracts.get("usage-capabilities"), undefined);
   assert.equal(contracts.get("organization-summary"), undefined);

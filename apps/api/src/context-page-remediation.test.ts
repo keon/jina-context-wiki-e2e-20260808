@@ -517,7 +517,7 @@ test("a production-bound read credential can watch builds but cannot remediate t
   };
 
   try {
-    const builds = await fetch(`${baseUrl}/context/builds`, { headers });
+    const builds = await fetch(`${baseUrl}/wiki/builds`, { headers });
     const buildsText = await builds.text();
     assert.equal(builds.status, 200, buildsText);
     assert.deepEqual(
@@ -525,18 +525,18 @@ test("a production-bound read credential can watch builds but cannot remediate t
       [fixture.buildId]
     );
 
-    const progress = await fetch(`${baseUrl}/context/builds/${fixture.buildId}/progress`, { headers });
+    const progress = await fetch(`${baseUrl}/wiki/builds/${fixture.buildId}/progress`, { headers });
     const progressText = await progress.text();
     assert.equal(progress.status, 200, progressText);
     assert.equal(Object.hasOwn(JSON.parse(progressText) as Record<string, unknown>, "retryEligibility"), false);
 
     const page = await fetch(
-      `${baseUrl}/context/builds/${fixture.buildId}/page?path=${encodeURIComponent("subjects/subject-1")}`,
+      `${baseUrl}/wiki/builds/${fixture.buildId}/page?path=${encodeURIComponent("subjects/subject-1")}`,
       { headers }
     );
     assert.equal(page.status, 404, await page.text());
 
-    const retry = await fetch(`${baseUrl}/context/builds/${fixture.buildId}/retry`, {
+    const retry = await fetch(`${baseUrl}/wiki/builds/${fixture.buildId}/retry`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({
@@ -547,7 +547,7 @@ test("a production-bound read credential can watch builds but cannot remediate t
     });
     assert.equal(retry.status, 401, await retry.text());
 
-    const crossTenant = await fetch(`${baseUrl}/context/builds/${fixture.buildId}/progress`, {
+    const crossTenant = await fetch(`${baseUrl}/wiki/builds/${fixture.buildId}/progress`, {
       headers: {
         ...headers,
         "x-jina-tenant-id": "tenant-page-remediation-reader-other"

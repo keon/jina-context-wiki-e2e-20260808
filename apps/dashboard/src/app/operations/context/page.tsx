@@ -1,5 +1,5 @@
-import { ContextPage } from "../../../components/context/context-page.tsx";
+import { redirect } from "next/navigation";
 
-export default function Page() {
-  return <ContextPage />;
+export default function LegacyOperationsContextPage() {
+  redirect("/wiki");
 }

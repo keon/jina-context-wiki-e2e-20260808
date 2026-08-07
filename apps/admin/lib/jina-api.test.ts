@@ -44,7 +44,7 @@ test("admin preserves authoritative current-first release order for each ref", a
   context.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const url = String(input);
     requested.push(url);
-    if (url.endsWith("/context/releases")) {
+    if (url.endsWith("/wiki/releases")) {
       return Response.json({
         releases: [
           {
@@ -184,7 +184,7 @@ test("admin binds checkpoint progress to the exact build, repository, and ref", 
   context.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const url = String(input);
     requested.push(url);
-    if (url.endsWith("/context/builds")) {
+    if (url.endsWith("/wiki/builds")) {
       return Response.json({
         builds: [
           {
@@ -259,7 +259,7 @@ test("admin binds checkpoint progress to the exact build, repository, and ref", 
   );
   assert.equal(progress[0]?.failureCode, "daytona");
   assert.equal(progress[0]?.stages[0]?.failureReason, "The isolated execution sandbox did not complete this stage.");
-  assert.ok(requested.some((url) => url.endsWith("/context/builds/build%2Fnewer/progress")));
+  assert.ok(requested.some((url) => url.endsWith("/wiki/builds/build%2Fnewer/progress")));
 });
 
 test("admin rejects checkpoint progress returned for a different tenant scope", async (context) => {

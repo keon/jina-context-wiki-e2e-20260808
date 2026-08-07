@@ -535,9 +535,9 @@ function parseQuotas(value: unknown): AdminContextMetrics["quotas"] {
 }
 
 export async function listAllReleases(): Promise<readonly AdminContextRelease[]> {
-  const body = await apiGet("/context/releases");
+  const body = await apiGet("/wiki/releases");
   if (!isRecord(body) || !Array.isArray(body.releases)) {
-    throw new JinaApiError("Jina API response for /context/releases omitted releases");
+    throw new JinaApiError("Jina API response for /wiki/releases omitted releases");
   }
   // The API places each authoritative current pointer before historical
   // releases. Re-sorting by timestamp would silently select history after an
@@ -557,7 +557,7 @@ export async function listContextDocuments(
   }
   const catalogs = await mapInBatches([...latestByScope.values()], 3, async (release) => {
     const body = await apiGet(
-      `/context/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`
+      `/wiki/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`
     );
     if (!isRecord(body) || !Array.isArray(body.documents)) {
       throw new JinaApiError(`Jina API response for context release ${release.id} omitted documents`);
@@ -575,9 +575,9 @@ export async function listContextDocuments(
 
 /** Builds, most recently updated first. */
 export async function listContextBuilds(): Promise<readonly AdminContextBuild[]> {
-  const body = await apiGet("/context/builds");
+  const body = await apiGet("/wiki/builds");
   if (!isRecord(body) || !Array.isArray(body.builds)) {
-    throw new JinaApiError("Jina API response for /context/builds omitted builds");
+    throw new JinaApiError("Jina API response for /wiki/builds omitted builds");
   }
   return collectValid(body.builds, "context build", parseBuild).sort(
     (left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id)
@@ -596,7 +596,7 @@ export async function listContextBuildProgress(
   const selected = builds.filter((build) => build.status === "active").slice(0, Math.max(0, limit));
   const progress = await mapInBatches(selected, 3, async (build) => {
     try {
-      const item = parseBuildProgress(await apiGet(`/context/builds/${encodeURIComponent(build.id)}/progress`));
+      const item = parseBuildProgress(await apiGet(`/wiki/builds/${encodeURIComponent(build.id)}/progress`));
       if (!item) {
         // Unparseable progress cannot be proven to belong to this build, so it
         // is dropped rather than rendered against the wrong row.
@@ -700,8 +700,8 @@ function parseBuildProgress(value: unknown): AdminContextBuildProgress | undefin
 }
 
 export async function getContextMetrics(): Promise<AdminContextMetrics> {
-  const body = await apiGet("/context/metrics");
-  if (!isRecord(body)) throw new JinaApiError("Jina API response for /context/metrics was not an object");
+  const body = await apiGet("/wiki/metrics");
+  if (!isRecord(body)) throw new JinaApiError("Jina API response for /wiki/metrics was not an object");
   const query = isRecord(body.query)
     ? definedOnly({
         count: optionalNumber(body.query.count),

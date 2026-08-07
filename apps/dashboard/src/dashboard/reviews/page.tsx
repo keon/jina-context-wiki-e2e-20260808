@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { useDashboard } from "../providers";
 import { EmptyState, List, Panel, Row, Toolbar } from "../components/ui";
-import { formatRelative, shortSha } from "../lib/presentation";
+import { shortSha } from "../lib/presentation";
 import { buildReviewWork, reviewWorkStatusSummary } from "../lib/review-work";
 import { runHref, runTitle } from "../lib/runs";
 import type { ReviewRun } from "../lib/types";
@@ -60,7 +60,6 @@ function ReviewRow({ run, statusSummary }: { run: ReviewRun; statusSummary: stri
       href={runHref(run)}
       title={runTitle(run)}
       meta={meta || "—"}
-      trailing={formatRelative(run.updated_at)}
     />
   );
 }

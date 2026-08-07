@@ -23,7 +23,7 @@ The remaining limitations belong to the static path and the unfinished reporting
 - Dashboard reads through the unified API use delegated per-tenant tokens, while each
   review receives a separate short-lived, exact-repository token; the static context
   credential remains only as a rollout fallback; and
-- there is no `GET /context/usage` or dashboard workflow that exposes per-token consumption.
+- there is no `GET /wiki/usage` or dashboard workflow that exposes per-token consumption.
 
 ## The model
 
@@ -32,13 +32,13 @@ server-side. Authorization stops depending on who holds a shared secret.
 
 ### Scopes
 
-| Scope           | Routes                                                                     |
-| --------------- | -------------------------------------------------------------------------- |
-| `context:query` | `POST /context/search`, `POST /mcp`                                        |
-| `context:read`  | `GET /context/releases`, `/context/list`, `/context/read`, `/context/diff` |
-| `context:build` | `POST /context/build`                                                      |
-| `context:admin` | Context build/task retry routes and `GET /context/metrics`                 |
-| `context:usage` | Reserved for a future self-service usage route                             |
+| Scope           | Routes                                                         |
+| --------------- | -------------------------------------------------------------- |
+| `context:query` | `POST /wiki/search`, `POST /mcp`                               |
+| `context:read`  | `GET /wiki/releases`, `/wiki/list`, `/wiki/read`, `/wiki/diff` |
+| `context:build` | `POST /wiki/build`                                             |
+| `context:admin` | Context build/task retry routes and `GET /wiki/metrics`        |
+| `context:usage` | Reserved for a future self-service usage route                 |
 
 Scope grants route reach, not permission. `requireTenantAdmin` still applies on top, and it
 covers every route under `context:build` and `context:admin` — so a token carrying either on
@@ -116,7 +116,7 @@ and an overrun atomically fails the build before any further work can be claimed
 Cached-input tokens remain a reported subset of input tokens and are not counted
 twice.
 
-`search_context` and `POST /context/search` do not reserve a model attempt or consume model
+`search_context` and `POST /wiki/search` do not reserve a model attempt or consume model
 quota. They perform bounded deterministic lexical scoring over the published PageIndex tree.
 Caller-controlled `x-request-id` remains the query-rate idempotency key, so retries consume
 one query-rate operation. Public search results contain only derived Context and
@@ -145,7 +145,7 @@ Customer credit billing is owned by the unified API and Autumn. Context quota ac
 is a separate admission and observability boundary; future per-token Context usage can be
 rolled into the same tenant usage surface without introducing another service dependency.
 
-The planned `GET /context/usage`, scoped by the caller's own token, is the self-service surface: a person
+The planned `GET /wiki/usage`, scoped by the caller's own token, is the self-service surface: a person
 sees their usage, a tenant administrator sees the tenant's. It takes its own `context:usage`
 scope rather than riding on `context:read`, because `context:read` is exactly what the static
 context credential holds — mapping usage onto it would silently widen a shared secret to a
@@ -179,14 +179,14 @@ Issuance and revocation are recorded with their actor.
 ## Sequencing
 
 0. **Done.** Widen the context credential to the read-only projections. This unblocked the
-   dashboard Context page and remains a strict subset of `context:read`.
+   dashboard Wiki page and remains a strict subset of `context:read`.
 1. **Done.** Token model here: mint, verify, scope-check, hash at rest, revoke. Both static
    tokens keep working, so nothing breaks — the pre-existing static-token scope test passes
    untouched, which is how that promise is checked.
 2. **Done at the tenant quota boundary.** Exact Board build-model usage and model-free
    query-rate usage are persisted idempotently and exposed in administrator quota metrics.
 3. Add usage records keyed by `tokenId`, covering builds, deterministic search, and MCP.
-   Expose `GET /context/usage` through the unified API.
+   Expose `GET /wiki/usage` through the unified API.
 4. Add dashboard issuance and per-token usage on the existing Usage page.
 5. Retire the static context token after every remaining service caller uses delegated,
    repository-scoped, or per-principal tokens.

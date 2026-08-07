@@ -279,7 +279,7 @@ grant select,insert on jina_runtime.github_deliveries to :"runtime_user";
     phase = "mint_primary_token";
     const issued = await mintToken(apiAUrl, internalToken, TENANT, PRINCIPAL, "cross-instance read token");
     secrets.push(issued.secret);
-    const allowedHttp = await jsonRequest(apiBUrl, `/context/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
+    const allowedHttp = await jsonRequest(apiBUrl, `/wiki/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
       token: issued.secret
     });
     assert.equal(allowedHttp.status, 200, diagnostic("instance B HTTP authentication", allowedHttp));
@@ -293,12 +293,12 @@ grant select,insert on jina_runtime.github_deliveries to :"runtime_user";
     phase = "verify_repository_oracles";
     const forbiddenHttp = await jsonRequest(
       apiBUrl,
-      `/context/releases?repository=${encodeURIComponent(FORBIDDEN_REPOSITORY)}`,
+      `/wiki/releases?repository=${encodeURIComponent(FORBIDDEN_REPOSITORY)}`,
       { token: issued.secret }
     );
     const nonexistentHttp = await jsonRequest(
       apiBUrl,
-      `/context/releases?repository=${encodeURIComponent(NONEXISTENT_REPOSITORY)}`,
+      `/wiki/releases?repository=${encodeURIComponent(NONEXISTENT_REPOSITORY)}`,
       { token: issued.secret }
     );
     assert.equal(forbiddenHttp.status, 404);
@@ -319,11 +319,11 @@ grant select,insert on jina_runtime.github_deliveries to :"runtime_user";
     phase = "verify_cross_tenant_oracles";
     const unknownSecret = issuedTokenSecret();
     secrets.push(unknownSecret);
-    const crossTenantHttp = await jsonRequest(apiBUrl, "/context/releases", {
+    const crossTenantHttp = await jsonRequest(apiBUrl, "/wiki/releases", {
       token: issued.secret,
       tenantId: OTHER_TENANT
     });
-    const unknownHttp = await jsonRequest(apiBUrl, "/context/releases", {
+    const unknownHttp = await jsonRequest(apiBUrl, "/wiki/releases", {
       token: unknownSecret,
       tenantId: OTHER_TENANT
     });
@@ -356,12 +356,12 @@ grant select,insert on jina_runtime.github_deliveries to :"runtime_user";
     secrets.push(otherTenantIssued.secret);
     const otherTenantTarget = await jsonRequest(
       apiBUrl,
-      `/context/releases?repository=${encodeURIComponent(REPOSITORY)}`,
+      `/wiki/releases?repository=${encodeURIComponent(REPOSITORY)}`,
       { token: otherTenantIssued.secret }
     );
     const otherTenantUnknown = await jsonRequest(
       apiBUrl,
-      `/context/releases?repository=${encodeURIComponent(NONEXISTENT_REPOSITORY)}`,
+      `/wiki/releases?repository=${encodeURIComponent(NONEXISTENT_REPOSITORY)}`,
       { token: otherTenantIssued.secret }
     );
     assert.equal(otherTenantTarget.status, 404);
@@ -374,7 +374,7 @@ grant select,insert on jina_runtime.github_deliveries to :"runtime_user";
     assert.equal(typeof revoked.body.token?.revokedAt, "string");
     assert.equal("secret" in revoked.body.token, false);
     assert.equal("secretHash" in revoked.body.token, false);
-    const revokedHttp = await jsonRequest(apiBUrl, `/context/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
+    const revokedHttp = await jsonRequest(apiBUrl, `/wiki/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
       token: issued.secret
     });
     const revokedMcp = await rawMcpList(apiBUrl, issued.secret);
@@ -386,18 +386,16 @@ grant select,insert on jina_runtime.github_deliveries to :"runtime_user";
     phase = "verify_database_time_expiry";
     const expiring = await mintToken(apiAUrl, internalToken, TENANT, PRINCIPAL, "database-time expiry token");
     secrets.push(expiring.secret);
-    const beforeExpiryHttp = await jsonRequest(
-      apiBUrl,
-      `/context/releases?repository=${encodeURIComponent(REPOSITORY)}`,
-      { token: expiring.secret }
-    );
+    const beforeExpiryHttp = await jsonRequest(apiBUrl, `/wiki/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
+      token: expiring.secret
+    });
     assert.equal(beforeExpiryHttp.status, 200, diagnostic("pre-expiry instance B request", beforeExpiryHttp));
     const beforeExpiryMcp = await rawMcpList(apiBUrl, expiring.secret);
     assert.equal(beforeExpiryMcp.status, 200, diagnostic("pre-expiry MCP request", beforeExpiryMcp));
 
     const databaseExpiry = await expireTokenUsingDatabaseTime(migration, TENANT, expiring.id);
     assert.equal(databaseExpiry.expiredByDatabaseTime, true);
-    const expiredHttp = await jsonRequest(apiBUrl, `/context/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
+    const expiredHttp = await jsonRequest(apiBUrl, `/wiki/releases?repository=${encodeURIComponent(REPOSITORY)}`, {
       token: expiring.secret
     });
     const expiredMcp = await rawMcpList(apiBUrl, expiring.secret);

@@ -818,7 +818,7 @@ file_digest() {
 }
 
 context_builds_json() {
-  curl -fsS "http://127.0.0.1:$JINA_RESTART_API_PORT/context/builds" \
+  curl -fsS "http://127.0.0.1:$JINA_RESTART_API_PORT/wiki/builds" \
     -H "authorization: Bearer $JINA_RESTART_INTERNAL_TOKEN" \
     -H "x-jina-tenant-id: $JINA_RESTART_TENANT" \
     -H "x-jina-principal-id: tenant:$JINA_RESTART_TENANT"
@@ -866,7 +866,7 @@ for (const build of builds.filter(build => build.status === "active" || build.st
   while IFS=$'\t' read -r build_id status repository ref; do
     local progress
     progress="$(curl -fsS \
-      "http://127.0.0.1:$api_port/context/builds/$(urlencode "$build_id")/progress" \
+      "http://127.0.0.1:$api_port/wiki/builds/$(urlencode "$build_id")/progress" \
       -H "authorization: Bearer $JINA_RESTART_INTERNAL_TOKEN" \
       -H "x-jina-tenant-id: $JINA_RESTART_TENANT" \
       -H "x-jina-principal-id: tenant:$JINA_RESTART_TENANT")"

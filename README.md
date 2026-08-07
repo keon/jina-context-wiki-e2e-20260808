@@ -74,9 +74,9 @@ The generic Board orchestrates the complete Context workflow:
    Querying uses bounded deterministic lexical scoring over that derived-context tree;
    it never invokes a model or generates an answer.
 
-`POST /context/search` returns selected context excerpts and original-evidence citations;
-it does not synthesize an answer. `GET /context/releases`, `/context/list`,
-`/context/read`, and `/context/diff` browse immutable releases. Default-branch builds are
+`POST /wiki/search` returns selected context excerpts and original-evidence citations;
+it does not synthesize an answer. `GET /wiki/releases`, `/wiki/list`,
+`/wiki/read`, and `/wiki/diff` browse immutable releases. Default-branch builds are
 canonical, PR heads publish to `pull/<number>/head`, and newly opened issues build against
 the default branch. Comments and edits do not schedule builds.
 

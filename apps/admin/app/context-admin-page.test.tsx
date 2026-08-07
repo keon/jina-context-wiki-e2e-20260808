@@ -98,11 +98,11 @@ interface Payloads {
 function respondWith(payloads: Payloads): (url: string) => Response {
   return (url) => {
     const failed = jsonResponse({ error: "unavailable" }, 500);
-    if (url.includes("/context/releases")) return payloads.releases ? jsonResponse(payloads.releases) : failed;
-    if (url.includes("/context/metrics")) return payloads.metrics ? jsonResponse(payloads.metrics) : failed;
-    if (url.includes("/context/builds/")) return payloads.progress ? jsonResponse(payloads.progress) : failed;
-    if (url.includes("/context/builds")) return payloads.builds ? jsonResponse(payloads.builds) : failed;
-    if (url.includes("/context/list")) return payloads.documents ? jsonResponse(payloads.documents) : failed;
+    if (url.includes("/wiki/releases")) return payloads.releases ? jsonResponse(payloads.releases) : failed;
+    if (url.includes("/wiki/metrics")) return payloads.metrics ? jsonResponse(payloads.metrics) : failed;
+    if (url.includes("/wiki/builds/")) return payloads.progress ? jsonResponse(payloads.progress) : failed;
+    if (url.includes("/wiki/builds")) return payloads.builds ? jsonResponse(payloads.builds) : failed;
+    if (url.includes("/wiki/list")) return payloads.documents ? jsonResponse(payloads.documents) : failed;
     return failed;
   };
 }
@@ -142,7 +142,7 @@ function stat(container: HTMLElement, label: string): { value: string; unknown: 
 }
 
 const EVERY_STAT = [
-  "Context releases",
+  "Wiki releases",
   "Repositories",
   "Derived context docs",
   "Projection backlog",
@@ -204,13 +204,13 @@ test("a section that loaded reports its measured counters and its unmeasured one
     documents: { documents: [DOCUMENT] }
   });
 
-  assert.equal(stat(container, "Context releases").value, "4");
+  assert.equal(stat(container, "Wiki releases").value, "4");
   assert.equal(stat(container, "Hierarchy nodes").value, "11");
   // Absent telemetry, from a read that otherwise succeeded.
   for (const label of ["Projection backlog", "Active builds", "Active model tasks"] as const) {
     assert.equal(stat(container, label).value, UNMEASURED, `${label} was not reported and is not zero`);
   }
-  // The prose under "Context index health" holds the same line.
+  // The prose under "Wiki index health" holds the same line.
   assert.match(textOf(container, "#health .muted"), /—/);
   assert.match(
     textOf(container, "#health .muted"),
@@ -318,7 +318,7 @@ test("a section that depends on a failed one reports as not attempted, not as em
   );
   // And it really was not attempted — a blocked read must not be issued.
   assert.equal(
-    requests.filter((url) => url.includes("/context/list")).length,
+    requests.filter((url) => url.includes("/wiki/list")).length,
     0,
     "the derived-context read needs the release list it did not get"
   );

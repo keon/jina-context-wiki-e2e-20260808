@@ -57,9 +57,9 @@ test("HTTP and MCP Context searches consume query quota but never model quota", 
     assert.equal(snapshot.monthlyModel.outputTokens, 0);
 
     for (const path of [
-      `/context/list?repository=${repository}`,
-      `/context/read?repository=${repository}&document=derived-1`,
-      `/context/diff?repository=${repository}&fromReleaseId=release-1&toReleaseId=release-1`
+      `/wiki/list?repository=${repository}`,
+      `/wiki/read?repository=${repository}&document=derived-1`,
+      `/wiki/diff?repository=${repository}&fromReleaseId=release-1&toReleaseId=release-1`
     ]) {
       const response = await fetch(`${baseUrl}${path}`, { headers: headers() });
       assert.equal(response.status, 200, `${path}: ${await response.text()}`);
@@ -159,7 +159,7 @@ async function search(
   baseUrl: string,
   requestId?: string
 ): Promise<{ response: Response; body: Record<string, unknown> }> {
-  const response = await fetch(`${baseUrl}/context/search`, {
+  const response = await fetch(`${baseUrl}/wiki/search`, {
     method: "POST",
     headers: headers(requestId),
     body: JSON.stringify({ repository, query: "How is the cache invalidated?" })

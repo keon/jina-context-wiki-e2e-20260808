@@ -165,3 +165,11 @@ test("a row with nothing to say in its meta line uses the absence sentinel", () 
   assert.equal(textOf(container, "[data-ui='row-meta']"), "—");
   assertNoLeakedValues(container, "/reviews");
 });
+
+test("review rows omit redundant update timestamps", () => {
+  setDashboardState({ data: feed({ review_runs: [RUN] }), loading: false, error: null });
+  const { container } = renderComponent(<ReviewsPage />);
+
+  assert.equal(count(container, "[data-ui='row-trailing']"), 0);
+  assert.doesNotMatch(container.textContent ?? "", /Updated 2\/1\/2026/);
+});

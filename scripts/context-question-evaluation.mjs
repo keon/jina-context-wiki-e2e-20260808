@@ -14,7 +14,7 @@ if (questions.length === 0) throw new Error("CONTEXT_QUESTION_FILE contains no M
 const results = await concurrentMap(questions, concurrency, async (entry) => {
   const started = performance.now();
   try {
-    const response = await fetch(`${apiUrl}/context/search`, {
+    const response = await fetch(`${apiUrl}/wiki/search`, {
       method: "POST",
       headers: requestHeaders(),
       body: JSON.stringify({

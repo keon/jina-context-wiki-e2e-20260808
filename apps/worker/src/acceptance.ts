@@ -147,7 +147,7 @@ export async function runProductionContextAcceptance(
     body: JSON.stringify({ repositories: [repository], mode: "merge" })
   });
 
-  const created = await apiJson(fetchImpl, `${apiUrl}/context/build`, {
+  const created = await apiJson(fetchImpl, `${apiUrl}/wiki/build`, {
     method: "POST",
     headers: internalHeaders,
     body: JSON.stringify({
@@ -290,7 +290,7 @@ export async function runProductionContextAcceptance(
     async (contextHeaders) => {
       const releasesPayload = await apiJson(
         fetchImpl,
-        `${apiUrl}/context/releases?repository=${encodeURIComponent(repository)}`,
+        `${apiUrl}/wiki/releases?repository=${encodeURIComponent(repository)}`,
         { headers: contextHeaders }
       );
       const releases = requiredArray(releasesPayload.releases, "releases").filter(isRecord);
@@ -312,7 +312,7 @@ export async function runProductionContextAcceptance(
 
       const catalog = await apiJson(
         fetchImpl,
-        `${apiUrl}/context/list?repository=${encodeURIComponent(repository)}&releaseId=${encodeURIComponent(releaseId)}`,
+        `${apiUrl}/wiki/list?repository=${encodeURIComponent(repository)}&releaseId=${encodeURIComponent(releaseId)}`,
         { headers: contextHeaders }
       );
       assertRelease(catalog.release, { repository, ref, releaseId, commitSha }, "HTTP list");
@@ -330,7 +330,7 @@ export async function runProductionContextAcceptance(
 
       const read = await apiJson(
         fetchImpl,
-        `${apiUrl}/context/read?repository=${encodeURIComponent(repository)}&releaseId=${encodeURIComponent(
+        `${apiUrl}/wiki/read?repository=${encodeURIComponent(repository)}&releaseId=${encodeURIComponent(
           releaseId
         )}&document=${encodeURIComponent(documentId)}`,
         { headers: contextHeaders }
@@ -350,7 +350,7 @@ export async function runProductionContextAcceptance(
       const fromCommitSha = requiredGitSha(previousRelease.commitSha, "previous release.commitSha");
       const diff = await apiJson(
         fetchImpl,
-        `${apiUrl}/context/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=${encodeURIComponent(
+        `${apiUrl}/wiki/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=${encodeURIComponent(
           fromReleaseId
         )}&toReleaseId=${encodeURIComponent(releaseId)}`,
         { headers: contextHeaders }
@@ -418,7 +418,7 @@ export async function runProductionContextAcceptance(
   // fails if it stays.
   const backlogDeadline = Date.now() + (optionalPositiveInteger(process.env.ACCEPTANCE_BACKLOG_TIMEOUT_MS) ?? 120_000);
   for (;;) {
-    const metrics = await apiJson(fetchImpl, `${apiUrl}/context/metrics?repository=${encodeURIComponent(repository)}`, {
+    const metrics = await apiJson(fetchImpl, `${apiUrl}/wiki/metrics?repository=${encodeURIComponent(repository)}`, {
       headers: internalHeaders
     });
     const pending = Object.entries(record(metrics.outboxDepthByConsumer)).filter(([, value]) => Number(value) > 0);
@@ -692,7 +692,7 @@ async function verifyIssuedTokenRestrictions(
 ): Promise<void> {
   await expectJsonError(
     input.fetchImpl,
-    `${input.apiUrl}/context/build`,
+    `${input.apiUrl}/wiki/build`,
     { method: "POST", headers, body: "{}" },
     403,
     "issued token build denial",
@@ -700,7 +700,7 @@ async function verifyIssuedTokenRestrictions(
   );
   await expectJsonError(
     input.fetchImpl,
-    `${input.apiUrl}/context/metrics`,
+    `${input.apiUrl}/wiki/metrics`,
     { headers },
     403,
     "issued token admin denial",
@@ -711,7 +711,7 @@ async function verifyIssuedTokenRestrictions(
   });
   await expectJsonError(
     input.fetchImpl,
-    `${input.apiUrl}/context/releases?repository=${encodeURIComponent(input.repository)}`,
+    `${input.apiUrl}/wiki/releases?repository=${encodeURIComponent(input.repository)}`,
     {
       headers: {
         ...headers,
@@ -724,7 +724,7 @@ async function verifyIssuedTokenRestrictions(
   );
   await expectJsonError(
     input.fetchImpl,
-    `${input.apiUrl}/context/releases?repository=${encodeURIComponent(input.repository)}`,
+    `${input.apiUrl}/wiki/releases?repository=${encodeURIComponent(input.repository)}`,
     {
       headers: {
         ...headers,
@@ -755,7 +755,7 @@ async function verifyRevokedTokenRejection(
 ): Promise<void> {
   await expectJsonError(
     input.fetchImpl,
-    `${input.apiUrl}/context/releases?repository=${encodeURIComponent(input.repository)}`,
+    `${input.apiUrl}/wiki/releases?repository=${encodeURIComponent(input.repository)}`,
     { headers },
     401,
     "revoked token HTTP denial",
@@ -839,7 +839,7 @@ export async function verifyProductionContextIsolation(
   await Promise.all([
     expectOpaqueContextNotFound(
       fetchImpl,
-      `${apiUrl}/context/list?repository=${encodeURIComponent(forbiddenRepository)}`,
+      `${apiUrl}/wiki/list?repository=${encodeURIComponent(forbiddenRepository)}`,
       { headers: input.headers, signal: AbortSignal.timeout(input.timeoutMs) },
       "production forbidden-repository isolation",
       "repository context not found",
@@ -847,7 +847,7 @@ export async function verifyProductionContextIsolation(
     ),
     expectOpaqueContextNotFound(
       fetchImpl,
-      `${apiUrl}/context/list?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(
+      `${apiUrl}/wiki/list?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(
         bogusReleaseId
       )}`,
       { headers: input.headers, signal: AbortSignal.timeout(input.timeoutMs) },
@@ -887,7 +887,7 @@ export async function verifyProductionRetrievalQuality(
     sample.map(async (document) => {
       const documentId = requiredString(document.id, "retrieval target document.id");
       const title = requiredString(document.title, "retrieval target document.title");
-      const search = await apiJson(fetchImpl, `${input.apiUrl.replace(/\/$/, "")}/context/search`, {
+      const search = await apiJson(fetchImpl, `${input.apiUrl.replace(/\/$/, "")}/wiki/search`, {
         method: "POST",
         headers: input.headers,
         body: JSON.stringify({
@@ -1110,7 +1110,7 @@ export async function requestProductionRemediation(input: {
 }): Promise<ProductionRemediationMode | undefined> {
   const progress = await apiJson(
     input.fetchImpl,
-    `${input.apiUrl}/context/builds/${encodeURIComponent(input.buildId)}/progress`,
+    `${input.apiUrl}/wiki/builds/${encodeURIComponent(input.buildId)}/progress`,
     { headers: input.internalHeaders }
   );
   const eligibility = recordOrEmpty(progress.retryEligibility);
@@ -1130,7 +1130,7 @@ export async function requestProductionRemediation(input: {
       : remediationMode === "gate_remediation"
         ? "gate-remediation"
         : "checkpoint-retry";
-  await apiJson(input.fetchImpl, `${input.apiUrl}/context/builds/${encodeURIComponent(input.buildId)}/retry`, {
+  await apiJson(input.fetchImpl, `${input.apiUrl}/wiki/builds/${encodeURIComponent(input.buildId)}/retry`, {
     method: "POST",
     headers: input.internalHeaders,
     body: JSON.stringify({
@@ -1296,7 +1296,7 @@ export async function verifyProductionWebSurfaces(
   const dashboardUrl = checks.dashboardUrl.replace(/\/$/, "");
   const adminUrl = checks.adminUrl.replace(/\/$/, "");
   const dashboard = await fetchImpl(
-    `${dashboardUrl}/api/context/releases?repository=${encodeURIComponent(expected.repository)}`,
+    `${dashboardUrl}/api/wiki/releases?repository=${encodeURIComponent(expected.repository)}`,
     {
       headers: {
         accept: "application/json",
@@ -1325,23 +1325,20 @@ export async function verifyProductionWebSurfaces(
     throw new Error("production dashboard API proxy did not expose the certified release");
   }
 
-  const dashboardPage = await fetchImpl(
-    `${dashboardUrl}/context?repository=${encodeURIComponent(expected.repository)}`,
-    {
-      headers: {
-        accept: "text/html",
-        authorization: checks.dashboardInvocationAuthorization,
-        "x-jina-web-authorization": checks.dashboardAuthorization
-      },
-      signal: AbortSignal.timeout(expected.timeoutMs)
-    }
-  );
+  const dashboardPage = await fetchImpl(`${dashboardUrl}/wiki?repository=${encodeURIComponent(expected.repository)}`, {
+    headers: {
+      accept: "text/html",
+      authorization: checks.dashboardInvocationAuthorization,
+      "x-jina-web-authorization": checks.dashboardAuthorization
+    },
+    signal: AbortSignal.timeout(expected.timeoutMs)
+  });
   const dashboardPageText = await dashboardPage.text();
   if (!dashboardPage.ok || !dashboardPage.headers.get("content-type")?.toLowerCase().includes("text/html")) {
-    throw new Error(`production dashboard Context page failed with ${dashboardPage.status}`);
+    throw new Error(`production dashboard Wiki page failed with ${dashboardPage.status}`);
   }
-  if (!dashboardPageText.includes('id="context-page"') || !dashboardPageText.includes("Evidence-backed workspace")) {
-    throw new Error("production dashboard Context page did not render the application marker");
+  if (!dashboardPageText.includes('id="wiki-page"') || !dashboardPageText.includes("Evidence-backed workspace")) {
+    throw new Error("production dashboard Wiki page did not render the application marker");
   }
 
   const admin = await fetchImpl(`${adminUrl}/?repository=${encodeURIComponent(expected.repository)}`, {

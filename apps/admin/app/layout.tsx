@@ -7,7 +7,7 @@ import "@jina/theme/theme.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Jina Admin — Repository Context",
+  title: "Jina Admin — Wiki",
   description: "Administrative view of immutable context releases and checkpoint health."
 };
 

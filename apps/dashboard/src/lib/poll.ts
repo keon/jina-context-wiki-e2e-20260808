@@ -29,7 +29,7 @@ const POLL_INTERVAL_MS = 2500;
  *
  * Because the key is the path, every component polling the same endpoint shares
  * one request and one scheduler — /board, /history and /tasks read one
- * `work-overview`, and /context's four resources run off a single timer.
+ * `work-overview`, and /wiki's four resources run off a single timer.
  */
 export function usePoll<T>(path: string, intervalMs: number = POLL_INTERVAL_MS) {
   const queryClient = useQueryClient();

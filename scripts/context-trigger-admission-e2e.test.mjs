@@ -239,7 +239,7 @@ async function withFakeAdmissionServer(configuration, run) {
       if (!isAuthorized(request)) return json(response, 401, { error: "unauthorized" });
       return json(response, 200, { tasks: state.roots });
     }
-    if (url.pathname === "/context/build" && request.method === "POST") {
+    if (url.pathname === "/wiki/build" && request.method === "POST") {
       if (!isAuthorized(request)) return json(response, 401, { error: "unauthorized" });
       const body = await readJson(request);
       const requestKey = String(body.requestKey);

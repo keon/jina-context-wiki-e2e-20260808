@@ -10,7 +10,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Jina",
-  description: "Code reviews, Context, models, billing, integrations, and operational workflows."
+  description: "Code reviews, Wiki, models, billing, integrations, and operational workflows."
 };
 
 export default function RootLayout({ children }: { readonly children: ReactNode }) {

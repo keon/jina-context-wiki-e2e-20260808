@@ -88,7 +88,7 @@ after(async () => {
 });
 
 test("manual Context admission creates a resumable board build and exposes only public checkpoints", async () => {
-  const overBudget = await api("/context/build", {
+  const overBudget = await api("/wiki/build", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
@@ -103,7 +103,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(overBudget.response.status, 400);
   assert.match(JSON.stringify(overBudget.body), /between 300 and 21600/);
 
-  const overTokenBudget = await api("/context/build", {
+  const overTokenBudget = await api("/wiki/build", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
@@ -115,7 +115,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(overTokenBudget.response.status, 400);
   assert.match(JSON.stringify(overTokenBudget.body), /between 250000 and 72000000/);
 
-  const created = await api("/context/build", {
+  const created = await api("/wiki/build", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
@@ -141,7 +141,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(typeof build.derivationDeadlineAt, "string");
   assert.equal("stages" in build, false);
 
-  const duplicate = await api("/context/build", {
+  const duplicate = await api("/wiki/build", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
@@ -157,7 +157,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(duplicate.body.duplicate, true);
   assert.equal(record(duplicate.body.build).id, buildId);
 
-  const initialProgress = await api("/context/builds/" + encodeURIComponent(buildId) + "/progress", {
+  const initialProgress = await api("/wiki/builds/" + encodeURIComponent(buildId) + "/progress", {
     headers: contextHeaders()
   });
   assert.equal(initialProgress.response.status, 200);
@@ -216,7 +216,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   });
   assert.equal(completed.response.status, 200);
 
-  const resumedProgress = await api("/context/builds/" + encodeURIComponent(buildId) + "/progress", {
+  const resumedProgress = await api("/wiki/builds/" + encodeURIComponent(buildId) + "/progress", {
     headers: contextHeaders()
   });
   assert.equal(resumedProgress.response.status, 200);
@@ -226,12 +226,12 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.deepEqual(resumedProgress.body.pages, []);
 
   const missingPage = await api(
-    "/context/builds/" + encodeURIComponent(buildId) + "/page?path=" + encodeURIComponent("architecture"),
+    "/wiki/builds/" + encodeURIComponent(buildId) + "/page?path=" + encodeURIComponent("architecture"),
     { headers: contextHeaders() }
   );
   assert.equal(missingPage.response.status, 404);
 
-  const builds = await api("/context/builds", { headers: contextHeaders() });
+  const builds = await api("/wiki/builds", { headers: contextHeaders() });
   assert.equal(builds.response.status, 200);
   assert.ok(
     array(builds.body.builds)
@@ -304,7 +304,7 @@ test("an incremental manual admission is durably deferred behind invested work a
     githubInstallationId: 140435029,
     requestKey: "incremental-commit-pr-issue"
   };
-  const created = await api("/context/build", {
+  const created = await api("/wiki/build", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify(request)
@@ -319,7 +319,7 @@ test("an incremental manual admission is durably deferred behind invested work a
   assert.match(string(record(build.queuedFollowup).reason), /incremental seed/i);
   assert.equal("stages" in build, false);
 
-  const replay = await api("/context/build", {
+  const replay = await api("/wiki/build", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify(request)
@@ -330,7 +330,7 @@ test("an incremental manual admission is durably deferred behind invested work a
   assert.equal(record(replay.body.build).id, build.id);
   assert.equal(record(replay.body.build).refSequence, 1);
 
-  const builds = await api("/context/builds", { headers: contextHeaders() });
+  const builds = await api("/wiki/builds", { headers: contextHeaders() });
   assert.equal(builds.response.status, 200);
   const mainBuilds = array(builds.body.builds)
     .map(record)
@@ -341,7 +341,7 @@ test("an incremental manual admission is durably deferred behind invested work a
     false
   );
 
-  const progress = await api("/context/builds/" + encodeURIComponent(string(build.id)) + "/progress", {
+  const progress = await api("/wiki/builds/" + encodeURIComponent(string(build.id)) + "/progress", {
     headers: contextHeaders()
   });
   assert.equal(progress.response.status, 200);
@@ -391,7 +391,7 @@ test("an incremental manual admission is durably deferred behind invested work a
 });
 
 test("public context search bounds query, result count, and request body", async () => {
-  const tooManyResults = await api("/context/search", {
+  const tooManyResults = await api("/wiki/search", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
@@ -402,7 +402,7 @@ test("public context search bounds query, result count, and request body", async
   });
   assert.equal(tooManyResults.response.status, 400);
 
-  const oversizedQuery = await api("/context/search", {
+  const oversizedQuery = await api("/wiki/search", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
@@ -412,7 +412,7 @@ test("public context search bounds query, result count, and request body", async
   });
   assert.equal(oversizedQuery.response.status, 400);
 
-  const oversizedBody = await api("/context/search", {
+  const oversizedBody = await api("/wiki/search", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
@@ -425,13 +425,13 @@ test("public context search bounds query, result count, and request body", async
 });
 
 test("unpublished board checkpoints never masquerade as published Context", async () => {
-  const releases = await api("/context/releases?repository=" + encodeURIComponent(repository), {
+  const releases = await api("/wiki/releases?repository=" + encodeURIComponent(repository), {
     headers: contextHeaders()
   });
   assert.equal(releases.response.status, 200);
   assert.deepEqual(releases.body.releases, []);
 
-  const searched = await api("/context/search", {
+  const searched = await api("/wiki/search", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
@@ -443,27 +443,27 @@ test("unpublished board checkpoints never masquerade as published Context", asyn
   assert.equal(searched.response.status, 404);
   assert.equal("answer" in searched.body, false);
 
-  const listed = await api("/context/list?repository=" + encodeURIComponent(repository), {
+  const listed = await api("/wiki/list?repository=" + encodeURIComponent(repository), {
     headers: contextHeaders()
   });
   assert.equal(listed.response.status, 404);
 });
 
 test("ACL failures do not reveal repository existence", async () => {
-  const stranger = await api("/context/search", {
+  const stranger = await api("/wiki/search", {
     method: "POST",
     headers: { ...contextHeaders(), "x-jina-principal-id": "user:stranger@example.com" },
     body: JSON.stringify({ repository, query: "What is indexed?" })
   });
   assert.equal(stranger.response.status, 404);
-  const forbiddenBuild = await api("/context/build", {
+  const forbiddenBuild = await api("/wiki/build", {
     method: "POST",
     headers: { ...contextHeaders(), "x-jina-principal-id": "user:stranger@example.com" },
     body: JSON.stringify({ repository, ref: "main" })
   });
   assert.equal(forbiddenBuild.response.status, 403);
 
-  const invalid = await api("/context/search", {
+  const invalid = await api("/wiki/search", {
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({ repository, query: "What is indexed?", limit: 0 })
@@ -484,18 +484,18 @@ test("all public context routes require a bound principal in production", async 
   const protectedUrl = `http://127.0.0.1:${(protectedServer.address() as AddressInfo).port}`;
   try {
     for (const path of [
-      `/context/releases?repository=${encodeURIComponent(repository)}`,
-      `/context/list?repository=${encodeURIComponent(repository)}`,
-      `/context/read?repository=${encodeURIComponent(repository)}&document=kr_hidden`,
-      `/context/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=ig_a&toReleaseId=ig_b`,
-      "/context/metrics"
+      `/wiki/releases?repository=${encodeURIComponent(repository)}`,
+      `/wiki/list?repository=${encodeURIComponent(repository)}`,
+      `/wiki/read?repository=${encodeURIComponent(repository)}&document=kr_hidden`,
+      `/wiki/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=ig_a&toReleaseId=ig_b`,
+      "/wiki/metrics"
     ]) {
       const response = await fetch(`${protectedUrl}${path}`, {
         headers: { authorization: `Bearer ${contextToken}` }
       });
       assert.equal(response.status, 401, path);
     }
-    for (const path of ["/context/build", "/context/search"]) {
+    for (const path of ["/wiki/build", "/wiki/search"]) {
       const response = await fetch(`${protectedUrl}${path}`, {
         method: "POST",
         headers: {
@@ -579,7 +579,7 @@ test("unsigned dev webhooks coexist with strict token-bound API identity", async
     assert.equal(devWebhook.status, 202);
 
     const spoofedWithoutToken = await fetch(
-      `${strictDevUrl}/context/releases?repository=${encodeURIComponent(repository)}`,
+      `${strictDevUrl}/wiki/releases?repository=${encodeURIComponent(repository)}`,
       {
         headers: {
           "x-jina-tenant-id": tenantId,
@@ -589,7 +589,7 @@ test("unsigned dev webhooks coexist with strict token-bound API identity", async
     );
     assert.equal(spoofedWithoutToken.status, 401);
 
-    const wrongTenant = await fetch(`${strictDevUrl}/context/releases?repository=${encodeURIComponent(repository)}`, {
+    const wrongTenant = await fetch(`${strictDevUrl}/wiki/releases?repository=${encodeURIComponent(repository)}`, {
       headers: {
         authorization: `Bearer ${contextToken}`,
         "x-jina-tenant-id": "tenant-attacker"
@@ -598,7 +598,7 @@ test("unsigned dev webhooks coexist with strict token-bound API identity", async
     assert.equal(wrongTenant.status, 401);
 
     const contextAuthenticated = await fetch(
-      `${strictDevUrl}/context/releases?repository=${encodeURIComponent(repository)}`,
+      `${strictDevUrl}/wiki/releases?repository=${encodeURIComponent(repository)}`,
       { headers: { authorization: `Bearer ${contextToken}` } }
     );
     assert.notEqual(contextAuthenticated.status, 401);
@@ -650,7 +650,7 @@ test("context bearer is query-only and server-side bound to its configured tenan
     });
     assert.equal(spoofedAccessSync.status, 401);
     assert.deepEqual(await boundStore.repositoriesForPrincipal("tenant-attacker", "user:attacker@example.com"), []);
-    const accepted = await fetch(`${boundUrl}/context/search`, {
+    const accepted = await fetch(`${boundUrl}/wiki/search`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${contextToken}`,
@@ -659,7 +659,7 @@ test("context bearer is query-only and server-side bound to its configured tenan
       body: JSON.stringify({ repository, query: "What is indexed?" })
     });
     assert.notEqual(accepted.status, 401);
-    const rejected = await fetch(`${boundUrl}/context/search`, {
+    const rejected = await fetch(`${boundUrl}/wiki/search`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${contextToken}`,
@@ -672,10 +672,10 @@ test("context bearer is query-only and server-side bound to its configured tenan
     assert.equal(rejected.status, 401);
     // Browsing stays bound to the same tenant and repository access as search.
     for (const path of [
-      `/context/releases?repository=${encodeURIComponent(repository)}`,
-      `/context/list?repository=${encodeURIComponent(repository)}`,
-      `/context/read?repository=${encodeURIComponent(repository)}&document=kr_missing`,
-      `/context/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=ig_a&toReleaseId=ig_b`
+      `/wiki/releases?repository=${encodeURIComponent(repository)}`,
+      `/wiki/list?repository=${encodeURIComponent(repository)}`,
+      `/wiki/read?repository=${encodeURIComponent(repository)}&document=kr_missing`,
+      `/wiki/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=ig_a&toReleaseId=ig_b`
     ]) {
       const response = await fetch(`${boundUrl}${path}`, {
         headers: { authorization: `Bearer ${contextToken}` }
@@ -683,12 +683,12 @@ test("context bearer is query-only and server-side bound to its configured tenan
       assert.notEqual(response.status, 401, `GET ${path}`);
     }
     for (const [method, path] of [
-      ["POST", "/context/build"],
+      ["POST", "/wiki/build"],
       ["POST", "/internal/context/access/sync"],
       // Writes must not ride in on a read path, administration stays internal,
       // and a deeper path under an allowed parent is not itself allowed.
-      ["POST", "/context/releases"],
-      ["GET", "/context/metrics"],
+      ["POST", "/wiki/releases"],
+      ["GET", "/wiki/metrics"],
       ["GET", "/board"],
       ["GET", "/overview"]
     ] as const) {
@@ -752,7 +752,7 @@ test("shared-database builds bind repository and installation to the authoritati
     "x-jina-principal-id": `tenant:${sharedTenant}`
   };
   try {
-    const mismatchedInstallation = await fetch(`${sharedUrl}/context/build`, {
+    const mismatchedInstallation = await fetch(`${sharedUrl}/wiki/build`, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -763,7 +763,7 @@ test("shared-database builds bind repository and installation to the authoritati
     });
     assert.equal(mismatchedInstallation.status, 404);
 
-    const crossTenantRepository = await fetch(`${sharedUrl}/context/build`, {
+    const crossTenantRepository = await fetch(`${sharedUrl}/wiki/build`, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -774,7 +774,7 @@ test("shared-database builds bind repository and installation to the authoritati
     });
     assert.equal(crossTenantRepository.status, 404);
 
-    const accepted = await fetch(`${sharedUrl}/context/build`, {
+    const accepted = await fetch(`${sharedUrl}/wiki/build`, {
       method: "POST",
       headers,
       body: JSON.stringify({ repository: "OmXYZ/Jina", requestKey: "provisioned-repository" })
@@ -838,7 +838,7 @@ test("shared-database workers claim across provisioned tenants without a tenant 
   await new Promise<void>((resolve) => sharedServer.listen(0, "127.0.0.1", resolve));
   const sharedUrl = `http://127.0.0.1:${(sharedServer.address() as AddressInfo).port}`;
   try {
-    const admitted = await fetch(`${sharedUrl}/context/build`, {
+    const admitted = await fetch(`${sharedUrl}/wiki/build`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${internalToken}`,
@@ -998,7 +998,7 @@ test("the unified webhook admits Context work without creating duplicate review 
     }
   };
 
-  const created = await signedGitHubWebhook("pull_request", deliveryId, payload, "/context/webhooks/github");
+  const created = await signedGitHubWebhook("pull_request", deliveryId, payload, "/wiki/webhooks/github");
   assert.equal(created.status, 202);
   const createdBody = record(await created.json());
   assert.equal(createdBody.outcome, "created");
@@ -1022,7 +1022,7 @@ test("the unified webhook admits Context work without creating duplicate review 
   );
   assert.ok(contextBuild);
 
-  const replay = await signedGitHubWebhook("pull_request", deliveryId, payload, "/context/webhooks/github");
+  const replay = await signedGitHubWebhook("pull_request", deliveryId, payload, "/wiki/webhooks/github");
   assert.equal(replay.status, 200);
   assert.equal(record(await replay.json()).duplicate, true);
 
@@ -1036,7 +1036,7 @@ test("the unified webhook admits Context work without creating duplicate review 
       issue: { number: pullRequestNumber },
       comment: { id: 7901, body: "No Context build should be created." }
     },
-    "/context/webhooks/github"
+    "/wiki/webhooks/github"
   );
   assert.equal(comment.status, 202);
   const afterComment = await api("/board", { headers: contextHeaders() });
@@ -1107,13 +1107,7 @@ test("feature pushes bypass Context dependencies and webhook metadata wins after
       ["renamed-feature", "refs/heads/feature"],
       ["renamed-former-default", "refs/heads/main"]
     ] as const) {
-      const ignored = await signedGitHubWebhookAt(
-        renamedUrl,
-        "push",
-        deliveryId,
-        push(ref),
-        "/context/webhooks/github"
-      );
+      const ignored = await signedGitHubWebhookAt(renamedUrl, "push", deliveryId, push(ref), "/wiki/webhooks/github");
       assert.equal(ignored.status, 202, await ignored.text());
     }
     assert.equal(quotaCalls, 0);
@@ -1125,7 +1119,7 @@ test("feature pushes bypass Context dependencies and webhook metadata wins after
       "push",
       "renamed-current-default",
       push("refs/heads/trunk"),
-      "/context/webhooks/github"
+      "/wiki/webhooks/github"
     );
     assert.equal(current.status, 202, await current.text());
     assert.equal(quotaCalls, 1);
@@ -1213,7 +1207,7 @@ test("a newer relayed ref build queues behind stale work without consuming anoth
     "pull_request",
     "v1-context-relay-pr-80-open",
     payload("opened", firstHead),
-    "/context/webhooks/github"
+    "/wiki/webhooks/github"
   );
   assert.equal(opened.status, 202);
   const quotaAfterOpen = await serverConfig.contextQuotaService.snapshot(tenantId);
@@ -1234,7 +1228,7 @@ test("a newer relayed ref build queues behind stale work without consuming anoth
     "pull_request",
     "v1-context-relay-pr-80-sync",
     payload("synchronize", secondHead),
-    "/context/webhooks/github"
+    "/wiki/webhooks/github"
   );
   assert.equal(synchronized.status, 202);
   const quotaAfterSync = await serverConfig.contextQuotaService.snapshot(tenantId);
@@ -1246,7 +1240,7 @@ test("a newer relayed ref build queues behind stale work without consuming anoth
     .filter((task) => task.id === firstBuild.id || record(task.metadata).contextBuildId === firstBuild.id);
   assert.ok(firstBuildTasks.length >= 3);
   assert.ok(firstBuildTasks.some((task) => task.status !== "canceled"));
-  const progress = await api(`/context/builds/${encodeURIComponent(string(firstBuild.id))}/progress`, {
+  const progress = await api(`/wiki/builds/${encodeURIComponent(string(firstBuild.id))}/progress`, {
     headers: contextHeaders()
   });
   assert.equal(progress.response.status, 200);
@@ -1371,7 +1365,7 @@ test("push and issue intake serialize their event-specific refs for one reposito
   });
   assert.equal(issue.response.status, 202);
   const afterIssue = await api("/board", { headers: contextHeaders() });
-  const issueProgress = await api(`/context/builds/${encodeURIComponent(string(pushedBuild.id))}/progress`, {
+  const issueProgress = await api(`/wiki/builds/${encodeURIComponent(string(pushedBuild.id))}/progress`, {
     headers: contextHeaders()
   });
   assert.equal(record(issueProgress.body.queuedFollowup).ref, "trunk");
@@ -1445,7 +1439,7 @@ test("signed push redelivery is idempotent while rollback coalesces into the que
     })),
     [{ refSequence: 1, commitSha: firstHead }]
   );
-  const progress = await api(`/context/builds/${encodeURIComponent(string(builds[0]?.id))}/progress`, {
+  const progress = await api(`/wiki/builds/${encodeURIComponent(string(builds[0]?.id))}/progress`, {
     headers: contextHeaders()
   });
   assert.equal(record(progress.body.queuedFollowup).commitSha, firstHead);

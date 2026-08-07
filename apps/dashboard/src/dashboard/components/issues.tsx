@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { Badge, BackLink, DetailHeader, ExternalLink } from "./ui";
+import { Badge, BackLink, ExternalLink } from "./ui";
 import { useDashboard } from "../providers";
 import { formatDate } from "../lib/presentation";
 import { issueLocation, issueTitle, severityTone } from "../lib/issues";
@@ -45,37 +45,37 @@ export function IssueDetail({ id }: { id: string }) {
     <article className="detail">
       <BackLink href="/issues">Issues</BackLink>
 
-      <DetailHeader
-        kicker="Issue"
-        title={issueTitle(issue.body)}
-        badges={
-          <>
+      <header className="issue-detail-hero">
+        <div className="issue-detail-hero__heading">
+          <span className="issue-detail-hero__kicker">Issue</span>
+          <h1>{issueTitle(issue.body)}</h1>
+          <div className="issue-detail-hero__meta" aria-label="Issue details">
             <Badge tone={severityTone(issue.severity)}>{issue.severity}</Badge>
             <Badge>{issue.category}</Badge>
             {location ? (
-              codeHref ? (
-                <ExternalLink className="cell-mono link" href={codeHref}>
-                  {location}
-                </ExternalLink>
-              ) : (
-                <span className="cell-mono">{location}</span>
-              )
+              <span className="issue-detail-hero__location">
+                {codeHref ? (
+                  <ExternalLink className="cell-mono link" href={codeHref}>
+                    {location}
+                  </ExternalLink>
+                ) : (
+                  <span className="cell-mono">{location}</span>
+                )}
+              </span>
             ) : null}
-          </>
-        }
-        actions={
-          <>
-            <Link className="btn btn--sm" href={runHref}>
-              Review run
-            </Link>
-            {issue.pull_request_url ? (
-              <ExternalLink className="btn btn--sm" href={issue.pull_request_url}>
-                GitHub PR
-              </ExternalLink>
-            ) : null}
-          </>
-        }
-      />
+          </div>
+        </div>
+        <nav className="issue-detail-actions" aria-label="Issue actions">
+          <Link className="btn btn--sm" href={runHref}>
+            Review run
+          </Link>
+          {issue.pull_request_url ? (
+            <ExternalLink className="btn btn--sm" href={issue.pull_request_url}>
+              GitHub PR
+            </ExternalLink>
+          ) : null}
+        </nav>
+      </header>
 
       <section className="detail-surface issue-detail-surface">
         <div className="detail-surface__head">
