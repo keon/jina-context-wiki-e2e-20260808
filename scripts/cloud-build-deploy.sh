@@ -1473,10 +1473,13 @@ if [[ "${context_backup_status}" != "SUCCESSFUL" ]]; then
 fi
 echo "Verified Cloud SQL backup ${context_backup_id} for ${cloud_sql_instance}"
 
-# Create both paused drains before closing claim admission. The serving worker
-# generation remains authorized to renew and complete work while no new leases
-# can be claimed. Only after the Board reaches zero leases is that generation
-# fenced and replaced by the paused drain revisions.
+# Create both paused drains before closing claim admission. A drain revision is
+# a routing fence, not an executor: keep its revision-level minimum at zero so
+# it cannot run background Board reconciliation while owner DDL is waiting for
+# the state-store advisory lock. The serving worker generation remains
+# authorized to renew and complete work while no new leases can be claimed.
+# Only after the Board reaches zero leases is that generation fenced and
+# replaced by the paused drain revisions.
 serving_api_url="$(stable_service_url "jina-api")"
 gcloud run deploy jina-context-worker \
   --project="${GCP_PROJECT_ID}" \
@@ -1488,9 +1491,9 @@ gcloud run deploy jina-context-worker \
   --memory="${context_worker_memory}" \
   --timeout=300 \
   --scaling=auto \
-  --min="${context_worker_min_instances}" \
+  --min=0 \
   --max="${context_worker_max_instances}" \
-  --min-instances="${context_worker_min_instances}" \
+  --min-instances=0 \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(context_worker_environment "${serving_api_url}" "paused")" \
@@ -1509,9 +1512,9 @@ gcloud run deploy jina-task-worker \
   --concurrency=1 \
   --timeout=300 \
   --scaling=auto \
-  --min=1 \
+  --min=0 \
   --max="${task_worker_max_instances}" \
-  --min-instances=1 \
+  --min-instances=0 \
   --max-instances="${task_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(task_worker_environment "${serving_api_url}" "paused")" \

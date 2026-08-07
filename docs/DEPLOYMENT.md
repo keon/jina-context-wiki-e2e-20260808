@@ -875,8 +875,10 @@ The coordinated `cloudbuild.yaml` invocation above calls
 4. under that lease, runs the exact schema-layout preflight and creates and verifies an
    on-demand Cloud SQL backup while the serving workers remain untouched;
 5. deploys claim-disabled Context and task-worker drain revisions from the exact pinned
-   worker image, closes only new-claim admission for the serving generation, and waits
-   up to 30 minutes for its existing lease holders to renew and complete normally;
+   worker image with a revision-level minimum of zero, closes only new-claim admission
+   for the serving generation, and waits up to 30 minutes for its existing lease holders
+   to renew and complete normally; the zero minimum keeps the routing fence from running
+   background Board reconciliation while owner DDL waits for the state-store lock;
 6. in the same locked transaction that proves the durable Board contains zero active
    leases, fences the old generation, then routes each worker service to its drain, removes every
    traffic tag, synchronously deletes every prior worker revision, and proves that only
@@ -1004,7 +1006,9 @@ The deployment then routes
 each worker service 100% to its exact paused drain, clears all revision tags,
 synchronously deletes every other revision, and checks the resulting inventory. Every
 drain and candidate explicitly restores automatic scaling, preventing a stale manual
-instance count from multiplying Board pollers across later releases. Deletion is
+instance count from multiplying Board pollers across later releases. Paused drains use
+a zero revision-level minimum; accepted candidates restore their configured warm
+minimum. Deletion is
 deliberate: routing an old polling revision to zero percent does not by itself prove its
 minimum instances have terminated. A final zero-lease check precedes schema mutation.
 That same locked preflight rejects non-terminal pre-page-oriented Context builds
