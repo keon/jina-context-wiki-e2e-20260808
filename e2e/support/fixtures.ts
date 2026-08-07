@@ -35,7 +35,7 @@ export function isScenario(value: string): value is Scenario {
 export const HEADINGS = {
   releases: "Published releases",
   builds: "Build and checkpoint state",
-  health: "Context index health",
+  health: "Wiki index health",
   documents: "Agent-derived context"
 } as const;
 
