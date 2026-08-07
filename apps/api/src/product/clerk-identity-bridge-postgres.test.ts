@@ -7,7 +7,11 @@ import {
   linkClerkUserIdentity,
   upsertGithubUserIdentity,
 } from "./internal-user.js";
-import { syncClerkTenantMembershipsWithClient } from "./store.js";
+import {
+  clerkMembershipBootstrapWithClient,
+  completeClerkMembershipBootstrapWithClient,
+  syncClerkTenantMembershipsWithClient,
+} from "./store.js";
 
 const connectionString = process.env.TEST_DATABASE_URL;
 
@@ -46,6 +50,30 @@ test(
            (tenant_id, github_user_id, github_login, user_id, role, source, synced_at)
          values ($1, $2, $3, $4, 'admin', 'installer', now())`,
         [tenant.rows[0].id, githubUserId, `bridge-${seed}`, identity.userId],
+      );
+
+      assert.deepEqual(
+        await clerkMembershipBootstrapWithClient(client, clerkUserId, identity.userId),
+        {
+          pending: true,
+          memberships: [
+            {
+              organizationId: clerkOrganizationId,
+              name: `Bridge ${seed}`,
+              role: "admin",
+            },
+          ],
+        },
+      );
+      await completeClerkMembershipBootstrapWithClient(client, clerkUserId, identity.userId);
+      assert.deepEqual(
+        await clerkMembershipBootstrapWithClient(client, clerkUserId, identity.userId),
+        { pending: false, memberships: [] },
+      );
+      await completeClerkMembershipBootstrapWithClient(client, clerkUserId, identity.userId);
+      await assert.rejects(
+        () => completeClerkMembershipBootstrapWithClient(client, `${clerkUserId}_conflict`, identity.userId),
+        /identity conflict/,
       );
 
       assert.deepEqual(

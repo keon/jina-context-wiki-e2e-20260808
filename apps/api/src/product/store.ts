@@ -1771,6 +1771,11 @@ interface ClerkOrgMembership {
   role: TenantRole;
 }
 
+export interface ClerkMembershipBootstrap {
+  pending: boolean;
+  memberships: ClerkOrgMembership[];
+}
+
 export interface ClerkMembershipSyncResult {
   linkedTenantIds: string[];
   ignoredOrganizations: { organizationId: string; name: string }[];
@@ -1782,6 +1787,101 @@ export interface ClerkMembershipSyncInput {
   githubLogin: string;
   userId: string;
   memberships: ClerkOrgMembership[];
+}
+
+/**
+ * Return the legacy team memberships that must be copied on this principal's
+ * first verified Clerk login. The durable marker makes this a one-time
+ * migration instead of a permanent fallback to tenant_members.
+ */
+export async function clerkMembershipBootstrap(
+  clerkUserId: string,
+  userId: string,
+): Promise<ClerkMembershipBootstrap> {
+  if (!databaseConfigured()) return { pending: false, memberships: [] };
+  return withTransaction((client) => clerkMembershipBootstrapWithClient(client, clerkUserId, userId));
+}
+
+export async function clerkMembershipBootstrapWithClient(
+  client: Pick<pg.PoolClient, "query">,
+  clerkUserId: string,
+  userId: string,
+): Promise<ClerkMembershipBootstrap> {
+  const marker = await client.query<{ user_id: string; clerk_user_id: string }>(
+    `select user_id, clerk_user_id
+       from clerk_membership_bootstraps
+      where user_id = $1::uuid or clerk_user_id = $2`,
+    [userId, clerkUserId],
+  );
+  if (marker.rows.some((row) => row.user_id !== userId || row.clerk_user_id !== clerkUserId)) {
+    throw new Error("Clerk membership bootstrap identity conflict");
+  }
+  if (marker.rows.length > 0) return { pending: false, memberships: [] };
+  const memberships = await client.query<{
+    organization_id: string;
+    name: string;
+    role: string;
+  }>(
+    `select t.clerk_organization_id as organization_id,
+            coalesce(nullif(btrim(t.name), ''), t.id::text) as name,
+            case when bool_or(m.role = 'admin') then 'admin' else 'member' end as role
+       from tenant_members m
+       join tenants t on t.id = m.tenant_id
+      where m.user_id = $1::uuid
+        and t.merged_into_tenant_id is null
+        and coalesce(
+              t.kind,
+              case when lower(coalesce(t.github_account_type, '')) = 'user' then 'personal' else 'team' end
+            ) = 'team'
+        and t.clerk_organization_id is not null
+      group by t.id, t.clerk_organization_id, t.name
+      order by lower(coalesce(nullif(btrim(t.name), ''), t.id::text)), t.id`,
+    [userId],
+  );
+  return {
+    pending: true,
+    memberships: memberships.rows.map((membership) => ({
+      organizationId: membership.organization_id,
+      name: membership.name,
+      role: membership.role === "admin" ? "admin" : "member",
+    })),
+  };
+}
+
+/** Seal a successful provider-side bootstrap without altering legacy rows. */
+export async function completeClerkMembershipBootstrap(
+  clerkUserId: string,
+  userId: string,
+): Promise<void> {
+  if (!databaseConfigured()) return;
+  await withTransaction((client) => completeClerkMembershipBootstrapWithClient(client, clerkUserId, userId));
+}
+
+export async function completeClerkMembershipBootstrapWithClient(
+  client: Pick<pg.PoolClient, "query">,
+  clerkUserId: string,
+  userId: string,
+): Promise<void> {
+  await client.query("select pg_advisory_xact_lock(hashtextextended('clerk-bootstrap:' || $1::text, 0))", [userId]);
+  const conflicting = await client.query<{ user_id: string; clerk_user_id: string }>(
+    `select user_id, clerk_user_id
+       from clerk_membership_bootstraps
+      where user_id = $1::uuid or clerk_user_id = $2
+      for update`,
+    [userId, clerkUserId],
+  );
+  if (conflicting.rows.some((row) => row.user_id !== userId || row.clerk_user_id !== clerkUserId)) {
+    throw new Error("Clerk membership bootstrap identity conflict");
+  }
+  const inserted = await client.query(
+    `insert into clerk_membership_bootstraps (user_id, clerk_user_id, completed_at)
+     values ($1::uuid, $2, now())
+     on conflict (user_id) do update set
+       completed_at = clerk_membership_bootstraps.completed_at
+     where clerk_membership_bootstraps.clerk_user_id = excluded.clerk_user_id`,
+    [userId, clerkUserId],
+  );
+  if (inserted.rowCount !== 1) throw new Error("Clerk membership bootstrap identity conflict");
 }
 
 /**

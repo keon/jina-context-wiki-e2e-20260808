@@ -25,7 +25,6 @@ const FIXED_INBOX_KEY = Object.freeze({
 
 const REQUIRED_LITERAL_ENV = Object.freeze({
   API_BASE_URL: "https://api.usejina.com",
-  DASHBOARD_AUTH_MODE: "github",
   DASHBOARD_URL: "https://app.usejina.com",
   DASHBOARD_COOKIE_SAMESITE: "None",
   DASHBOARD_COOKIE_SECURE: "true",
@@ -38,15 +37,17 @@ const REQUIRED_LITERAL_ENV = Object.freeze({
   JINA_TENANCY_MODE: "shared-db",
   JINA_REQUIRE_WORKER_RELEASE_GATE: "true",
   JINA_DB_MANAGE_SCHEMA: "false",
-  JINA_DB_POOL_MAX: "3",
+  JINA_DB_POOL_MAX: "12",
   DB_NAME: "jina",
   DB_USER: "jina_v2_app",
   JINA_GITHUB_WEBHOOK_INBOX_ENABLED: "true",
   JINA_SCHEDULER_OIDC_AUDIENCE: FIXED_SCHEDULER.oidcAudience,
   JINA_SCHEDULER_OIDC_EMAIL: FIXED_SCHEDULER.oidcServiceAccount,
-  JINA_REVIEW_BOARD_PIPELINE_MODE: "paused",
+  JINA_REVIEW_BOARD_PIPELINE_MODE: "v2",
   JINA_BILLING_ENFORCE: "on"
 });
+
+const SUPPORTED_DASHBOARD_AUTH_MODES = Object.freeze(new Set(["github", "clerk"]));
 
 const REQUIRED_SECRET_ENV = Object.freeze([
   "DB_PASS",
@@ -167,6 +168,9 @@ export function validatePublicApiCandidateManifest(value) {
   for (const [name, expected] of Object.entries(REQUIRED_LITERAL_ENV)) {
     if (environment[name] !== expected) fail(`environment.${name} must be ${expected}`);
   }
+  if (!SUPPORTED_DASHBOARD_AUTH_MODES.has(environment.DASHBOARD_AUTH_MODE)) {
+    fail("environment.DASHBOARD_AUTH_MODE must be github or clerk");
+  }
   for (const [name, value] of Object.entries(environment)) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(name)) fail(`invalid environment name ${name}`);
     if (/[~\0\r\n]/.test(value)) fail(`environment.${name} contains a forbidden delimiter`);
@@ -214,6 +218,11 @@ export function validatePublicApiCandidateManifest(value) {
   }
   for (const name of REQUIRED_SECRET_ENV) {
     if (!secrets[name]) fail(`secrets.${name} is required`);
+  }
+  if (environment.DASHBOARD_AUTH_MODE === "clerk") {
+    for (const name of ["CLERK_PUBLISHABLE_KEY", "CLERK_SECRET_KEY"]) {
+      if (!secrets[name]) fail(`secrets.${name} is required in Clerk auth mode`);
+    }
   }
   if (environment.GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION !== secrets.GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY.version) {
     fail(

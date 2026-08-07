@@ -1,6 +1,7 @@
 # Clerk identity cutover
 
-Status: implementation in progress; no production auth or identity mutation has been authorized by this document alone.
+Status: hard production migration authorized; execution in progress with additive data
+changes and retained GitHub-auth rollback targets.
 
 Last evidence refresh: 2026-08-07 (America/Chicago).
 
@@ -40,7 +41,8 @@ same data before and after signing in through Clerk.
 4. Never overwrite `tenant_members.source`; it is rollback evidence for GitHub OAuth
    and installer-derived access.
 5. Never enable Clerk-only authorization before all active Jina teams are explicitly
-   mapped and all active members can authenticate.
+   mapped. Existing members without a Clerk account are migrated on their first
+   verified Clerk + GitHub login by a sealed, one-time membership bootstrap.
 6. Never mutate production identity state without a new physical Cloud SQL backup,
    a consistent logical dump, a Clerk directory export, and verified restore/readback.
 7. Do not delete old users, Clerk organizations, memberships, sessions, backups,
@@ -59,6 +61,8 @@ These facts are evidence for planning, not a substitute for the pre-change refre
 - Dashboard auth mode: GitHub (`NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE=github`).
 - API auth mode: GitHub (`DASHBOARD_AUTH_MODE=github`).
 - Primary Cloud SQL: project `jina-463721`, instance `jina-db`, database `jina`.
+- The retained directory has 23 users and 35 non-merged tenants: 16 team tenants
+  and 19 personal workspaces.
 - The retained `omxyz` team tenant is
   `eff0efc9-b103-494a-b7a3-1ae7f95c2d26`.
 - That tenant currently has `clerk_organization_id = null`; it must be linked in
@@ -84,7 +88,7 @@ Read-only Backend API inventory observed on 2026-08-07:
 | Users already carrying a GitHub external account |     4 |
 | Users carrying a Google external account         |    36 |
 
-The existing Clerk organization intended for the current Jina `omxyz` workspace is:
+The older Clerk organization that previously appeared to correspond to `omxyz` is:
 
 - Clerk organization: `org_2ysvOwT5G5pAUzKwwpvfw02TQwX` (`Om Labs`);
 - current membership: Keon only, `org:admin`;
@@ -93,20 +97,56 @@ The existing Clerk organization intended for the current Jina `omxyz` workspace 
   (`16009358`);
 - Krish already has a Clerk user backed by Google, but no GitHub external account.
 
-The 40 Clerk organizations must not be bulk-imported into Jina. Only organizations
-listed in an operator-reviewed reconciliation manifest may receive a Jina tenant link.
+It is retained but is not the cutover target. The authorized hard migration creates a
+new Clerk organization with each tenant's exact existing name. The 40 older Clerk
+organizations must not be bulk-imported into Jina. Only the exact organizations in the
+reconciliation manifest may receive a Jina tenant link.
 
 The old `omlabs/jina` Vercel deployment's Neon database contains legacy flow/run data,
 not the current Jina user/workspace directory. It is not an identity source and must
 not be joined to the live Cloud SQL database.
 
-### Current access constraint
+### Authorized all-team mapping
 
-The local `gcloud` credential was expired at the last attempt. Fresh Cloud SQL
-inventory, backup, restore verification, migration, and Cloud Run deployment are
-blocked until `keon@omlabs.xyz` completes `gcloud auth login`. This does not block
-code review, local tests, manifest design, or Clerk/Vercel read-only inventory. It does
-block every production database mutation.
+The following Clerk organizations have been created in the production Clerk instance.
+Each is inert until the reconciliation command links its listed existing Jina tenant;
+each already carries the same tenant UUID in private metadata.
+
+| Existing Jina team name  | New exact-name Clerk organization |
+| ------------------------ | --------------------------------- |
+| `0xpass`                 | `org_3HaRO1KTS0bTbW0FGNekCMZBU0C` |
+| `0xtx`                   | `org_3HaRO8Y22F8vCd2gZc6IkgDuv0o` |
+| `7th-Street-Research-Co` | `org_3HaROEgdRxYTVJSKFa3kT9AES75` |
+| `Alliance`               | `org_3HaROEMBpJBVGkU1yosGIfNlD9L` |
+| `Alliancexyz`            | `org_3HaRODceReCaTyPiu8nYuNzR9as` |
+| `deconflict`             | `org_3HaROBXAGkDsD0Lptf2ylNAZkw1` |
+| `funny-development-org`  | `org_3HaROBz600dPWwusXXGBo3B2h0A` |
+| `holdoutlabs`            | `org_3HaRO9TMMpCUHEWCuv5XyoVUv5D` |
+| `kkljkl`                 | `org_3HaROFHEaCbAgJBD1zXZf49v4ep` |
+| `Metopian`               | `org_3HaROCAHy02K6la9X8gmuRX2VAy` |
+| `midnightntwrk`          | `org_3HaROJvBisMN0upzobqTsQWXzWD` |
+| `omxyz`                  | `org_3HaROMEyFwJi80pQlt5A5NaGyAW` |
+| `OrvantaLabs`            | `org_3HaROLMizxBqpH58Go9riMhag3A` |
+| `Pistachio-Wallet`       | `org_3HaROJoCKWR62kfeqHGNFFizvno` |
+| `stealth-projects`       | `org_3HaROJj1qLk9fdIO4WiSQCVCHwO` |
+| `test org`               | `org_3HaRONpDUwCkrcG1Vw9KftWb1T2` |
+
+Personal workspaces are deliberately absent: they remain Jina-owned and resolve by
+`personal_owner_user_id` in Clerk mode.
+
+### Completed pre-change recovery evidence
+
+- Production physical backup operation
+  `140a476b-d385-45ef-afc0-ce3900000026` completed successfully.
+- The logical dump and provider evidence are retained in the private, versioned bucket
+  `gs://jina-463721-prod-backups-us-east1` with a 30-day retention policy.
+- Physical and logical recovery drills reproduced the critical-table row counts and
+  content digests.
+- Recovery clone `jina-db-clerk-recovery-20260807`, the prior Cloud Run revisions,
+  prior Vercel deployments, legacy membership rows, and the older Clerk directory are
+  retained. No production data was deleted.
+- `keon@omlabs.xyz` refreshed the local Google Cloud credential; production mutation
+  is no longer blocked on authentication.
 
 ## Identity matching rules
 
@@ -142,7 +182,7 @@ organization login, and custom domain are assertions for operator review, not ke
 
 ### Data model
 
-Migration `0032_clerk_identity_bridge.sql` adds only
+Migration `0032_clerk_identity_bridge.sql` adds
 `clerk_tenant_memberships`:
 
 ```text
@@ -159,6 +199,14 @@ The prior additive structures remain:
 
 - `user_identities` from migration `0025` stores both GitHub and Clerk identities;
 - `tenants.clerk_organization_id` from migration `0029` stores the org link.
+
+Migration `0033_clerk_membership_bootstrap.sql` adds a durable completion marker for
+each exact Jina-user/Clerk-user pair. On the first verified Clerk login, the API copies
+that user's legacy memberships for explicitly linked team tenants into Clerk, then
+seals the bootstrap. The marker is intentionally separate from the live Clerk
+membership projection: removing a member from Clerk later cannot cause a subsequent
+login to recreate that access from `tenant_members`. Personal workspaces do not need a
+Clerk organization and continue to resolve through `personal_owner_user_id`.
 
 No foreign key points from reviews, Context, installations, billing, or integrations
 to a Clerk id.

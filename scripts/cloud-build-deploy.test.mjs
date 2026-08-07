@@ -337,7 +337,7 @@ test("the private coordinated API cannot be mistaken for the public GitHub-auth 
   assert.match(publicApiCandidateDeployment, /project: "jina-463721"/);
   for (const contract of [
     /API_BASE_URL: "https:\/\/api\.usejina\.com"/,
-    /DASHBOARD_AUTH_MODE: "github"/,
+    /SUPPORTED_DASHBOARD_AUTH_MODES[^\n]+"github"[^\n]+"clerk"/,
     /DASHBOARD_URL: "https:\/\/app\.usejina\.com"/,
     /DASHBOARD_COOKIE_SAMESITE: "None"/,
     /DASHBOARD_COOKIE_SECURE: "true"/,

@@ -7,6 +7,8 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { dashboardOriginAllowed, type AppConfig } from "./config.js";
 import { ApiError } from "./errors.js";
 import {
+  clerkMembershipBootstrap,
+  completeClerkMembershipBootstrap,
   consumeOauthState,
   deleteSession,
   getSession,
@@ -483,7 +485,48 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
     throw new ApiError(403, "Connect GitHub to your Clerk profile before using Jina");
   }
 
-  const memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
+  let memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
+  const bootstrap = await clerkMembershipBootstrap(auth.userId, userId).catch(() => {
+    throw new ApiError(403, "This Clerk account conflicts with an existing Jina membership migration");
+  });
+  if (bootstrap.pending) {
+    let membershipByOrganization = new Map(
+      memberships.data.map((membership) => [membership.organization.id, membership]),
+    );
+    for (const desired of bootstrap.memberships) {
+      const desiredRole = desired.role === "admin" ? "org:admin" : "org:member";
+      let existing = membershipByOrganization.get(desired.organizationId);
+      if (!existing) {
+        try {
+          await clerk.organizations.createOrganizationMembership({
+            organizationId: desired.organizationId,
+            userId: auth.userId,
+            role: desiredRole,
+          });
+        } catch {
+          // A concurrent first request may have created the same membership.
+          // Refetch and require that exact principal/org pair before sealing.
+          memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
+          membershipByOrganization = new Map(
+            memberships.data.map((membership) => [membership.organization.id, membership]),
+          );
+          existing = membershipByOrganization.get(desired.organizationId);
+          if (!existing) throw new ApiError(503, "Clerk organization membership migration failed");
+        }
+      }
+      if (existing && existing.role !== desiredRole) {
+        await clerk.organizations.updateOrganizationMembership({
+          organizationId: desired.organizationId,
+          userId: auth.userId,
+          role: desiredRole,
+        });
+      }
+    }
+    // Provider writes finish before the durable seal. Partial failures leave
+    // the marker absent, so the next request retries idempotently.
+    await completeClerkMembershipBootstrap(auth.userId, userId);
+    memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
+  }
   const membershipSync = await syncClerkTenantMemberships({
     clerkUserId: auth.userId,
     githubUserId,
