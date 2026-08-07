@@ -138,6 +138,10 @@ const MAX_CONTEXT_QUERY_REQUEST_BYTES = 128 * 1024;
 const DEFAULT_ISSUE_GRAPH_REF = "main";
 const MAX_CONTEXT_OPERATOR_RETRY_TASKS = 25;
 const WORKER_LEASE_MS = 30 * 60 * 1000;
+// Long Context/model stages remain live through the worker's one-minute
+// heartbeat. Keep the expiry bounded so an OOM or hard instance loss becomes
+// claimable within five minutes instead of stranding work for the full model
+// deadline; every completion remains protected by its write fence.
 const DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 * 60 * 1000;
 const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };

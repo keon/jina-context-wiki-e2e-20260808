@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   createApp,
   DEFAULT_GRAPH_HISTORY_LIMIT,
+  githubAdminRevalidationRequired,
   MAX_GRAPH_HISTORY_LIMIT,
   parseGraphHistoryLimit,
   parseJinaOrganizationName,
@@ -693,6 +694,13 @@ test("tenantAccessDenial: a member may read but not write", () => {
 test("tenantAccessDenial: an admin may read and write", () => {
   assert.equal(tenantAccessDenial("admin", false), undefined);
   assert.equal(tenantAccessDenial("admin", true), undefined);
+});
+
+test("Clerk-authoritative admins do not fall back to legacy GitHub admin revalidation", () => {
+  assert.equal(githubAdminRevalidationRequired("clerk"), false);
+  assert.equal(githubAdminRevalidationRequired("hybrid"), true);
+  assert.equal(githubAdminRevalidationRequired("legacy"), true);
+  assert.equal(githubAdminRevalidationRequired(undefined), true);
 });
 
 test("tenant-scoped review routes require an authenticated tenant member", async () => {

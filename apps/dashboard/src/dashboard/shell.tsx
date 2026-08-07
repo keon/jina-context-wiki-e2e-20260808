@@ -113,7 +113,8 @@ function sectionForPath(pathname: string | null): NavKey {
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { viewer, authLoading } = useDashboard();
+  const { viewer, authLoading, sessionError, reloadViewer } = useDashboard();
+  const { accessError: workspaceAccessError, retryDiscovery } = useTenant();
   const { ready: authReady, signedIn } = useAppAuth();
   const developerMode = useDeveloperMode();
   const pathname = usePathname();
@@ -139,6 +140,8 @@ export function Shell({ children }: { children: ReactNode }) {
   // Models page needs the same viewer-scoped status, and on /models both reads fired in the same tick.
   const { harness } = useCodexHarness();
   const codexReconnectRequired = harness.reconnect_required === true;
+  const visibleWorkspaceError = workspaceAccessError ?? (signedIn ? sessionError : null);
+  const retryWorkspace = workspaceAccessError ? retryDiscovery : reloadViewer;
 
   // Strip the GitHub install callback query params (incl. installation_id) from
   // the URL once read, so they don't leak via the Referer header on later nav.
@@ -270,7 +273,9 @@ export function Shell({ children }: { children: ReactNode }) {
         <main key={pathname ?? section} className={`main${section === "context" ? " main--context" : ""}`}>
           {installationResult ? <InstallResultNotice result={installationResult} /> : null}
           {codexReconnectRequired ? <CodexReconnectNotice /> : null}
-          {developerRouteBlocked || clerkOnlyRouteBlocked ? (
+          {visibleWorkspaceError ? (
+            <WorkspaceAccessError message={visibleWorkspaceError} onRetry={retryWorkspace} />
+          ) : developerRouteBlocked || clerkOnlyRouteBlocked ? (
             <div className="page-placeholder page-placeholder--compact" role="status">
               Opening Reviews…
             </div>
@@ -282,6 +287,28 @@ export function Shell({ children }: { children: ReactNode }) {
       {commandOpen ? (
         <CommandPalette section={section} developerMode={developerMode.enabled} onClose={() => setCommandOpen(false)} />
       ) : null}
+    </div>
+  );
+}
+
+function WorkspaceAccessError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const account = useAppAccount();
+
+  return (
+    <div className="page-placeholder workspace-access-error" role="alert">
+      <span className="page-placeholder__icon">
+        <OrganizationIcon />
+      </span>
+      <strong>We couldn’t load your workspaces.</strong>
+      <p>{message}</p>
+      <div className="workspace-access-error__actions">
+        <button type="button" className="btn btn--primary" onClick={onRetry}>
+          Try again
+        </button>
+        <button type="button" className="btn btn--ghost" onClick={() => void account.signOut()}>
+          Sign out
+        </button>
+      </div>
     </div>
   );
 }

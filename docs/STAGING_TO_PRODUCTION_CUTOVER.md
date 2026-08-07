@@ -2582,3 +2582,310 @@ following:
 The infrastructure is not considered deleted or disposable at that point. Destructive
 cleanup requires a separate plan, a fresh inventory, explicit user approval, and new
 backups.
+
+## Execution record: monorepo and Clerk production cutover
+
+This section records the production state observed and changed on 2026-08-07. It is
+the authoritative addendum for the cutover execution. Earlier sections intentionally
+preserve the pre-cutover inventory and decision process; where an earlier statement
+says production still uses GitHub dashboard auth, relational review is not live, or a
+component is only planned for promotion, this execution record supersedes that status
+statement without rewriting the historical evidence.
+
+At the cleanup-candidate checkpoint recorded below, the product was functionally cut
+over and production acceptance was green, but the one-commit source-integrity
+definition of done was not yet satisfied: the APIs served a cleanup-branch build while
+the workers served the prior monorepo `main` build. The remaining release action is to
+merge the cleanup branch, rebuild from the resulting immutable `main` commit, and move
+both APIs plus every worker to those exact artifacts under the existing release gates.
+The dashboard must be rebuilt and promoted through Vercel from that same merge commit.
+Trigger.dev production must be deployed from an exact clean checkout of that commit by
+running `scripts/deploy-trigger-gcloud.sh production`, the fixed-project Secret
+Manager-backed path. Do not use the path-filtered GitHub Trigger workflow for closure:
+its Production environment is not configured, and the cleanup merge does not touch
+`trigger/**` in any event.
+That final roll must also replace the upstream API's five remaining `latest` secret
+aliases (`DB_PASS`, `GITHUB_WEBHOOK_SECRET`, `INTERNAL_API_TOKEN`,
+`CONTEXT_API_TOKEN`, and `CONTEXT_PRIVATE_CHECKPOINT_KEY`) with the exact enabled
+numeric versions selected in the release manifest.
+Do not interpret this execution record as final closure until a later paragraph in
+this section records that merged SHA, its build, every serving revision/digest, the
+Vercel production deployment/source identity, the Trigger.dev production
+version/source identity, and the post-roll acceptance evidence.
+
+### Data-safety and rollback boundary
+
+The cutover remained additive. No production row, provider object, customer record,
+GitHub installation, Clerk identity, Stripe or Autumn object, Trigger run, Daytona
+sandbox, GCS artifact, Cloud SQL backup, Cloud Run revision, Vercel deployment, or
+source-history object was deleted. The restore-tested physical and logical database
+copies, object-store copies, provider exports, and Git bundles documented above remain
+the recovery authority.
+
+The safe application rollback targets retained after the final cleanup are:
+
+| Surface                                        | Serving revision/deployment                                                                 | Retained rollback                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Public product API, `api.usejina.com`          | `jina-code-review-api-envclean6d27`                                                         | `jina-code-review-api-cleanup6d27` and `jina-code-review-api-causal-68d0f55`       |
+| Context/graph API, `jina-v2/us-east1/jina-api` | `jina-api-lease5m6d27`                                                                      | `jina-api-cleanup6d27` and `jina-api-prod3603clean`                                |
+| Dashboard, `app.usejina.com`                   | Vercel `dpl_4hVrUSBGQu2SU4xuiZhedABLahXq`, URL `jina-dashboard-g5yxt4vdv-omlabs.vercel.app` | Prior Vercel deployments and aliases retained                                      |
+| Task/review worker                             | `jina-task-worker-prod3603d36`                                                              | Prior binaries retained; first create a release-identity-compatible rollback clone |
+| Causal worker                                  | `jina-causal-graph-worker-prod3603d36`                                                      | Prior binaries retained; first create a release-identity-compatible rollback clone |
+| Context worker                                 | `jina-context-worker-prod3603d36c`                                                          | `jina-context-worker-prod3603d36b` and prior worker revisions retained             |
+
+Removing a Cloud Run traffic tag is not deleting a revision. The temporary
+`attempt4`, `hotfix-11b75ba`, and obsolete rollback-route tags were removed only after
+their targets had zero traffic; the immutable revisions and image digests remain
+addressable and can be retagged during rollback.
+
+Retained worker revisions are binary/configuration inputs, not traffic-only rollback
+targets. A Context or task/review rollback must first acquire and continuously renew
+the shared deployment lease in `jina_runtime.release_control`. Under the shared
+release-control advisory lock, set `worker_accepts_claims=false` while leaving
+`worker_claims_enabled=true`: the latter preserves renew/completion authority for the
+currently accepted generation, while the former prevents the expired/no-lease
+fallback from admitting new claims. Prove zero unexpired attempts for the affected
+service before changing its identity or routing.
+
+Revision-only compare-and-swap is valid only when the target mounts the currently
+accepted release ID and credential. Context revision `...36b` is compatible with the
+serving Context identity, so its `context_worker_revision` may be changed under the
+lock while preserving the release ID, credential hash, other worker revision, and all
+gates. No retained task revision currently shares the serving task identity
+`prod-3603d36` and credential Secret version `123`. A task-only rollback must therefore
+deploy a zero-traffic clone of the chosen prior binary/configuration that mounts the
+current shared identity. Changing the release ID or credential is not a task-only
+operation: those fields are shared with Context, so that alternative requires draining
+both services and atomically switching the complete Context/task release row to a
+fully compatible ID/credential/revision tuple after proving the prior numeric
+credential version remains enabled. Verify the committed row, route only compatible
+revisions, reopen `worker_accepts_claims`, and then release the deployment lease.
+
+Causal rollback uses the same shared deployment lease and shared admission closure:
+set `jina_runtime.release_control.worker_accepts_claims=false` under its advisory lock
+and leave the causal `worker_claims_enabled` gate true while draining. Setting that
+causal gate false clears/rejects the active identity and would also reject renewals and
+completions. After proving zero unexpired causal attempts, take the distinct
+`jina_runtime.causal_graph_release_control` advisory lock. No retained causal revision
+shares the serving identity `cg-prod-3603d36` and credential Secret version `15`, so
+either create a zero-traffic clone mounting that current tuple or atomically
+compare-and-swap the complete validated causal release ID/credential hash/revision
+tuple after proving the old numeric credential version remains enabled. Verify the
+committed row, route the compatible revision, reopen shared claim admission, and
+release the shared deployment lease. Moving traffic alone will make an old revision
+fail the release gate and is not a valid recovery operation.
+
+### Source and immutable artifacts
+
+Production serving source is being consolidated in `omxyz/jina`. At this checkpoint,
+the old `omxyz/jina-simulation` repository still has two enabled production-capable
+GitHub workflows: `Deploy API` (`296179693`) can route the production Cloud Run/API
+target and `Deploy Trigger` (`296433659`) can deploy the old Trigger.dev project. Both
+run on old-`main` path pushes and expose manual production dispatch. They must be
+disabled (without deleting repository history) and their production environment
+authority removed before the old repository can be declared unable to build or serve
+production. The accepted production base was monorepo `main` commit
+`3603d3661eb80a6f89b2d0671aaf5b059f0d7884`; the final cleanup was built from commit
+`6d27eecc3197adbb793addc1b2fd50b92859518a` on the cleanup branch before merge.
+
+Cloud Build `679ed8b8-e754-41c7-9806-3661cde8c193` completed successfully in
+`jina-v2/us-east1`. Its immutable outputs were:
+
+- API: `us-east1-docker.pkg.dev/jina-v2/jina/api@sha256:65d46973d6642ad55e9211d2e64d96aa88d60e63cd42b8d747dc487ee2ae8c1d`;
+- worker: `us-east1-docker.pkg.dev/jina-v2/jina/worker@sha256:aaf1c2584ba7f8e4fdf7390293ed4c6574ad41d08d622201dbbe687cb67cb6d0`.
+
+Both API services were deployed as zero-traffic candidates, checked through tagged
+`/health` endpoints, and only then moved to 100% traffic. The public API retained its
+Cloud SQL binding, Clerk secret bindings, GitHub App configuration, graph tokens,
+inbox encryption key, billing enforcement, concurrency 10, and min/max scale 1/10.
+An environment-only successor, `jina-code-review-api-envclean6d27`, removed the
+retired `jina-simulation-dashboard.vercel.app` CORS origin and the dead
+`JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL`; an OPTIONS probe allowed
+`https://app.usejina.com` with credentials and did not return an allow-origin header
+for the retired Vercel origin. The scheduler tag was moved only after the candidate
+health check passed.
+The upstream API initially retained concurrency 10, min/max scale 1/1, and a temporary
+`CONTEXT_WORKER_LEASE_MS=9000000` runtime fence during recovery. Final audit rejected
+that setting: workers renew every minute, so a hard instance loss immediately after a
+renewal would strand the task for 150 minutes. The merged release restores the bounded
+five-minute lease (`300000` ms) in both source and deployment defaults. Long-running
+model work remains live through one-minute renewals, while hard failures become
+claimable within five minutes and completions remain write-fenced.
+The environment-only `jina-api-lease5m6d27` revision applied that correction before
+merge and also pinned the upstream API's five Secret Manager bindings to the numeric
+versions in the pending release manifest: database `1`, GitHub webhook `2`, and
+internal API, Context API, and private-checkpoint keys `1`. Its tagged `/health` probe
+was green before 100% traffic moved; `jina-api-cleanup6d27` remains retained.
+
+### Clerk hard cutover and tenant preservation
+
+The dashboard and product API use Clerk in production. Existing Jina tenant and user
+IDs remain authoritative database identifiers; Clerk organization/user IDs are linked
+to them rather than replacing or merging product rows. Organization names were
+preserved during provisioning. For the production `omxyz` tenant:
+
+- Jina tenant: `eff0efc9-b103-494a-b7a3-1ae7f95c2d26`, name `omxyz`;
+- Clerk organization: `org_3HaROMEyFwJi80pQlt5A5NaGyAW`;
+- all three retained production memberships are `org:admin` in Clerk: the original
+  `krish@omlabs.xyz` principal, the transferred `kchelikavada@gmail.com` principal,
+  and the existing Keon operator principal;
+- the matching legacy `tenant_members` and `clerk_tenant_memberships` rows remain,
+  preserving rollback and audit provenance.
+
+The Clerk identity bridge and membership-bootstrap ledgers remain intentionally. They
+are durable compatibility/audit state for existing tenants, not disposable migration
+scratch data. Deleting them would make rollback and future membership reconciliation
+unsafe.
+
+The post-cutover access report for `thecskc` exposed two Clerk accounts for the same
+person. `krish@omlabs.xyz` (`user_2yt2a3MZAmvf8I6s08Jb73W2Kvp`) held the original
+operator-approved Jina link, while the user was actively signing in as the separately
+verified `kchelikavada@gmail.com` account
+(`user_3HaqpfF4mPoKCYMbkd2ZzWsolwc`). The latter has the exact GitHub external account
+ID `16009358` and login `thecskc`, so the immutable GitHub identity proved that both
+records resolve to existing Jina user `93c76575-2c8d-4370-b86d-861ccb0fac38`.
+
+The stable link was transferred to the Gmail Clerk principal, its Clerk external ID
+was set to that existing Jina UUID, and its linked Jina-team memberships were mirrored
+as `org:admin`: `omxyz` plus `0xpass`. The matching
+`clerk_tenant_memberships` projections were recorded with GitHub ID `16009358`; the
+existing personal `thecskc` workspace continues to resolve through the stable Jina
+user and does not need a Clerk organization. The old Clerk user, its verified email,
+and its organization memberships were retained; only its now-superseded external-ID
+pointer was cleared because Clerk requires external IDs to be unique. No Jina user,
+tenant, membership history, or provider user was deleted, and no second empty Jina
+user was created.
+
+An authenticated Clerk admin initially received HTTP 403 while changing model
+routing. The request had already passed the Clerk membership check, but the API then
+unconditionally applied the legacy five-minute GitHub-admin observation refresh. A
+Clerk session has no legacy GitHub OAuth credential with which to perform that refresh,
+so the dashboard rendered the generic message `Only workspace admins can change model
+routing.` The cleanup makes GitHub revalidation conditional on the session's
+membership authority: legacy sessions retain the old protection, while Clerk sessions
+trust the verified Clerk organization role.
+
+Production verification changed `omxyz` from `managed` to `byok`, observed the active
+selection without a 403, changed it back to `managed`, and reloaded the page. The
+row was then changed through the same production UI to `model_provider=codex` at
+`2026-08-07 15:24:36.909564+00`, with Context harness owner
+`7d184ba8-1144-40cb-829f-a3d101ed768f`. A final reload after the environment cleanup
+showed `Codex` active and no admin error. No credential value was read or exposed by
+these tests.
+
+### Relational review acceptance
+
+The production review path is the one-task relational Board workflow. GitHub webhook
+arrival uses the same durable task-board ingress as other work; a task worker owns the
+actual `run-review` Trigger.dev dispatch. There is no separate API-side review
+dispatcher path.
+
+The exact-SHA production smoke test used
+`omxyz/jina-code-review-smoke-20260612214910#18` at commit
+`6644c654b29debd32cd38cfb683f5f1516cfc173`. Its durable identities were:
+
+| Record                              | ID/result                                                        |
+| ----------------------------------- | ---------------------------------------------------------------- |
+| Review workflow                     | `3f9011e6-bc75-56ef-8725-040bb1e611f2`                           |
+| Relational Board task               | `5faaba24-ac63-58a3-916b-a869f1716b0d`                           |
+| Review run row                      | `4c6c11bf-385b-4f3a-84fe-07ad92999320`                           |
+| Trigger.dev root run                | `run_06ftok7euqo48s940p0b7tb801`, `COMPLETED`                    |
+| Trigger project/environment/version | `proj_yrxsqjznkghpwsolfmjp` / `production` / `20260807.2`        |
+| Dashboard/GitHub result             | three rendered findings, five runtime tasks, one bot publication |
+
+The production GitHub App installation is `140435029`; its installation-token
+repository listing included the smoke repository before the final acceptance runs.
+Review execution continued to use the accepted Trigger.dev project, the same review
+prompt contract, and Daytona execution path from the consolidated monorepo.
+
+### Context and causal-graph acceptance
+
+The exact-SHA causal build completed all history, derive, and publish tasks:
+
+- root `task_1998114bd854085bcdc1517055d99fb4`;
+- history `task_dc692a96d4f4117277c8fbb0315d8726`;
+- derive `task_9e6bdce4d4f1618b95ca2ed2d65d5832`;
+- publish `task_b7dc377a8acd6008f7ec12f579258a96`;
+- release `cir_3726cc5f08ee88717d42efeaf187ce27` at the exact PR head,
+  `refSequence=2`, `history_complete=true`.
+
+The repository intentionally produced zero issues/causalities, but the release and
+current-release pointer exist and are exact-SHA proof that the causal path executed.
+
+The Context acceptance reused root `task_a0a85b2b89ae23bdfa89087d24aa076a`
+and planner artifact from attempt 4. A temporary API concurrency reduction to two had
+caused page workers to receive Cloud Run 429s; restoring concurrency 10 and issuing the
+task-specific operator retry reopened only the four page tasks and publication task,
+without rerunning the planner or changing the source SHA. Final Context release proof
+is:
+
+| Record                | ID/result                                                                                                                                                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Root                  | `task_a0a85b2b89ae23bdfa89087d24aa076a`, `done`                                                                                                                                                                            |
+| Page tasks            | `task_5b6ec1dd3effca0382d55564efcb826d` attempt 2, `task_79d77db9be47f9afca6094900b1fd2d2` attempt 2, `task_82bec215573f5dc6586afe3cb1835744` attempt 3, and `task_b6ce8353b6fa482ca24d881123225341` attempt 5; all `done` |
+| Publication task      | `task_ee25515431b4f13e00611352c2887419`, attempt 1, `done` at `2026-08-07T15:44:26.001Z`                                                                                                                                   |
+| Context release       | `cr_50592a52f5ae82915ace9ef1d342ae21`, four pages, exact commit `6644c654b29debd32cd38cfb683f5f1516cfc173`                                                                                                                 |
+| Scope/current pointer | tenant `eff0efc9-b103-494a-b7a3-1ae7f95c2d26`, repository `omxyz/jina-code-review-smoke-20260612214910`, ref `pull/18/head`, `refSequence=1`; the current-release pointer equals the release ID                            |
+
+The publication transaction and PageIndex attachment were already durable at
+`2026-08-07T14:37:36.670Z`. The final worker attempt idempotently observed that exact
+release and reconciled the publication task and aggregate root to `done`; it did not
+write a second release.
+
+### Runtime cleanup and interruption accounting
+
+During the Context retry, the retired upstream API revision still had a tagged minimum
+instance. Abandoned claim requests on that zero-traffic revision queued behind the
+PostgreSQL advisory lock used for `jina_runtime.api_state`; each request then performed
+snapshot compaction after its caller timed out. The rollback route tag was removed,
+the revision itself was retained, and three exact pre-promotion database sessions from
+the retired instance were terminated. PostgreSQL rolled back their uncommitted work.
+The active Context worker immediately claimed the preferred smoke-repository page.
+
+The same database `application_name` is shared by the public and upstream API pools,
+so that bounded session cleanup also reset a public API pool connection. Two internal
+worker-claim requests returned transient 503s at `2026-08-07 15:18:16-18Z`; workers
+retried automatically, `/health` was green immediately afterward, and no dashboard,
+webhook, review, billing, or committed data operation was lost. This is recorded as an
+operator cleanup side effect, not hidden as a zero-error event.
+
+A claim request already sent by the temporary local Context worker outlived that
+worker's shutdown and later acquired a lease for
+`task_79d77db9be47f9afca6094900b1fd2d2`. It emitted no `stage.started` event and never
+renewed the lease. The exact message ID, lease ID, attempt, and write-fence token were
+therefore returned through `/internal/worker/release`; the live production worker
+claimed it normally at `2026-08-07T15:34:35Z` and completed it. No Board row was edited
+or deleted to bypass the fence.
+
+The production inbox scheduler was resumed against the accepted `clerk-candidate` tag.
+Its initial backlog was 135 open deliveries with no dead letters. Two manually started
+drains inherited the old three-minute deadline and timed out while their row-level
+work continued; after old worker tags and API contention were removed, normal 25-row
+batches completed in 2-32 seconds. The final cutover check observed 472 completed rows
+with zero pending, leased, retry-wait, or dead-letter rows. The temporary 30-minute
+diagnostic deadline was restored to the normal 180 seconds, and the enabled one-minute
+job then reported HTTP 200 with an empty status object.
+
+Four obsolete zero-traffic task-worker tags were removed after their background claim
+loops were observed returning release-gate 409s. The serving task worker remains
+`jina-task-worker-prod3603d36`; every retired revision remains available for retagged
+rollback. Public API compatibility tags used by the retired workers were removed after
+the callers stopped. The scheduler-owned `clerk-candidate` tag and the accepted
+`envclean6d27` tag remain on the serving public API revision; `cleanup6d27` and the
+temporary `lease5m6d27` verification tag point to the separately serving upstream
+Context/graph API revision.
+
+After the Context proof was recorded, the four exact stopped local recovery containers
+(`jina-prod-pr18-context-attempt4`, `jina-prod-pr18-context-lease150`,
+`jina-prod-pr18-context-recovery`, and `jina-prod-pr18-causal-recovery`) and the two
+exact temporary service-spec files were removed. The production Context worker was
+restored to its normal service- and revision-level scale range of min 1/max 100 with
+concurrency 1. Revision `jina-context-worker-prod3603d36c` now serves 100% of traffic
+and owns the `p3603-context` tag. After a guarded advisory-lock compare-and-swap, the
+release-control row selects that exact Context revision while preserving release
+`prod-3603d36`, the task-worker revision, credential hash, and enabled claim gates;
+there were zero unexpired Context attempts at the transition. The prior accepted
+revision `jina-context-worker-prod3603d36b` remains the retained rollback artifact,
+subject to the guarded two-part release-control and traffic procedure above.
+Recovery databases, backups, provider exports, old revisions, secret versions, and
+customer/provider data remain retained.

@@ -1937,7 +1937,11 @@ async function requireTenantMembership(
   if (denial) {
     throw new ApiError(denial.status, denial.message);
   }
-  if (opts.requireAdmin && role === "admin") {
+  // Clerk organization roles are the authority after the hard migration. A
+  // migrated Clerk admin must not be forced back through the retired GitHub
+  // OAuth membership check merely because a preserved legacy tenant_members
+  // observation has aged past its five-minute verification window.
+  if (opts.requireAdmin && role === "admin" && githubAdminRevalidationRequired(session.membershipAuthority)) {
     const refresh = await getGithubTenantAdminRefreshRequirement(
       session.user.id,
       tenantId,
@@ -1959,6 +1963,12 @@ async function requireTenantMembership(
     }
   }
   return role!;
+}
+
+export function githubAdminRevalidationRequired(
+  authority: DashboardSession["membershipAuthority"],
+): boolean {
+  return authority !== "clerk";
 }
 
 function containsControlCharacters(value: string): boolean {

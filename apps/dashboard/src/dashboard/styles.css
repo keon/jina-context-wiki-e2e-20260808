@@ -978,6 +978,13 @@ button.nav__item:hover {
   font-size: var(--text-base);
 }
 
+.workspace-access-error__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
 /* One pill, matching `Badge` in `@jina/ui` — the class name belongs to this
    app's markup, so the shared component cannot supply it. Its tone modifiers
    carry the full ok/warn/bad/info tone rather than only recolouring the text on

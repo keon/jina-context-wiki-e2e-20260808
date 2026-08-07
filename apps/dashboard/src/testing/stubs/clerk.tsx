@@ -15,12 +15,26 @@ interface StubUser {
   readonly imageUrl: string;
   readonly primaryEmailAddress: { readonly emailAddress: string } | null;
   readonly emailAddresses: readonly { readonly emailAddress: string }[];
+  readonly unsafeMetadata: { readonly developerMode?: boolean };
+  readonly updateMetadata: (metadata: {
+    readonly unsafeMetadata: { readonly developerMode: boolean };
+  }) => Promise<unknown>;
 }
 
 let user: StubUser | null = null;
+let signOutCalls = 0;
 
 export function setClerkUser(next: StubUser | null): void {
   user = next;
+}
+
+export function clerkSignOutCallCount(): number {
+  return signOutCalls;
+}
+
+export function resetClerkStub(): void {
+  user = null;
+  signOutCalls = 0;
 }
 
 export function ClerkProvider({ children }: { readonly children: ReactNode }) {
@@ -42,7 +56,10 @@ export function useUser() {
 export function useClerk() {
   return {
     openUserProfile: () => undefined,
-    signOut: () => Promise.resolve(),
+    signOut: () => {
+      signOutCalls += 1;
+      return Promise.resolve();
+    },
     getOrganization: () => Promise.resolve(null)
   };
 }
