@@ -1642,6 +1642,22 @@ disposable PostgreSQL integration instance proved the exact split after a poison
 released its same-PR successor. The stopped test container is retained; no test data
 was deleted.
 
+That review exposed one remaining time-of-check/time-of-use gap: a normal Cloud Run
+deployment could change the serving inbox writer after its key was inspected but
+before the former unconditional traffic command. Candidate promotion now obtains the
+fixed production service through the Cloud Run v2 API, requires equal generation and
+observed generation plus a single 100-percent serving revision, and retains its
+system etag. Only after acquiring that etag does it revalidate the same serving
+revision, its exact inbox secret/version binding, and the active-key snapshot. It then
+patches only `traffic` with `updateMask=traffic` and the retained etag while preserving
+every existing traffic tag. Cloud Run documents the etag as the resource fingerprint
+for modification-conflict detection. A 409/412 abort restores the prior Scheduler
+state without fencing the inbox or issuing a compensating traffic update, so the
+release cannot overwrite the concurrent operator. Ambiguous failures after a request
+still use the existing generation fence and rollback path. The fake-cloud race proof
+changes the serving writer after final validation, observes a stale-etag rejection,
+and asserts zero traffic mutations; the focused promotion suite passes 25/25.
+
 The exact production allowlist `proj_yrxsqjznkghpwsolfmjp` is a safety control, not a
 temporary convenience. Legacy project `proj_gmesnthgwwqledarlfip` still owns
 `billing-retry`, `github-installation-backfill`, and `scheduled-review-scan` in addition
