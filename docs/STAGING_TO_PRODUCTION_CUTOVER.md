@@ -1605,6 +1605,28 @@ The focused deployment, release-build, and Trigger wrapper suite passes 57/57 af
 these changes. The default source-triggered path remains `deferred`, retains empty/false
 reuse substitutions, and still exits before the mutation-capable rollback trap.
 
+A later current-head review found one observability gap and raised one topology
+concern. The observability gap is fixed: the authenticated inbox snapshot now reports
+up to 50 dead-letter error-code counts plus the newest 25 retained delivery summaries
+(delivery/event/action/repository, bounded error code, attempt count, and terminal
+timestamp). It never returns ciphertext or decrypted payload. The disposable
+PostgreSQL proof verifies the summary for a fenced poison delivery and confirms the next
+same-PR delivery remains claimable.
+
+The topology concern treated private `jina-v2/jina-api` as though it served
+`api.usejina.com`. It does not. [`cloud-build-deploy.sh`](../scripts/cloud-build-deploy.sh)
+now makes the boundary machine-verifiable by explicitly setting
+`DASHBOARD_AUTH_MODE=disabled` on that private coordinated Board/Context API and by
+continuing to omit public OAuth/App/encryption secrets. The production dashboard image
+is compiled to call `https://api.usejina.com`; that hostname remains the old public API
+until [`deploy-public-api-candidate.mjs`](../scripts/deploy-public-api-candidate.mjs)
+creates the no-traffic monorepo revision on fixed service
+`jina-463721/us-east1/jina-code-review-api`. The public candidate manifest—not the
+private API—requires GitHub auth mode, canonical dashboard/API URLs, secure cross-site
+cookie settings, the OAuth client ID, and numeric OAuth/App/session-encryption secrets.
+The cross-file topology test asserts all of these boundaries, and the focused private
+deployment plus public-candidate suite passes 74/74.
+
 The exact production allowlist `proj_yrxsqjznkghpwsolfmjp` is a safety control, not a
 temporary convenience. Legacy project `proj_gmesnthgwwqledarlfip` still owns
 `billing-retry`, `github-installation-backfill`, and `scheduled-review-scan` in addition

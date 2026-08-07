@@ -186,6 +186,31 @@ test(
       assert.equal(snapshot.leased, 0);
       assert.equal(snapshot.completed, 4);
       assert.equal(snapshot.deadLetter, 1);
+      assert.deepEqual(snapshot.deadLetterByErrorCode, {
+        webhook_inbox_ciphertext_invalid: 1,
+      });
+      assert.deepEqual(
+        snapshot.recentDeadLetters.map((row) => ({
+          deliveryId: row.deliveryId,
+          event: row.event,
+          action: row.action,
+          repositoryFullName: row.repositoryFullName,
+          errorCode: row.errorCode,
+          attemptCount: row.attemptCount,
+          timestampIsDate: row.deadLetteredAt instanceof Date,
+        })),
+        [
+          {
+            deliveryId: "delivery-poison",
+            event: "pull_request",
+            action: "synchronize",
+            repositoryFullName: "omxyz/private-repo",
+            errorCode: "webhook_inbox_ciphertext_invalid",
+            attemptCount: 1,
+            timestampIsDate: true,
+          },
+        ],
+      );
       assert.equal(snapshot.priorGenerationLeases, 0);
       assert.deepEqual(snapshot.activeKeyVersions, { "7": 2 });
     } finally {

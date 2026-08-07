@@ -44,6 +44,7 @@ const workerServer = await readFile("apps/worker/src/server.ts", "utf8");
 const postgresStateStore = await readFile("packages/db/src/postgres-json-state-store.ts", "utf8");
 const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
 const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
+const publicApiCandidateDeployment = await readFile("scripts/deploy-public-api-candidate.mjs", "utf8");
 const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
 const stagingSerialization = await readFile("scripts/serialize-cloud-build-deploy.sh", "utf8");
 const stagingCloudBuild = await readFile("cloudbuild.staging.yaml", "utf8");
@@ -319,6 +320,26 @@ test("explicit production acceptance reuses the deferred build's source-bound im
   assert.match(cloudBuild, /_JINA_REUSE_EXISTING_IMAGE_TAG: "false"/);
   assert.match(deployment, /A non-current IMAGE_TAG requires JINA_REUSE_EXISTING_IMAGE_TAG=true/);
   assert.match(deployment, /JINA_REUSE_EXISTING_IMAGE_TAG=true requires a prior IMAGE_TAG/);
+});
+
+test("the private coordinated API cannot be mistaken for the public GitHub-auth API", () => {
+  assert.match(deployment, /api_env_vars="[^\n]+DASHBOARD_AUTH_MODE=disabled/);
+  const privateApiSecrets = deployment.match(/api_secrets="([^"]+)"/)?.[1] ?? "";
+  assert.doesNotMatch(privateApiSecrets, /GITHUB_OAUTH_CLIENT_SECRET|GITHUB_APP_PRIVATE_KEY|SECRETS_ENCRYPTION_KEY/);
+  assert.match(cloudBuild, /_JINA_PUBLIC_API_BASE_URL: https:\/\/api\.usejina\.com/);
+  assert.match(cloudBuild, /_JINA_DASHBOARD_AUTH_MODE: github/);
+  assert.match(publicApiCandidateDeployment, /service: "jina-code-review-api"/);
+  assert.match(publicApiCandidateDeployment, /project: "jina-463721"/);
+  for (const contract of [
+    /API_BASE_URL: "https:\/\/api\.usejina\.com"/,
+    /DASHBOARD_AUTH_MODE: "github"/,
+    /DASHBOARD_URL: "https:\/\/app\.usejina\.com"/,
+    /DASHBOARD_COOKIE_SAMESITE: "None"/,
+    /DASHBOARD_COOKIE_SECURE: "true"/,
+    /"GITHUB_OAUTH_CLIENT_SECRET"/
+  ]) {
+    assert.match(publicApiCandidateDeployment, contract);
+  }
 });
 
 test("the polling Context pool keeps twenty real executors warm", () => {

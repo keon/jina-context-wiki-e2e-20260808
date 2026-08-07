@@ -339,7 +339,11 @@ deploy_candidate_args=(
   --revision-suffix="${release_suffix}"
 )
 
-api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=true~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_POOL_MAX=${api_db_pool_max}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_GCS_BUCKET=${context_artifact_bucket}"
+# This jina-v2 service is the private coordinated Board/Context candidate, not
+# the public GitHub-session product API. Keep browser auth explicitly disabled;
+# the public candidate is deployed separately to jina-463721/jina-code-review-api
+# with the complete numeric-secret-pinned GitHub runtime manifest.
+api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~DASHBOARD_AUTH_MODE=disabled~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=true~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_POOL_MAX=${api_db_pool_max}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_GCS_BUCKET=${context_artifact_bucket}"
 api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=jina-context-private-checkpoint-key:latest"
 
 case "${tenancy_mode}" in
