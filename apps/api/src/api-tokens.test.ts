@@ -200,7 +200,7 @@ test("a minted token authenticates as its own row and every failure looks identi
   });
 });
 
-test("V1 review access is short-lived, repository-scoped, and MCP-capable", async () => {
+test("Review access is short-lived, repository-scoped, and MCP-capable", async () => {
   await withServer(async ({ store, request }) => {
     const response = await request("/internal/context/review-access", {
       method: "POST",

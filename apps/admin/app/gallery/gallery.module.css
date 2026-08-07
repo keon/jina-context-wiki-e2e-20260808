@@ -1,0 +1,79 @@
+/* Scaffolding for the gallery, and nothing else.
+ *
+ * Every rule here draws the *catalog* — the grid of cards, the caption above
+ * each one, the note under it. Nothing in this file may reach a specimen: a
+ * gallery that restyles what it is showing is showing something the product
+ * does not have. The stage is a bare box; whatever is inside it is drawn
+ * entirely by `@jina/theme`, `globals.css`, and the primitives' own modules.
+ *
+ * Tokens only, like every other stylesheet in this repo. */
+
+.gallery {
+  display: grid;
+  gap: var(--space-6);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+/* A specimen that needs the full content width — a table, a stat row cut into
+   four lanes — opts out of the auto-fill grid rather than being squeezed. */
+.wide {
+  grid-column: 1 / -1;
+}
+
+.specimen {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--canvas);
+}
+
+.caption {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.caption code {
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.note {
+  margin: 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+/* The screenshot target. Padding so a shadow or a focus ring is not clipped at
+   the edge of the captured box; no background, so a specimen sits on the same
+   canvas the product would give it. */
+.stage {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px dashed var(--line-subtle);
+  border-radius: var(--radius);
+}
+
+/* For specimens whose variants read as a row of chips rather than a stack. */
+.inline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}

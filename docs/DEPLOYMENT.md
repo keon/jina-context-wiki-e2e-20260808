@@ -1,5 +1,65 @@
 # Deployment
 
+The unified API lives in `apps/api`; product/review, Board, Context, causal graph,
+and MCP routes ship in one backend image. The target topology and staging use the
+relational Board for review and control workflows; primary production still has the
+explicitly gated legacy review queue described under worker configuration. Context and
+causal-graph workflows use the generic snapshot Board and durable outbox while their
+releases and projections are relational. All are executed by `apps/worker`. The
+portable Daytona review runtime lives in `packages/review-agent`. The customer
+dashboard deploys from `apps/dashboard`.
+
+Every push to `staging` starts the `jina-staging-deploy` Cloud Build trigger in the
+isolated `jina-staging-20260802` project. The trigger follows the same source-bound model
+as production: it checks out the event SHA, runs `cloudbuild.staging.yaml`, validates the
+repository, builds immutable API/worker images tagged `staging-<full merge SHA>`, and
+passes that tag plus its UUID-valued `_JINA_CONTEXT_TENANT_ID` substitution to
+`scripts/deploy-staging.sh`. The build waits for any older active invocation of the same
+trigger before deployment, so overlapping pushes cannot interleave cutovers. The script
+is fail-closed on any resource, service account, secret, database, tenant, bucket, URL,
+or image tag that is not explicitly staging-scoped. If a post-cutover step fails, it
+restores the exact prior API, Context, task, and causal revisions and reactivates the
+prior causal release credential. The coordinated staging deploy also invokes the isolated
+`scripts/deploy-staging-causal-graph.sh` lane with that same image tag, preventing the
+unified API and causal worker from drifting across an artifact-protocol change. The
+staging deploy installs the Board-recorded 15-minute billing retry schedule and the
+OpenTelemetry sidecars, including the causal worker's release-gated sidecar. Production continues to use the
+coordinated `cloudbuild.yaml` path below.
+
+The audited staging-to-production source consolidation, provider inventory, backup,
+and rollback runbook is
+[STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md).
+
+For an operator rerun, invoke the source-bound trigger with the exact audited staging SHA:
+
+```sh
+release_sha="$(git rev-parse origin/staging)"
+gcloud builds triggers run jina-staging-deploy \
+  --project=jina-staging-20260802 \
+  --region=us-central1 \
+  --sha="${release_sha}"
+```
+
+The build and deployment identity is
+`jina-cloud-build-staging@jina-staging-20260802.iam.gserviceaccount.com`; staging does not
+use a GitHub Actions deployment identity or GitHub environment secrets. The account has
+the project deployment roles checked by `scripts/check-staging-readiness.sh`, plus
+`roles/secretmanager.secretVersionAdder` only on
+`jina-staging-causal-graph-worker-release-credential`; only the staging project's Cloud
+Build service agent can mint its short-lived build credentials. Cloud Scheduler is a
+platform prerequisite; application deployment verifies that its API is enabled but does
+not grant itself service-usage administration.
+
+Before a staging deploy, run `scripts/check-staging-readiness.sh`. It verifies the
+staging-only Cloud Build trigger, Cloud SQL runtime state, migration job, secrets,
+services, domain mappings, dashboard projects, and causal-worker sidecar contract.
+After deploy, follow `docs/STAGING_PR_E2E.md`; a green health check or review alone
+is not sufficient acceptance because the exact-head Context release and its PageIndex
+attachment are part of the pull-request contract.
+The v2 database transition is complete: routine staging deploys use the unified
+`jina-v2-migrate-staging` job, and the retired one-time cutover job and legacy database
+credentials must remain absent.
+
 Cloud Build validates, builds, and deploys one coordinated release to
 `jina-v2/us-east1`. API, worker, dashboard, and admin images are built from the same
 exact source revision, receive the same unique Cloud Build release identity, and are
@@ -310,41 +370,41 @@ query is limited to 4,000 characters and may select at most 25 tree nodes. MCP a
 the same limits through `search_context`; `list_context`, `read_context`, and
 `diff_context` are read-only release operations.
 
-| Cloud Build substitution                                 |                                          Default | Guidance                                                                                                   |
-| -------------------------------------------------------- | -----------------------------------------------: | ---------------------------------------------------------------------------------------------------------- |
-| `_JINA_API_MIN_INSTANCES`                                |                                              `1` | Keeps one API container warm.                                                                              |
-| `_JINA_API_MAX_INSTANCES`                                |                                              `4` | Allows bounded API scale-out during worker and dashboard request bursts.                                   |
-| `_JINA_API_CONCURRENCY`                                  |                                             `10` | Maximum concurrent API requests per instance.                                                              |
-| `_JINA_API_DB_POOL_MAX`                                  |                                              `3` | Maximum connections in each of the API's three PostgreSQL pools.                                           |
-| `_JINA_API_CPU`                                          |                                              `1` | API CPU allocation.                                                                                        |
-| `_JINA_API_MEMORY`                                       |                                            `1Gi` | API memory allocation.                                                                                     |
-| `_JINA_CONTEXT_WORKER_MEMORY`                            |                                            `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.                                  |
-| `_JINA_CONTEXT_WORKER_MIN_INSTANCES`                     |                                             `20` | Warm polling executors; Board queue depth does not trigger Cloud Run request autoscaling.                  |
-| `_JINA_CONTEXT_WORKER_MAX_INSTANCES`                     |                                            `100` | Hard ceiling for concurrency-one Context workers. Twenty are kept warm by default.                         |
-| `_JINA_TASK_WORKER_MAX_INSTANCES`                        |                                              `5` | Maximum concurrency-one generic task workers.                                                              |
-| `_JINA_CONTEXT_DAYTONA_SNAPSHOT`                         |      `jina-context-board-codex-0-145-0-bwrap-v2` | Audited immutable Codex-and-bubblewrap-ready snapshot.                                                     |
-| `_JINA_CONTEXT_DAYTONA_IMAGE`                            |                                            empty | Required unless the snapshot substitution is set; pin an image by digest.                                  |
-| `_JINA_CONTEXT_DAYTONA_MODEL_SECRET`                     |                            `jina-context-openai` | Daytona organization Secret containing the model credential.                                               |
-| `_JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV`                 |                                 `OPENAI_API_KEY` | Environment variable populated from the Daytona Secret.                                                    |
-| `_JINA_CONTEXT_DAYTONA_MODEL_DOMAINS`                    |                                 `api.openai.com` | Comma-separated sandbox model-provider allowlist.                                                          |
-| `_JINA_WORKER_RELEASE_SECRET`                            |                 `jina-worker-release-credential` | Precreated Secret Manager secret receiving independent control and worker-generation versions per release. |
-| `_JINA_ACCEPTANCE_REPOSITORY`                            |                   `omxyz/jina-context-graph-e2e` | Registered purpose-built repository used by production acceptance.                                         |
-| `_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID`                |                                      `140435029` | Operational read-only App installation used for build metadata and webhook audit.                          |
-| `_JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_ID_SECRET`          |          `jina-trigger-acceptance-github-app-id` | Secret containing the fixture-mutation App ID.                                                             |
-| `_JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET` | `jina-trigger-acceptance-github-app-private-key` | Secret containing the fixture-mutation App PEM key.                                                        |
-| `_JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID`        |                                      `150069172` | Fixture-only mutation App installation; must differ from the operational installation.                     |
-| `_JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS`             |                                          `10800` | Three-hour agent-stage budget for the measured 2.5-hour full build.                                        |
-| `_JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET`               |                                       `24000000` | Hard input-plus-output model-token ceiling for the acceptance build.                                       |
-| `_JINA_ACCEPTANCE_TIMEOUT_MS`                            |                                       `10800000` | Three-hour acceptance polling window.                                                                      |
-| `_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS`                   |                                          `11700` | Three hours fifteen minutes, leaving cleanup/logging time.                                                 |
-| `_JINA_DEPLOYMENT_ACCEPTANCE_MODE`                       |                                     `mechanical` | Nonblocking release gate; explicit `full` also runs the multi-hour candidate Context build before cutover. |
-| `_JINA_CONTEXT_RESET_MODE`                               |                                       `disabled` | Set to `legacy-once` only for the audited first v2 transition.                                             |
-| `_JINA_CONFIRM_CONTEXT_RESET`                            |                                            empty | Must equal `delete-rebuildable-context` only with `legacy-once`.                                           |
+| Cloud Build substitution                                 |                                          Default | Guidance                                                                                                                                            |
+| -------------------------------------------------------- | -----------------------------------------------: | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `_JINA_API_MIN_INSTANCES`                                |                                              `1` | Keeps one API container warm.                                                                                                                       |
+| `_JINA_API_MAX_INSTANCES`                                |                                              `4` | Allows bounded API scale-out during worker and dashboard request bursts.                                                                            |
+| `_JINA_API_CONCURRENCY`                                  |                                             `10` | Maximum concurrent API requests per instance.                                                                                                       |
+| `_JINA_API_DB_POOL_MAX`                                  |                                              `3` | Maximum connections in each API pool. Context, JSON Board state, and product routes share one pool; shared identity uses a separate read-only pool. |
+| `_JINA_API_CPU`                                          |                                              `1` | API CPU allocation.                                                                                                                                 |
+| `_JINA_API_MEMORY`                                       |                                            `1Gi` | API memory allocation.                                                                                                                              |
+| `_JINA_CONTEXT_WORKER_MEMORY`                            |                                            `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.                                                                           |
+| `_JINA_CONTEXT_WORKER_MIN_INSTANCES`                     |                                             `20` | Warm polling executors; Board queue depth does not trigger Cloud Run request autoscaling.                                                           |
+| `_JINA_CONTEXT_WORKER_MAX_INSTANCES`                     |                                            `100` | Hard ceiling for concurrency-one Context workers. Twenty are kept warm by default.                                                                  |
+| `_JINA_TASK_WORKER_MAX_INSTANCES`                        |                                              `5` | Maximum concurrency-one generic task workers.                                                                                                       |
+| `_JINA_CONTEXT_DAYTONA_SNAPSHOT`                         |      `jina-context-board-codex-0-145-0-bwrap-v2` | Audited immutable Codex-and-bubblewrap-ready snapshot.                                                                                              |
+| `_JINA_CONTEXT_DAYTONA_IMAGE`                            |                                            empty | Required unless the snapshot substitution is set; pin an image by digest.                                                                           |
+| `_JINA_CONTEXT_DAYTONA_MODEL_SECRET`                     |                            `jina-context-openai` | Daytona organization Secret containing the model credential.                                                                                        |
+| `_JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV`                 |                                 `OPENAI_API_KEY` | Environment variable populated from the Daytona Secret.                                                                                             |
+| `_JINA_CONTEXT_DAYTONA_MODEL_DOMAINS`                    |                                 `api.openai.com` | Comma-separated sandbox model-provider allowlist.                                                                                                   |
+| `_JINA_WORKER_RELEASE_SECRET`                            |                 `jina-worker-release-credential` | Precreated Secret Manager secret receiving independent control and worker-generation versions per release.                                          |
+| `_JINA_ACCEPTANCE_REPOSITORY`                            |                   `omxyz/jina-context-graph-e2e` | Registered purpose-built repository used by production acceptance.                                                                                  |
+| `_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID`                |                                      `140435029` | Operational read-only App installation used for build metadata and webhook audit.                                                                   |
+| `_JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_ID_SECRET`          |          `jina-trigger-acceptance-github-app-id` | Secret containing the fixture-mutation App ID.                                                                                                      |
+| `_JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET` | `jina-trigger-acceptance-github-app-private-key` | Secret containing the fixture-mutation App PEM key.                                                                                                 |
+| `_JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID`        |                                      `150069172` | Fixture-only mutation App installation; must differ from the operational installation.                                                              |
+| `_JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS`             |                                          `10800` | Three-hour agent-stage budget for the measured 2.5-hour full build.                                                                                 |
+| `_JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET`               |                                       `24000000` | Hard input-plus-output model-token ceiling for the acceptance build.                                                                                |
+| `_JINA_ACCEPTANCE_TIMEOUT_MS`                            |                                       `10800000` | Three-hour acceptance polling window.                                                                                                               |
+| `_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS`                   |                                          `11700` | Three hours fifteen minutes, leaving cleanup/logging time.                                                                                          |
+| `_JINA_DEPLOYMENT_ACCEPTANCE_MODE`                       |                                     `mechanical` | Nonblocking release gate; explicit `full` also runs the multi-hour candidate Context build before cutover.                                          |
+| `_JINA_CONTEXT_RESET_MODE`                               |                                       `disabled` | Set to `legacy-once` only for the audited first v2 transition.                                                                                      |
+| `_JINA_CONFIRM_CONTEXT_RESET`                            |                                            empty | Must equal `delete-rebuildable-context` only with `legacy-once`.                                                                                    |
 
-The API request timeout is 3,600 seconds. Each instance's context, state, and
-shared-identity PostgreSQL pools are capped at three connections. With two instances,
-their configured maxima total 18 connections; raise either limit only while preserving
-an explicit aggregate database connection budget.
+The API request timeout is 3,600 seconds. Each instance has one shared Context/state/product
+pool and one separate read-only shared-identity pool, each capped at three connections.
+With two live instances, their configured maxima total 12 connections; raise either
+limit only while preserving an explicit aggregate database connection budget.
 
 Dashboard/admin values are server-side Cloud Run environment variables and secrets:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
@@ -357,9 +417,10 @@ a credential.
 
 ## Worker configuration
 
-The context service runs three one-concurrency instances with continuous CPU.
-Every instance claims the same Board topic set, which lets independent page builds
-execute in parallel while the Board keeps their dependencies and checkpoints durable:
+The context service keeps twenty one-concurrency polling instances warm by default,
+with continuous CPU and a hard ceiling of one hundred. Every instance claims the same
+Board topic set, which lets independent page builds execute in parallel while the Board
+keeps their dependencies and checkpoints durable:
 
 ```text
 WORKER_TOPICS=run-context-input-snapshot|run-context-page-plan|run-context-page-build|run-context-publication
@@ -400,22 +461,23 @@ Secret placeholder, and verifies egress substitution and actual model authentica
 rather than only the binary. A missing snapshot, missing/inaccessible Secret,
 incompatible toolchain, or failed model request fails the release closed.
 
-Production Context workers also require `JINA_V1_API_URL` and
-`JINA_V1_INTERNAL_API_TOKEN` when tenant model routing is enabled. For every build,
-the worker resolves the write-once profile created by V1 and honors its Context model,
+Context workers use the unified `JINA_API_URL` and additionally require
+`JINA_PRODUCT_INTERNAL_API_TOKEN` when tenant model routing is enabled. For every build,
+the worker resolves the write-once profile created by the unified API and honors its Context model,
 reasoning effort, credential revision, and fallback policy. Credential/configuration,
 quota, and unknown-model failures are terminal and remain visible on the task board;
 only transient provider/sandbox failures consume bounded automatic retries.
-Production stores the latter as `jina-v1-internal-api-token` in the V2 project
-because V1 and V2 intentionally use different service-internal tokens. Rotate this
-mirror whenever V1's `jina-internal-api-token` rotates; only the Context worker
+Production currently stores the latter under the historical
+`jina-v1-internal-api-token` secret name. Review and Context workers intentionally
+use different service-internal tokens. Rotate this mirror whenever the review
+internal token rotates; only the Context worker
 service account receives accessor permission.
 
 `CONTEXT_DAYTONA_MODEL_SECRET` is the Jina-managed fallback's Daytona organization
 Secret name, never its credential value. Tenant BYOK or Codex credentials arrive
-through the authenticated V1 execution-profile endpoint, are added to redaction, and
+through the authenticated execution-profile endpoint, are added to redaction, and
 are injected only into the build's private ephemeral sandbox. They are not mounted as
-static Cloud Run configuration or persisted by V2. The sandbox receives only the exact
+static Cloud Run configuration or persisted by the Context service. The sandbox receives only the exact
 repository archive and declared stage inputs and may reach only the selected
 model-provider domain.
 
@@ -427,8 +489,14 @@ and read-only `contents`, `issues`, `pull_requests`, and `metadata`; the returne
 scope is validated before checkout. This remains true when the controlled
 production-trigger fixture also has a separate write-capable mutation App; that
 fixture identity is mounted only into the operator-run trigger-acceptance job.
-`GITHUB_CLONE_TOKEN` is the manual-build fallback. The separate task worker
-mounts its own model key and handles only `run-review`.
+`GITHUB_CLONE_TOKEN` is the manual-build fallback. The primary production
+release still runs the compatibility `run-review` queue and must set
+`JINA_LEGACY_REVIEW_PIPELINE_ENABLED=true`; the worker rejects that topic
+without the explicit gate. Staging and the target production topology use the
+relational review/control topics (`prepare-review` through `settle-review`,
+installation backfill, and billing retry). Remove the gate only after product
+migrations are applied, product API routing is enabled, and legacy review work
+has drained.
 
 The worker image embeds the pinned PageIndex OSS source, isolated Python
 environment, and bridge. The pin is commit
@@ -533,14 +601,16 @@ Worker claims also reconcile pending follow-ups, so process loss between complet
 promotion cannot strand them. Request-key redelivery reuses either the existing build or
 the same deferred follow-up.
 
-The Board is the only production scheduler. It materializes snapshot, research
-plan, parallel subject research, publication plan, parallel page write/audit,
-bounded page repair, source challenge, context-only task evaluation, bounded
-global repair, certification, atomic publication, and PageIndex tasks. Each
-agent task gets a fresh Daytona sandbox call. Non-agent tasks remain
-deterministic workers. Completed task artifacts are immutable GCS checkpoints;
-lease expiry or worker loss leaves them available to a fenced retry without
-making them queryable.
+The Board is the only production scheduler. The active page-oriented graph has
+four claimable topics: input snapshot, page planning, per-page construction, and
+publication. Research planning, bounded subject research, and publication
+planning are checkpointed phases inside the planner lease. Writing, citation
+audit, and at most one repair/replacement-audit cycle are checkpointed inside
+each page lease. Page tasks can fan out after planning; subject research is
+currently sequential inside the planner. Publication resolves every page
+disposition, builds PageIndex, and atomically advances the release. Completed
+phase artifacts are immutable GCS checkpoints, so a fenced retry can reuse them
+without making partial work queryable.
 
 Only classified transient provider, sandbox, model, or API-transport failures
 request an automatic retry. The Board atomically records a bounded diagnostic,
@@ -567,30 +637,24 @@ The issued token needs `context:admin`, its principal must be a tenant
 administrator, and both IDs are tenant scoped. The request is accepted only for
 one failed, unpublished Context build whose selected task is a failed
 dispatchable task below the four-attempt hard limit with completed
-prerequisites. The Board rejects completed Board roots, concurrent or
-ambiguous branches, another independent failure, and reopening derivation work
-behind an already published release. A failed stable publication task may
-replay through the authoritative idempotent publication transaction. A failed
-PageIndex task may replay after its publication task is done; the completed
-publication remains untouched. Both side-effect retries are rejected when a
-newer ref sequence has been admitted, and their transactions revalidate the
-live Board fence and immutable release identity. The Board retires old delivery
-fences, reopens only the selected task plus its failed/canceled required
-dependent chain, retains completed siblings and artifacts, and queues a fresh
-attempt. The same `requestKey` returns the original result without adding
-another attempt; reuse for a different task is rejected.
-`task.operator_reopened` and
-`task.operator_retry_scheduled` events record the actor, reason, request key,
-attempts, and affected tasks. Before the Board update commits, the API
-reactivates that completed build's quota reservation under the active-build
-limit without consuming another build-rate token; a Board conflict compensates
-the reservation back to completed. Exhausted-page remediation also gates every
-reopened canceled dispatchable sibling on the new page audit, preventing
-unrelated agents from repeatedly restarting while the failed page is repaired.
-After three automatic repository-wide repair passes, exhausted-gate remediation
-can likewise add one operator-authorized repair/challenge/evaluation round from
-the retained draft and gate checkpoints; certification remains blocked on both
-successor gates.
+prerequisites. The Board rejects completed roots, concurrent or ambiguous
+branches, another independent failure, and reopening work behind an already
+published release. A failed publication task may replay through the
+authoritative idempotent publication transaction, including PageIndex
+construction. Side-effect retries are rejected when a newer ref sequence has
+been admitted, and the transaction revalidates the live Board fence and
+immutable release identity. The Board retires old delivery fences, reopens only
+the selected task plus its failed/canceled required dependent chain, retains
+completed siblings and artifacts, and queues a fresh attempt. The same
+`requestKey` returns the original result without adding another attempt; reuse
+for a different task is rejected.
+`task.operator_reopened` and `task.operator_retry_scheduled` events record the
+actor, reason, request key, attempts, and affected tasks. Before the Board update
+commits, the API reactivates that completed build's quota reservation under the
+active-build limit without consuming another build-rate token; a Board conflict
+compensates the reservation back to completed. The retired multi-topic page and
+gate remediation modes are not valid for page-oriented builds; see
+[Retired multi-topic Context remediation](CONTEXT_PAGE_REMEDIATION.md).
 
 The worker fetches the exact checkpoint SHA, creates a bounded Git archive, and
 supplies Codex a read-only repository plus only the stage inputs declared by
@@ -600,12 +664,10 @@ sandbox inputs. Results return through bounded declared files and the
 lease/fence-scoped API. A source-aware citation audit checks every public core
 evidence binding, deterministic validation requires a grounded lead and every
 substantive section to contain a usable anchor, and writers normally spend one
-decisive evidence link per substantive section, increasing to two or at most three
-only for distinct high-impact claims, rather than citing every
-sentence. The source challenge looks for omitted material subjects, and a
-context-only critic must pass every maintenance task while using every
-published page. Publication remains unavailable until unchanged public bytes
-pass certification.
+decisive evidence link per substantive section, increasing to two or at most
+three only for distinct high-impact claims rather than citing every sentence.
+Publication remains unavailable until every planned page has a valid explicit
+disposition and the complete derived catalog and PageIndex tree validate.
 
 The snapshot worker must allowlist GitHub provider response fields before artifact
 upload. Temporary clone tokens, authorization material, clone endpoints, and nested
@@ -619,9 +681,10 @@ explicitly retire documents whose support disappeared. The host validates body m
 structured facts/questions/diagnostics, citation ordinals, exact claim excerpts, identities, and
 scope. Only revisions whose every citation identity/digest is present in the exact
 generation checkpoint are selectable; matching ref+commit history is not enough.
-Equivalent-evidence derivation cache reuse remains safe because indexing performs that
-checkpoint-membership check. Page and global repairs are bounded by the Board graph;
-exhaustion fails closed. Worker writes are fenced by the current board lease.
+Equivalent-evidence derivation cache reuse remains safe because publication performs
+that checkpoint-membership check. Each page has at most one repair/replacement-audit
+cycle; a still-unsupported new page is omitted and a still-unsupported revision retains
+the prior validated bytes. Worker writes are fenced by the current Board lease.
 
 The API Cloud Run request timeout is 60 minutes. A Context operation may run longer in
 its sandbox and terminal completion has a separate deadline, but its Board authority is
@@ -744,16 +807,16 @@ one immutable artifact metadata row and one current-pointer row regardless of gr
 cardinality. The API image built by this lane is used only by its migration and
 activation jobs; it is never deployed as the shared API service.
 
-Context derivation keeps twenty polling workers warm by default so independent research,
-page-writing, and audit stages can execute in parallel. These workers pull from the
-Board without inbound requests, so Cloud Run request autoscaling cannot observe queue
-depth; setting only a maximum left production at the old three-instance minimum and
-starved research leaves. Override the actual pool with
+Context derivation keeps twenty polling workers warm by default so independent page
+tasks and builds can execute in parallel. Planner-internal subject research and
+page-internal write/audit/repair phases remain sequential inside their respective
+leases. These workers pull from the Board without inbound requests, so Cloud Run request
+autoscaling cannot observe queue depth. Override the actual pool with
 `JINA_CONTEXT_WORKER_MIN_INSTANCES` and `JINA_CONTEXT_WORKER_MAX_INSTANCES`. The generic
 task service keeps one warm worker and may scale to five. Model provider limits and
 tenant token budgets remain the authoritative cost bounds. Each tenant may hold twenty
-active model-task reservations, matching one repository's maximum research fan-out;
-the 100-worker service ceiling provides shared headroom across tenants and repositories.
+active model-task reservations; the 100-worker service ceiling provides shared headroom
+across tenants and repositories.
 
 The production transition program is copied into both immutable backend images at
 `/opt/jina/context-production-preflight.mjs` and executed from that path by the Daytona,
@@ -931,6 +994,9 @@ drain and candidate explicitly restores automatic scaling, preventing a stale ma
 instance count from multiplying Board pollers across later releases. Deletion is
 deliberate: routing an old polling revision to zero percent does not by itself prove its
 minimum instances have terminated. A final zero-lease check precedes schema mutation.
+That same locked preflight rejects non-terminal pre-page-oriented Context builds
+or claimable legacy Context topics, because the candidate worker cannot resume
+that queue topology.
 The standalone `worker-pause` recovery action applies the same locked zero-lease guard.
 The atomic waiter closes the race between observation and fencing even during the first
 rollout from an API revision that does not yet understand the shared claim-admission gate.
@@ -1059,8 +1125,10 @@ Google service account and database-using runtime service accounts require
 `roles/cloudsql.client` there. The migration-owner password secret remains in `jina-v2`
 and grants direct secret access only to `jina-migration`. Project-level Cloud SQL IAM
 does not imply secret access, and secret access does not imply Cloud SQL connectivity.
-The exact commands and database-role boundary are in
-[SHARED_TENANCY.md](SHARED_TENANCY.md).
+The coordinated deploy validates both cross-project Cloud SQL grants and the
+migration/runtime database-role boundary before it changes traffic. Treat a failure of
+either check as a release blocker; never compensate by granting the migration secret to
+a runtime identity.
 
 ## Production acceptance
 
@@ -1130,8 +1198,9 @@ prevented from receiving that static Context token.
    query principal's ACL without replacing unrelated repositories;
 2. uses the distinct administrator to start `POST /context/build` with the configured
    GitHub installation ID;
-3. follows the dynamic Board graph through parallel research/pages/audits,
-   repairs, certification, atomic publication, and PageIndex attachment, and
+3. follows the page-oriented Board graph through snapshot, planning, parallel
+   page construction, bounded repair, PageIndex construction, and atomic
+   publication, and
    rejects failed or blocked work. Before querying the release, it requires the
    tenant-scoped worker-completion view to attest that every completed dispatchable
    Context task ran on the exact candidate Context-worker release and revision;
@@ -1168,13 +1237,9 @@ and `25` for transport or unexpected failures. Inspect the job execution logs be
 retrying with a new request key.
 
 For release-candidate quality checks beyond the deployment smoke query, run the
-Board-artifact evaluator and the real-question corpus evaluator:
+real-question corpus evaluator:
 
 ```sh
-pnpm evaluate:context-board-quality -- \
-  --artifact-root /absolute/path/to/context-artifacts \
-  --build task_context_build_id
-
 JINA_API_URL="${JINA_API_URL}" \
 JINA_CONTEXT_REPOSITORY=owner/repository \
 JINA_CONTEXT_REF=main \
@@ -1183,6 +1248,11 @@ CONTEXT_API_TOKEN='<bound context query token>' \
 CONTEXT_QUESTION_MIN_RETRIEVED_RATE=0.8 \
 pnpm evaluate:questions > /tmp/context-question-report.json
 ```
+
+Do not use `evaluate:context-board-quality` as a page-oriented release gate yet. Its v2
+artifact parser still expects retired source-challenge and task-evaluation artifacts;
+the limitation and replacement criteria are recorded in
+[Context quality benchmark](CONTEXT_QUALITY_BENCHMARK.md).
 
 The question file uses Markdown headings plus bullet queries. The JSON report records
 retrieved/no-context/error results, selected logical documents, original citation source
@@ -1254,6 +1324,12 @@ Role installation requires `CREATEROLE`. Production runs
 the schema, and is deliberately `NOINHERIT`. Adapters use `transactionAs`/`queryAs` to
 execute `SET LOCAL ROLE` before accessing context tables. See
 [DATA_MODELS.md](DATA_MODELS.md) for the capability-role list.
+
+The production job now uses the exact release API image and runs
+`dist/product/migrate-all.js --install-roles`, applying runtime and product migrations
+through one ledgered path. This unified path is required for the source consolidation,
+as specified in
+[STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md#unified-production-migration-job).
 
 Install the pgvector extension/schema only when an approved embedding provider is ready
 for evaluation:

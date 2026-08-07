@@ -236,18 +236,18 @@ export async function resolveContextExecutionProfile(
   attempt: BoardAgentAttemptContext,
   profileFetch: ContextProfileFetch = fetch
 ): Promise<ContextExecutionProfile | undefined> {
-  const apiUrl = environment.JINA_V1_API_URL?.trim()?.replace(/\/+$/, "");
-  const token = environment.JINA_V1_INTERNAL_API_TOKEN?.trim();
-  if (!apiUrl && !token) return undefined;
-  if (!apiUrl || !token) throw new Error("JINA_V1_API_URL and JINA_V1_INTERNAL_API_TOKEN must be configured together");
+  const apiUrl = environment.JINA_API_URL?.trim()?.replace(/\/+$/, "");
+  const token = environment.JINA_PRODUCT_INTERNAL_API_TOKEN?.trim();
+  if (!token) return undefined;
+  if (!apiUrl) throw new Error("JINA_API_URL is required when JINA_PRODUCT_INTERNAL_API_TOKEN is configured");
   if (!attempt.tenantId || !attempt.buildId) throw new Error("Context execution profile requires tenantId and buildId");
   let endpoint: URL;
   try {
     endpoint = new URL(`${apiUrl}/internal/context/execution-profile`);
   } catch {
-    throw new Error("JINA_V1_API_URL must be an absolute URL");
+    throw new Error("JINA_API_URL must be an absolute URL");
   }
-  if (endpoint.protocol !== "https:") throw new Error("JINA_V1_API_URL must use HTTPS");
+  if (endpoint.protocol !== "https:") throw new Error("JINA_API_URL must use HTTPS");
   const timeout = AbortSignal.timeout(15_000);
   const response = await profileFetch(endpoint.href, {
     method: "POST",

@@ -9,6 +9,20 @@ interface HistoryEventContext {
   readonly repository: string;
 }
 
+/**
+ * An event paired with everything derived from it. The derivation is O(events)
+ * once — filter options, filtering, and row rendering all read the same rows
+ * instead of re-deriving context (and re-serializing payloads) per pass.
+ */
+export interface HistoryEventRow {
+  readonly event: BoardEvent;
+  readonly context: HistoryEventContext;
+  /** Lowercased search text, including the serialized payload. Computed once. */
+  readonly haystack: string;
+  /** `Date.parse(event.at)`, precomputed for the date filter. */
+  readonly timestamp: number;
+}
+
 function asText(value: unknown): string {
   if (!value) return "";
   if (typeof value === "string") return value;
@@ -16,8 +30,8 @@ function asText(value: unknown): string {
   return JSON.stringify(value) ?? "";
 }
 
-export function historyEventContext(event: BoardEvent, tasks: readonly BoardTask[]): HistoryEventContext {
-  const task = event.taskId ? (tasks.find((candidate) => candidate.id === event.taskId) ?? null) : null;
+function historyEventContext(event: BoardEvent, tasksById: ReadonlyMap<string, BoardTask>): HistoryEventContext {
+  const task = (event.taskId ? tasksById.get(event.taskId) : undefined) ?? null;
   return {
     task,
     actor: asText(event.payload?.actor) || asText(event.payload?.assigneeRole) || task?.assigneeRole || "System",
@@ -25,8 +39,52 @@ export function historyEventContext(event: BoardEvent, tasks: readonly BoardTask
   };
 }
 
+/**
+ * Builds the newest-first row list. One task index and one pass over the
+ * events; every downstream derivation reuses the result.
+ */
+export function buildHistoryEventRows(
+  events: readonly BoardEvent[],
+  tasks: readonly BoardTask[]
+): readonly HistoryEventRow[] {
+  const tasksById = new Map<string, BoardTask>();
+  for (const task of tasks) tasksById.set(task.id, task);
+
+  const rows: HistoryEventRow[] = [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    const context = historyEventContext(event, tasksById);
+    rows.push({
+      event,
+      context,
+      haystack: [
+        eventLabel(event),
+        context.task?.title,
+        context.actor,
+        context.repository,
+        formatValue(event.payload || {})
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase(),
+      timestamp: new Date(event.at).getTime()
+    });
+  }
+  return rows;
+}
+
+/** Clock time for a row, or the absence sentinel when the stamp is unparseable. */
+export function eventClockTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 export function historyDateGroup(value: string): string {
   const date = new Date(value);
+  // An unparseable timestamp otherwise renders "Invalid Date" as a sticky group
+  // heading over the rows it collects.
+  if (Number.isNaN(date.getTime())) return "Unknown date";
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const eventStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
@@ -52,37 +110,23 @@ interface HistoryFilters {
   readonly date: string;
 }
 
-export function filteredHistoryEvents(
-  events: readonly BoardEvent[],
-  tasks: readonly BoardTask[],
+export function filterHistoryEventRows(
+  rows: readonly HistoryEventRow[],
   filters: HistoryFilters
-): readonly BoardEvent[] {
+): readonly HistoryEventRow[] {
   const query = filters.query.trim().toLowerCase();
+  if (!query && !filters.type && !filters.actor && !filters.repository && !filters.date) return rows;
   const now = Date.now();
-  return events
-    .slice()
-    .reverse()
-    .filter((event) => {
-      const context = historyEventContext(event, tasks);
-      const haystack = [
-        eventLabel(event),
-        context.task?.title,
-        context.actor,
-        context.repository,
-        formatValue(event.payload || {})
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      const age = now - new Date(event.at).getTime();
-      return (
-        (!query || haystack.includes(query)) &&
-        (!filters.type || event.type === filters.type) &&
-        (!filters.actor || context.actor === filters.actor) &&
-        (!filters.repository || context.repository === filters.repository) &&
-        (!filters.date || (filters.date === "today" ? age <= 86400000 : age <= 604800000))
-      );
-    });
+  return rows.filter((row) => {
+    const age = now - row.timestamp;
+    return (
+      (!query || row.haystack.includes(query)) &&
+      (!filters.type || row.event.type === filters.type) &&
+      (!filters.actor || row.context.actor === filters.actor) &&
+      (!filters.repository || row.context.repository === filters.repository) &&
+      (!filters.date || (filters.date === "today" ? age <= 86400000 : age <= 604800000))
+    );
+  });
 }
 
 export function historyEventExplanation(event: BoardEvent, task: BoardTask | null): string {

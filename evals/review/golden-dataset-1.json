@@ -1,0 +1,847 @@
+{
+  "name": "Golden Dataset 1: Regression-Introducing PRs",
+  "generated": "2026-06-16",
+  "repositories": ["manaflow-ai/cmux", "calcom/cal.diy"],
+  "objective": "Select 12 regression-introducing merged PRs per repository, split into 4 Easy, 4 Medium, and 4 Hard candidates. Within each bucket, prefer PRs that introduced the largest number of known closed issues with direct GitHub evidence; where multi-issue candidates are scarce, use the strongest single-issue attributions.",
+  "evidence_policy": "A known issue is counted only when the issue body, a GitHub issue comment, or a linked PR/timeline discussion explicitly connects the issue to the introducing PR. Closed PRs are not counted as issues.",
+  "repo_results": [
+    {
+      "repository": "manaflow-ai/cmux",
+      "entries": [
+        {
+          "rank": "E1",
+          "bucket": "Easy",
+          "introducing_pr": {
+            "number": 2467,
+            "title": "Fix paste from Raycast and apps using alternate plain-text UTIs",
+            "url": "https://github.com/manaflow-ai/cmux/pull/2467",
+            "merged": true,
+            "changed_files": 2,
+            "additions": 147,
+            "deletions": 18
+          },
+          "complexity_rationale": "2 files, 147 additions; localized pasteboard handling plus tests.",
+          "known_attributed_closed_issue_count": 2,
+          "introduced_issues": [
+            {
+              "number": 2756,
+              "title": "Cmd+V paste replaces Cyrillic (non-ASCII) characters with question marks",
+              "url": "https://github.com/manaflow-ai/cmux/issues/2756",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 2762,
+              "title": "Raycast Clipboard History / Snippets paste silently fails in cmux v0.63.2 (Cmd+V and Ctrl+V both no-op)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/2762",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#2756 comment identifies #2467 as the regression source for Cyrillic paste corruption. #2762 reports Raycast paste regressed or remained broken in the same alternate-plain-text UTI path after #2467.",
+          "fix_prs": [
+            {
+              "number": 2776,
+              "url": "https://github.com/manaflow-ai/cmux/pull/2776"
+            },
+            {
+              "number": 2768,
+              "url": "https://github.com/manaflow-ai/cmux/pull/2768"
+            }
+          ]
+        },
+        {
+          "rank": "E2",
+          "bucket": "Easy",
+          "introducing_pr": {
+            "number": 5106,
+            "title": "Revert \"Fix #3799: preserve per-pane OSC 11 backgrounds on inactive panes\"",
+            "url": "https://github.com/manaflow-ai/cmux/pull/5106",
+            "merged": true,
+            "changed_files": 4,
+            "additions": 49,
+            "deletions": 253
+          },
+          "complexity_rationale": "4 files, mostly revert/removal; localized OSC/background ownership behavior.",
+          "known_attributed_closed_issue_count": 2,
+          "introduced_issues": [
+            {
+              "number": 5917,
+              "title": "OSC 11 per-pane terminal background coloring regression (reverted in #5106)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/5917",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 5478,
+              "title": "OSC 11 terminal background color broken in 0.64.13",
+              "url": "https://github.com/manaflow-ai/cmux/issues/5478",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#5917 says per-pane OSC 11 coloring stopped after #5106 reverted #3886. #5478 has a root-cause comment naming the #3886 merge plus #5106 revert as the shipped feature-then-revert regression.",
+          "fix_prs": [
+            {
+              "number": 5997,
+              "url": "https://github.com/manaflow-ai/cmux/pull/5997"
+            },
+            {
+              "number": 5509,
+              "url": "https://github.com/manaflow-ai/cmux/pull/5509"
+            }
+          ]
+        },
+        {
+          "rank": "E3",
+          "bucket": "Easy",
+          "introducing_pr": {
+            "number": 1017,
+            "title": "fix: add CJK font fallback to prevent decorative font rendering",
+            "url": "https://github.com/manaflow-ai/cmux/pull/1017",
+            "merged": true,
+            "changed_files": 2,
+            "additions": 353,
+            "deletions": 0
+          },
+          "complexity_rationale": "2 files, 353 additions; localized Ghostty font fallback configuration and tests.",
+          "known_attributed_closed_issue_count": 2,
+          "introduced_issues": [
+            {
+              "number": 1793,
+              "title": "CJK font-codepoint-map auto-injection overrides font-family that already contains CJK glyphs",
+              "url": "https://github.com/manaflow-ai/cmux/issues/1793",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 1693,
+              "title": "Korean font style/size mismatch due to CJK font-codepoint-map injection",
+              "url": "https://github.com/manaflow-ai/cmux/issues/1693",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#1793 says the automatic font-codepoint-map injection introduced in #1017 overrides a configured CJK-capable font. #1693 says PR #1017 force-maps Korean ranges to Apple SD Gothic Neo and causes font style/size mismatch.",
+          "fix_prs": []
+        },
+        {
+          "rank": "E4",
+          "bucket": "Easy",
+          "introducing_pr": {
+            "number": 2564,
+            "title": "Fix SSH password auth bootstrap race",
+            "url": "https://github.com/manaflow-ai/cmux/pull/2564",
+            "merged": true,
+            "changed_files": 4,
+            "additions": 984,
+            "deletions": 124
+          },
+          "complexity_rationale": "4 files, 984 additions; localized SSH bootstrap/password-auth behavior but with shell-compatibility risk.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 2706,
+              "title": "SSH LocalCommand incompatible with Fish shell",
+              "url": "https://github.com/manaflow-ai/cmux/issues/2706",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#2706 states the issue was introduced in #2564 and explains that the new SSH LocalCommand path used POSIX-style variable assignment that is incompatible with Fish shell.",
+          "fix_prs": []
+        },
+        {
+          "rank": "M1",
+          "bucket": "Medium",
+          "introducing_pr": {
+            "number": 3767,
+            "title": "Fix Chinese IME Enter swallowed in terminal (#3762)",
+            "url": "https://github.com/manaflow-ai/cmux/pull/3767",
+            "merged": true,
+            "changed_files": 2,
+            "additions": 91,
+            "deletions": 9
+          },
+          "complexity_rationale": "2 files, but high conceptual risk: macOS text input, IME composition, key forwarding, and regression tests.",
+          "known_attributed_closed_issue_count": 3,
+          "introduced_issues": [
+            {
+              "number": 3762,
+              "title": "Chinese IME terminal: Enter swallowed, AND PR #3767 fix broke arrow keys for all IME users - redo with narrower scope",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3762",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 3691,
+              "title": "Chinese IME (Zhuyin/Bopomofo): arrow keys cannot navigate candidate window in terminal",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3691",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 3679,
+              "title": "Mandarin Zhuyin IME candidate selection no longer works after updating CMUX",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3679",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#3762 states #3767 fixed Enter but introduced broader key swallowing for IME users. #3691 says follow-on PRs including #3767 extended the broken IME framework and were reverted. #3679 comment records that #3767 was among follow-up CJK fixes reverted for breaking other IME families.",
+          "fix_prs": [
+            {
+              "number": 3867,
+              "url": "https://github.com/manaflow-ai/cmux/pull/3867"
+            },
+            {
+              "number": 3957,
+              "url": "https://github.com/manaflow-ai/cmux/pull/3957"
+            },
+            {
+              "number": 4030,
+              "url": "https://github.com/manaflow-ai/cmux/pull/4030"
+            }
+          ]
+        },
+        {
+          "rank": "M2",
+          "bucket": "Medium",
+          "introducing_pr": {
+            "number": 3694,
+            "title": "Fix arrow key navigation in IME candidate window during composition",
+            "url": "https://github.com/manaflow-ai/cmux/pull/3694",
+            "merged": true,
+            "changed_files": 5,
+            "additions": 767,
+            "deletions": 53
+          },
+          "complexity_rationale": "5 files, 767 additions; crosses AppDelegate routing, terminal view, IME composition, and tests.",
+          "known_attributed_closed_issue_count": 3,
+          "introduced_issues": [
+            {
+              "number": 3691,
+              "title": "Chinese IME (Zhuyin/Bopomofo): arrow keys cannot navigate candidate window in terminal",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3691",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 3762,
+              "title": "Chinese IME terminal: Enter swallowed, AND PR #3767 fix broke arrow keys for all IME users - redo with narrower scope",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3762",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 3679,
+              "title": "Mandarin Zhuyin IME candidate selection no longer works after updating CMUX",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3679",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#3691 says #3694 was reverted because it introduced a broad global IME regression. #3762 names #3694 as the PR that introduced the Down-arrow + IME composition path later extended by #3767/#3836. #3679 comment lists #3694 among broad CJK fixes reverted for breaking other IME families.",
+          "fix_prs": [
+            {
+              "number": 3849,
+              "url": "https://github.com/manaflow-ai/cmux/pull/3849"
+            },
+            {
+              "number": 3850,
+              "url": "https://github.com/manaflow-ai/cmux/pull/3850"
+            }
+          ]
+        },
+        {
+          "rank": "M3",
+          "bucket": "Medium",
+          "introducing_pr": {
+            "number": 3179,
+            "title": "Fix transparent titlebar backdrop matching",
+            "url": "https://github.com/manaflow-ai/cmux/pull/3179",
+            "merged": true,
+            "changed_files": 11,
+            "additions": 517,
+            "deletions": 160
+          },
+          "complexity_rationale": "11 files, 517 additions; window backdrop, terminal surface background ownership, and titlebar behavior.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 3799,
+              "title": "Per-pane OSC 11 background tints lost on inactive panes since #3179 (window-root backdrop only paints active surface)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3799",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#3799 says the regression was introduced by commit 259de58 / PR #3179 and explains that the window-root backdrop path caused inactive panes to lose per-pane OSC 11 backgrounds.",
+          "fix_prs": [
+            {
+              "number": 3886,
+              "url": "https://github.com/manaflow-ai/cmux/pull/3886"
+            }
+          ]
+        },
+        {
+          "rank": "M4",
+          "bucket": "Medium",
+          "introducing_pr": {
+            "number": 3216,
+            "title": "Update Ghostty upstream",
+            "url": "https://github.com/manaflow-ai/cmux/pull/3216",
+            "merged": true,
+            "changed_files": 4,
+            "additions": 40,
+            "deletions": 8
+          },
+          "complexity_rationale": "4 files, small diff, but conceptually risky upstream terminal/input update touching IME behavior.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 3571,
+              "title": "[Bug] Traditional Chinese (Zhuyin/Bopomofo) IME candidate window missing after v0.64.0 update",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3571",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#3571 identifies the likely regression source as the Ghostty upstream update in #3216 and ties it to changed NSTextInputClient preedit/candidate behavior.",
+          "fix_prs": []
+        },
+        {
+          "rank": "H1",
+          "bucket": "Hard",
+          "introducing_pr": {
+            "number": 5294,
+            "title": "Out-of-process custom sidebars: isolated interpreter + remote rendering",
+            "url": "https://github.com/manaflow-ai/cmux/pull/5294",
+            "merged": true,
+            "changed_files": 58,
+            "additions": 3018,
+            "deletions": 147
+          },
+          "complexity_rationale": "58 files, 3,018 additions; new out-of-process interpreter/rendering architecture with settings and UI integration.",
+          "known_attributed_closed_issue_count": 2,
+          "introduced_issues": [
+            {
+              "number": 5370,
+              "title": "main: tests job red since #5294 merge (focus/responder + browser-panel unit failures)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/5370",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 5460,
+              "title": "Main window cannot be resized narrower than current width (min-width regression); height resizes fine",
+              "url": "https://github.com/manaflow-ai/cmux/issues/5460",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#5370 reports main tests red since #5294 and was followed by revert/reland PRs. #5460 ties the min-width regression window to the out-of-process sidebar work in #5294/#5382.",
+          "fix_prs": [
+            {
+              "number": 5372,
+              "url": "https://github.com/manaflow-ai/cmux/pull/5372"
+            },
+            {
+              "number": 5382,
+              "url": "https://github.com/manaflow-ai/cmux/pull/5382"
+            },
+            {
+              "number": 5474,
+              "url": "https://github.com/manaflow-ai/cmux/pull/5474"
+            }
+          ]
+        },
+        {
+          "rank": "H2",
+          "bucket": "Hard",
+          "introducing_pr": {
+            "number": 2936,
+            "title": "Add Sessions panel to right sidebar",
+            "url": "https://github.com/manaflow-ai/cmux/pull/2936",
+            "merged": true,
+            "changed_files": 29,
+            "additions": 3395,
+            "deletions": 3
+          },
+          "complexity_rationale": "29 files, 3,395 additions; new right-sidebar feature touching assets, app routing, session UI, and SwiftUI layout behavior.",
+          "known_attributed_closed_issue_count": 3,
+          "introduced_issues": [
+            {
+              "number": 3010,
+              "title": "Nightly 3698f13: consistent 100% CPU in sidebar (no freeze) - regression vs stable 0.63.2",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3010",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 3018,
+              "title": "Nightly: memory/swap pressure causes typing lag - ~3GB RSS, 2.1GB swapped, +53 threads in 25s while idle (regression vs stable 0.63.2)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3018",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 3011,
+              "title": "Selecting a workspace renders blank terminal pane (no prompt, no content)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/3011",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#3010 comment says regression bisect narrowed the CPU issue to the Sessions panel PR #2936 and follow-up #2970. #3018 lists the Sessions panel from #2936 as a likely source for idle thread/memory growth. #3011 comment lists #2936 as a secondary suspect in the workspace blank-terminal regression window.",
+          "fix_prs": [
+            {
+              "number": 3013,
+              "url": "https://github.com/manaflow-ai/cmux/pull/3013"
+            },
+            {
+              "number": 3022,
+              "url": "https://github.com/manaflow-ai/cmux/pull/3022"
+            },
+            {
+              "number": 3012,
+              "url": "https://github.com/manaflow-ai/cmux/pull/3012"
+            }
+          ]
+        },
+        {
+          "rank": "H3",
+          "bucket": "Hard",
+          "introducing_pr": {
+            "number": 4415,
+            "title": "Fix settings appearance dispatch_once reentrancy",
+            "url": "https://github.com/manaflow-ai/cmux/pull/4415",
+            "merged": true,
+            "changed_files": 7,
+            "additions": 284,
+            "deletions": 108
+          },
+          "complexity_rationale": "7 files, 284 additions; appearance settings, defaults side effects, SwiftUI/AppKit launch timing, and terminal theme propagation.",
+          "known_attributed_closed_issue_count": 2,
+          "introduced_issues": [
+            {
+              "number": 4525,
+              "title": "Main window + sidebar render Light on launch when cmux.json sets app.appearance: dark (regression from #4415)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/4525",
+              "state": "closed",
+              "is_pr": false
+            },
+            {
+              "number": 4565,
+              "title": "Ghostty pane stuck on light theme in Dark mode after `cmux themes set --light/--dark` (0.64.9)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/4565",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#4525 says the launch appearance regression occurs after #4415 and gives a root-cause analysis of side-effect timing after that PR. #4565 links the Ghostty light-theme symptom to the same dark-appearance regression pattern from #4415.",
+          "fix_prs": []
+        },
+        {
+          "rank": "H4",
+          "bucket": "Hard",
+          "introducing_pr": {
+            "number": 4975,
+            "title": "Reimplement Settings as CmuxSettings/CmuxSettingsUI SPM packages (Claude)",
+            "url": "https://github.com/manaflow-ai/cmux/pull/4975",
+            "merged": true,
+            "changed_files": 130,
+            "additions": 12807,
+            "deletions": 122
+          },
+          "complexity_rationale": "130 files, 12,807 additions; large settings-package rewrite with async observation, Swift package boundaries, and app-wide settings consumers.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 5309,
+              "title": "Memory leak root cause: CmuxSettings values(for:) parks an uncancellable Task in NotificationCenter.notifications(named:) — leaks a Task + async-sequence per settings observation (regression from #4975)",
+              "url": "https://github.com/manaflow-ai/cmux/issues/5309",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#5309 says the leaking settings-observation code was added by #4975 and calls it a regression from the CmuxSettings/CmuxSettingsUI rewrite.",
+          "fix_prs": [
+            {
+              "number": 5310,
+              "url": "https://github.com/manaflow-ai/cmux/pull/5310"
+            },
+            {
+              "number": 5403,
+              "url": "https://github.com/manaflow-ai/cmux/pull/5403"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "repository": "calcom/cal.diy",
+      "note": "Cal.com still did not surface enough multi-issue PRs to fill the expansion under the explicit attribution rule. The added entries therefore use the strongest additional single-issue attributions per complexity bucket.",
+      "entries": [
+        {
+          "rank": "E1",
+          "bucket": "Easy",
+          "introducing_pr": {
+            "number": 13048,
+            "title": "fix: Avoid duplicate inline embeds",
+            "url": "https://github.com/calcom/cal.diy/pull/13048",
+            "merged": true,
+            "changed_files": 1,
+            "additions": 4,
+            "deletions": 0
+          },
+          "complexity_rationale": "1 file, 4 additions; localized embed-core guard.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 13259,
+              "title": "[CAL-3177] Inline embed already exists. Ignoring this call",
+              "url": "https://github.com/calcom/cal.diy/issues/13259",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#13259 comment says the inline embed issue was broken in #13048.",
+          "fix_prs": [
+            {
+              "number": 13386,
+              "url": "https://github.com/calcom/cal.diy/pull/13386"
+            },
+            {
+              "number": 23088,
+              "url": "https://github.com/calcom/cal.diy/pull/23088"
+            }
+          ]
+        },
+        {
+          "rank": "E2",
+          "bucket": "Easy",
+          "introducing_pr": {
+            "number": 18077,
+            "title": "fix: correct line-breaks in calendar event description",
+            "url": "https://github.com/calcom/cal.diy/pull/18077",
+            "merged": true,
+            "changed_files": 1,
+            "additions": 110,
+            "deletions": 123
+          },
+          "complexity_rationale": "1 file, balanced rewrite of CalEventParser; localized but production-critical workflows/calendar behavior.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 17928,
+              "title": "[CAL-4825] Workflows are not getting executed (both Email and specially Text message workflows)",
+              "url": "https://github.com/calcom/cal.diy/issues/17928",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#17928 comment says the workflow execution issue was introduced in #18077 and would be reverted.",
+          "fix_prs": [
+            {
+              "number": 18175,
+              "url": "https://github.com/calcom/cal.diy/pull/18175"
+            }
+          ]
+        },
+        {
+          "rank": "E3",
+          "bucket": "Easy",
+          "introducing_pr": {
+            "number": 22082,
+            "title": "fix: Always return `cancellationReason` and `cancelledByEmail` for cancelled bookings",
+            "url": "https://github.com/calcom/cal.diy/pull/22082",
+            "merged": true,
+            "changed_files": 1,
+            "additions": 10,
+            "deletions": 6
+          },
+          "complexity_rationale": "1 file, 10 additions; localized API output-shape change for cancelled bookings.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 25410,
+              "title": "fix: return cancelled reason even when rescheduled",
+              "url": "https://github.com/calcom/cal.diy/issues/25410",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#25410 says #22082 introduced returning cancellation reason only for cancelled bookings, which omitted cancellation reason for rescheduled bookings.",
+          "fix_prs": []
+        },
+        {
+          "rank": "E4",
+          "bucket": "Easy",
+          "introducing_pr": {
+            "number": 1604,
+            "title": "Fixes for team event creation",
+            "url": "https://github.com/calcom/cal.diy/pull/1604",
+            "merged": true,
+            "changed_files": 1,
+            "additions": 19,
+            "deletions": 3
+          },
+          "complexity_rationale": "1 file, 19 additions; localized team event creation changes.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 1623,
+              "title": "NaN values are shown when creating new event types under your name",
+              "url": "https://github.com/calcom/cal.diy/issues/1623",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#1623 says the NaN values shown when creating event types under a user were introduced by #1604.",
+          "fix_prs": []
+        },
+        {
+          "rank": "M1",
+          "bucket": "Medium",
+          "introducing_pr": {
+            "number": 27012,
+            "title": "chore: disable apps with missing required keys",
+            "url": "https://github.com/calcom/cal.diy/pull/27012",
+            "merged": true,
+            "changed_files": 5,
+            "additions": 215,
+            "deletions": 3
+          },
+          "complexity_rationale": "5 files, 215 additions; app validation, repository logic, cron sync, seed behavior, and tests.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 28126,
+              "title": "google-calendar integration vanished",
+              "url": "https://github.com/calcom/cal.diy/issues/28126",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#28126 comment says the vanished Google Calendar integration was introduced with #27012 and fixed in #27918.",
+          "fix_prs": [
+            {
+              "number": 27918,
+              "url": "https://github.com/calcom/cal.diy/pull/27918"
+            }
+          ]
+        },
+        {
+          "rank": "M2",
+          "bucket": "Medium",
+          "introducing_pr": {
+            "number": 13794,
+            "title": "feat: SSO for orgs",
+            "url": "https://github.com/calcom/cal.diy/pull/13794",
+            "merged": true,
+            "changed_files": 9,
+            "additions": 206,
+            "deletions": 52
+          },
+          "complexity_rationale": "9 files, 206 additions; auth, SSO, organization settings, DSync, and provisioning behavior.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 14611,
+              "title": "[CAL-3731] SAML Authentication no Longer Auto Provisioning Users",
+              "url": "https://github.com/calcom/cal.diy/issues/14611",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#14611 says a broken change was introduced and links PR #13794 as the introduced PR for SAML auto-provisioning failure.",
+          "fix_prs": []
+        },
+        {
+          "rank": "M3",
+          "bucket": "Medium",
+          "introducing_pr": {
+            "number": 1673,
+            "title": "availability: end time should not be lower than start time",
+            "url": "https://github.com/calcom/cal.diy/pull/1673",
+            "merged": true,
+            "changed_files": 3,
+            "additions": 94,
+            "deletions": 19
+          },
+          "complexity_rationale": "3 files, 94 additions; availability validation with timezone and day-boundary behavior.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 1718,
+              "title": "End Time not 24:00 for other TZ users after the end time check fix in #1673 issue",
+              "url": "https://github.com/calcom/cal.diy/issues/1718",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#1718 was opened from discussion on #1673 and says the end-time check introduced by #1673 caused availability end time to be limited incorrectly for users in other time zones.",
+          "fix_prs": []
+        },
+        {
+          "rank": "M4",
+          "bucket": "Medium",
+          "introducing_pr": {
+            "number": 8705,
+            "title": "chore: Rounding, frames and radio buttons of the booking forms not consistent",
+            "url": "https://github.com/calcom/cal.diy/pull/8705",
+            "merged": true,
+            "changed_files": 10,
+            "additions": 118,
+            "deletions": 48
+          },
+          "complexity_rationale": "10 files, 118 additions; booking form UI behavior, phone input country detection, and rendering consistency.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 9682,
+              "title": "[CAL-2009] the phone input not prefilling (disappearing)",
+              "url": "https://github.com/calcom/cal.diy/issues/9682",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#9682 says phone input prefill disappearing is a regression from #8705 because the country change on page load clears the input field.",
+          "fix_prs": []
+        },
+        {
+          "rank": "H1",
+          "bucket": "Hard",
+          "introducing_pr": {
+            "number": 13184,
+            "title": "chore: [app-router-migration 13.5] Add ability to reuse legacy getServerSideProps and getStaticProps on the `/future` pages",
+            "url": "https://github.com/calcom/cal.diy/pull/13184",
+            "merged": true,
+            "changed_files": 58,
+            "additions": 944,
+            "deletions": 1291
+          },
+          "complexity_rationale": "58 files, 944 additions and 1,291 deletions; broad app-router migration across future pages, video, org, booking, and app pages.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 13368,
+              "title": "[CAL-3003] Cal Video does not work in 3.7.3",
+              "url": "https://github.com/calcom/cal.diy/issues/13368",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#13368 states Cal Video 3.7.3 was caused by #13184, with endTime undefined.",
+          "fix_prs": [
+            {
+              "number": 13369,
+              "url": "https://github.com/calcom/cal.diy/pull/13369"
+            }
+          ]
+        },
+        {
+          "rank": "H2",
+          "bucket": "Hard",
+          "introducing_pr": {
+            "number": 8355,
+            "title": "feat: Add copy invite link",
+            "url": "https://github.com/calcom/cal.diy/pull/8355",
+            "merged": true,
+            "changed_files": 22,
+            "additions": 655,
+            "deletions": 49
+          },
+          "complexity_rationale": "22 files, 655 additions; team invite flows, DB migration/schema, TRPC handlers, settings UI, and localization.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 10106,
+              "title": "[CAL-2160] Team invites aren't working for non-users",
+              "url": "https://github.com/calcom/cal.diy/issues/10106",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#10106 begins \"Introduced in #8355\" and describes the non-user team invite token regression.",
+          "fix_prs": [
+            {
+              "number": 10110,
+              "url": "https://github.com/calcom/cal.diy/pull/10110"
+            }
+          ]
+        },
+        {
+          "rank": "H3",
+          "bucket": "Hard",
+          "introducing_pr": {
+            "number": 14215,
+            "title": "feat: added Rating Template to Workflows",
+            "url": "https://github.com/calcom/cal.diy/pull/14215",
+            "merged": true,
+            "changed_files": 22,
+            "additions": 836,
+            "deletions": 399
+          },
+          "complexity_rationale": "22 files, 836 additions and 399 deletions; workflow templates, public mutation endpoints, email-link behavior, and security-sensitive booking actions.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 14342,
+              "title": "[CAL-3362] Use tokens for public mutating endpoints",
+              "url": "https://github.com/calcom/cal.diy/issues/14342",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#14342 quotes review discussion from #14215 saying the noShow and submitRating handlers introduced in #14215 are public and lack protections, so tokens should be generated for email links.",
+          "fix_prs": []
+        },
+        {
+          "rank": "H4",
+          "bucket": "Hard",
+          "introducing_pr": {
+            "number": 9195,
+            "title": "feat: add basecamp integration to cal.com",
+            "url": "https://github.com/calcom/cal.diy/pull/9195",
+            "merged": true,
+            "changed_files": 35,
+            "additions": 751,
+            "deletions": 0
+          },
+          "complexity_rationale": "35 files, 751 additions; new app integration spanning app-store metadata, integration wiring, and release availability.",
+          "known_attributed_closed_issue_count": 1,
+          "introduced_issues": [
+            {
+              "number": 12372,
+              "title": "Basecamp application still not available",
+              "url": "https://github.com/calcom/cal.diy/issues/12372",
+              "state": "closed",
+              "is_pr": false
+            }
+          ],
+          "evidence_summary": "#12372 says the Basecamp integration was merged in #9195 and announced, but the application was still unavailable in the app store due to missing availability/configuration.",
+          "fix_prs": []
+        }
+      ]
+    }
+  ],
+  "excluded_near_misses": [
+    {
+      "repository": "calcom/cal.diy",
+      "reference": {
+        "number": 9840,
+        "url": "https://github.com/calcom/cal.diy/issues/9840"
+      },
+      "reason": "Appeared as a two-issue raw group, but it was an issue number being referenced by related work, not a merged introducing PR with multiple caused issues."
+    }
+  ],
+  "verification_notes": [
+    "Every counted issue above was checked via GitHub API as state=closed and is_pr=false.",
+    "Every introducing PR above was checked via GitHub API as merged=true.",
+    "PR complexity metadata was checked from GitHub PR file stats.",
+    "The final dataset lists exactly 12 PRs for manaflow-ai/cmux and exactly 12 PRs for calcom/cal.diy, with 4 Easy, 4 Medium, and 4 Hard entries per repository.",
+    "The expansion added 6 PRs per repository on 2026-06-16 using the same explicit attribution policy as the original pass."
+  ]
+}

@@ -1,17 +1,29 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { evaluateAdminAccess } from "./lib/admin-auth";
 
-// Runs before every rendered route. Env is read inside the handler so it is
-// evaluated at request time by the self-hosted Node server, not inlined.
+// Runs before every rendered route. Credential env is read inside the handler so
+// it is evaluated at request time by the self-hosted Node server, not inlined.
+//
+// `NODE_ENV` is the deliberate exception: Next inlines it at build time, so the
+// unauthenticated local-development path is compiled out of every deployed
+// image and cannot be re-enabled by a runtime environment variable.
+const ALLOW_UNAUTHENTICATED_LOCAL_DEV = process.env.NODE_ENV !== "production";
+
 export function proxy(request: NextRequest): NextResponse {
   const decision = evaluateAdminAccess({
-    authRequired: Boolean(process.env.INTERNAL_API_TOKEN?.trim() || process.env.JINA_GLOBAL_ADMIN_TOKEN?.trim()),
     authorizationHeader: request.headers.get("authorization"),
     webAuthUsername: process.env.JINA_WEB_AUTH_USERNAME,
-    webAuthPassword: process.env.JINA_WEB_AUTH_PASSWORD
+    webAuthPassword: process.env.JINA_WEB_AUTH_PASSWORD,
+    allowUnauthenticatedLocalDev: ALLOW_UNAUTHENTICATED_LOCAL_DEV
   });
 
   if (!decision.ok) {
+    if (decision.status === 503) {
+      console.error(
+        "[admin] refusing every request: %s (set JINA_WEB_AUTH_USERNAME and JINA_WEB_AUTH_PASSWORD)",
+        decision.error
+      );
+    }
     return NextResponse.json(
       { error: decision.error },
       {

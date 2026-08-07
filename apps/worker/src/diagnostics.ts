@@ -42,7 +42,7 @@ export function workerFailureCategory(reason: string): WorkerFailureCategory {
   )
     return "context_validation";
   if (
-    /context api .*failed with (?:408|425|429|5\d\d)|\b(?:econnreset|econnrefused|etimedout|enotfound)\b|fetch failed|network error|socket hang up|connection reset|service unavailable|bad gateway|gateway timeout|operation was aborted|aborted due to timeout|request timed out/.test(
+    /(?:context|review) api .*failed with (?:408|425|429|5\d\d)|\b(?:econnreset|econnrefused|etimedout|enotfound)\b|fetch failed|network error|socket hang up|connection reset|service unavailable|bad gateway|gateway timeout|operation was aborted|aborted due to timeout|request timed out/.test(
       value
     )
   )

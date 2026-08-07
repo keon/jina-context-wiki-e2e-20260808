@@ -1,0 +1,4873 @@
+/* Fresh Platform-style application and page system. */
+
+/* Shell ------------------------------------------------------------------- */
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  min-height: 100dvh;
+  background: var(--canvas);
+  transition: grid-template-columns 160ms ease;
+}
+
+.app--sidebar-collapsed {
+  grid-template-columns: var(--sidebar-collapsed-width) minmax(0, 1fr);
+}
+
+.content {
+  min-width: 0;
+}
+
+.sidebar {
+  position: sticky;
+  z-index: 20;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: var(--sidebar-width);
+  height: 100dvh;
+  padding: var(--space-2);
+  overflow: hidden auto;
+  border-right: 1px solid var(--line-subtle);
+  background: var(--sidebar);
+  transition: width 160ms ease;
+}
+
+.app--sidebar-collapsed .sidebar {
+  width: var(--sidebar-collapsed-width);
+}
+
+.sidebar__top {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 40px;
+  margin-bottom: var(--space-2);
+}
+
+.sidebar__workspace {
+  min-width: 0;
+  width: calc(100% - 34px);
+}
+
+.workspace-switcher {
+  position: relative;
+  width: 100%;
+}
+
+.workspace-switcher__trigger,
+.workspace-switcher__option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 9px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-switcher__trigger {
+  height: 40px;
+}
+
+.workspace-switcher__trigger:hover,
+.workspace-switcher__option:hover,
+.workspace-switcher__option--active {
+  background: var(--surface-hover);
+}
+
+.workspace-switcher__mark {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--ink-strong);
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+
+.workspace-switcher__mark img,
+.user__avatar img,
+.team-avatar img,
+.member-avatar img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+
+.workspace-switcher__copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  line-height: 1.25;
+}
+
+.workspace-switcher__copy strong,
+.workspace-switcher__copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-switcher__copy strong {
+  font-size: var(--text-base);
+  font-weight: 500;
+}
+
+.workspace-switcher__copy small {
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+  text-transform: capitalize;
+}
+
+.workspace-switcher__menu {
+  position: fixed;
+  z-index: 70;
+  top: 48px;
+  left: 8px;
+  width: 244px;
+  max-height: min(420px, calc(100dvh - 64px));
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.workspace-switcher__option {
+  min-height: 44px;
+}
+
+.workspace-switcher__check {
+  color: var(--ok-fg);
+}
+
+.sidebar__collapse,
+.sidebar__mobile-close,
+.header__menu {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-subtle);
+  cursor: pointer;
+}
+
+.sidebar__collapse {
+  margin-left: 2px;
+}
+
+.sidebar__collapse:hover,
+.sidebar__mobile-close:hover,
+.header__menu:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.sidebar__mobile-close,
+.header__menu,
+.sidebar__backdrop {
+  display: none;
+}
+
+.sidebar__mark {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 36px;
+  color: var(--ink-strong);
+  font-size: var(--text-lg);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+}
+
+.app--sidebar-collapsed .sidebar__top {
+  justify-content: center;
+}
+
+.app--sidebar-collapsed .sidebar__workspace {
+  display: none;
+}
+
+.app--sidebar-collapsed .sidebar__collapse {
+  position: absolute;
+  left: 4px;
+  opacity: 0;
+}
+
+.app--sidebar-collapsed .sidebar__top:hover .sidebar__mark {
+  opacity: 0;
+}
+
+.app--sidebar-collapsed .sidebar__top:hover .sidebar__collapse,
+.app--sidebar-collapsed .sidebar__collapse:focus-visible {
+  opacity: 1;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.nav__item,
+button.nav__item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  width: 100%;
+  height: 36px;
+  gap: var(--space-3);
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: var(--text-md);
+  font-weight: 450;
+  line-height: 20px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.nav__item:hover,
+button.nav__item:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.nav__item--active,
+.nav__item--active:hover {
+  background: var(--surface-selected);
+  color: var(--ink-strong);
+  font-weight: 500;
+}
+
+.nav__icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+.nav__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar__search {
+  margin-bottom: var(--space-2);
+  background: var(--surface) !important;
+  color: var(--ink) !important;
+}
+
+.sidebar__search:hover {
+  background: var(--surface-selected) !important;
+}
+
+.sidebar__shortcut,
+.command kbd {
+  margin-left: auto;
+  padding: 1px 5px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink-subtle);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  line-height: 17px;
+}
+
+.sidebar__spacer {
+  flex: 1;
+}
+
+.nav__chevron {
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  color: var(--ink-subtle);
+}
+
+.sidebar__menu-label,
+.command__group-label {
+  display: block;
+  padding: 6px 8px 5px;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.user {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 40px;
+  gap: 10px;
+  margin-top: var(--space-1);
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.user:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.user__avatar {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 50%;
+  background: var(--ink-strong);
+  color: var(--ink-inverse);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.user__copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+
+.user__copy small {
+  overflow: hidden;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-md);
+  font-weight: 450;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-menu {
+  position: relative;
+}
+
+.user-menu__popover {
+  position: fixed;
+  z-index: 70;
+  bottom: 56px;
+  left: 8px;
+  width: 244px;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.user-menu__identity {
+  padding: 10px 10px 12px;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.user-menu__identity strong {
+  font-size: var(--text-base);
+  font-weight: 450;
+}
+
+.user-menu__workspace {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.user-menu__workspace > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.user-menu__workspace strong {
+  color: var(--ink-strong);
+  font-weight: 500;
+}
+
+.user-menu__workspace small {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.user-menu__section {
+  display: grid;
+  gap: 2px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.user-menu__action {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  gap: 10px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.user-menu__action:hover,
+.user-menu__action--active {
+  background: var(--surface-hover);
+  color: var(--ink-strong);
+}
+
+.app--sidebar-collapsed .user-menu__popover {
+  bottom: 8px;
+  left: 60px;
+  width: 270px;
+}
+
+.app--sidebar-collapsed .nav__item,
+.app--sidebar-collapsed button.nav__item,
+.app--sidebar-collapsed .user {
+  width: 40px;
+  padding: 0 var(--space-3);
+  gap: 0;
+}
+
+.app--sidebar-collapsed .nav {
+  align-items: center;
+}
+
+.app--sidebar-collapsed .nav__label,
+.app--sidebar-collapsed .sidebar__shortcut,
+.app--sidebar-collapsed .nav__chevron,
+.app--sidebar-collapsed .user__name {
+  display: none;
+}
+
+.app--sidebar-collapsed .user__copy,
+.app--sidebar-collapsed .user > .nav__chevron {
+  display: none;
+}
+
+/* Scoped to the sidebar. Unscoped, this also matched the `data-label` the task
+   type table uses as its mobile column label, so hovering a cell on /tasks with
+   the sidebar collapsed popped a tooltip pinned to the far left of the
+   viewport. */
+.app--sidebar-collapsed .sidebar [data-label]::after {
+  position: fixed;
+  z-index: 90;
+  left: 52px;
+  display: none;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--tooltip-bg);
+  color: var(--tooltip-fg);
+  box-shadow: var(--shadow);
+  content: attr(data-label);
+  font-size: var(--text-sm);
+  pointer-events: none;
+}
+
+.app--sidebar-collapsed .sidebar [data-label]:hover::after {
+  display: block;
+}
+
+.sidebar-settings__back {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 36px;
+  gap: 9px;
+  padding: 0 9px;
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sidebar-settings__back:hover {
+  background: var(--surface-hover);
+}
+
+.sidebar-settings__identity {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+  margin: 0 2px 14px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.sidebar-settings__identity > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.sidebar-settings__identity strong,
+.sidebar-settings__identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-settings__identity strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sidebar-settings__identity small {
+  color: var(--ink-subtle);
+  font-size: 10px;
+}
+
+.sidebar__pane {
+  animation: sidebar-pane-in 160ms ease both;
+}
+
+.sidebar__pane--settings {
+  transform-origin: left center;
+}
+
+@keyframes sidebar-pane-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.app--sidebar-collapsed .sidebar-settings__back {
+  width: 40px;
+  padding: 0 12px;
+}
+
+.app--sidebar-collapsed .sidebar-settings__back span,
+.app--sidebar-collapsed .sidebar-settings__identity > span:last-child {
+  display: none;
+}
+
+.app--sidebar-collapsed .sidebar-settings__identity {
+  justify-content: center;
+  padding: 8px 4px 14px;
+}
+
+.header {
+  position: sticky;
+  z-index: 10;
+  top: 0;
+  height: var(--header-height);
+  border-bottom: 1px solid var(--line-subtle);
+  background: var(--chrome-bg);
+  backdrop-filter: blur(12px);
+}
+
+.header__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 100%;
+  gap: var(--space-4);
+  padding: 0 var(--space-6);
+}
+
+.header__leading,
+.header__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.header__title {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: var(--text-md);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header__stamp {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.main,
+.main--context {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: var(--content-max);
+  min-width: 0;
+  gap: var(--space-6);
+  margin: 0 auto;
+  padding: 40px 48px 72px;
+}
+
+/* Keep every route on one shared content grid, even when a page renders
+   several top-level panels instead of a dedicated page wrapper. */
+.main > *,
+.main--context > * {
+  width: 100%;
+  max-width: var(--page-max);
+  margin-inline: auto;
+}
+
+/* Controls ---------------------------------------------------------------- */
+
+/* One button. `.knowledge-button` and `.agent-board-toolbar__refresh` are class
+   names the markup owns and this stylesheet cannot rename, so they join `.btn`
+   here rather than carrying near-copies of it in globals.css — which is where
+   they had each drifted to their own height, radius, type size and disabled
+   opacity. Both stylesheets load globally against the same tokens, so a shared
+   selector list is the whole merge; the duplicate rules are gone. */
+.btn,
+.knowledge-button,
+.agent-board-toolbar__refresh,
+.select,
+.input,
+.textarea {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.btn,
+.knowledge-button,
+.agent-board-toolbar__refresh,
+.select {
+  height: 36px;
+}
+
+.btn,
+.knowledge-button,
+.agent-board-toolbar__refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  font-size: var(--text-base);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled),
+.knowledge-button:hover:not(:disabled),
+.agent-board-toolbar__refresh:hover:not(:disabled),
+.select:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-hover);
+}
+
+/* One disabled treatment. The four button systems had landed on .48, .45 and
+   .65, and the segmented control had none at all. */
+.btn:disabled,
+.knowledge-button:disabled,
+.agent-board-toolbar__refresh:disabled,
+.usage-period button:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.btn--sm {
+  height: 32px;
+}
+
+.btn--primary,
+.knowledge-button--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.btn--primary:hover:not(:disabled),
+.knowledge-button--primary:hover:not(:disabled) {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+  color: var(--accent-fg);
+}
+
+.btn--danger {
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+}
+
+.btn--danger:hover:not(:disabled) {
+  border-color: var(--bad-fg);
+  background: rgba(239, 106, 114, 0.18);
+}
+
+.btn--disabled {
+  opacity: 0.48;
+  pointer-events: none;
+}
+
+.btn--ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-muted);
+}
+
+.btn--block {
+  width: 100%;
+}
+
+.select {
+  min-width: 150px;
+  /* The right inset is clearance for the chevron drawn below, not a step on the
+     spacing scale; it moves with `background-position`, not with the scale. */
+  padding: 0 32px 0 var(--space-3);
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-subtle) 50%),
+    linear-gradient(135deg, var(--ink-subtle) 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) 50%,
+    calc(100% - 10px) 50%;
+  background-repeat: no-repeat;
+  background-size: 5px 5px;
+}
+
+.select--inline {
+  width: auto;
+}
+
+.input,
+.textarea {
+  width: 100%;
+  padding: 9px 11px;
+}
+
+.textarea {
+  min-height: 104px;
+  resize: vertical;
+}
+
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--ink-subtle);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.link {
+  color: var(--ink-strong);
+  text-decoration: underline;
+  text-decoration-color: var(--ink-subtle);
+  text-underline-offset: 3px;
+}
+
+/* Surface primitives ------------------------------------------------------ */
+.section,
+.notice,
+.sub-card,
+.plan-card,
+.verdict,
+.review-area,
+.review-note,
+.review-notice {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.section__title {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.section__title {
+  color: var(--ink);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+
+/* The count beside a section heading. `Panel` carries its own; this is for the
+   headings the reviews pages assemble themselves. */
+.section__count {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.section__title--row {
+  justify-content: flex-start;
+}
+
+.section__title--row .section__count {
+  margin-left: auto;
+}
+
+.section__subtitle {
+  margin: var(--space-5) 0 var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-base);
+}
+
+.section__body {
+  padding: var(--space-5);
+}
+
+/* The padding above lives on `.section__body`, but ten sections on the scenario
+   page render their content straight into `.section` with no body wrapper, so
+   that content sat flush against the card border. Put the body's inset on the
+   section instead and pull `.section__title` back out to the edge it draws its
+   rule against. `.review-detail-surface` opts out below: it flattens sections
+   and manages its own insets, and its `SectionFlush` bodies are flush by
+   intent. */
+.section:not(:has(> .section__body)) {
+  padding: 0 var(--space-5) var(--space-5);
+}
+
+.section:not(:has(> .section__body)) > .section__title {
+  margin: 0 calc(-1 * var(--space-5)) var(--space-4);
+}
+
+.cell-meta {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.row__badges,
+.review-row__badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: var(--space-3) var(--space-4);
+  color: var(--ink-muted);
+}
+
+.notice--bad {
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+}
+
+.notice--ok {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+
+.page-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  padding: var(--space-10) var(--space-6);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink-subtle);
+  text-align: center;
+}
+
+.page-placeholder--compact {
+  min-height: 160px;
+}
+
+.page-placeholder__icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+}
+
+.page-placeholder__icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.page-placeholder > strong {
+  color: var(--ink);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+
+.page-placeholder > p {
+  max-width: 480px;
+  margin: 6px 0 18px;
+  color: var(--ink-subtle);
+  font-size: var(--text-base);
+}
+
+/* One pill, matching `Badge` in `@jina/ui` — the class name belongs to this
+   app's markup, so the shared component cannot supply it. Its tone modifiers
+   carry the full ok/warn/bad/info tone rather than only recolouring the text on
+   a borrowed surface. The untinted base reads --neutral-*, the tone for a chip
+   stating a fact; it used to reach for --surface-raised, a background token
+   doing a tone token's job. */
+.chip,
+.knowledge-pill,
+.tenant-pill__type {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  gap: 6px;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--neutral-border);
+  border-radius: var(--radius-pill);
+  background: var(--neutral-bg);
+  color: var(--neutral-fg);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.knowledge-pill--completed,
+.knowledge-pill--valid,
+.knowledge-pill--done {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+
+.knowledge-pill--failed,
+.knowledge-pill--invalid {
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+  color: var(--bad-fg);
+}
+
+.knowledge-pill--active,
+.knowledge-pill--in_progress,
+.knowledge-pill--pending {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+  color: var(--info-fg);
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-subtle);
+}
+
+.s-pass,
+.s-complete {
+  color: var(--ok-fg);
+  background-color: var(--positive);
+}
+
+.s-warn,
+.s-blocking {
+  color: var(--warn-fg);
+  background-color: var(--caution);
+}
+
+.s-fail {
+  color: var(--bad-fg);
+  background-color: var(--negative);
+}
+
+.s-running,
+.s-queued,
+.s-generated {
+  color: var(--info-fg);
+  background-color: var(--informative);
+}
+
+/* Page and detail composition -------------------------------------------- */
+.detail,
+.organization-page {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--space-6);
+}
+
+.two-col,
+.split,
+.review-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.split__title {
+  margin: 0 0 10px;
+  color: var(--ink-muted);
+  font-size: var(--text-base);
+}
+
+.def {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+/* `.dl` is a real `<dl>`: the component emits bare `dt`/`dd` pairs, so the two
+   tracks and the `dt`/`dd` rules are the whole layout. Sharing `.def`'s
+   single-column, zero-gap declaration left it on the UA default — a 40px `dd`
+   indent with term and value in the same colour and size. Reads as
+   `.organization-summary` does: quiet term, weighted value. */
+.dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
+
+.dl dt {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.dl dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.def__block {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.4fr) minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.def__block:last-child {
+  border-bottom: 0;
+}
+
+.def__term,
+.form-field__label {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.def__desc {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.def__desc--muted {
+  color: var(--ink-muted);
+}
+
+.cell-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.code-block,
+.timeline__payload {
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.code-block--sm {
+  max-height: 260px;
+}
+
+.detail-surface,
+.review-detail-surface {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.detail-surface__head {
+  padding: 15px 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.detail-surface__head h2 {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+
+.issue-detail__body {
+  padding: 22px 20px;
+  color: var(--ink-muted);
+  font-size: var(--text-base);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.issue-detail__meta {
+  display: grid;
+  margin: 0;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.issue-meta-row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: var(--space-6);
+  padding: 13px 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.issue-meta-row:last-child {
+  border-bottom: 0;
+}
+
+.issue-meta-row dt {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.issue-meta-row dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.review-detail-surface > .section,
+.review-detail-surface .review-appendix__body > .section {
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.review-detail-surface > .section + .section,
+.review-detail-surface > .notice + .section,
+.review-detail-surface .review-appendix__body > .section + .section {
+  border-top: 1px solid var(--line-subtle);
+}
+
+.review-detail-surface > .notice {
+  border-width: 1px 0 0;
+  border-radius: 0;
+}
+
+.review-detail-surface .section__title {
+  min-height: 0;
+  padding: 18px 20px 8px;
+  border-bottom: 0;
+}
+
+.review-detail-surface .section__body {
+  padding: 10px 20px 22px;
+}
+
+/* Opts out of the body-less `.section` fallback: sections here are already
+   flattened into the surface and set their own title/body insets, and
+   `SectionFlush` deliberately runs its list to the surface edge. */
+.review-detail-surface .section:not(:has(> .section__body)) {
+  padding: 0;
+}
+
+.review-detail-surface .section:not(:has(> .section__body)) > .section__title {
+  margin: 0;
+}
+
+.review-detail-surface .review-context {
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 0;
+  padding: 0 var(--space-5) var(--space-5);
+}
+
+.review-detail-surface .review-context dt,
+.review-detail-surface .review-context dd {
+  min-width: 0;
+  margin: 0;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-subtle);
+  overflow-wrap: anywhere;
+}
+
+.review-detail-surface .review-context dt {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.review-detail-surface .review-area,
+.review-detail-surface .review-note,
+.review-detail-surface .review-notice,
+.review-detail-surface .metric {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.review-detail-surface .review-area {
+  padding: 0;
+}
+
+.review-detail-surface .review-area + .review-area {
+  padding-top: 18px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.review-detail-surface .review-block,
+.review-detail-surface .disclosure,
+.review-detail-surface .review-appendix {
+  border-top-color: var(--line-subtle);
+}
+
+.review-detail-surface .code-block {
+  padding: var(--space-3) 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.review-detail-surface .review-row--issue,
+.review-detail-surface .review-row--task {
+  box-shadow: none;
+}
+
+.review-detail-surface .review-notices,
+.review-detail-surface .review-area-stack,
+.review-detail-surface .review-appendix__body {
+  gap: 0;
+}
+
+.review-detail-surface .review-appendix__body > .section,
+.review-detail-surface .review-appendix__body > .event-history {
+  border-top: 1px solid var(--line-subtle);
+}
+
+.form,
+.form-field,
+.field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.form-field--wide,
+.form__lead,
+.form__foot {
+  grid-column: 1 / -1;
+}
+
+.form__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.error-text {
+  color: var(--bad-fg);
+  font-size: var(--text-sm);
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.toggle-row--disabled {
+  opacity: 0.52;
+}
+
+/* Reviews, issues, simulations ------------------------------------------- */
+/* `display: grid` suppresses neither the list marker nor the UA's 40px
+   `padding-inline-start`, so every one of these lists was rendering `1. 2. 3.`
+   or discs behind a deep indent. The reset is kept on this existing selector
+   list rather than applied globally to `ul`/`ol`: a blanket reset would also
+   strip `.review-bullet-list`, `.trail-evidence` and the markdown prose the
+   Context reader renders, all of which want their markers. */
+.scenario-list,
+.review-task-stack,
+.review-issue-stack,
+.review-disclosure-list,
+/* Each audit entry stacks: kicker, detail, then optional evidence. Without this
+   the three run inline on one line, which the pre-rewrite rule did not do. */
+.review-audit-list > li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.review-audit-list,
+.timeline,
+.events,
+.activity-list,
+.file-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Only these three stack: each is a container whose children are a head and a
+   body (`<details>` summary + panel, `<li>` head + payload, or a metric column).
+   `.events__row` and `.sim-run` lay a fixed set of labels across one line and
+   are laid out as flex rows below — a column grid shredded them into one child
+   per line. */
+.review-row,
+.timeline__item,
+.activity-row {
+  position: relative;
+  display: grid;
+  gap: var(--space-2);
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.review-row:last-child,
+.timeline__item:last-child,
+.activity-row:last-child {
+  border-bottom: 0;
+}
+
+/* The row chrome for `.events` belongs on the `<li>`, not on the head `<div>`
+   inside it: the `<li>` also holds the payload disclosure, which was sitting
+   outside the padded, ruled box. Inline padding comes from the enclosing
+   body-less `.section`, so these carry the vertical step only. */
+.events > li,
+.sim-run {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.events > li:last-child,
+.sim-run:last-child {
+  border-bottom: 0;
+}
+
+.sim-run {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  color: var(--ink);
+}
+
+/* The run currently being viewed. The modifier was emitted but styled nothing,
+   so it read identically to every other row. An accent rule rather than a fill:
+   the rows are padded vertically only, so a background would sit inset from the
+   card edge — and the theme routes selection through the accent. */
+.sim-run--current {
+  box-shadow: inset 2px 0 0 var(--accent);
+  padding-left: var(--space-3);
+}
+
+.sim-run__verdict {
+  min-width: 0;
+  flex: 1;
+}
+
+/* Two-part heads: a label, and the metrics or timestamp that belong to it. */
+.events__row,
+.timeline__head,
+.verdict__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+}
+
+/* A run of short `Label <b>value</b>` pairs, not a two-column grid: as a grid
+   it broke to a new line under the verdict and stacked three metrics into two
+   half-width columns. */
+.verdict__metrics {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+/* `<summary>` defaults to `display: list-item`, so both of these were drawing
+   the browser's own ▶ next to the component's chevron span. */
+.review-row__summary,
+.review-note > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  cursor: pointer;
+  list-style: none;
+}
+
+.review-row__summary::-webkit-details-marker,
+.review-note > summary::-webkit-details-marker {
+  display: none;
+}
+
+.review-row__title,
+.review-block__label,
+.timeline__head,
+.verdict__head {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.review-row__summary,
+.review-row__details,
+.review-row__location,
+.review-note__details,
+.review-notice,
+.timeline__time,
+.activity-row__date,
+.activity-row__link--none {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+/* The title takes the slack in the summary row so the badges and the file
+   location settle against its trailing edge; the location is capped and
+   truncated so a deep path cannot squeeze the title out. */
+.review-row__title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.review-row__location {
+  overflow: hidden;
+  max-width: min(260px, 35%);
+  flex: 0 0 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-summary,
+.summary-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.metric {
+  display: grid;
+  gap: 3px;
+  padding: 14px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.metric__label,
+.metric__sub {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.metric__value {
+  color: var(--ink-strong);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+}
+
+.metric__value--ok {
+  color: var(--ok-fg);
+}
+.metric__value--warn {
+  color: var(--warn-fg);
+}
+.metric__value--bad {
+  color: var(--bad-fg);
+}
+.metric__value--info {
+  color: var(--info-fg);
+}
+
+.review-bullet-list,
+.trail-evidence,
+.step-verdicts {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ink-muted);
+}
+
+/* `.step-verdicts` is a wrapper around an unclassed `<ol>`, so the class above
+   indents the wrapper while the list inside still carried the UA's own numbers
+   and 40px indent on top of it. Every `<li>` opens with its own "step N"
+   label; the numbers were a second, disagreeing count. */
+.step-verdicts ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-block,
+.sim-detail,
+.more-context,
+.disclosure,
+.review-appendix {
+  border-top: 1px solid var(--line-subtle);
+}
+
+.review-area__head,
+.sim-detail__summary,
+.more-context__summary,
+.review-appendix__summary,
+.event-history__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  cursor: pointer;
+}
+
+.review-area,
+.review-note,
+.review-notice,
+.verdict {
+  padding: var(--space-4);
+}
+
+.verdict--ok {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+}
+.verdict--warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.verdict--bad {
+  border-color: var(--bad-border);
+  background: var(--bad-bg);
+}
+.verdict--info {
+  border-color: var(--info-border);
+  background: var(--info-bg);
+}
+
+.trail {
+  display: grid;
+  gap: 0;
+}
+
+/* Four tracks for the four children TrailRow emits — marker, dot, body, type.
+   A two-track version placed `.trail__body` in the 20px marker lane, shredding
+   every simulation step into a ~20px ribbon. */
+.trail__row {
+  display: grid;
+  grid-template-columns: 56px 14px minmax(0, 1fr) max-content;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: 10px 0;
+}
+
+.trail__dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--ink-subtle);
+}
+
+.trail__dot--action {
+  background: var(--informative);
+}
+.trail__dot--assertion {
+  background: var(--caution);
+}
+.trail__dot--observation {
+  background: var(--positive);
+}
+
+/* Models and integrations ------------------------------------------------- */
+
+.sub-card__hint {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.sub-card__actions {
+  margin-left: auto;
+}
+
+.harness-connect__row,
+.codex-connected {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.sub-card {
+  margin: var(--space-3) var(--space-4);
+}
+
+/* A glyph, not a tile. This class is on the <svg> itself in every caller — the
+   close ×, the copy icon, the connected check — so the 32px bordered plate it
+   used to draw framed each icon in its own box and blew out the 22px check
+   circle it sits inside. */
+.codex-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+/* Device sign-in steps.
+   The number is generated here from a counter on the <ol>, so it tracks DOM
+   order and cannot be knocked out of step by markup changes. Everything else
+   in a step is a flex item the component actually emits: the step lays out
+   whatever children it is given rather than reserving fixed lanes for markup
+   it hopes for. The previous rule declared three grid columns for
+   [number][text][action] against markup that emitted a single wrapper div, so
+   every step's text was squeezed into the 28px number column. */
+.codex-steps {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  counter-reset: codex-step;
+  list-style: none;
+}
+
+.codex-step {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius);
+  counter-increment: codex-step;
+}
+
+.codex-step::before {
+  content: counter(codex-step);
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: var(--surface-selected);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.codex-step__text {
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+/* Each step's action sits at its trailing edge, centred against the text. */
+.codex-step__action,
+.codex-code {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.codex-step__text,
+.codex-device__note,
+.codex-modal__note,
+.codex-fallback__body {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+/* Every panel in the modal is a grid that owns its own gap, so the paragraphs
+   inside them must not add a default bottom margin on top of it. */
+.codex-device__note,
+.codex-modal__note,
+.codex-modal__subtitle,
+.codex-fallback__body p {
+  margin: 0;
+}
+
+/* The code chip and its Copy button sit side by side. They are siblings rather
+   than the button floating inside the chip, which is what used to make Copy
+   overlap the code it was supposed to sit next to. */
+.codex-code {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* A credential the user reads off the screen and types into ChatGPT: it must
+   never break across lines mid-token, and the glyphs are spaced far enough
+   apart to be read aloud a character at a time. The right inset absorbs the
+   trailing letter-space so the code stays optically centred in its chip. */
+.codex-code__value {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 calc(var(--space-3) - 0.16em) 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+  color: var(--ink-strong);
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  white-space: nowrap;
+}
+
+.codex-device,
+.codex-fallback,
+.codex-fallback__body {
+  display: grid;
+  gap: var(--space-3);
+}
+
+/* The manual-credentials escape hatch is secondary to the device flow above it. */
+.codex-fallback {
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--line-subtle);
+}
+
+.codex-fallback__toggle {
+  justify-self: start;
+  padding-left: 0;
+}
+
+.codex-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--line);
+  border-top-color: var(--ink-strong);
+  border-radius: 50%;
+  animation: spin 800ms linear infinite;
+}
+
+/* The one spinner rotation in the app. globals.css carried a byte-identical
+   `agent-board-spin`; its consumers now animate this. */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Billing and usage ------------------------------------------------------- */
+.plan-hero {
+  display: grid;
+  gap: 5px;
+  padding: var(--space-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.plan-hero__kicker,
+.plan-hero__sub,
+.plan-card__per {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.plan-hero__name {
+  margin: 0;
+  font-size: 32px;
+  letter-spacing: -0.04em;
+}
+
+.plan-hero__lead {
+  color: var(--ink-muted);
+}
+
+.plan-card {
+  padding: var(--space-5);
+}
+
+.plan-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.plan-card__name {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.plan-card__price {
+  margin-top: var(--space-4);
+  color: var(--ink-strong);
+  font-size: var(--text-2xl);
+  letter-spacing: -0.04em;
+}
+
+.plan-card__credits {
+  margin-top: var(--space-3);
+  color: var(--ink-muted);
+}
+
+
+.organization-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+
+.organization-summary > div {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 18px 16px;
+  border-right: 1px solid var(--line-subtle);
+}
+
+.organization-summary > div:last-child {
+  border-right: 0;
+}
+
+.organization-summary dt {
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.organization-summary dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.organization-access {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.organization-access .page-placeholder__icon {
+  margin: 0;
+}
+
+.organization-access strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.organization-access p {
+  max-width: 760px;
+  margin: var(--space-1) 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+/* Organization and user settings ---------------------------------------- */
+.settings-page {
+  display: grid;
+  width: 100%;
+  max-width: 920px;
+  gap: 20px;
+}
+
+.settings-page__intro {
+  padding: 6px 0 8px;
+}
+
+.settings-page__intro--row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.settings-page__intro h1 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.15;
+  letter-spacing: -0.04em;
+}
+
+.settings-page__intro p,
+.settings-card__head p,
+.settings-card__note {
+  margin: 6px 0 0;
+  color: var(--ink-subtle);
+  font-size: 13px;
+}
+
+.settings-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.settings-card--danger {
+  border-color: var(--bad-border);
+}
+
+.settings-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 66px;
+  gap: 16px;
+  padding: 15px 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.settings-card__head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.settings-card__head p {
+  margin-top: 3px;
+  font-size: 12px;
+}
+
+.settings-card__note,
+.settings-card__empty {
+  margin: 0;
+  padding: 24px 20px;
+}
+
+.settings-card__empty {
+  color: var(--ink-subtle);
+  text-align: center;
+}
+
+.team-profile {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.team-avatar,
+.member-avatar,
+.session-row__device {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+  color: var(--ink-strong);
+  font-weight: 650;
+}
+
+.team-avatar--large {
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  font-size: 22px;
+}
+
+.team-profile__avatar-actions {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+}
+
+.team-profile__avatar-actions strong,
+.preference-row strong,
+.security-action strong,
+.security-subrow strong,
+.identity-method > span,
+.session-row__identity strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.team-profile__avatar-actions > span,
+.preference-row small,
+.security-action small,
+.security-subrow small,
+.identity-method small,
+.session-row__identity small,
+.session-row__time {
+  color: var(--ink-subtle);
+  font-size: 11px;
+}
+
+.team-profile__avatar-actions .btn {
+  margin-top: 5px;
+}
+
+.settings-form {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.settings-form--two-col,
+.security-inline-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.settings-field > span {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.settings-field--full {
+  grid-column: 1 / -1;
+}
+
+.settings-form__actions,
+.danger-action__buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.settings-metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.settings-metadata > div {
+  min-width: 0;
+  padding: 15px 20px;
+  border-right: 1px solid var(--line-subtle);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.settings-metadata > div:nth-child(2n) {
+  border-right: 0;
+}
+
+.settings-metadata > div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.settings-metadata dt {
+  margin-bottom: 4px;
+  color: var(--ink-subtle);
+  font-size: 11px;
+}
+
+.settings-metadata dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.danger-actions {
+  display: grid;
+}
+
+.danger-action {
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.danger-action:last-child {
+  border-bottom: 0;
+}
+
+.danger-action__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 76px;
+  gap: 20px;
+  padding: 15px 20px;
+}
+
+.danger-action__summary > span {
+  display: grid;
+  gap: 3px;
+}
+
+.danger-action__summary strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.danger-action__summary small,
+.danger-action__confirmation {
+  color: var(--ink-subtle);
+  font-size: 12px;
+}
+
+.danger-action__body {
+  display: grid;
+  gap: 14px;
+  padding: 16px 20px 20px;
+  border-top: 1px solid var(--bad-border);
+  background: rgba(239, 106, 114, 0.04);
+}
+
+.danger-action__confirmation {
+  margin: 0;
+}
+
+.member-invite {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.member-invite .input {
+  width: 240px;
+}
+
+.member-list,
+.session-list,
+.security-actions {
+  display: grid;
+}
+
+.member-row,
+.session-row {
+  display: grid;
+  align-items: center;
+  min-width: 0;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.member-row:last-child,
+.session-row:last-child {
+  border-bottom: 0;
+}
+
+.member-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  font-size: 12px;
+}
+
+.member-row__identity,
+.member-row__actions,
+.session-row__identity {
+  display: flex;
+  min-width: 0;
+}
+
+.member-row__identity,
+.session-row__identity {
+  flex-direction: column;
+}
+
+.member-row__identity strong,
+.member-row__identity small,
+.session-row__identity strong,
+.session-row__identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-row__identity strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.member-row__identity small,
+.member-row__joined {
+  color: var(--ink-subtle);
+  font-size: 11px;
+}
+
+.member-row__actions {
+  align-items: center;
+  gap: 4px;
+}
+
+.member-row__actions .select {
+  min-width: 100px;
+}
+
+.access-levels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.access-levels > div {
+  padding: 20px;
+  border-right: 1px solid var(--line-subtle);
+}
+
+.access-levels > div:last-child {
+  border-right: 0;
+}
+
+.access-levels strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.access-levels p {
+  margin: 5px 0 0;
+  color: var(--ink-subtle);
+  font-size: 12px;
+}
+
+.preference-row,
+.security-action,
+.security-subrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 70px;
+  gap: 20px;
+  padding: 15px 20px;
+}
+
+.preference-row > span,
+.security-action > span,
+.security-subrow > span {
+  display: grid;
+  gap: 3px;
+}
+
+.switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-inset);
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.switch > span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ink-muted);
+  transition:
+    transform 140ms ease,
+    background 140ms ease;
+}
+
+.switch--on {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+}
+
+.switch--on > span {
+  background: var(--ok-fg);
+  transform: translateX(16px);
+}
+
+.security-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.security-stat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+  border-right: 1px solid var(--line-subtle);
+}
+
+.security-stat:last-child {
+  border-right: 0;
+}
+
+.security-stat > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.security-stat small {
+  color: var(--ink-subtle);
+  font-size: 10px;
+}
+
+.security-stat strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.security-stat__dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--ink-subtle);
+}
+
+.security-stat__dot--ok {
+  background: var(--ok-fg);
+}
+
+.security-action,
+.security-subrow,
+.security-inline-form {
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.security-action--stack {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.security-inline-form {
+  display: grid;
+  gap: 14px;
+  padding: 16px 20px 20px;
+  background: var(--surface-inset);
+}
+
+.identity-methods {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.identity-method {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 7px;
+  background: var(--surface-inset);
+}
+
+.identity-method > span,
+.identity-method small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row {
+  grid-template-columns: auto minmax(160px, 1fr) auto auto;
+}
+
+.session-row__device {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.metadata-details {
+  border-top: 1px solid var(--line-subtle);
+}
+
+.metadata-details summary {
+  padding: 14px 20px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.metadata-json-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 20px 20px;
+}
+
+.metadata-json-grid > div {
+  min-width: 0;
+}
+
+.metadata-json-grid strong {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--ink-subtle);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.metadata-json-grid pre {
+  min-height: 80px;
+  max-height: 240px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--line-subtle);
+  border-radius: 7px;
+  background: var(--surface-inset);
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.topup {
+  display: flex;
+  align-items: end;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+/* Four tracks for the four children the invoice row always emits: date, amount,
+   status (or an empty span when Stripe reports none), and the invoice link (or
+   its em-dash placeholder). Three tracks wrapped the link onto a second line
+   inside the date column and doubled every row's height. */
+.activity-row {
+  grid-template-columns: 120px minmax(0, 1fr) auto auto;
+  align-items: center;
+}
+
+.activity-row__amount {
+  color: var(--ink);
+  font-family: var(--font-mono);
+}
+
+
+/* Dialogs and command palette -------------------------------------------- */
+.command {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding: min(14vh, 120px) 20px 20px;
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+}
+
+/* The Codex modal is a native <dialog> opened with showModal(): the top layer,
+   the scrim, the focus trap and Escape all come from the browser, so there is
+   no backdrop element and no z-index of our own. It is capped in height and
+   laid out head / body / footer so only the body scrolls — the previous
+   `max-height: 65vh` on the body alone let a tall dialog run off the bottom of
+   the viewport and take the footer with it. */
+.codex-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  width: min(600px, calc(100vw - var(--space-8)));
+  max-width: none;
+  max-height: min(760px, calc(100dvh - var(--space-10)));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-lg);
+}
+
+.codex-modal:not([open]) {
+  display: none;
+}
+
+.codex-modal::backdrop {
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+}
+
+.codex-modal__head,
+.codex-modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.codex-modal__head {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.codex-modal__heading {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.codex-modal__title {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: var(--text-lg);
+}
+
+/* A square icon button on the .btn chassis rather than a bare <button>. */
+.codex-modal__close {
+  width: 32px;
+  padding: 0;
+}
+
+/* min-height: 0 is what actually lets a flex child scroll instead of growing
+   past its parent's max-height. */
+.codex-modal__body {
+  display: grid;
+  align-content: start;
+  min-height: 0;
+  flex: 1 1 auto;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+
+.codex-modal__footer {
+  border-top: 1px solid var(--line-subtle);
+}
+
+.command__dialog {
+  position: relative;
+  z-index: 1;
+  width: min(600px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.command__input-wrap {
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.command__input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--ink-strong);
+  font-size: var(--text-lg);
+}
+
+.command__input-wrap:focus-within {
+  border-bottom-color: var(--accent);
+  box-shadow: inset 0 -1px var(--accent);
+}
+
+.command__results {
+  max-height: min(56vh, 460px);
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.command__result {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  gap: var(--space-3);
+  padding: 0 10px;
+  border-radius: var(--radius);
+  color: var(--ink-muted);
+}
+
+.command__result:hover,
+.command__result--active {
+  background: var(--surface-selected);
+  color: var(--ink-strong);
+}
+
+.command__hint {
+  margin-left: auto;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.command__empty {
+  padding: 36px 12px;
+  color: var(--ink-subtle);
+  text-align: center;
+}
+
+/* Auth -------------------------------------------------------------------- */
+.auth-shell {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: var(--space-5);
+  background: var(--canvas);
+}
+
+.auth-page {
+  display: grid;
+  width: min(440px, 100%);
+  gap: var(--space-5);
+}
+
+.auth-page__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.auth-page__mark {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border-radius: var(--radius);
+  background: var(--ink-strong);
+  color: var(--ink-inverse);
+  font-weight: 700;
+}
+
+.auth-page__header h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+  letter-spacing: -0.03em;
+}
+
+.auth-page__header p {
+  margin: 3px 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.auth-clerk-root,
+.auth-clerk-box {
+  width: 100%;
+}
+
+.auth-clerk-card {
+  width: 100%;
+  border: 1px solid var(--line) !important;
+  border-radius: var(--radius-lg) !important;
+  background: var(--surface) !important;
+  box-shadow: none !important;
+}
+
+.auth-clerk-header {
+  display: none !important;
+}
+
+.auth-clerk-social,
+.auth-clerk-input {
+  border-color: var(--line) !important;
+  background: var(--surface-raised) !important;
+  box-shadow: none !important;
+}
+
+.auth-clerk-primary {
+  background: var(--accent) !important;
+  color: var(--accent-fg) !important;
+  box-shadow: none !important;
+}
+
+.auth-clerk-footer {
+  background: transparent !important;
+}
+
+.auth-loading {
+  color: var(--ink-muted);
+}
+
+/* Responsive -------------------------------------------------------------- */
+
+@media (max-width: 920px) {
+  .main,
+  .main--context {
+    padding: 32px 24px 56px;
+  }
+
+  .header__stamp {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .app,
+  .app--sidebar-collapsed {
+    display: block;
+  }
+
+  .sidebar,
+  .app--sidebar-collapsed .sidebar {
+    position: fixed;
+    z-index: 80;
+    inset: 0 auto 0 0;
+    width: min(280px, calc(100vw - 40px));
+    height: 100dvh;
+    border-right: 1px solid var(--line);
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-102%);
+    transition: transform 180ms ease;
+  }
+
+  .app--mobile-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .app--mobile-open .sidebar__backdrop {
+    position: fixed;
+    z-index: 70;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: var(--scrim);
+    backdrop-filter: blur(2px);
+  }
+
+  .sidebar__top,
+  .app--sidebar-collapsed .sidebar__top {
+    justify-content: flex-start;
+  }
+
+  .sidebar__workspace,
+  .app--sidebar-collapsed .sidebar__workspace {
+    display: block;
+    width: calc(100% - 40px);
+  }
+
+  .sidebar__mark,
+  .sidebar__collapse {
+    display: none;
+  }
+
+  .sidebar__mobile-close,
+  .header__menu {
+    display: inline-grid;
+  }
+
+  .sidebar__mobile-close {
+    margin-left: auto;
+  }
+
+  .app--sidebar-collapsed .nav__item,
+  .app--sidebar-collapsed button.nav__item,
+  .app--sidebar-collapsed .user,
+  .nav__item,
+  button.nav__item,
+  .user {
+    width: 100%;
+    padding: 0 10px;
+    gap: var(--space-3);
+  }
+
+  .app--sidebar-collapsed .nav__label,
+  .app--sidebar-collapsed .sidebar__shortcut,
+  .app--sidebar-collapsed .nav__chevron,
+  .app--sidebar-collapsed .user__name {
+    display: initial;
+  }
+
+  .app--sidebar-collapsed .user__copy {
+    display: grid;
+  }
+
+  .app--sidebar-collapsed .user > .nav__chevron {
+    display: block;
+  }
+
+  .app--sidebar-collapsed .sidebar-settings__back {
+    width: auto;
+    padding: 0 9px;
+  }
+
+  .app--sidebar-collapsed .sidebar-settings__back span,
+  .app--sidebar-collapsed .sidebar-settings__identity > span:last-child {
+    display: grid;
+  }
+
+  .app--sidebar-collapsed .sidebar-settings__identity {
+    justify-content: flex-start;
+    padding: 8px;
+  }
+
+  .user-menu__popover,
+  .app--sidebar-collapsed .user-menu__popover {
+    right: auto;
+    bottom: 56px;
+    left: 8px;
+    width: min(264px, calc(100vw - 56px));
+  }
+
+  .app--sidebar-collapsed .sidebar [data-label]::after {
+    display: none !important;
+  }
+
+  .header__inner {
+    padding: 0 var(--space-3);
+  }
+
+  .main,
+  .main--context {
+    padding: 24px 16px 48px;
+  }
+
+  .topup {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .two-col,
+  .split,
+  .review-field-grid,
+  .form {
+    grid-template-columns: 1fr;
+  }
+
+  .form-field--wide,
+  .form__lead,
+  .form__foot {
+    grid-column: auto;
+  }
+
+  .def__block {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+
+  .sub-card__actions {
+    margin-left: 0;
+  }
+
+  /* Narrow: the action drops onto its own row, indented under the step text
+     rather than under the number. Two columns for the two lanes that exist. */
+  .codex-step {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .codex-step__action,
+  .codex-code {
+    grid-column: 2;
+    justify-self: start;
+    margin-left: 0;
+  }
+
+  /* Date on its own line, then amount / status / link across one row — two
+     tracks for four children broke the row into three ragged lines. */
+  .activity-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .activity-row__date {
+    grid-column: 1 / -1;
+  }
+
+  .command {
+    padding: 10px;
+  }
+
+  .command__dialog {
+    border-radius: var(--radius-lg);
+  }
+
+  .codex-modal {
+    width: calc(100vw - var(--space-4));
+    max-height: calc(100dvh - var(--space-4));
+  }
+}
+
+/* Usage v2 --------------------------------------------------------------- */
+.usage-v2 {
+  display: grid;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  gap: 0;
+}
+
+.usage-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 44px;
+  margin-bottom: var(--space-5);
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--text-base);
+}
+
+.usage-alert button {
+  flex: none;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.usage-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-6);
+  min-height: 72px;
+  padding: 4px 0 18px;
+}
+
+.usage-toolbar h1 {
+  margin: 0;
+  font-size: 25px;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.usage-toolbar p {
+  margin: 6px 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-base);
+}
+
+.usage-toolbar__filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.usage-filter-pill,
+.usage-period {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+}
+
+.usage-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  overflow: hidden;
+  padding: 0 var(--space-3);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-period {
+  display: flex;
+  align-items: center;
+  padding: 3px;
+}
+
+/* Segments of a segmented control, not free-standing buttons: the 26px height
+   and the pill radius are what fit inside the 34px `.usage-period` track above,
+   so they stay off `.btn`'s 36px metric. The disabled treatment is shared. */
+.usage-period button {
+  min-width: 46px;
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.usage-period button:hover,
+.usage-period__active {
+  background: var(--surface-selected) !important;
+  color: var(--ink-strong) !important;
+}
+
+.usage-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  min-height: 470px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--surface);
+}
+
+.usage-chart-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.usage-chart-panel__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+  padding: 22px 24px 0;
+}
+
+.usage-chart-panel__head > div {
+  display: grid;
+}
+
+.usage-chart-panel__head span,
+.usage-chart-panel__head small,
+.usage-chart-panel__group {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.usage-chart-panel__head strong {
+  margin-top: 3px;
+  color: var(--ink-strong);
+  font-size: 24px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+}
+
+.usage-chart-panel__head small {
+  margin-top: 2px;
+}
+
+.usage-chart-panel__group {
+  padding: 5px 9px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.usage-trend {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 340px;
+  padding: 36px 24px 26px;
+  color: var(--accent);
+}
+
+.usage-trend svg {
+  width: 100%;
+  height: 100%;
+  min-height: 280px;
+  overflow: visible;
+}
+
+.usage-trend__baseline {
+  stroke: var(--line);
+  stroke-width: 0.3;
+}
+
+.usage-trend__line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 0.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.usage-trend__area {
+  fill: url(#usage-fill);
+  stroke: none;
+}
+
+.usage-trend__empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--ink-subtle);
+  font-size: var(--text-base);
+  text-align: center;
+}
+
+.usage-trend__labels {
+  position: absolute;
+  right: 24px;
+  bottom: 13px;
+  left: 24px;
+  display: flex;
+  justify-content: space-between;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.usage-side-rail {
+  display: grid;
+  grid-template-rows: repeat(3, minmax(0, 1fr));
+  border-left: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.usage-side-rail__metric {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 22px 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.usage-side-rail__metric:last-child {
+  border-bottom: 0;
+}
+
+.usage-side-rail__metric > span,
+.usage-side-rail__metric > small {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.usage-side-rail__metric > strong {
+  margin-top: var(--space-2);
+  color: var(--ink-strong);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+}
+
+.usage-side-rail__metric > small {
+  margin-top: 2px;
+}
+
+.usage-rail-progress {
+  height: 7px;
+  margin-top: auto;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--surface-selected);
+}
+
+.usage-rail-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.usage-breakdown {
+  background: transparent;
+}
+
+.usage-breakdown__tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  min-height: 54px;
+  padding: 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+}
+
+.usage-breakdown__tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 54px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-subtle);
+  font-size: var(--text-base);
+  white-space: nowrap;
+}
+
+a.usage-breakdown__tab {
+  cursor: pointer;
+}
+
+.usage-breakdown__tab--active {
+  color: var(--ink-strong);
+  cursor: default;
+}
+
+.usage-breakdown__tab--active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  background: var(--accent);
+  content: "";
+}
+
+.usage-capabilities {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: var(--space-4) 0 0;
+}
+
+.usage-capability-card {
+  min-width: 0;
+  min-height: 250px;
+  padding: var(--space-4);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.usage-capability-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.usage-capability-card__head h2 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+
+.usage-capability-card__head span {
+  color: var(--ink-subtle);
+  font-size: var(--text-xl);
+}
+
+.usage-capability-card__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: var(--space-2);
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.usage-capability-card__legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.usage-capability-card__legend i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+}
+
+.usage-capability-card svg {
+  width: 100%;
+  height: 136px;
+  margin-top: 18px;
+  overflow: visible;
+}
+
+.usage-capability-card svg line {
+  stroke: var(--line);
+  stroke-width: 0.3;
+}
+
+.usage-capability-card svg polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 0.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.usage-capability-card__labels {
+  display: flex;
+  justify-content: space-between;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.usage-recent {
+  margin-top: 22px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.usage-recent__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 68px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.usage-recent__head h2 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.usage-recent__head p {
+  margin: 3px 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.usage-recent__head > span {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.usage-recent__empty {
+  display: grid;
+  place-items: center;
+  min-height: 150px;
+  padding: 28px;
+  color: var(--ink-subtle);
+  font-size: var(--text-base);
+  text-align: center;
+}
+
+.usage-recent__row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.7fr) 130px 120px 100px 130px;
+  align-items: center;
+  min-width: 800px;
+  min-height: 48px;
+  gap: 14px;
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--line-subtle);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.usage-recent__row > span:first-child {
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-recent__row--head {
+  min-height: 38px;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.usage-recent__table {
+  overflow-x: auto;
+}
+
+@media (max-width: 980px) {
+  .usage-overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .usage-side-rail {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: auto;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .usage-side-rail__metric {
+    min-height: 145px;
+    border-right: 1px solid var(--line-subtle);
+    border-bottom: 0;
+  }
+
+  .usage-side-rail__metric:last-child {
+    border-right: 0;
+  }
+}
+
+@media (max-width: 700px) {
+  .usage-alert,
+  .usage-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .usage-toolbar {
+    padding-top: 2px;
+  }
+
+  .usage-toolbar__filters {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .usage-period {
+    margin-left: auto;
+  }
+
+  .usage-overview {
+    min-height: 0;
+  }
+
+  .usage-chart-panel__head {
+    padding: 18px 16px 0;
+  }
+
+  .usage-trend {
+    min-height: 260px;
+    padding: 24px 16px 22px;
+  }
+
+  .usage-trend svg {
+    min-height: 210px;
+  }
+
+  .usage-trend__labels {
+    right: 16px;
+    left: 16px;
+  }
+
+  .usage-side-rail,
+  .usage-capabilities {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .usage-side-rail__metric {
+    min-height: 124px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+
+  .usage-side-rail__metric:last-child {
+    border-bottom: 0;
+  }
+
+  .usage-capabilities {
+    padding: var(--space-3) 0 0;
+  }
+
+  .usage-capability-card {
+    min-height: 220px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Billing v2 ------------------------------------------------------------- */
+.billing-v2 {
+  display: grid;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+}
+
+.billing-v2 > .route-intro {
+  margin-bottom: var(--space-2);
+}
+
+.billing-v2__tabs {
+  display: flex;
+  min-height: 48px;
+  gap: var(--space-6);
+  border-bottom: 1px solid var(--line);
+}
+
+.billing-v2__tabs a,
+.billing-v2__tabs span {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-subtle);
+  font-size: var(--text-base);
+  text-decoration: none;
+}
+
+.billing-v2__tabs a:hover,
+.billing-v2__tabs span[aria-current="page"] {
+  color: var(--ink-strong);
+}
+
+.billing-v2__tabs span[aria-current="page"]::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  background: var(--accent);
+  content: "";
+}
+
+.billing-v2__state,
+.billing-v2__plan,
+.billing-v2__section {
+  border-bottom: 1px solid var(--line);
+}
+
+.billing-v2__state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 140px;
+  gap: var(--space-6);
+  padding: 28px 0;
+}
+
+.billing-v2__state strong,
+.billing-v2__section-head h2 {
+  color: var(--ink-strong);
+  font-size: var(--text-lg);
+  font-weight: 500;
+}
+
+.billing-v2__state p,
+.billing-v2__section-head p {
+  margin: 5px 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.billing-v2__plan,
+.billing-v2__section {
+  padding: var(--space-6) 0;
+}
+
+.billing-v2__plan-head,
+.billing-v2__section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+}
+
+.billing-v2__plan .plan-hero__lead {
+  display: grid;
+  gap: 5px;
+}
+
+.billing-v2__plan .plan-hero__name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.billing-v2__plans {
+  margin-top: 22px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.billing-v2__plan-option {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 110px minmax(170px, 1fr) auto;
+  align-items: center;
+  gap: var(--space-5);
+  min-height: 76px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.billing-v2__plan-option:last-child {
+  border-bottom: 0;
+}
+
+.billing-v2__plan-option .plan-card__head,
+.billing-v2__plan-option .plan-card__price,
+.billing-v2__plan-option .plan-card__credits {
+  margin: 0;
+}
+
+.billing-v2__plan-option .plan-card__price {
+  font-size: var(--text-xl);
+}
+
+.billing-v2__plan-option--current {
+  color: var(--ink-strong);
+}
+
+/* Columns follow the child count rather than a hard three: the Members metric
+   only exists on an organization account, so a personal account left a third of
+   the band empty with the divider stopping mid-row. */
+.billing-v2__metrics {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  margin-top: var(--space-5);
+  border-top: 1px solid var(--line-subtle);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.billing-v2__metric {
+  display: grid;
+  min-width: 0;
+  min-height: 110px;
+  align-content: center;
+  gap: var(--space-2);
+  padding: 18px 20px;
+  border-right: 1px solid var(--line-subtle);
+}
+
+.billing-v2__metric:first-child {
+  padding-left: 0;
+}
+
+.billing-v2__metric:last-child {
+  border-right: 0;
+}
+
+.billing-v2__metric .metric__value {
+  color: var(--ink-strong);
+  font-size: 22px;
+  font-weight: 450;
+}
+
+.billing-v2__note {
+  margin: var(--space-3) 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.billing-v2__setting {
+  display: grid;
+  max-width: 760px;
+  gap: 18px;
+  margin-top: var(--space-5);
+}
+
+.billing-v2__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.billing-v2 .limit-field,
+.billing-v2 .topup {
+  max-width: 560px;
+}
+
+/* `EmptyState` is a shared component whose own class is bundler-hashed, so the
+   page hands it this class for its own spacing rather than reaching in. */
+.billing-v2 .activity-list,
+.billing-v2__empty {
+  margin-top: 18px;
+}
+
+@media (max-width: 700px) {
+  .billing-v2__state,
+  .billing-v2__plan-head,
+  .billing-v2__section-head,
+  .billing-v2__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .billing-v2__plan-option {
+    grid-template-columns: 1fr auto;
+    gap: var(--space-2) var(--space-4);
+    padding: var(--space-4) 0;
+  }
+
+  .billing-v2__plan-option .plan-card__credits {
+    grid-column: 1 / -1;
+  }
+
+  .billing-v2__metrics {
+    grid-auto-flow: row;
+  }
+
+  .billing-v2__metric,
+  .billing-v2__metric:first-child {
+    min-height: 90px;
+    padding: var(--space-4) 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+
+  .billing-v2__metric:last-child {
+    border-bottom: 0;
+  }
+}
+
+/* Complete component coverage -------------------------------------------- */
+
+.codex-connected__check {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+}
+
+/* Takes the slack so the Disconnect button lands on the trailing edge instead
+   of the label being spread away from its check by `justify-content`. */
+.codex-connected__label {
+  flex: 1 1 auto;
+}
+
+.codex-connected__label,
+.codex-modal__subtitle,
+.plan-hero__error,
+.more-context__title,
+.more-context__hint,
+.verdict__note,
+.verdict__text {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.codex-device__waiting {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-muted);
+}
+
+/* The stall hint is a paragraph with inline links inside it, so it must stay a
+   block: `.notice` is a flex row, which would break each run of text and each
+   <strong>/<a> out into its own flex item spread across the width. */
+.codex-device__stalled {
+  display: block;
+}
+
+.codex-device__stalled,
+.plan-hero__error,
+.tenant-gate-note {
+  color: var(--bad-fg);
+}
+
+.reconnect-notice {
+  position: relative;
+}
+
+.more-context__summary {
+  width: 100%;
+  padding: var(--space-3) 0;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.timeline__status,
+.verdict__status,
+.sim-run__verdict {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.limit-field {
+  display: grid;
+  gap: 6px;
+}
+
+.limit-field__control,
+.topup__amount,
+.topup__custom {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.limit-field__input {
+  min-width: 0;
+  flex: 1;
+}
+
+.limit-field__usd {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.review-notices,
+.review-area-stack,
+.review-context,
+.more-context__body,
+.review-appendix__body {
+  display: grid;
+  gap: 10px;
+}
+
+.review-row--issue {
+  box-shadow: inset 2px 0 var(--bad-fg);
+}
+
+.review-row--task {
+  box-shadow: inset 2px 0 var(--info-fg);
+}
+
+/* All three are empty `<span aria-hidden>`s the components emit for the
+   disclosure caret. With only a colour on them they drew nothing, so a row that
+   had lost its native marker had no open/closed affordance at all. Two borders
+   and a rotation rather than an asset, so the open state is a transform. */
+.review-appendix__chevron,
+.review-note__chevron,
+.review-row__chevron {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  color: var(--ink-subtle);
+  transform: rotate(-45deg);
+}
+
+.review-row[open] > .review-row__summary .review-row__chevron,
+.review-note[open] > summary .review-note__chevron,
+.review-appendix[open] > .review-appendix__summary .review-appendix__chevron {
+  transform: rotate(45deg);
+}
+
+.toggle-row__input {
+  accent-color: var(--accent);
+}
+
+.toggle-row__label {
+  color: var(--ink-muted);
+}
+
+.trail__body {
+  min-width: 0;
+}
+
+.trail__marker {
+  position: relative;
+}
+
+.trail__type,
+.trail__sim,
+.trail-evidence__item {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.trail-evidence__item {
+  padding: 8px 10px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+}
+
+.verdict__status {
+  font-weight: 500;
+}
+
+@media (max-width: 700px) {
+  .topup__amount,
+  .topup__custom,
+  .limit-field__control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .organization-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .organization-summary > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+
+  .organization-summary > div:last-child {
+    border-bottom: 0;
+  }
+
+  .organization-access {
+    grid-template-columns: 1fr;
+  }
+
+  .organization-access .btn {
+    justify-self: start;
+  }
+
+  .page-placeholder {
+    min-height: 260px;
+  }
+
+  .settings-page__intro--row,
+  .team-profile,
+  .danger-action__summary,
+  .preference-row,
+  .security-action,
+  .security-subrow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .member-invite {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .member-invite .input {
+    width: 100%;
+  }
+
+  .settings-form--two-col,
+  .security-inline-form,
+  .settings-metadata,
+  .security-summary,
+  .identity-methods,
+  .metadata-json-grid,
+  .access-levels {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-metadata > div,
+  .settings-metadata > div:nth-child(2n),
+  .settings-metadata > div:nth-last-child(-n + 2) {
+    border-right: 0;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+
+  .settings-metadata > div:last-child {
+    border-bottom: 0;
+  }
+
+  .security-stat,
+  .access-levels > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+
+  .security-stat:last-child,
+  .access-levels > div:last-child {
+    border-bottom: 0;
+  }
+
+  .member-row,
+  .session-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .member-row__joined,
+  .member-row__actions,
+  .member-row > .badge,
+  .session-row__time,
+  .session-row > .btn,
+  .session-row > .badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .security-action > .btn,
+  .security-subrow > .btn,
+  .danger-action__summary > .btn {
+    align-self: flex-start;
+  }
+}
+
+@media (min-width: 701px) and (max-width: 1050px) {
+  .organization-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .organization-summary > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .organization-summary > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line-subtle);
+  }
+}
+
+/* Integrations v2 --------------------------------------------------------- */
+.integrations-v2 {
+  display: grid;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  gap: var(--space-8);
+}
+
+.route-intro {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding: var(--space-2) 0 var(--space-1);
+}
+
+.route-intro h1 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+}
+
+.route-intro p {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-muted);
+  font-size: var(--text-md);
+}
+
+.route-intro__scope {
+  flex: none;
+  max-width: 260px;
+  overflow: hidden;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+  margin-top: -12px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--text-base);
+}
+
+.inline-status button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-subtle);
+  cursor: pointer;
+}
+
+.inline-status button:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.integration-group {
+  min-width: 0;
+}
+
+.integration-group__head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.integration-group__head h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 500;
+  letter-spacing: -0.012em;
+}
+
+.integration-group__head p {
+  margin: 3px 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.integration-rows,
+.integration-row--source,
+.integration-state {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.integration-row {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 92px;
+  gap: 14px;
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.integration-rows > .integration-row:last-child,
+.integration-row--source {
+  border-bottom: 0;
+}
+
+.integration-row--editing {
+  align-items: start;
+}
+
+.integration-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: 600 var(--text-xs)/1 var(--font-sans);
+  letter-spacing: -0.02em;
+}
+
+.integration-mark--muted {
+  color: var(--ink-subtle);
+  letter-spacing: 0.1em;
+}
+
+.integration-row__main {
+  min-width: 0;
+}
+
+.integration-row__titleline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.integration-row__titleline strong,
+.integration-state strong {
+  color: var(--ink-strong);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+
+.integration-row__main > p,
+.integration-state p {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.integration-row__metadata,
+.integration-row__connections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: var(--space-2);
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.integration-row__connections span,
+.integration-row__metadata span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-row__message {
+  display: block;
+  margin-top: 7px;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.integration-row__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  max-width: 360px;
+  gap: 7px;
+}
+
+.integration-row__editor {
+  display: grid;
+  grid-column: 2 / -1;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  align-items: end;
+  gap: var(--space-2);
+  padding-top: 14px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.integration-row__editor label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+.integration-row__editor .input {
+  width: 100%;
+}
+
+.integration-state {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 112px;
+  gap: 14px;
+  padding: 18px;
+}
+
+.integration-state__action {
+  justify-self: end;
+}
+
+@media (max-width: 700px) {
+  .integrations-v2 {
+    gap: 26px;
+  }
+
+  .route-intro {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding-top: 2px;
+  }
+
+  .route-intro h1 {
+    font-size: 27px;
+  }
+
+  .integration-row,
+  .integration-state {
+    grid-template-columns: 40px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .integration-row__actions,
+  .integration-state__action,
+  .integration-row__editor {
+    grid-column: 1 / -1;
+  }
+
+  .integration-row__actions {
+    justify-content: flex-start;
+    max-width: none;
+    padding-left: 54px;
+  }
+
+  .integration-row__editor {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .integration-row__editor label {
+    grid-column: 1 / -1;
+  }
+
+  .integration-state__action {
+    justify-self: start;
+    padding-left: 54px;
+  }
+}
+
+/* Models v2 -------------------------------------------------------------- */
+.models-v2 {
+  display: grid;
+  width: 100%;
+  max-width: var(--page-max);
+  margin: 0 auto;
+  gap: 26px;
+}
+
+.models-v2__header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.models-v2__save {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.models-v2__save--error {
+  color: var(--bad-fg);
+}
+
+.models-v2-state {
+  display: grid;
+  place-items: center;
+  min-height: 360px;
+  padding: 48px 24px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  text-align: center;
+}
+
+.models-v2-state__icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+  font-size: 22px;
+}
+
+.models-v2-state > strong {
+  color: var(--ink-strong);
+  font-size: var(--text-lg);
+  font-weight: 500;
+}
+
+.models-v2-state > p {
+  max-width: 520px;
+  margin: 7px 0 20px;
+  color: var(--ink-subtle);
+  font-size: var(--text-base);
+}
+
+.model-v2-panel {
+  min-width: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.model-v2-panel + .model-v2-panel {
+  padding-top: 26px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.model-v2-panel__head {
+  min-height: 0;
+  padding: 0 0 14px;
+  border-bottom: 0;
+}
+
+.model-v2-panel__head h2 {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+
+.model-v2-panel__head p {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.model-v2-panel__gate,
+.model-v2-panel__link {
+  display: block;
+  margin: 14px 0 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.model-v2-panel__link {
+  margin-bottom: var(--space-4);
+  color: var(--ink-muted);
+}
+
+.model-v2-panel__link:hover {
+  color: var(--ink-strong);
+}
+
+.model-v2-panel > .harness-connect {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.model-provider-grid,
+.model-trigger-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0;
+}
+
+.model-provider-card,
+.model-trigger-card {
+  position: relative;
+  display: grid;
+  align-items: start;
+  min-width: 0;
+  min-height: 116px;
+  gap: var(--space-3);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.model-provider-card {
+  grid-template-columns: 38px minmax(0, 1fr);
+}
+
+.model-trigger-card {
+  grid-template-columns: 16px minmax(0, 1fr);
+}
+
+.model-provider-card--active,
+.model-trigger-card--active {
+  border-color: var(--line-strong);
+  background: var(--surface-selected);
+}
+
+.model-provider-card input,
+.model-trigger-card input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.model-trigger-card::before {
+  width: 13px;
+  height: 13px;
+  margin-top: 3px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  content: "";
+}
+
+.model-trigger-card--active::before {
+  border: 4px solid var(--accent);
+}
+
+.model-provider-card strong,
+.model-trigger-card strong,
+.model-setting-row strong,
+.model-fallbacks strong,
+.model-v2-catalog__row strong {
+  display: block;
+  color: var(--ink);
+  font-size: var(--text-base);
+  font-weight: 500;
+}
+
+.model-provider-card small,
+.model-trigger-card small,
+.model-setting-row small,
+.model-fallbacks small,
+.model-v2-catalog__row small {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.model-setting-list {
+  display: grid;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.model-setting-row {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.2fr) auto;
+  align-items: center;
+  gap: 18px;
+  min-height: 88px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.model-setting-row select,
+.model-fallbacks select {
+  min-width: 0;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: var(--text-sm);
+}
+
+.model-setting-row select:hover,
+.model-setting-row select:focus-visible,
+.model-fallbacks select:hover,
+.model-fallbacks select:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--ink-strong);
+}
+
+.model-effort {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.model-effort button {
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.model-effort__active {
+  background: var(--surface-selected) !important;
+  color: var(--ink-strong) !important;
+}
+
+.model-fallbacks {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  border-top: 1px solid var(--line-subtle);
+}
+
+.model-fallbacks label {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.75fr) minmax(260px, 1fr);
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 82px;
+  padding: 14px 0;
+  border-right: 0;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.model-fallbacks label:last-child {
+  border-bottom: 0;
+}
+
+.model-catalog-search {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  gap: var(--space-2);
+  padding: 0;
+  border-top: 1px solid var(--line-subtle);
+  border-bottom: 1px solid var(--line-subtle);
+  color: var(--ink-subtle);
+}
+
+.model-catalog-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: var(--text-sm);
+}
+
+.model-catalog-search:focus-within {
+  border-top-color: var(--line-strong);
+  border-bottom-color: var(--line-strong);
+  color: var(--ink-strong);
+}
+
+.model-v2-catalog {
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.model-v2-catalog__row {
+  display: grid;
+  grid-template-columns: 38px minmax(200px, 1fr) 100px 170px;
+  align-items: center;
+  gap: 14px;
+  min-height: 64px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.model-v2-catalog__row:last-child {
+  border-bottom: 0;
+}
+
+.model-v2-catalog__row > span:nth-child(n + 3) {
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+  text-align: right;
+}
+
+.model-v2-empty {
+  display: grid;
+  place-items: center;
+  min-height: 150px;
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 900px) {
+  .model-provider-grid,
+  .model-trigger-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-provider-card,
+  .model-trigger-card {
+    min-height: 0;
+  }
+
+  .model-setting-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+
+  .model-effort {
+    justify-self: start;
+  }
+
+  .model-v2-catalog__row {
+    grid-template-columns: 38px minmax(0, 1fr) 120px;
+  }
+
+  .model-v2-catalog__row > span:nth-child(3) {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .models-v2 {
+    gap: var(--space-5);
+  }
+
+  .issue-meta-row,
+  .review-detail-surface .review-context {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .issue-meta-row {
+    gap: var(--space-1);
+  }
+
+  .review-detail-surface .review-context dd {
+    padding-top: 0;
+  }
+
+  .models-v2__header-actions {
+    justify-content: flex-start;
+  }
+
+  .model-fallbacks {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-fallbacks label {
+    grid-template-columns: minmax(0, 1fr);
+    border-right: 0;
+    border-bottom: 1px solid var(--line-subtle);
+  }
+
+  .model-fallbacks label:last-child {
+    border-bottom: 0;
+  }
+
+  .model-v2-catalog__row {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .model-v2-catalog__row > span:nth-child(n + 3) {
+    display: none;
+  }
+}
+
+/* Members and access ------------------------------------------------------ */
+
+/* The invite form is the shared `.input` / `.select` / `.btn` primitives on a
+   three-column grid, not a second form system: only the arrangement lives here. */
+.organization-invite {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(140px, max-content) max-content;
+  align-items: end;
+  gap: var(--space-3);
+  padding: var(--space-5);
+}
+
+.organization-invite__foot {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: var(--space-1);
+}
+
+.organization-invite__hint,
+.organization-invite__message {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.organization-invite__hint {
+  color: var(--ink-subtle);
+}
+
+/* The live region stays in the layout when it is empty — an empty block box is
+   already zero-height, and `display: none` would cost the announcement. */
+.organization-invite__message {
+  color: var(--ink-muted);
+}
+
+.organization-invite__message--bad {
+  color: var(--bad-fg);
+}
+
+/* A read that failed is not an empty list, so it gets its own treatment rather
+   than `EmptyState`: the reason, and the way to ask again. (This page predates
+   `ErrorState`, whose shape is a banner rather than this centred retry.) */
+.organization-directory__error {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  color: var(--bad-fg);
+  text-align: center;
+}
+
+.organization-directory__error p {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.organization-directory__failure {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line-subtle);
+  color: var(--bad-fg);
+  font-size: var(--text-sm);
+}
+
+/* `.tenant-gate-note` carries the colour; a panel body has no padding of its own. */
+.organization-directory__gate {
+  margin: 0;
+  padding: var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.organization-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line-subtle);
+}
+
+.organization-pager__count {
+  color: var(--ink-subtle);
+  font-size: var(--text-sm);
+}
+
+.organization-pager__controls {
+  display: flex;
+  gap: var(--space-2);
+}
+
+@media (max-width: 700px) {
+  .organization-invite {
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-4);
+  }
+
+  .organization-pager {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+/* The email field joins the shared 36px control metric, so its label, the role
+   select and the submit button all sit on one line instead of three baselines. */
+.organization-invite .input {
+  height: 36px;
+}

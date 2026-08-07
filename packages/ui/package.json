@@ -1,0 +1,29 @@
+{
+  "name": "@jina/ui",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./testing/index.ts",
+    "./testing/css-contract": "./testing/css-contract.ts",
+    "./testing/module-stubs.mjs": "./testing/module-stubs.mjs",
+    "./testing/stubs": "./testing/stubs/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "test": "node --test --import tsx --import ./testing/setup.ts \"src/**/*.test.tsx\""
+  },
+  "peerDependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "^20.11.1",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "tsx": "^4.23.5"
+  }
+}

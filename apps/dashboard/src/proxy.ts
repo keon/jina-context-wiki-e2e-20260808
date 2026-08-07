@@ -1,29 +1,15 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { dashboardWebAuthorization, isValidBasicAuthorization } from "./server/proxy-policy";
+import { clerkMiddleware } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
+import { dashboardProxyUsesClerk } from "./server/auth-mode";
 
-export function proxy(request: NextRequest): NextResponse {
-  if (!process.env.INTERNAL_API_TOKEN?.trim()) return NextResponse.next();
+const dashboardProxy = dashboardProxyUsesClerk() ? clerkMiddleware() : () => NextResponse.next();
 
-  // Existing Google Cloud deployments continue to rely on IAP. Vercel uses
-  // app-level HTTP authentication because production Vercel Authentication is
-  // not available for this project plan.
-  if (request.headers.get("x-goog-authenticated-user-email")) return NextResponse.next();
-  if (
-    isValidBasicAuthorization(
-      dashboardWebAuthorization(request.headers.get("authorization"), request.headers.get("x-jina-web-authorization")),
-      process.env.JINA_WEB_AUTH_USERNAME,
-      process.env.JINA_WEB_AUTH_PASSWORD
-    )
-  ) {
-    return NextResponse.next();
-  }
-
-  return new NextResponse("Authentication required", {
-    status: 401,
-    headers: { "www-authenticate": 'Basic realm="Jina Dashboard", charset="UTF-8"' }
-  });
-}
+export default dashboardProxy;
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"]
+  matcher: [
+    "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+    "/(api|trpc)(.*)",
+    "/__clerk/(.*)"
+  ]
 };

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { REVIEW_FINDINGS_SCHEMA } from "@jina/ai";
+import { LEGACY_REVIEW_FINDINGS_SCHEMA } from "./legacy-review-contract.js";
 import {
   CITATION_AUDIT_STAGE_SCHEMA,
   CRITIC_STAGE_SCHEMA,
@@ -35,7 +35,7 @@ test("all production Codex response schemas recursively require every declared s
     SOURCE_CHALLENGE_STAGE_SCHEMA,
     CITATION_AUDIT_STAGE_SCHEMA,
     CRITIC_STAGE_SCHEMA,
-    REVIEW_FINDINGS_SCHEMA
+    LEGACY_REVIEW_FINDINGS_SCHEMA
   };
   const violations: string[] = [];
 
@@ -382,8 +382,8 @@ test("Daytona worker configuration requires one immutable selector and a Secret 
 
 test("execution profiles are fetched without retaining decrypted credentials and strictly bounded", async () => {
   const environment = {
-    JINA_V1_API_URL: "https://api.usejina.test",
-    JINA_V1_INTERNAL_API_TOKEN: "internal-test-token"
+    JINA_API_URL: "https://api.usejina.test",
+    JINA_PRODUCT_INTERNAL_API_TOKEN: "internal-test-token"
   };
   const attempt = {
     commitSha: "a".repeat(40),
@@ -537,8 +537,8 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
     CONTEXT_DAYTONA_MODEL_SECRET_ENV: "OPENAI_API_KEY",
     CONTEXT_DAYTONA_MODEL_DOMAINS: "api.openai.com",
     CONTEXT_CODEX_MODEL: "openai/gpt-5.6-terra",
-    JINA_V1_API_URL: "https://api.usejina.test",
-    JINA_V1_INTERNAL_API_TOKEN: "internal-test-token"
+    JINA_API_URL: "https://api.usejina.test",
+    JINA_PRODUCT_INTERNAL_API_TOKEN: "internal-test-token"
   };
   const executions: (BoardAgentExecutionConfiguration | undefined)[] = [];
   const runnerFactory = (

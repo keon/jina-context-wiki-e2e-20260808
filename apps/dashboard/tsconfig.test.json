@@ -1,0 +1,9 @@
+{
+  // `jsx: "preserve"` is what Next needs and what `tsc --noEmit` uses; the test
+  // runner transpiles for Node instead, which has no JSX. Only the transform
+  // differs — everything else, `paths` included, is inherited.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  }
+}

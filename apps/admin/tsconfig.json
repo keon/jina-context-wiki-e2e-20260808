@@ -26,6 +26,8 @@
     "next-env.d.ts",
     "next.config.ts",
     "proxy.ts",
+    "testing/**/*.ts",
+    "testing/**/*.tsx",
     ".next/types/**/*.ts"
   ],
   "exclude": ["node_modules", ".next"]

@@ -8,6 +8,7 @@ import {
   PostgresContextPhaseCheckpointRepository,
   PostgresJsonStateStore,
   PostgresIssueGraphRepository,
+  PostgresRelationalBoardWorkerStore,
   PostgresSharedIdentityStore,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
@@ -17,12 +18,22 @@ import {
   MemoryContextPhaseCheckpointStore,
   type ContextEngineStore
 } from "@jina/context-engine";
-import { createLogger, errorLogFields } from "@jina/observability";
+import { createLogger, errorLogFields, startOpenTelemetry } from "@jina/observability";
+import { configuredReviewRunTopicMode } from "@jina/shared-kernel";
 import { createApiServer } from "./server.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
 const port = Number(process.env.PORT ?? 4000);
+const openTelemetry = startOpenTelemetry({
+  serviceName: "jina-api",
+  ...(process.env.K_REVISION ? { serviceVersion: process.env.K_REVISION } : {}),
+  ...(process.env.JINA_ENVIRONMENT ? { environment: process.env.JINA_ENVIRONMENT } : {}),
+  attributes: {
+    ...(process.env.K_SERVICE ? { "gcp.cloud_run.service": process.env.K_SERVICE } : {}),
+    ...(process.env.K_REVISION ? { "gcp.cloud_run.revision": process.env.K_REVISION } : {})
+  }
+});
 const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 const trustDevIdentityHeaders = booleanEnvironment("JINA_TRUST_DEV_IDENTITY_HEADERS", enableDevEndpoints);
 if (trustDevIdentityHeaders && !enableDevEndpoints) {
@@ -37,6 +48,14 @@ if (devContextMaxActiveBuilds !== undefined && !enableDevEndpoints) {
 }
 const tenancyMode = process.env.JINA_TENANCY_MODE?.trim() || "fixed";
 const requireWorkerReleaseGate = booleanEnvironment("JINA_REQUIRE_WORKER_RELEASE_GATE", false);
+const reviewRunTopicMode = configuredReviewRunTopicMode(process.env.JINA_REVIEW_RUN_TOPIC_MODE);
+const reviewBoardPipelineMode = process.env.JINA_REVIEW_BOARD_PIPELINE_MODE?.trim() || "v1";
+if (
+  (reviewBoardPipelineMode === "v2" || reviewBoardPipelineMode === "allowlist") &&
+  reviewRunTopicMode !== "relational"
+) {
+  throw new Error("JINA_REVIEW_BOARD_PIPELINE_MODE v2/allowlist requires JINA_REVIEW_RUN_TOPIC_MODE=relational");
+}
 if (requireWorkerReleaseGate && enableDevEndpoints) {
   throw new Error("JINA_REQUIRE_WORKER_RELEASE_GATE must remain disabled for local development");
 }
@@ -63,11 +82,14 @@ const contextDatabase = postgresConfig
       manageRoles: process.env.JINA_DB_MANAGE_ROLES === "true"
     })
   : undefined;
-const stateStore = createStateStore(postgresConfig);
+const stateStore = createStateStore(postgresConfig, contextDatabase?.pool);
 const contextStore = createContextStore(contextDatabase);
 const contextPhaseCheckpointStore = contextDatabase
   ? new PostgresContextPhaseCheckpointRepository(contextDatabase)
   : new MemoryContextPhaseCheckpointStore();
+const relationalBoardWorkerStore = contextDatabase
+  ? new PostgresRelationalBoardWorkerStore(contextDatabase.pool)
+  : undefined;
 const contextBoardPublicationTransaction = contextDatabase
   ? new PostgresBoardContextPublicationRepository(contextDatabase)
   : undefined;
@@ -98,6 +120,8 @@ const contextArtifactStore = process.env.CONTEXT_GCS_BUCKET
     ? new FileContextArtifactStore(process.env.CONTEXT_ARTIFACT_DIRECTORY?.trim() || ".jina/context-artifacts")
     : undefined;
 
+const productApiRequestHandler = await loadProductApiRequestHandler(contextDatabase?.pool);
+
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
   ...(process.env.JINA_TENANT_ID ? { tenantId: process.env.JINA_TENANT_ID } : {}),
@@ -108,6 +132,8 @@ const server = createApiServer({
   ...(stateStore ? { stateStore } : {}),
   contextStore,
   contextPhaseCheckpointStore,
+  ...(relationalBoardWorkerStore ? { relationalBoardWorkerStore } : {}),
+  relationalReviewTopicEnabled: reviewRunTopicMode === "relational",
   ...(contextArtifactStore ? { contextArtifactStore } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardPublicationTransaction } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardReleaseSeedStore: contextBoardPublicationTransaction } : {}),
@@ -123,7 +149,8 @@ const server = createApiServer({
   ...(process.env.JINA_CONTEXT_PRINCIPAL_ID ? { contextApiPrincipalId: process.env.JINA_CONTEXT_PRINCIPAL_ID } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
   mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS"),
-  ...(contextWorkerLeaseMs === undefined ? {} : { contextWorkerLeaseMs })
+  ...(contextWorkerLeaseMs === undefined ? {} : { contextWorkerLeaseMs }),
+  ...(productApiRequestHandler ? { productApiRequestHandler } : {})
 });
 
 const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
@@ -153,14 +180,19 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
         logger.error("API shutdown failed", { event: "api.shutdown_failed", ...errorLogFields(error) });
         process.exitCode = 1;
       }
+      void openTelemetry.shutdown();
     });
   });
 }
 
-function createStateStore(config: PostgresJsonStateStoreConfig | undefined): ApiStateStore | undefined {
+function createStateStore(
+  config: PostgresJsonStateStoreConfig | undefined,
+  sharedPool: ContextDatabase["pool"] | undefined
+): ApiStateStore | undefined {
   if (!config) return undefined;
   return new PostgresJsonStateStore<ApiSnapshot>({
     ...config,
+    ...(sharedPool ? { pool: sharedPool } : {}),
     manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
   });
 }
@@ -220,4 +252,20 @@ function booleanEnvironment(name: string, fallback: boolean): boolean {
   if (raw === "true") return true;
   if (raw === "false") return false;
   throw new Error(`${name} must be true or false`);
+}
+
+async function loadProductApiRequestHandler(databasePool: import("pg").Pool | undefined) {
+  if (!booleanEnvironment("JINA_PRODUCT_API_ENABLED", false)) return undefined;
+  // Keep the product compiler boundary independent while the absorbed code is
+  // progressively refactored onto the shared kernel.
+  const productModulePath = "./product/index.js";
+  const product = (await import(productModulePath)) as {
+    createProductApiRequestHandler: (options?: {
+      readonly databasePool?: import("pg").Pool;
+    }) => (
+      request: import("node:http").IncomingMessage,
+      response: import("node:http").ServerResponse
+    ) => void | Promise<void>;
+  };
+  return product.createProductApiRequestHandler(databasePool ? { databasePool } : {});
 }

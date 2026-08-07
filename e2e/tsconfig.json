@@ -1,0 +1,21 @@
+{
+  // The browser suites are not a pnpm workspace, so `turbo run typecheck` does
+  // not reach them. The root `typecheck` script runs this project explicitly —
+  // both CI and scripts/cloud-build-ci.sh invoke `pnpm typecheck` verbatim, so
+  // adding it there keeps the two in step without touching either.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "noEmit": true,
+    // `page.evaluate` bodies run in the browser and `stub-api.ts` runs in Node;
+    // both type-check against the same program, which is the point.
+    "types": ["node"],
+    // Node strips types from these files directly, so imports carry the
+    // extension they will actually resolve.
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "esModuleInterop": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", ".artifacts", "__screenshots__"]
+}

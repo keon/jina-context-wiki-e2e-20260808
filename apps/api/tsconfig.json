@@ -8,14 +8,13 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
+  "exclude": ["src/product/**/*.ts"],
   "references": [
     { "path": "../../packages/board" },
     { "path": "../../packages/db" },
     { "path": "../../packages/github" },
     { "path": "../../packages/observability" },
-    { "path": "../../packages/publication" },
     { "path": "../../packages/context-engine" },
-    { "path": "../../packages/review" },
     { "path": "../../packages/shared-kernel" }
   ]
 }

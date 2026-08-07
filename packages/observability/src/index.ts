@@ -25,3 +25,11 @@ export {
   type HeaderBag,
   type RequestTraceContext
 } from "./trace.js";
+export {
+  activeTraceparent,
+  setOpenTelemetrySpanOutcome,
+  startOpenTelemetry,
+  withOpenTelemetrySpan,
+  type OpenTelemetryRuntime,
+  type SpanParent
+} from "./otel.js";

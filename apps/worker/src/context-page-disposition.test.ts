@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { contextPagePublicationDisposition, unsupportedContextPageFallback } from "./context-page-disposition.js";
+import { contextPagePublicationDisposition, resolveContextPageOmission } from "./context-page-disposition.js";
 
 test("publication includes accepted pages and skips explicitly omitted pages", () => {
   const artifact = { key: "context/page.json", sha256: "a".repeat(64) };
@@ -24,17 +24,18 @@ test("publication includes accepted pages and skips explicitly omitted pages", (
   );
 });
 
-test("unsupported Context revisions retain the prior certified page while new pages are omitted", () => {
-  const priorPage = { documentPath: "architecture.md", revisionId: "kr_prior" };
-  assert.deepEqual(unsupportedContextPageFallback("revise", priorPage), {
-    status: "retained_stale",
-    reasonCode: "unsupported_core_claims",
-    priorPage
+test("unsupported revisions retain the certified prior page while unsupported additions may be omitted", () => {
+  assert.deepEqual(resolveContextPageOmission({ plannedChange: "add", hasPriorPage: false }), {
+    status: "omit_new_page"
   });
-  assert.deepEqual(unsupportedContextPageFallback("add", undefined), {
-    status: "omitted",
-    reasonCode: "unsupported_core_claims"
+  assert.deepEqual(resolveContextPageOmission({ plannedChange: "revise", hasPriorPage: true }), {
+    status: "retain_prior_page"
   });
-  assert.throws(() => unsupportedContextPageFallback("revise", undefined), /requires a prior certified page/);
-  assert.throws(() => unsupportedContextPageFallback("retain", priorPage), /does not accept retain/);
+  assert.deepEqual(resolveContextPageOmission({ plannedChange: "retain", hasPriorPage: true }), {
+    status: "retain_prior_page"
+  });
+  assert.throws(
+    () => resolveContextPageOmission({ plannedChange: "revise", hasPriorPage: false }),
+    /has no certified prior page/
+  );
 });

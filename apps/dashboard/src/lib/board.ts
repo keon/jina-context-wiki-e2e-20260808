@@ -100,7 +100,16 @@ export function partitionBoardTasks(tasks: readonly BoardTask[]): {
     if (contextTask) {
       const scope = boardBuildScope(metadata, causalGraphTaskTypes.has(task.type) ? "causal-graph" : "context");
       const latest = latestRequestByScope.get(scope);
-      (latest && latest.requestKey === metadata.requestKey ? current : history).push(task);
+      if (!latest) {
+        // No root build task is visible for this scope: it may be absent from
+        // the page, or its metadata may not agree with the stage's (the scope
+        // key spans tenantId, which the root is not required to carry). Nothing
+        // establishes supersession here, so fall back to the task's own status
+        // rather than filing work that is still executing as history.
+        (task.status === "superseded" ? history : current).push(task);
+      } else {
+        (latest.requestKey === metadata.requestKey ? current : history).push(task);
+      }
     } else {
       (task.status === "superseded" ? history : current).push(task);
     }

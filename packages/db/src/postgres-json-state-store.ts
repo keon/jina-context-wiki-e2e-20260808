@@ -4,6 +4,8 @@ import { pingPostgresPool } from "./postgres-health.js";
 export interface PostgresJsonStateStoreConfig extends PoolConfig {
   readonly applicationName?: string;
   readonly manageSchema?: boolean;
+  /** Reuse a process-owned pool; the state store will not close it. */
+  readonly pool?: Pool;
   /** Bounds global snapshot contention so worker renewals can retry before leases expire. */
   readonly mutationLockTimeoutMillis?: number;
 }
@@ -32,6 +34,66 @@ export interface VersionedState<T> {
   readonly version: number;
 }
 
+export const JINA_RUNTIME_SCHEMA_SQL = `
+  create schema if not exists jina_runtime;
+
+  create table if not exists jina_runtime.api_state (
+    id smallint primary key check (id = 1),
+    snapshot jsonb not null,
+    version bigint not null default 1,
+    updated_at timestamptz not null default now()
+  );
+
+  create table if not exists jina_runtime.github_deliveries (
+    delivery_id text primary key,
+    received_at timestamptz not null default now()
+  );
+
+  create table if not exists jina_runtime.release_control (
+    id smallint primary key check (id = 1),
+    lease_release_id text,
+    lease_credential_sha256 text,
+    lease_expires_at timestamptz,
+    worker_claims_enabled boolean not null default false,
+    worker_accepts_claims boolean not null default true,
+    worker_release_id text,
+    worker_credential_sha256 text,
+    context_worker_revision text,
+    task_worker_revision text,
+    updated_at timestamptz not null default now(),
+    check (
+      (lease_release_id is null and lease_credential_sha256 is null and lease_expires_at is null)
+      or
+      (lease_release_id is not null and lease_credential_sha256 is not null and lease_expires_at is not null)
+    ),
+    check (
+      (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
+         and context_worker_revision is null and task_worker_revision is null)
+      or
+      (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
+         and context_worker_revision is not null and task_worker_revision is not null)
+    )
+  );
+
+  alter table jina_runtime.release_control
+    add column if not exists worker_accepts_claims boolean not null default true;
+  create table if not exists jina_runtime.causal_graph_release_control (
+    id smallint primary key check (id=1),
+    worker_claims_enabled boolean not null default false,
+    worker_release_id text,
+    worker_credential_sha256 text,
+    worker_revision text,
+    updated_at timestamptz not null default now(),
+    check (
+      (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
+         and worker_revision is null)
+      or
+      (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
+         and worker_revision is not null)
+    )
+  );
+`;
+
 /**
  * Durable MVP state store. The board snapshot and delivery ledger are written
  * in one Postgres transaction so an acknowledged webhook survives restarts.
@@ -40,27 +102,39 @@ export interface VersionedState<T> {
  */
 export class PostgresJsonStateStore<T> {
   private readonly pool: Pool;
+  private readonly ownsPool: boolean;
   private readonly manageSchema: boolean;
   private readonly mutationLockTimeoutMillis: number;
   private initialized?: Promise<void>;
 
   constructor(config: PostgresJsonStateStoreConfig) {
-    const { manageSchema = true, mutationLockTimeoutMillis = 10_000, ...poolConfig } = config;
+    const {
+      applicationName,
+      manageSchema = true,
+      mutationLockTimeoutMillis = 10_000,
+      pool: sharedPool,
+      ...poolConfig
+    } = config;
     if (!Number.isSafeInteger(mutationLockTimeoutMillis) || mutationLockTimeoutMillis < 1) {
       throw new Error("mutationLockTimeoutMillis must be a positive safe integer");
     }
     this.manageSchema = manageSchema;
     this.mutationLockTimeoutMillis = mutationLockTimeoutMillis;
-    this.pool = new Pool({
-      ...poolConfig,
-      application_name: config.applicationName ?? "jina-api",
-      max: config.max ?? 5,
-      idleTimeoutMillis: config.idleTimeoutMillis ?? 30_000,
-      connectionTimeoutMillis: config.connectionTimeoutMillis ?? 10_000
-    });
-    this.pool.on("error", (error) => {
-      console.error("postgres idle connection error", error);
-    });
+    this.ownsPool = sharedPool === undefined;
+    this.pool =
+      sharedPool ??
+      new Pool({
+        ...poolConfig,
+        application_name: applicationName ?? "jina-api",
+        max: poolConfig.max ?? 5,
+        idleTimeoutMillis: poolConfig.idleTimeoutMillis ?? 30_000,
+        connectionTimeoutMillis: poolConfig.connectionTimeoutMillis ?? 10_000
+      });
+    if (this.ownsPool) {
+      this.pool.on("error", (error) => {
+        console.error("postgres idle connection error", error);
+      });
+    }
   }
 
   async load(): Promise<T | undefined> {
@@ -301,7 +375,7 @@ export class PostgresJsonStateStore<T> {
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    if (this.ownsPool) await this.pool.end();
   }
 
   private initialize(): Promise<void> {
@@ -310,65 +384,7 @@ export class PostgresJsonStateStore<T> {
   }
 
   private async createSchema(): Promise<void> {
-    await this.pool.query(`
-      create schema if not exists jina_runtime;
-
-      create table if not exists jina_runtime.api_state (
-        id smallint primary key check (id = 1),
-        snapshot jsonb not null,
-        version bigint not null default 1,
-        updated_at timestamptz not null default now()
-      );
-
-      create table if not exists jina_runtime.github_deliveries (
-        delivery_id text primary key,
-        received_at timestamptz not null default now()
-      );
-
-      create table if not exists jina_runtime.release_control (
-        id smallint primary key check (id = 1),
-        lease_release_id text,
-        lease_credential_sha256 text,
-        lease_expires_at timestamptz,
-        worker_claims_enabled boolean not null default false,
-        worker_accepts_claims boolean not null default true,
-        worker_release_id text,
-        worker_credential_sha256 text,
-        context_worker_revision text,
-        task_worker_revision text,
-        updated_at timestamptz not null default now(),
-        check (
-          (lease_release_id is null and lease_credential_sha256 is null and lease_expires_at is null)
-          or
-          (lease_release_id is not null and lease_credential_sha256 is not null and lease_expires_at is not null)
-        ),
-        check (
-          (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
-             and context_worker_revision is null and task_worker_revision is null)
-          or
-          (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
-             and context_worker_revision is not null and task_worker_revision is not null)
-        )
-      );
-
-      alter table jina_runtime.release_control
-        add column if not exists worker_accepts_claims boolean not null default true;
-      create table if not exists jina_runtime.causal_graph_release_control (
-        id smallint primary key check (id=1),
-        worker_claims_enabled boolean not null default false,
-        worker_release_id text,
-        worker_credential_sha256 text,
-        worker_revision text,
-        updated_at timestamptz not null default now(),
-        check (
-          (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
-             and worker_revision is null)
-          or
-          (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
-             and worker_revision is not null)
-        )
-      );
-    `);
+    await this.pool.query(JINA_RUNTIME_SCHEMA_SQL);
   }
 }
 

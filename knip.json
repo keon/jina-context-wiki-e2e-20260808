@@ -1,19 +1,56 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "ignoreBinaries": ["codex"],
+  "ignore": ["trigger/**"],
   "workspaces": {
     ".": {
-      "entry": ["scripts/context-production-preflight.mjs"],
+      "entry": [
+        "autumn.config.ts",
+        "evals/review/run-isolated-review.mjs",
+        "scripts/context-production-preflight.mjs",
+        "scripts/verify-trigger-project.mjs",
+        "e2e/support/stub-api.ts",
+        "e2e/*.spec.ts"
+      ],
       "ignoreDependencies": ["pg"]
     },
     "apps/api": {
-      "entry": ["src/dev-server.ts", "src/**/*.test.ts"]
+      "entry": [
+        "src/dev-server.ts",
+        "src/product/index.ts",
+        "src/product/migrate.ts",
+        "src/product/migrate-all.ts",
+        "src/product/database-cutover.ts",
+        "src/product/backfill-internal-users.ts",
+        "src/product/rollback-tenant-installation.ts",
+        "src/product/sync-github-webhook.ts",
+        "src/**/*.test.ts"
+      ]
     },
     "apps/worker": {
       "entry": ["src/server.ts", "src/acceptance.ts", "src/**/*.test.ts"]
     },
-    "apps/workflows": {
-      "entry": ["src/cli/review-pr.ts", "src/simulations/pr-review-trace.ts"]
+    "packages/theme": {},
+    "packages/ui": {
+      "entry": ["src/**/*.test.tsx", "testing/**"]
+    },
+    "apps/dashboard": {
+      "entry": [
+        "src/app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}",
+        "src/**/*.test.ts",
+        "src/**/*.test.tsx",
+        "src/testing/**"
+      ]
+    },
+    "apps/admin": {
+      "entry": [
+        "app/**/{page,layout,not-found,error,loading,route}.{ts,tsx}",
+        "lib/**/*.test.ts",
+        "app/**/*.test.tsx",
+        "testing/**"
+      ]
+    },
+    "packages/review-agent": {
+      "entry": ["src/index.ts", "src/review/codex-review.ts", "src/**/*.test.ts"]
     },
     "packages/db": {
       "entry": [

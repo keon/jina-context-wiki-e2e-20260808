@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import Link from "next/link";
+import { GeistMono } from "geist/font/mono";
+import { GeistSans } from "geist/font/sans";
+import { AdminShell } from "./admin-shell";
+import "@jina/theme/theme.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -10,19 +13,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { readonly children: ReactNode }) {
   return (
-    <html lang="en">
+    // The same font variables the dashboard sets, so the two apps render in one
+    // typeface instead of admin falling back to the system stack.
+    <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>
       <body>
-        <div className="shell">
-          <header className="masthead">
-            <h1>
-              <Link href="/">Jina Admin</Link>
-            </h1>
-            <span className="scope-badge">All context</span>
-            <span className="spacer" />
-            <span className="muted">tenant-admin view</span>
-          </header>
-          {children}
-        </div>
+        <AdminShell>{children}</AdminShell>
       </body>
     </html>
   );

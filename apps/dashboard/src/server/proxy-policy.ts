@@ -3,6 +3,7 @@ export function isAllowedDashboardApiRequest(
   pathname: string,
   hasInternalApiToken: boolean
 ): boolean {
+  if (isProductDashboardApiRequest(method, pathname)) return true;
   const allowedRead =
     method === "GET" &&
     (pathname === "/api/board" ||
@@ -23,6 +24,17 @@ export function isAllowedDashboardApiRequest(
   const allowedContextSearch = method === "POST" && pathname === "/api/context/search";
 
   return allowedRead || allowedLocalDemo || allowedContextSearch;
+}
+
+/** Routes that authenticate with the signed-in Clerk user, not the Context service token. */
+export function isProductDashboardApiRequest(method: string | undefined, pathname: string): boolean {
+  if (!method || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return false;
+  return (
+    pathname.startsWith("/api/dashboard/") ||
+    pathname === "/api/auth/github/login" ||
+    pathname === "/api/auth/github/callback" ||
+    pathname === "/api/auth/logout"
+  );
 }
 
 export interface DashboardPrincipalInput {
@@ -54,7 +66,7 @@ function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-export function isValidBasicAuthorization(
+function isValidBasicAuthorization(
   header: string | null | undefined,
   expectedUsername: string | null | undefined,
   expectedPassword: string | null | undefined

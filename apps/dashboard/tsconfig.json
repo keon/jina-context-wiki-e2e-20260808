@@ -11,6 +11,9 @@
     "resolveJsonModule": true,
     "jsx": "preserve",
     "allowImportingTsExtensions": true,
+    "paths": {
+      "@dashboard/*": ["./src/dashboard/*"]
+    },
     "types": ["node"],
     "plugins": [{ "name": "next" }]
   },

@@ -74,6 +74,50 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
              runtime_user
            );
          end if;
+         if to_regclass('jina_runtime.board_workflows') is not null then
+           execute format(
+             'grant select,insert,update on jina_runtime.board_workflows to %I',
+             runtime_user
+           );
+         end if;
+         if to_regclass('jina_runtime.board_tasks') is not null then
+           execute format(
+             'grant select,insert,update on jina_runtime.board_tasks to %I',
+             runtime_user
+           );
+         end if;
+         if to_regclass('jina_runtime.board_dependencies') is not null then
+           execute format(
+             'grant select,insert on jina_runtime.board_dependencies to %I',
+             runtime_user
+           );
+         end if;
+         if to_regclass('jina_runtime.board_attempts') is not null then
+           execute format(
+             'grant select,insert,update on jina_runtime.board_attempts to %I',
+             runtime_user
+           );
+         end if;
+         if to_regclass('jina_runtime.board_events') is not null then
+           execute format(
+             'revoke update,delete on jina_runtime.board_events from %I',
+             runtime_user
+           );
+           execute format(
+             'grant select,insert on jina_runtime.board_events to %I',
+             runtime_user
+           );
+           execute format(
+             'grant usage,select on sequence jina_runtime.board_events_id_seq to %I',
+             runtime_user
+           );
+         end if;
+         if to_regclass('jina_runtime.board_effect_receipts') is not null then
+           execute format(
+             'grant select,insert,update on jina_runtime.board_effect_receipts to %I',
+             runtime_user
+           );
+         end if;
        end if;
 
        foreach relation_name in array array[

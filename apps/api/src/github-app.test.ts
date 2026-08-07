@@ -983,7 +983,7 @@ test("pull-request intake queues review work and a PR-preview context build", as
   );
 });
 
-test("the V1 relay admits Context work without creating V2 review work", async () => {
+test("the unified webhook admits Context work without creating duplicate review work", async () => {
   const relayRepository = "omlabs/v1-relay-fixture";
   const pullRequestNumber = 79;
   const headSha = "d".repeat(40);

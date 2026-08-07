@@ -2,34 +2,8 @@ export type ContextPagePublicationDisposition =
   | { readonly status: "accepted" | "retained_stale"; readonly pageArtifact: unknown }
   | { readonly status: "omitted"; readonly reasonCode: string };
 
-export type UnsupportedContextPageFallback<TPriorPage> =
-  | {
-      readonly status: "retained_stale";
-      readonly reasonCode: "unsupported_core_claims";
-      readonly priorPage: TPriorPage;
-    }
-  | { readonly status: "omitted"; readonly reasonCode: "unsupported_core_claims" };
-
-/**
- * A new unsupported page can be withheld. An existing page cannot disappear
- * from an incremental release merely because its replacement failed audit, so
- * revisions fall back to the previously certified page instead.
- */
-export function unsupportedContextPageFallback<TPriorPage>(
-  operation: string,
-  priorPage: TPriorPage | undefined
-): UnsupportedContextPageFallback<TPriorPage> {
-  if (operation === "add") {
-    return { status: "omitted", reasonCode: "unsupported_core_claims" };
-  }
-  if (operation !== "revise") {
-    throw new Error(`Unsupported Context page fallback does not accept ${operation}`);
-  }
-  if (!priorPage) {
-    throw new Error("Revised Context page fallback requires a prior certified page");
-  }
-  return { status: "retained_stale", reasonCode: "unsupported_core_claims", priorPage };
-}
+export type ContextPageOmissionResolution =
+  { readonly status: "omit_new_page" } | { readonly status: "retain_prior_page" };
 
 export function contextPagePublicationDisposition(result: Record<string, unknown>): ContextPagePublicationDisposition {
   const disposition = result.disposition;
@@ -51,4 +25,20 @@ export function contextPagePublicationDisposition(result: Record<string, unknown
     return { status, pageArtifact: value.pageArtifact };
   }
   throw new Error("Context page dependency disposition status is invalid");
+}
+
+/**
+ * A failed new page can be omitted from a release. An existing page cannot:
+ * incremental publication must keep the last certified bytes rather than
+ * silently deleting established Context when a proposed revision fails audit.
+ */
+export function resolveContextPageOmission(input: {
+  readonly plannedChange: "add" | "retain" | "revise";
+  readonly hasPriorPage: boolean;
+}): ContextPageOmissionResolution {
+  if (input.plannedChange === "add") return { status: "omit_new_page" };
+  if (!input.hasPriorPage) {
+    throw new Error(`Omitted ${input.plannedChange} Context page has no certified prior page`);
+  }
+  return { status: "retain_prior_page" };
 }

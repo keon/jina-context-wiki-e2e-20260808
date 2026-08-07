@@ -1,8 +1,15 @@
-FROM mirror.gcr.io/library/node:26-bookworm-slim AS build
+# Must track the distroless runtime tag below. Building on a newer major than
+# the one that runs in production lets a Node API that only exists on the build
+# image pass typecheck, build, and tests, then fail at container start.
+FROM mirror.gcr.io/library/node:22-bookworm-slim AS build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 ENV NEXT_TELEMETRY_DISABLED=1
+ARG NEXT_PUBLIC_API_BASE_URL=""
+ARG NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE="clerk"
+ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE=$NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE
 WORKDIR /workspace
 
 RUN npm install -g pnpm@11.15.1

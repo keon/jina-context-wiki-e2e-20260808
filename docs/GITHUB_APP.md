@@ -1,15 +1,14 @@
 # GitHub App webhook setup
 
-In integrated production, the GitHub App sends deliveries to the original Jina API at
-`https://api.usejina.com/webhooks/github`. V1 verifies and records the delivery, remains
-the sole review orchestrator, and relays the exact raw body plus the three GitHub headers
-to V2 `POST /context/webhooks/github`. V2 verifies `X-Hub-Signature-256` again, uses
+The GitHub App sends deliveries to the unified Jina API at
+`https://api.usejina.com/webhooks/github`. The review handler verifies and records the
+delivery, then hands the exact raw body plus the three GitHub headers to the Context
+handler at `POST /context/webhooks/github`. Context verifies `X-Hub-Signature-256` again, uses
 `X-GitHub-Delivery` for durable idempotency, and admits only Context Board work. The relay
 cannot manufacture provider events or create a second review.
 
-`POST /webhooks/github` remains V2's standalone combined review-and-Context endpoint for
-isolated deployments and tests. Do not configure the production GitHub App to call both
-services.
+Only `POST /webhooks/github` is configured on the GitHub App. The Context-specific
+route is an internal handoff and is never a second public webhook target.
 
 ## Current behavior
 
@@ -22,7 +21,7 @@ services.
 | Everything else | any                     | Acknowledged and ignored; comments, edits, closes, labels, and reviews do not schedule Context builds     |
 
 The integrated `POST /context/webhooks/github` route produces only the Context result in
-this table. V1 owns all review tasks.
+this table. The review handler owns all review tasks.
 
 An unchanged latest head deduplicates redelivery. Pull-request heads supersede their
 older previews immediately. A branch push replaces an unstarted build, but once the
@@ -165,28 +164,28 @@ curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   "${JINA_API_URL}/board"
 ```
 
-For a push, verify that the Board root, snapshot, dynamic agent tasks, certification,
-publication, and PageIndex tasks refer to the expected repository/ref; that the snapshot
-task carries the expected GitHub installation ID; and that it records the event's full head
-SHA only if it still matches the fetched remote head. An immutable release returned by
-`/context/releases` must use that same commit. The context catalog should include an
-agent-derived change summary cited to the checkpoint commit and changed paths when the
-evidence supports one.
+For a push, verify that the page-oriented Board root, snapshot, planner, page tasks, and
+publication task refer to the expected repository/ref; that the snapshot task carries
+the expected GitHub installation ID; and that it records the event's full head SHA only
+if it still matches the fetched remote head. Publication includes PageIndex construction.
+An immutable release returned by `/context/releases` must use that same commit. The
+context catalog should include an agent-derived change summary cited to the checkpoint
+commit and changed paths when the evidence supports one.
 
 GitHub's App settings show delivery response status and support redelivery.
 
-## V1 review access to V2 Context
+## Review access to Context
 
-A V1 review never receives either service credential. After resolving the shared tenant
-UUID and exact repository, V1 calls `POST /internal/context/review-access` with its
-server-only V2 internal credential. V2 resolves the repository through shared identity,
+A review never receives either service credential. After resolving the shared tenant
+UUID and exact repository, the review handler calls `POST /internal/context/review-access`
+with its server-only Context credential. Context resolves the repository through shared identity,
 creates a deterministic run-and-repository principal, replaces that principal's ACL with
 exactly one repository, and returns a 5–360 minute opaque token with only
 `context:query` and `context:read`.
 
-The review sandbox connects directly to V2 `/mcp` with that token and can use only
+The review sandbox connects directly to `/mcp` with that token and can use only
 `search_context`, `list_context`, `read_context`, and `diff_context`. It cannot build,
-administer, or read another repository. V1 exposes no MCP proxy and stores no Context
+administer, or read another repository. The review handler exposes no MCP proxy and stores no Context
 response bodies in review telemetry.
 
 ## Local demo and persistence

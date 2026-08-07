@@ -34,16 +34,22 @@ activates one focused capability with `SET LOCAL ROLE`.
 
 ## Board and execution
 
-The task board is the sole production orchestrator. A context build is an aggregate root
-with a thin input-snapshot child. The API expands a validated research plan into bounded
-research tasks; the publication planner adds one aggregate per page; page aggregates add writer, independent
-citation-audit, and bounded repair/audit tasks; final source challenge and context-only
-maintenance-task evaluation gate certification, publication, and PageIndex construction.
-Every required dynamic child blocks the root automatically.
+The task board is the sole production orchestrator. The active page-oriented
+Context workflow has an aggregate root, a graph-materialization latch, one input
+snapshot task, one planner task, one dispatchable task per affected page, and one
+publication task. Every required dynamic child blocks the root automatically.
+
+The planner durably checkpoints its research plan, bounded subject research, and
+publication plan inside one Board lease. Each page task similarly checkpoints
+writing, independent citation audit, and at most one repair/audit cycle. The
+publication task resolves every page disposition, retains validated prior bytes
+when a revision cannot be supported, builds PageIndex, and publishes the release.
+This keeps failure and retry boundaries durable without exposing each internal
+model phase as another queue topic.
 
 Board rows contain only bounded orchestration metadata and immutable GCS references.
 Evidence bundles, prompts, reports, drafts, transcripts, audit payloads, and
-certifications remain content-addressed artifacts. This keeps scheduling transactions
+publication receipts remain content-addressed artifacts. This keeps scheduling transactions
 small and makes every completed unit reusable after process or sandbox loss.
 
 The mutable snapshot is hot orchestration state, not the historical system of record.
@@ -57,8 +63,8 @@ to outlive a worker lease.
 
 Each dispatchable task is claimed through the durable outbox with an attempt-bound
 renewable lease and write-fence token. A worker that loses its lease cannot commit late
-results. Audit findings create repair tasks rather than erasing sibling progress; only
-execution failures consume retry attempts.
+results. Audit findings trigger the bounded repair phase inside that page task rather
+than erasing sibling progress; only execution failures consume retry attempts.
 
 A monotonically allocated ref sequence is bound to the build root and publication fence
 for each tenant/repository/ref. Admission order, rather than completion time, determines
@@ -136,14 +142,15 @@ dispatchable Board task gets a fresh sandbox/Codex invocation with bounded input
 declared output files. The local Board runner disables nested orchestration because
 parallel fan-out, joins, retries, and checkpoints belong to the Board.
 
-The first agent task proposes a durable research plan. The Board validates it and creates
-parallel subject-research tasks. A later publication-planning task converts those
-artifacts into stable page IDs and maintenance questions, then creates one aggregate per
-page. Independent agent tasks write, audit, challenge, evaluate, and repair the proposed
-context. Subjects cover relevant features, flows, components, interfaces, state,
-security, operations, decisions, history, and patterns without prescribing a fixed
-document taxonomy. Discovery deliberately moves between source/tests/configuration and
-Git/provider history.
+The planner task proposes and validates a durable research plan, executes bounded
+subject research, and converts those artifacts into stable page IDs and
+maintenance questions. The API then creates independent page tasks, allowing page
+construction to fan out while keeping planner-internal phases checkpointed under
+one lease. Each page task writes, audits, and, when required, repairs its proposed
+document. Subjects cover relevant features, flows, components, interfaces, state,
+security, operations, decisions, history, and patterns without prescribing a
+fixed document taxonomy. Discovery deliberately moves between
+source/tests/configuration and Git/provider history.
 
 Codex writes a repository-specific Markdown document tree. A file path is the logical
 document identity. Agents choose useful subjects and folders based on repository
@@ -171,10 +178,10 @@ must contribute concrete support.
 Provider evidence uses natural GitHub URLs and must resolve to exactly one captured
 record identity before the same semantic audit. Citation-audit inputs and results are
 private digest-bound checkpoints; the public Markdown exposes none of that control
-state. A repository-wide gap repair gets at most two targeted citation edits and three
-audits. Its first audit reuses exact supported bindings from unchanged page
-checkpoints, and later passes send only unsupported or changed groups back to the
-model.
+state. A page receives one audit and, when needed, one repair plus replacement audit.
+Supported bindings from the first pass are reused when their exact assertion and evidence
+remain unchanged. If the replacement audit still rejects core claims, a new page is
+omitted and an unsupported revision falls back to the prior validated page.
 
 Context-only evaluation does not convert unavailable external state into an
 unanswerable publication requirement. If a provider or control-plane fact is outside
@@ -188,14 +195,6 @@ When a maintenance task intentionally asks for a missing test, implementation, o
 configuration, that absence is not itself a Context gap. The task passes when the
 candidate identifies enough current behavior, change points, invariants, failure
 consequences, and verification guidance to perform the work safely.
-
-The independent source-challenge and context-only evaluation gates may schedule
-at most three automatic repository-wide repair rounds. If those rounds exhaust,
-the Board retains the candidate draft and completed checkpoints, cancels
-certification, and exposes a single-target administrative continuation. Each
-explicit request adds exactly one fresh repair/challenge/evaluation round and
-keeps certification blocked on both successor gates; repository research and
-completed page branches do not restart.
 
 Every newly admitted build also carries two independent hard limits. Its absolute
 deadline is derived from the durable root task's `createdAt` plus
@@ -242,12 +241,13 @@ only an unfinished call; it does not repeat completed research, generation, audi
 repair calls. Public progress exposes only phase names and timestamps, never private
 artifact locations or model transcripts.
 
-The host verifies the lead's completion claim: required plan items must resolve to files
-or explicit unsupported reasons, deterministic areas must be accounted for, workers must
-be terminal, declared available evidence categories must actually be cited, and no
-blocking gap may be open. Otherwise the build remains incomplete and its checkpoints
-stay resumable; no new release is published. Older completed releases remain addressable
-for reproducibility and `diff_context`.
+Before publication, the host requires every planned page to have an explicit
+disposition. Accepted pages must carry validated immutable artifacts. An
+unsupported new page is omitted with a reason; an unsupported revision retains
+the last validated page rather than silently deleting established Context. The
+publication task assembles those exact bytes, builds the PageIndex tree, and
+commits both behind the ref-sequence fence. Older completed releases remain
+addressable for reproducibility and `diff_context`.
 
 Artifact payloads are written under tenant/repository/build-scoped object keys. Production
 uses GCS with create-only generation preconditions and stored SHA-256 metadata. Local
@@ -364,11 +364,19 @@ configuration is present and otherwise lists the static targets. Execution requi
 ```text
 apps/api/                  HTTP, MCP, auth, workflow coordination
 apps/worker/               Git checkout, ingestion, local/Daytona derivation
-apps/dashboard/            repository context explorer and checkpoints
+apps/dashboard/            only customer dashboard application
 apps/admin/                tenant-wide release and citation health
+apps/docs/                 customer documentation application
 packages/context-engine/   evidence, derivation, validation, release, retrieval
 packages/daytona/          isolated Codex executors
 packages/db/               PostgreSQL stores, roles, GCS artifacts, reset
 packages/github/           signed webhook parsing and trigger policy
 services/pageindex-worker/ pinned self-hosted PageIndex Markdown bridge
+packages/review-agent/    portable Daytona review runtime used by Board workers
 ```
+
+`apps/api` owns the only HTTP listener. Product/review, Board, Context, causal graph,
+MCP, webhook, and internal worker routes ship in the same backend image.
+`apps/dashboard` owns the only customer dashboard; its `/api` proxy forwards to that
+listener. Staging uses the equivalent `*.staging.usejina.com` domains and isolated
+cloud resources, secrets, GitHub App, Clerk instance, and database credentials.

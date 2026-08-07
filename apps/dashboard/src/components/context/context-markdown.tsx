@@ -48,7 +48,7 @@ function MermaidDiagram({ source }: { readonly source: string }) {
 
   if (error) {
     return (
-      <figure className="context-mermaid context-mermaid-error">
+      <figure className="knowledge-diagram knowledge-diagram--error">
         <figcaption>Diagram source (rendering failed: {error})</figcaption>
         <pre>
           <code>{source}</code>
@@ -59,7 +59,7 @@ function MermaidDiagram({ source }: { readonly source: string }) {
   if (svg) {
     return (
       <figure
-        className="context-mermaid"
+        className="knowledge-diagram"
         aria-label="Architecture diagram"
         aria-busy={false}
         dangerouslySetInnerHTML={{ __html: svg }}
@@ -67,7 +67,7 @@ function MermaidDiagram({ source }: { readonly source: string }) {
     );
   }
   return (
-    <figure className="context-mermaid" aria-label="Architecture diagram" aria-busy>
+    <figure className="knowledge-diagram knowledge-diagram--loading" aria-label="Architecture diagram" aria-busy>
       <span>Rendering diagram…</span>
     </figure>
   );
@@ -108,7 +108,7 @@ export function ContextMarkdown({
       a({ children, href, title }) {
         const resolved = resolveContextMarkdownLink(href ?? "", { release, document, documents });
         if (resolved.kind === "unsafe") {
-          return <span className="context-markdown-invalid-link">{children}</span>;
+          return <span className="knowledge-prose__invalid-link">{children}</span>;
         }
         if (resolved.kind === "document") {
           return (
@@ -139,7 +139,7 @@ export function ContextMarkdown({
   );
 
   return (
-    <section className="context-rendered-markdown">
+    <section className="knowledge-prose">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {bodyMarkdown}
       </ReactMarkdown>

@@ -1,6 +1,8 @@
 import {
   applyCommand,
   createEmptyBoardState,
+  findTask,
+  isTerminalTaskStatus,
   reduceBoard,
   supersedeEpochTasks,
   type BoardState,
@@ -8,7 +10,7 @@ import {
   type TaskId
 } from "@jina/board";
 import { isIssueTrigger, isReviewTrigger, type ParsedGitHubWebhook } from "@jina/github";
-import { applyPrReviewPlan, planPrReview } from "@jina/review";
+import { applyPrReviewPlan, planPrReview } from "./legacy-review-pipeline.js";
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
 
 interface TrackedPullRequest {
@@ -24,6 +26,8 @@ interface TrackedPullRequest {
   readonly authorGithubUserId?: number;
   readonly authorLogin?: string;
   readonly authorAccountType?: string;
+  /** Last webhook activity; lets long-idle tracking entries be compacted away. */
+  readonly updatedAt?: IsoTimestamp;
 }
 
 export interface GitHubIntakeState {
@@ -94,10 +98,31 @@ function ingestPullRequest(
       pullRequest.number === event.pullRequestNumber
   );
   const isNewHead = existing !== undefined && existing.headSha !== event.headSha;
-  const epoch = existing ? (isNewHead ? existing.epoch + 1 : existing.epoch) : 1;
+  let epoch = existing ? (isNewHead ? existing.epoch + 1 : existing.epoch) : 1;
 
   let board = state.board;
-  if (isNewHead) {
+  // Tracked-pull-request entries are compacted after long idleness while epoch
+  // roots may be retained longer as idempotency tombstones. A returning pull
+  // request then restarts at epoch 1 and would collide with a retained root
+  // for a DIFFERENT head; the review must not be suppressed in that case, so
+  // the epoch advances past every retained root whose head differs.
+  const epochRootHeadSha = (candidateEpoch: number): string | undefined => {
+    const root = board.tasks.find(
+      (task) =>
+        task.dedupeKey ===
+        `${tenantId}:${webhook.repository}:pr-${event.pullRequestNumber}:epoch-${candidateEpoch}:root`
+    );
+    return root ? (typeof root.metadata.headSha === "string" ? root.metadata.headSha : "") : undefined;
+  };
+  for (
+    let collidingHead = epochRootHeadSha(epoch);
+    collidingHead !== undefined && collidingHead !== event.headSha;
+    collidingHead = epochRootHeadSha(epoch)
+  ) {
+    epoch += 1;
+  }
+
+  if (epoch > 1 && (isNewHead || existing === undefined)) {
     board = supersedeEpochTasks(
       board,
       epoch,
@@ -125,9 +150,17 @@ function ingestPullRequest(
     ...(webhook.sender?.id !== undefined ? { senderGithubUserId: webhook.sender.id } : {}),
     ...(webhook.sender?.login ? { senderLogin: webhook.sender.login } : {}),
     ...(webhook.sender?.accountType ? { senderAccountType: webhook.sender.accountType } : {}),
-    needsExternalContext: false,
-    includePublication: false
+    needsExternalContext: false
   });
+  // A settled epoch's root survives compaction as an idempotency tombstone
+  // while its child graph is pruned. Task-level dedupe alone cannot stop a
+  // replayed delivery for the same epoch from recreating the pruned review
+  // child and dispatching a duplicate run, so a terminal root ends intake for
+  // this epoch here.
+  const existingRoot = findTask(board, plan.rootTaskId);
+  if (existingRoot && isTerminalTaskStatus(existingRoot.status)) {
+    return state;
+  }
   board = applyPrReviewPlan(board, plan, {
     actor: githubActor(webhook, options.deliveryId),
     now: options.now,
@@ -146,7 +179,8 @@ function ingestPullRequest(
     epoch,
     ...(event.authorId !== undefined ? { authorGithubUserId: event.authorId } : {}),
     ...(event.authorLogin ? { authorLogin: event.authorLogin } : {}),
-    ...(event.authorAccountType ? { authorAccountType: event.authorAccountType } : {})
+    ...(event.authorAccountType ? { authorAccountType: event.authorAccountType } : {}),
+    updatedAt: options.now
   };
 
   return {
