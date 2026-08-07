@@ -506,7 +506,19 @@ export function validateInboxKeyCompatibility(snapshotValue, manifest) {
   if (incompatible.length > 0) {
     fail(`inbox key version ${expectedVersion} cannot process active rows encrypted by ${incompatible.join(",")}`);
   }
-  return { expectedVersion, activeKeyVersions: versions };
+  const deadLetterVersions =
+    snapshot.deadLetterKeyVersions === undefined
+      ? {}
+      : object(snapshot.deadLetterKeyVersions, "GitHub webhook inbox deadLetterKeyVersions");
+  for (const [version, rawCount] of Object.entries(deadLetterVersions)) {
+    if (!/^[1-9][0-9]*$/.test(version)) fail(`inbox snapshot has invalid dead-letter key version ${version}`);
+    integer(rawCount, 0, Number.MAX_SAFE_INTEGER, `inbox dead-letter key version ${version}`);
+  }
+  return {
+    expectedVersion,
+    activeKeyVersions: versions,
+    deadLetterKeyVersions: deadLetterVersions
+  };
 }
 
 export function validateServingInboxWriterKey(revision, manifest) {

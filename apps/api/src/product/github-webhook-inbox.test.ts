@@ -343,6 +343,7 @@ class FakeInboxRepository implements GithubWebhookInboxRepository {
       recentDeadLetters: [],
       priorGenerationLeases: 0,
       activeKeyVersions: this.captured ? { [this.captured.encryptionKeyVersion]: 1 } : {},
+      deadLetterKeyVersions: {},
     };
   }
 }

@@ -68,8 +68,10 @@ export interface GithubWebhookInboxSnapshot {
   /** Newest retained dead letters, capped by the store so the control response stays bounded. */
   readonly recentDeadLetters: readonly GithubWebhookInboxDeadLetterSummary[];
   readonly priorGenerationLeases: number;
-  /** Counts for every non-completed row, keyed by its pinned Secret Manager version. */
+  /** Counts for rows that can still be claimed/retried, keyed by their pinned key version. */
   readonly activeKeyVersions: Readonly<Record<string, number>>;
+  /** Terminal retained evidence by pinned key version; these rows are never claimed or retried. */
+  readonly deadLetterKeyVersions: Readonly<Record<string, number>>;
   readonly oldestPendingAt?: Date;
 }
 
@@ -520,7 +522,17 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
     }>(
       `select encryption_key_version,count(*)::int as active_count
          from github_webhook_inbox
-        where status <> 'completed'
+        where status in ('pending','leased','retry_wait')
+        group by encryption_key_version
+      order by encryption_key_version`,
+    );
+    const deadLetterKeyVersions = await query<{
+      encryption_key_version: string;
+      dead_letter_count: number;
+    }>(
+      `select encryption_key_version,count(*)::int as dead_letter_count
+         from github_webhook_inbox
+        where status='dead_letter'
         group by encryption_key_version
       order by encryption_key_version`,
     );
@@ -574,6 +586,12 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
       priorGenerationLeases: counts?.prior_generation_leases ?? 0,
       activeKeyVersions: Object.fromEntries(
         keyVersions.map((row) => [row.encryption_key_version, Number(row.active_count)]),
+      ),
+      deadLetterKeyVersions: Object.fromEntries(
+        deadLetterKeyVersions.map((row) => [
+          row.encryption_key_version,
+          Number(row.dead_letter_count),
+        ]),
       ),
       ...(counts?.oldest_pending_at ? { oldestPendingAt: counts.oldest_pending_at } : {}),
     };

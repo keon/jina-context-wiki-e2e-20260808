@@ -1627,6 +1627,21 @@ cookie settings, the OAuth client ID, and numeric OAuth/App/session-encryption s
 The cross-file topology test asserts all of these boundaries, and the focused private
 deployment plus public-candidate suite passes 74/74.
 
+The next exact-head runtime review found that the inbox snapshot still classified
+retained terminal `dead_letter` rows as active encryption-key users. That made the
+public-API promotion fence unable to distinguish a decrypt-required pending/retry row
+from retained evidence, so one poison delivery encrypted by an older key could block
+every future key rotation. The store now defines `activeKeyVersions` narrowly as
+`pending`, `leased`, and `retry_wait` rows and exposes terminal evidence separately as
+`deadLetterKeyVersions`. Promotion continues to fail closed for any processable row on
+an unavailable version, while retained dead letters remain visible without blocking
+traffic promotion. Dead-letter replay is not an implicit operation: adding it later
+requires an explicit replay/key-retention policy and a new acceptance gate. The public
+candidate suite proves both the active-row rejection and terminal-row allowance, and a
+disposable PostgreSQL integration instance proved the exact split after a poison row
+released its same-PR successor. The stopped test container is retained; no test data
+was deleted.
+
 The exact production allowlist `proj_yrxsqjznkghpwsolfmjp` is a safety control, not a
 temporary convenience. Legacy project `proj_gmesnthgwwqledarlfip` still owns
 `billing-retry`, `github-installation-backfill`, and `scheduled-review-scan` in addition

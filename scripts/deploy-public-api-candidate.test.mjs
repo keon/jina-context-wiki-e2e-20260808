@@ -547,6 +547,18 @@ test("promotion rejects active inbox rows encrypted by an unavailable key versio
   );
 });
 
+test("promotion permits retained terminal dead letters encrypted by an old key version", () => {
+  const manifest = validatePublicApiCandidateManifest(rawManifest());
+  assert.deepEqual(
+    validateInboxKeyCompatibility({ activeKeyVersions: { 7: 1 }, deadLetterKeyVersions: { 6: 2 } }, manifest),
+    {
+      expectedVersion: "7",
+      activeKeyVersions: { 7: 1 },
+      deadLetterKeyVersions: { 6: 2 }
+    }
+  );
+});
+
 test("application rollback fence requires capture_only and zero current/prior-generation leases", () => {
   assert.equal(
     isInboxFenceComplete({

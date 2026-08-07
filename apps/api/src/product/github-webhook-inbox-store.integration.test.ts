@@ -212,7 +212,8 @@ test(
         ],
       );
       assert.equal(snapshot.priorGenerationLeases, 0);
-      assert.deepEqual(snapshot.activeKeyVersions, { "7": 2 });
+      assert.deepEqual(snapshot.activeKeyVersions, { "7": 1 });
+      assert.deepEqual(snapshot.deadLetterKeyVersions, { "7": 1 });
     } finally {
       await getPool().end().catch(() => undefined);
       restoreEnvironment("JINA_PRODUCT_DATABASE_URL", previousProductUrl);
