@@ -713,10 +713,10 @@ return flows without changing the App ID, webhook secret, or private key.
 
 ### Staging App
 
-The isolated staging App is ID `4461130`, slug
-`jina-staging-gcloud-omxyz`, with one selected-repository installation. Its private key
-differs from production. Staging acceptance must use a repository not installed on the
-production App; see [STAGING_PR_E2E.md](./STAGING_PR_E2E.md).
+The isolated staging App is ID `4461130`, public slug `jina-staging`, with one
+selected-repository installation. Its private key differs from production. Staging
+acceptance must use a repository not installed on the production App; see
+[STAGING_PR_E2E.md](./STAGING_PR_E2E.md).
 
 ## Secret and environment ownership
 
@@ -964,8 +964,8 @@ DASHBOARD_ORIGIN=https://app.staging.usejina.com
 API_BASE_URL=https://api.staging.usejina.com
 DASHBOARD_COOKIE_SAMESITE=None
 DASHBOARD_COOKIE_SECURE=true
-GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new
-GITHUB_APP_SLUG=jina-staging-gcloud-omxyz
+GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging/installations/new
+GITHUB_APP_SLUG=jina-staging
 JINA_BILLING_ENFORCE=off
 JINA_GRAPH_API_URL=https://api.staging.usejina.com
 JINA_GRAPH_REQUEST_TIMEOUT_MS=20000
