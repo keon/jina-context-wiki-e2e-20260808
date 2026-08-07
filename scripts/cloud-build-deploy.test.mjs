@@ -103,7 +103,7 @@ test("production Cloud Build declares image validation before every dependent bu
   assert.ok(firstDependent >= 0, "image build steps must wait for image selection validation");
   assert.ok(
     validationStep < firstDependent,
-    "Cloud Build requires every waitFor dependency to be declared before the dependent step",
+    "Cloud Build requires every waitFor dependency to be declared before the dependent step"
   );
 });
 
