@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -52,6 +52,40 @@ test("Daytona preflight bounds and redacts sandbox failures", async () => {
         assert.ok(stderr.length < 4_000, `diagnostic was ${stderr.length} bytes`);
         return true;
       }
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("Board drain pauses the worker generation after reaching zero leases", async () => {
+  const fixture = await fakeDatabaseFixture();
+  try {
+    const credential = "release-credential-value-000000000000";
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      ["scripts/context-production-preflight.mjs", "board-await-drain"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          CONTEXT_RESET_MODULE_PATH: fixture.resetPath,
+          DATABASE_URL: "postgresql://fake.invalid/jina",
+          CONTEXT_RUNTIME_DB_USER: "jina_v2_app",
+          JINA_WORKER_RELEASE_ID: "release-under-test",
+          JINA_WORKER_RELEASE_CREDENTIAL: credential,
+          FAKE_DB_CAPTURE_PATH: fixture.capturePath,
+          FAKE_RELEASE_CREDENTIAL: credential
+        }
+      }
+    );
+    assert.equal(stderr, "");
+    assert.match(stdout, /release_control\.board_drained_and_worker_paused/);
+    assert.match(stdout, /"workerGenerationPreserved":false/);
+    const queries = JSON.parse(await readFile(fixture.capturePath, "utf8"));
+    assert.ok(queries.some((query) => query.includes("set worker_claims_enabled=false, worker_accepts_claims=false")));
+    assert.ok(
+      queries.some((query) => query.includes('revoke insert,update on jina_runtime.api_state from "jina_v2_app"'))
     );
   } finally {
     await fixture.cleanup();
@@ -128,6 +162,65 @@ async function fakeDaytonaFixture() {
   return {
     modulePath,
     anchorPath,
+    capturePath,
+    cleanup: () => rm(directory, { recursive: true, force: true })
+  };
+}
+
+async function fakeDatabaseFixture() {
+  const directory = await mkdtemp(join(tmpdir(), "jina-production-database-test-"));
+  const resetPath = join(directory, "reset.mjs");
+  const pgDirectory = join(directory, "node_modules", "pg");
+  const capturePath = join(directory, "queries.json");
+  await mkdir(pgDirectory, { recursive: true });
+  await writeFile(resetPath, "export {};\n", "utf8");
+  await writeFile(
+    join(pgDirectory, "index.js"),
+    `
+      const { createHash } = require("node:crypto");
+      const { writeFileSync } = require("node:fs");
+
+      const queries = [];
+      const client = {
+        async query(sql) {
+          const query = String(sql).replace(/\\s+/g, " ").trim();
+          queries.push(query);
+          if (query.includes("select lease_release_id")) {
+            return {
+              rows: [{
+                lease_release_id: "release-under-test",
+                lease_credential_sha256: createHash("sha256")
+                  .update(process.env.FAKE_RELEASE_CREDENTIAL, "utf8")
+                  .digest("hex"),
+                lease_expires_at: new Date(Date.now() + 600_000).toISOString(),
+                worker_claims_enabled: false
+              }]
+            };
+          }
+          if (query.includes("to_regclass('jina_runtime.api_state')")) {
+            return { rows: [{ relation: "jina_runtime.api_state" }] };
+          }
+          if (query.includes("select snapshot from jina_runtime.api_state")) {
+            return { rows: [{ snapshot: { intakeState: { board: { outbox: [] } } } }] };
+          }
+          return { rows: [] };
+        },
+        release() {}
+      };
+
+      class Pool {
+        async connect() { return client; }
+        async end() {
+          writeFileSync(process.env.FAKE_DB_CAPTURE_PATH, JSON.stringify(queries));
+        }
+      }
+
+      module.exports = { Pool };
+    `,
+    "utf8"
+  );
+  return {
+    resetPath,
     capturePath,
     cleanup: () => rm(directory, { recursive: true, force: true })
   };
