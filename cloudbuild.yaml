@@ -26,6 +26,31 @@ steps:
       - DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
       - TEST_DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
 
+  - id: validate-image-selection
+    name: gcr.io/cloud-builders/docker
+    waitFor: [validate]
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        reuse="${_JINA_REUSE_EXISTING_IMAGE_TAG}"
+        tag="${_JINA_EXISTING_IMAGE_TAG}"
+        if [[ "$${reuse}" == "false" ]]; then
+          test -z "$${tag}"
+          exit 0
+        fi
+        [[ "$${reuse}" == "true" ]]
+        [[ "$${tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]
+        [[ "${_JINA_DEPLOYMENT_ACCEPTANCE_MODE}" == "mechanical" || "${_JINA_DEPLOYMENT_ACCEPTANCE_MODE}" == "full" ]]
+        for image in api worker dashboard admin; do
+          tagged="us-east1-docker.pkg.dev/$PROJECT_ID/jina/$${image}:$${tag}"
+          docker pull "$${tagged}"
+          revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$${tagged}")"
+          source="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$${tagged}")"
+          test "$${revision}" = "$COMMIT_SHA"
+          test "$${source}" = "https://github.com/omxyz/jina"
+        done
+
   - id: build-api
     name: gcr.io/cloud-builders/docker
     waitFor: [validate-image-selection]
@@ -99,31 +124,6 @@ steps:
           --label=org.opencontainers.image.source=https://github.com/omxyz/jina \
           --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID \
           .
-
-  - id: validate-image-selection
-    name: gcr.io/cloud-builders/docker
-    waitFor: [validate]
-    entrypoint: bash
-    args:
-      - -ceu
-      - |
-        reuse="${_JINA_REUSE_EXISTING_IMAGE_TAG}"
-        tag="${_JINA_EXISTING_IMAGE_TAG}"
-        if [[ "$${reuse}" == "false" ]]; then
-          test -z "$${tag}"
-          exit 0
-        fi
-        [[ "$${reuse}" == "true" ]]
-        [[ "$${tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]
-        [[ "${_JINA_DEPLOYMENT_ACCEPTANCE_MODE}" == "mechanical" || "${_JINA_DEPLOYMENT_ACCEPTANCE_MODE}" == "full" ]]
-        for image in api worker dashboard admin; do
-          tagged="us-east1-docker.pkg.dev/$PROJECT_ID/jina/$${image}:$${tag}"
-          docker pull "$${tagged}"
-          revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$${tagged}")"
-          source="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$${tagged}")"
-          test "$${revision}" = "$COMMIT_SHA"
-          test "$${source}" = "https://github.com/omxyz/jina"
-        done
 
   - id: push-api
     name: gcr.io/cloud-builders/docker

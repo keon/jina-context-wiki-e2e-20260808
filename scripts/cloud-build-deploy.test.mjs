@@ -96,6 +96,17 @@ test("production deployment shell is syntactically valid", async () => {
   await execFileAsync(process.execPath, ["--check", "scripts/context-production-trigger-e2e.mjs"]);
 });
 
+test("production Cloud Build declares image validation before every dependent build step", () => {
+  const validationStep = cloudBuild.indexOf("  - id: validate-image-selection");
+  const firstDependent = cloudBuild.indexOf("    waitFor: [validate-image-selection]");
+  assert.ok(validationStep >= 0, "image selection validation step must exist");
+  assert.ok(firstDependent >= 0, "image build steps must wait for image selection validation");
+  assert.ok(
+    validationStep < firstDependent,
+    "Cloud Build requires every waitFor dependency to be declared before the dependent step",
+  );
+});
+
 test("staging uses one v2 database connection and one migration job", async () => {
   await execFileAsync("bash", ["-n", "scripts/deploy-staging.sh"]);
   await execFileAsync("bash", ["-n", "scripts/serialize-cloud-build-deploy.sh"]);
