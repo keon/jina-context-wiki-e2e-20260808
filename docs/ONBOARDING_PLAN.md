@@ -8,28 +8,28 @@ Target: staging
 
 Give a newly created Jina account a calm, full-screen setup flow that turns an authenticated user into a workspace that can do useful work. The experience should borrow Capy's strongest interaction patterns—one decision per screen, explicit progress, persistent back/skip controls, real integration handoffs, and a final set of useful starting points—while using Jina's own visual language and product model.
 
-The team flow is successful when a new user can:
+The organization-only flow is successful when a new user can:
 
-1. choose a personal or shared workspace;
-2. create or select a Jina organization when working with a team;
-3. state the first job they want Jina to do;
-4. install the Jina GitHub App for the selected workspace;
-5. choose the automatic review policy that will actually be saved for that workspace;
-6. connect Codex, or deliberately continue without it;
-7. invite teammates when the workspace is shared; and
-8. land on the most relevant product surface with their setup retained.
+1. create or select a Jina organization;
+2. state the first job they want Jina to do;
+3. install the Jina GitHub App for the selected organization;
+4. choose the automatic review policy that will actually be saved for that organization;
+5. connect Codex, or deliberately continue without it;
+6. invite teammates; and
+7. land on the most relevant product surface with their setup retained.
 
 ## What the Capy reference gets right
 
-The supplied screenshots show a variable-length wizard rather than a fixed marketing tour. Team setup expands the path from five to eight steps. Every page keeps the same stable frame: brand and logout at the top, a narrow content column, progress above the heading, and back/continue actions anchored near the bottom. Optional integration steps say so through a visible Skip action. External GitHub authorization returns into the same task. The last screen is not a generic success message; it offers concrete ways to start working.
+The supplied screenshots show a focused setup wizard rather than a fixed marketing tour. Every page keeps the same stable frame: brand and logout at the top, a narrow content column, progress above the heading, and back/continue actions anchored near the bottom. Optional integration steps say so through a visible Skip action. External GitHub authorization returns into the same task. The last screen is not a generic success message; it offers concrete ways to start working.
 
 Those patterns are the reference. Capy's name, mascot, copy, colors, and unsupported Slack/Linear promises are not.
 
 ## Current Jina constraints
 
 - Clerk is the staging authentication and organization authority. Jina mirrors those memberships into durable tenant rows and uses the Jina tenant as the data, billing, GitHub, and artifact boundary.
-- Jina's current Clerk session bootstrap requires a linked GitHub OAuth identity and usable GitHub access token before it can create the internal user, personal tenant, or tenant list. Onboarding therefore needs a preflight state for a Clerk user whose GitHub identity is missing: explain the requirement, open Clerk account management, and retry the Jina viewer bootstrap without rendering tenant-dependent steps prematurely.
-- A personal tenant is already created during identity synchronization. A team path must create a real Clerk organization and wait for its Jina tenant mirror before continuing.
+- Jina's current Clerk session bootstrap requires a linked GitHub OAuth identity and usable GitHub access token before it can create the internal user or tenant list. Onboarding therefore needs a preflight state for a Clerk user whose GitHub identity is missing: explain the requirement, open Clerk account management, and retry the Jina viewer bootstrap without rendering tenant-dependent steps prematurely.
+- In staging Clerk mode, every newly onboarded workspace is a Clerk organization mirrored to a team Jina tenant. Legacy personal tenants remain discoverable temporarily so existing repositories, installations, artifacts, and billing data are not orphaned, but they cannot be selected during onboarding. Removing them entirely requires a separate data migration.
+- The current staging Clerk application predates Clerk's membership-required default. The application enforces organization-only behavior now; disabling Personal Accounts at the Clerk instance itself requires a Clerk instance migration or Clerk support.
 - GitHub repository selection belongs to the GitHub App installation screen. Jina should explain that handoff and show the authoritative connected-installation result instead of drawing a fake repository picker.
 - Jina has no separate `Project` entity. Repositories belong directly to a workspace, so onboarding must not introduce a project-name field that cannot be represented after the wizard.
 - The existing tenant review-trigger endpoint supports `every_commit`, `first_commit`, and `manual_only`; onboarding should save one of those exact values.
@@ -38,17 +38,9 @@ Those patterns are the reference. Capy's name, mascot, copy, colors, and unsuppo
 
 ## Proposed flow
 
-The progress denominator is generated from the actual path. Personal setup contains six steps: workspace, starting job, GitHub, review policy, model, and finish. Team setup contains eight by adding organization and invitations. Tests enumerate both sequences so copy and navigation cannot drift from the denominator.
+The progress denominator is generated from the single organization-only path. The seven steps are organization, starting job, GitHub, review policy, model, invitations, and finish. Tests enumerate the sequence so copy and navigation cannot drift from the denominator.
 
-### 1. Choose a workspace
-
-Question: “Who are you setting Jina up for?”
-
-- Personal selects the viewer's personal Jina tenant.
-- Team continues to organization setup.
-- Continue remains disabled until a choice is made.
-
-### 2. Name or select the organization (team only)
+### 1. Name or select the organization
 
 - Existing Jina organizations are selectable.
 - Selecting an existing organization activates the matching Clerk organization before selecting its Jina tenant.
@@ -56,7 +48,7 @@ Question: “Who are you setting Jina up for?”
 - Mirroring uses a bounded retry with a visible timeout and Retry action. It never guesses the tenant from the organization name.
 - Creation errors remain on this screen and keep the user's draft.
 
-### 3. Choose a starting job
+### 2. Choose a starting job
 
 Question: “What should Jina help with first?”
 
@@ -66,7 +58,7 @@ Question: “What should Jina help with first?”
 
 This choice personalizes the completion screen and default destination; it does not hide other product capabilities.
 
-### 4. Connect GitHub
+### 3. Connect GitHub
 
 - Show the selected workspace and any authoritative active installations.
 - “Connect GitHub” opens the configured GitHub App installation URL with a versioned state value carrying the selected tenant and one allowlisted flow marker (`onboarding`). The parser remains compatible with the legacy raw-tenant state already used by Integrations.
@@ -74,27 +66,27 @@ This choice personalizes the completion screen and default destination; it does 
 - Return routing never accepts an arbitrary URL. After an authorized callback, only the known `/onboarding` route may be selected; callback parameters are stripped after consumption and connection state is refreshed.
 - The step is skippable because a user may be evaluating the interface before receiving organization-admin approval.
 
-### 5. Set the review policy
+### 4. Set the review policy
 
 - Present the three supported review-trigger modes in plain language.
 - Save the chosen mode through the tenant-scoped endpoint before advancing.
 - Non-admin organization members see the current value but cannot overwrite it.
 - This step is still relevant when the user's initial job is Wiki or Issues because it defines future PR behavior.
 
-### 6. Connect a model
+### 5. Connect a model
 
 - Reuse the existing Codex connection component and device-code flow.
 - Show authoritative connected/reconnect-required state.
 - Allow “Skip for now”; Models remains available later for Codex, managed, or BYOK selection.
 
-### 7. Invite teammates (team only)
+### 6. Invite teammates
 
 - Accept comma- or newline-separated email addresses.
 - Resolve the selected Jina tenant to its authoritative Clerk organization ID before enabling the form. Normalize, validate, deduplicate, and invite each address as `org:member` through that organization with bounded concurrency.
 - Report per-address failures without losing successful invitations.
-- The step is skippable and never appears for a personal workspace.
+- The step is skippable.
 
-### 8. Start working
+### 7. Start working
 
 - Mark onboarding complete before navigation.
 - Lead with the card matching the user's starting-job choice.
@@ -103,7 +95,7 @@ This choice personalizes the completion screen and default destination; it does 
 
 ## State and routing
 
-Onboarding state is product guidance, not an authorization boundary. A vendor-neutral `useAppOnboarding()` adapter will validate and expose the versioned state, awaited writes, write errors, restart, and completion. Clerk mode stores the record in the authenticated account's unsafe metadata under `jinaOnboarding`; writes merge with and preserve unrelated keys such as `developerMode`. The legacy GitHub-auth development mode uses a viewer-scoped local-storage fallback. Missing metadata means “not started,” malformed or unknown versions fail safely as “not started,” and a failed write remains visible and retryable. The record contains only low-sensitivity UX state: status, current step, workspace kind, selected tenant ID, starting job, and timestamps. Secrets, installation tokens, Clerk organization IDs, email invitations, and repository lists are never stored there.
+Onboarding state is product guidance, not an authorization boundary. A vendor-neutral `useAppOnboarding()` adapter validates and exposes the versioned state, awaited writes, write errors, restart, and completion. Clerk mode stores the record in the authenticated account's unsafe metadata under `jinaOnboarding`; writes merge with and preserve unrelated keys such as `developerMode`. The legacy GitHub-auth development mode uses a viewer-scoped local-storage fallback and creates Jina-native organization tenants through the Product API. Missing metadata means “not started,” malformed or unknown versions fail safely as “not started,” and a failed write remains visible and retryable. The record contains only low-sensitivity UX state: status, current step, selected tenant ID, starting job, and timestamps. Secrets, installation tokens, Clerk organization IDs, email invitations, and repository lists are never stored there. Version 2 removes workspace kind; every version 1 record without an explicit team choice is reopened at organization selection, while version 1 team progress is preserved.
 
 New Clerk sign-ups use `/onboarding` as their sign-up fallback destination. Merely lacking metadata does not redirect an existing user, which avoids forcing the wizard onto every pre-existing staging account. Once a user starts, `status: in_progress` makes the shell resume `/onboarding` after a later sign-in. Completion changes the status to `complete`. An account-menu “Setup guide” entry allows an intentional restart.
 
@@ -137,8 +129,8 @@ External writes are disabled while in flight. A reload resumes from metadata, th
 - A new sign-up enters onboarding; an existing account with no onboarding metadata is not interrupted.
 - A new Clerk account without a linked GitHub identity sees the recoverable preflight instead of a blank or tenant-dependent screen.
 - Starting and abandoning the wizard resumes it on the next authenticated visit.
-- Personal and team paths show correct, stable progress counts and Back behavior.
-- Team organization creation produces a real Clerk organization and selects the corresponding Jina tenant.
+- The organization-only path shows a correct, stable seven-step progress count and Back behavior.
+- Organization creation produces a real Clerk organization and selects the corresponding Jina tenant.
 - Organization selection/creation activates the matching Clerk organization and handles mirror timeout without guessing identity.
 - GitHub callback routing cannot select a tenant the viewer cannot administer and returns onboarding installs to the wizard.
 - Review mode is read from and saved to the real tenant endpoint.
@@ -148,7 +140,7 @@ External writes are disabled while in flight. A reload resumes from metadata, th
 - Keyboard focus is visible, controls have accessible names, status/error copy is announced, and the flow remains usable at 390 px wide.
 - Completion is persisted before the selected destination opens.
 - Repository checks and the dashboard production build pass.
-- Browser QA confirms the full six-step personal path, eight-step team path, GitHub-identity preflight, redirect-loop prevention, conditional screens, back/skip behavior, callback query stripping, and responsive layout.
+- Browser QA confirms the full seven-step organization path, GitHub-identity preflight, redirect-loop prevention, back/skip behavior, callback query stripping, and responsive layout.
 
 ## Deliberate non-goals
 
@@ -160,7 +152,7 @@ External writes are disabled while in flight. A reload resumes from metadata, th
 
 ## Release plan
 
-The release sequence is: run staging readiness checks; open a PR targeting `staging`; wait for CI/review; merge the PR (the user authorized a staging deployment); capture the exact new `origin/staging` SHA; wait for the source-bound `jina-staging-deploy` Cloud Build; verify the separate `jina-staging-dashboard` deployment is serving the same SHA; then run `docs/STAGING_PR_E2E.md` plus onboarding smoke tests. PR creation alone is not a deployment. The Cloud Build lane builds immutable API/worker images, runs migrations and acceptance gates, and deploys the exact merge SHA to the isolated `jina-staging-20260802` project. The smoke test covers sign-up redirect, missing-GitHub preflight, personal completion, GitHub connect/return, review-policy persistence, and organization invitation success/failure.
+The release sequence is: run staging readiness checks; open a PR targeting `staging`; wait for CI/review; merge the PR (the user authorized a staging deployment); capture the exact new `origin/staging` SHA; wait for the source-bound `jina-staging-deploy` Cloud Build; verify the separate `jina-staging-dashboard` deployment is serving the same SHA; then run `docs/STAGING_PR_E2E.md` plus onboarding smoke tests. PR creation alone is not a deployment. The Cloud Build lane builds immutable API/worker images, runs migrations and acceptance gates, and deploys the exact merge SHA to the isolated `jina-staging-20260802` project. The smoke test covers sign-up redirect, missing-GitHub preflight, organization creation/selection, GitHub connect/return, review-policy persistence, and organization invitation success/failure.
 
 ## Independent audit
 
@@ -176,19 +168,23 @@ Audit status: completed and addressed on 2026-08-07.
 | GitHub callback state/return routing was underspecified          | Accepted; added a versioned codec, legacy compatibility, allowlisted return, reauthorization, and query stripping. |
 | Shell routing order and chrome-less behavior were underspecified | Accepted; added exact auth/resume ordering and redirect-loop coverage.                                             |
 | No metadata adapter contract existed                             | Accepted; added validated reads, awaited merge-preserving writes, failure behavior, and fallback semantics.        |
-| Personal progress count did not match the listed steps           | Accepted; corrected to six personal and eight team steps generated from tested sequences.                          |
+| Personal progress count did not match the listed steps           | Superseded; the product now uses one tested seven-step organization-only sequence.                                 |
 | Invitation targeting lacked Clerk organization resolution        | Accepted; added authoritative Clerk ID resolution, default role, bounded concurrency, and partial-result handling. |
 | Back/retry behavior for irreversible actions was missing         | Accepted; added authoritative reconciliation and idempotency rules.                                                |
 | Audit status remained pending                                    | Accepted; this table records the completed audit and every disposition.                                            |
+| Global personal-tenant filtering would orphan legacy data        | Accepted; removed the global filter and grandfathered legacy workspaces pending a dedicated data migration.        |
+| Legacy GitHub-auth mode could not create an organization         | Accepted; wired its existing Product API organization endpoint into the onboarding adapter.                        |
+| Omitted version 1 workspace kind followed the old personal path  | Accepted; migration now treats every non-team version 1 record as personal and tests the omitted-kind case.        |
+| A reload after Clerk creation could offer duplicate creation     | Accepted; the active Clerk organization is recovered and retried until its Jina tenant mirror is visible.          |
 
 ## Implementation record
 
-Implemented on `codex/capy-inspired-onboarding` on 2026-08-07. The delivered flow includes the versioned progress adapter, GitHub-identity preflight, six-step personal and eight-step team paths, authoritative Clerk organization mirroring, versioned GitHub App return state, tenant review-policy persistence, the existing Codex connection flow, Clerk invitations, completion destinations, account-menu restart, and a dedicated responsive shell.
+Initially implemented on `codex/capy-inspired-onboarding` on 2026-08-07 and revised on `codex/org-only-onboarding` the same day. The delivered flow includes the versioned progress adapter, GitHub-identity preflight, one seven-step organization-only path, authoritative Clerk organization mirroring, versioned GitHub App return state, tenant review-policy persistence, the existing Codex connection flow, Clerk invitations, completion destinations, account-menu restart, and a dedicated responsive shell. Legacy version 1 personal progress is safely migrated back to organization selection. Existing personal workspaces remain accessible outside onboarding until their data can be explicitly migrated; new onboarding never offers them as a destination.
 
 Verification before staging release:
 
 - dashboard lint and TypeScript checks pass;
-- 160 dashboard unit tests and 36 component tests pass, including progress, redirect, GitHub callback, preflight, and personal-flow coverage;
+- 166 dashboard unit tests and 37 component tests pass, including progress migration, redirect, GitHub callback, preflight, reload recovery, and organization-only flow coverage;
 - the Next.js production build succeeds with `/onboarding` in the route manifest;
 - in-app browser QA passed at the default desktop viewport and 390 × 844 with no horizontal overflow or console errors;
 - browser QA identified and the implementation corrected a non-Clerk invite-hook crash plus an unrecoverable preflight loading state before release.
