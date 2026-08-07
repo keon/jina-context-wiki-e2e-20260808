@@ -13,6 +13,7 @@ import {
 } from "../../dashboard/lib/onboarding.ts";
 import type { ViewerResponse } from "../../dashboard/lib/types.ts";
 import type { ViewerTenant } from "../../dashboard/lib/tenants.ts";
+import type { StagingClerkAuthOptions } from "../../server/staging-auth-origin.ts";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 interface DeveloperModeContextValue {
@@ -80,10 +81,16 @@ const AppAuthContext = createContext<AppAuthContextValue | null>(null);
  * keeps vendor routing, appearance, and session semantics in one replaceable
  * adapter while the visible application remains made from Jina components.
  */
-export function AppAuthProvider({ children }: { readonly children: ReactNode }) {
+export function AppAuthProvider({
+  children,
+  clerkOptions
+}: {
+  readonly children: ReactNode;
+  readonly clerkOptions?: StagingClerkAuthOptions;
+}) {
   if (dashboardUsesGithubAuth) return <GithubAuthAdapter>{children}</GithubAuthAdapter>;
   return (
-    <ClerkProvider>
+    <ClerkProvider {...clerkOptions}>
       <ClerkAuthAdapter>{children}</ClerkAuthAdapter>
     </ClerkProvider>
   );
