@@ -151,5 +151,6 @@ packages/shared-kernel/ shared IDs, timestamps, and queue-topic wire contracts
 - [Deployment](docs/DEPLOYMENT.md)
 - [API tokens and authentication](docs/API_TOKENS.md)
 - [GitHub App setup](docs/GITHUB_APP.md)
+- [Capy-inspired onboarding plan](docs/ONBOARDING_PLAN.md)
 - [Observability](docs/OBSERVABILITY.md)
 - [Billing and credits](docs/BILLING.md)

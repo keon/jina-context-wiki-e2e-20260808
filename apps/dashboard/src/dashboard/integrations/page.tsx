@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Badge } from "../components/ui";
 import { apiUrl } from "../lib/api";
 import {
+  connectGithubInstallation,
   githubInstallationUrl,
   normalizeGithubConnections,
   parseGithubInstallationCallback,
@@ -86,24 +87,9 @@ function githubConnectionsUrl(selected: SelectedTenant): string {
   return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/github/installations`);
 }
 
-async function connectGithubInstallation(tenantId: string, installationId: number): Promise<Response> {
-  const url = apiUrl(`/dashboard/tenants/${encodeURIComponent(tenantId)}/github/installations`);
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const response = await fetch(url, {
-      method: "POST",
-      credentials: "include",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ installation_id: installationId }),
-    });
-    if (response.status !== 409 || attempt === 3) return response;
-    await new Promise((resolve) => window.setTimeout(resolve, 500 * 2 ** attempt));
-  }
-  throw new Error("Could not connect the GitHub installation");
-}
-
 export default function IntegrationsPage() {
   const { viewer } = useDashboard();
-  const { selected, tenants, selectTenant } = useTenant();
+  const { selected, tenants, selectTenant, ready: tenantsReady } = useTenant();
   const scope = useTenantQueryScope();
   const queryClient = useQueryClient();
   const [pageMessage, setPageMessage] = useState<string | null>(null);
@@ -184,8 +170,13 @@ export default function IntegrationsPage() {
     if (!viewer || typeof window === "undefined") return;
     const callback = parseGithubInstallationCallback(window.location.search);
     if (!callback) return;
+    if (!tenantsReady) return;
     const target = tenants.find((tenant) => tenant.tenant_id === callback.tenantId);
-    if (!target || target.role !== "admin") return;
+    if (!target || target.role !== "admin") {
+      setPageMessage("That GitHub installation could not be assigned to an administrable workspace.");
+      stripGithubCallbackParams();
+      return;
+    }
     const completionKey = `${callback.tenantId}:${callback.installationId}`;
     if (completingInstallation.current === completionKey) return;
     completingInstallation.current = completionKey;
@@ -204,18 +195,17 @@ export default function IntegrationsPage() {
         // Invalidate by resource rather than refetching this render's key: the
         // selection above moves the page to the tenant that was just connected.
         void queryClient.invalidateQueries({ queryKey: ["github-installations"] });
+        if (callback.returnTo === "onboarding") {
+          window.location.assign("/onboarding?github=connected");
+        }
       })
       .catch((error: unknown) => {
         setPageMessage(error instanceof Error ? error.message : "Could not connect the GitHub installation");
       })
       .finally(() => {
-        const nextUrl = new URL(window.location.href);
-        nextUrl.searchParams.delete("installation_id");
-        nextUrl.searchParams.delete("setup_action");
-        nextUrl.searchParams.delete("state");
-        window.history.replaceState({}, "", nextUrl.pathname + nextUrl.search + nextUrl.hash);
+        stripGithubCallbackParams();
       });
-  }, [viewer, tenants, selectTenant, queryClient]);
+  }, [viewer, tenants, tenantsReady, selectTenant, queryClient]);
 
   return (
     <div className="integrations-v2">
@@ -267,6 +257,14 @@ export default function IntegrationsPage() {
       </IntegrationGroup>
     </div>
   );
+}
+
+function stripGithubCallbackParams(): void {
+  const nextUrl = new URL(window.location.href);
+  nextUrl.searchParams.delete("installation_id");
+  nextUrl.searchParams.delete("setup_action");
+  nextUrl.searchParams.delete("state");
+  window.history.replaceState({}, "", nextUrl.pathname + nextUrl.search + nextUrl.hash);
 }
 
 function IntegrationGroup({

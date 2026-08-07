@@ -1796,8 +1796,7 @@
   border: 1px solid var(--line);
   border-radius: calc(var(--radius) + 3px);
   background:
-    linear-gradient(145deg, color-mix(in srgb, var(--surface-raised) 72%, transparent), transparent 70%),
-    var(--surface);
+    linear-gradient(145deg, color-mix(in srgb, var(--surface-raised) 72%, transparent), transparent 70%), var(--surface);
   color: var(--ink-muted);
   font: inherit;
   text-align: left;

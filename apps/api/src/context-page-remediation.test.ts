@@ -121,7 +121,7 @@ test("operator retry rejects a current publication whose release already committ
   try {
     const before = store.current().intakeState.board;
     const response = await fetch(
-      `${baseUrl}/context/builds/${created.buildTaskId}/tasks/${publication.publicationTaskId}/retry`,
+      `${baseUrl}/wiki/builds/${created.buildTaskId}/tasks/${publication.publicationTaskId}/retry`,
       {
         method: "POST",
         headers: devHeaders(tenantId, principalId),

@@ -3,12 +3,19 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { dashboardUsesGithubAuth, useAppAccount, useAppAuth, useDeveloperMode } from "../components/auth/app-auth";
+import {
+  dashboardUsesGithubAuth,
+  useAppAccount,
+  useAppAuth,
+  useAppOnboarding,
+  useDeveloperMode,
+} from "../components/auth/app-auth";
 import { useCodexHarness, useDashboard, useTenant } from "./providers";
 import { parseInstallationResult } from "./lib/api";
 import { clerkAuthRedirect } from "./lib/auth-navigation";
 import { useSelectedClerkOrganization } from "./lib/clerk-organization";
 import { WORKSPACE_NAV_ITEMS, type WorkspaceNavKey } from "./lib/navigation";
+import { onboardingRedirect } from "./lib/onboarding";
 import type { InstallationResult, ViewerResponse } from "./lib/types";
 
 type NavKey =
@@ -115,11 +122,13 @@ function sectionForPath(pathname: string | null): NavKey {
 export function Shell({ children }: { children: ReactNode }) {
   const { viewer, authLoading } = useDashboard();
   const { ready: authReady, signedIn } = useAppAuth();
+  const onboarding = useAppOnboarding();
   const developerMode = useDeveloperMode();
   const pathname = usePathname();
   const router = useRouter();
   const section = sectionForPath(pathname);
   const isSignin = pathname === "/signin";
+  const isOnboarding = pathname === "/onboarding";
   const [installationResult] = useState<InstallationResult | null>(() =>
     typeof window === "undefined" ? null : parseInstallationResult(window.location.search)
   );
@@ -166,6 +175,17 @@ export function Shell({ children }: { children: ReactNode }) {
     });
     if (destination) router.replace(destination);
   }, [appAuthEnabled, authLoading, authReady, signedIn, isSignin, router]);
+
+  useEffect(() => {
+    if (authLoading || !authReady || !signedIn || !onboarding.ready || !pathname) return;
+    const destination = onboardingRedirect({
+      pathname,
+      restartRequested:
+        typeof window !== "undefined" && new URLSearchParams(window.location.search).get("restart") === "1",
+      progress: onboarding.progress,
+    });
+    if (destination) router.replace(destination);
+  }, [authLoading, authReady, signedIn, onboarding.ready, onboarding.progress, pathname, router]);
 
   useEffect(() => {
     if (developerRouteBlocked) {
@@ -218,6 +238,11 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="auth-loading">Loading…</div>
       </div>
     );
+  }
+
+  // Onboarding owns the entire viewport, including its stable header and footer.
+  if (isOnboarding) {
+    return <div className="onboarding-shell">{children}</div>;
   }
 
   return (
@@ -545,6 +570,20 @@ function AccountMenu({
               </Link>
             </div>
           ) : null}
+          <div className="user-menu__section">
+            <Link
+              className="user-menu__action"
+              href="/onboarding?restart=1"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onNavigate();
+              }}
+            >
+              <JinaGuideIcon />
+              <span>Setup guide</span>
+            </Link>
+          </div>
           {developerMode.enabled ? (
             <div className="user-menu__section">
               {DEVELOPER_NAV_ITEMS.map((item) => {
