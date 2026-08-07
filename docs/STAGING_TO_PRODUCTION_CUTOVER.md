@@ -933,6 +933,13 @@ the legacy `run-review` lane. The current monorepo production deployment script 
 `relational` explicitly and must include the Trigger/product/GitHub/Daytona secret set
 required by the bridge.
 
+Production splits the Context API and product/review API into separate Cloud Run
+services. Context and causal workers must therefore set `JINA_PRODUCT_API_URL` to the
+production product/review API while retaining `JINA_API_URL` for Board claims and
+Context artifacts. `JINA_PRODUCT_INTERNAL_API_TOKEN` authenticates only against that
+product URL. Unified staging may omit `JINA_PRODUCT_API_URL`; the worker deliberately
+falls back to `JINA_API_URL` there.
+
 #### Isolated-staging API
 
 Service: `jina-staging-20260802/us-east1/jina-api-staging`.

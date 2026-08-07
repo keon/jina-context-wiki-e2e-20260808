@@ -453,6 +453,7 @@ const openTelemetry = startOpenTelemetry({
 const metrics = new MetricsRegistry();
 const port = Number(process.env.PORT ?? 8080);
 const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
+const productApiUrl = (process.env.JINA_PRODUCT_API_URL?.trim() || apiUrl).replace(/\/$/, "");
 const token = requiredEnv("INTERNAL_API_TOKEN");
 const productInternalToken = process.env.JINA_PRODUCT_INTERNAL_API_TOKEN?.trim() || token;
 const reviewRunTopicMode = configuredReviewRunTopicMode(
@@ -3975,7 +3976,7 @@ async function runBillingRetry(work: ClaimedWork<"billing-retry">): Promise<Reco
 async function productInternalJson<T = Record<string, unknown>>(path: string, body: unknown): Promise<T> {
   assertLeaseOwned();
   const traceparent = activeTraceparent();
-  const response = await fetch(`${apiUrl}${path}`, {
+  const response = await fetch(`${productApiUrl}${path}`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${productInternalToken}`,

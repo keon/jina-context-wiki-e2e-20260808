@@ -382,7 +382,8 @@ test("Daytona worker configuration requires one immutable selector and a Secret 
 
 test("execution profiles are fetched without retaining decrypted credentials and strictly bounded", async () => {
   const environment = {
-    JINA_API_URL: "https://api.usejina.test",
+    JINA_API_URL: "https://context.usejina.test",
+    JINA_PRODUCT_API_URL: "https://api.usejina.test",
     JINA_PRODUCT_INTERNAL_API_TOKEN: "internal-test-token"
   };
   const attempt = {
@@ -392,8 +393,10 @@ test("execution profiles are fetched without retaining decrypted credentials and
     buildId: "build-1"
   };
   let calls = 0;
-  const profileFetch = async () => {
+  const requestedUrls: string[] = [];
+  const profileFetch = async (input: string) => {
     calls += 1;
+    requestedUrls.push(input);
     return profileResponse({
       provider: "byok",
       model: "openai/gpt-5.6-terra",
@@ -411,6 +414,10 @@ test("execution profiles are fetched without retaining decrypted credentials and
   const first = await resolveContextExecutionProfile(environment, attempt, profileFetch);
   const second = await resolveContextExecutionProfile(environment, attempt, profileFetch);
   assert.equal(calls, 2);
+  assert.deepEqual(requestedUrls, [
+    "https://api.usejina.test/internal/context/execution-profile",
+    "https://api.usejina.test/internal/context/execution-profile"
+  ]);
   assert.equal(first?.credential.kind === "openai" ? first.credential.value : undefined, "sk-profile-1-credential");
   assert.equal(second?.credential.kind === "openai" ? second.credential.value : undefined, "sk-profile-2-credential");
 
@@ -482,6 +489,34 @@ test("execution profiles are fetched without retaining decrypted credentials and
     () => resolveContextExecutionProfile(environment, attempt, async () => new Response("", { status: 401 })),
     /Context API execution-profile request failed with 401/
   );
+});
+
+test("execution-profile requests retain the unified-API fallback", async () => {
+  let requestedUrl = "";
+  await resolveContextExecutionProfile(
+    {
+      JINA_API_URL: "https://unified.usejina.test",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "internal-test-token"
+    },
+    {
+      commitSha: "a".repeat(40),
+      attempt: 1,
+      tenantId: "tenant-1",
+      buildId: "build-1"
+    },
+    async (input) => {
+      requestedUrl = input;
+      return profileResponse({
+        provider: "managed",
+        model: "openai/gpt-5.6-terra",
+        effort: "medium",
+        fallback_policy: "managed",
+        credential: { kind: "managed" },
+        settings_revision: "settings-1"
+      });
+    }
+  );
+  assert.equal(requestedUrl, "https://unified.usejina.test/internal/context/execution-profile");
 });
 
 test("worker-scoped API credentials create a fresh Daytona runner for every stage", async () => {
