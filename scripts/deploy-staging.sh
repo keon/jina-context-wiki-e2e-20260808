@@ -48,6 +48,7 @@ product_internal_token_version="${JINA_PRODUCT_INTERNAL_TOKEN_VERSION:?JINA_PROD
 product_encryption_secret="jina-staging-secrets-encryption-key"
 github_webhook_inbox_encryption_secret="jina-staging-github-webhook-inbox-encryption-key"
 clerk_secret="jina-staging-clerk-secret-key"
+github_oauth_client_secret="jina-staging-github-oauth-client-secret"
 graph_token_secret="jina-staging-graph-api-token"
 graph_internal_token_secret="jina-staging-graph-internal-token"
 autumn_secret="jina-staging-autumn-secret-key"
@@ -59,6 +60,8 @@ openai_secret="jina-staging-openai-api-key"
 causal_release_credential_secret="jina-staging-causal-graph-worker-release-credential"
 worker_release_credential_secret="jina-staging-worker-release-credential"
 review_trigger_secret="${JINA_REVIEW_TRIGGER_SECRET:-jina-staging-trigger-secret-key}"
+dashboard_auth_mode="${JINA_DASHBOARD_AUTH_MODE:-clerk}"
+github_oauth_client_id="${JINA_GITHUB_OAUTH_CLIENT_ID:-}"
 review_board_pipeline_mode="${JINA_REVIEW_BOARD_PIPELINE_MODE:-v1}"
 review_board_v2_repositories="${JINA_REVIEW_BOARD_V2_REPOSITORIES:-}"
 require_worker_release_gate="${JINA_REQUIRE_WORKER_RELEASE_GATE:-false}"
@@ -78,6 +81,20 @@ if [[ ! "${product_internal_token_version}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'JINA_PRODUCT_INTERNAL_TOKEN_VERSION must be a numeric pinned version\n' >&2
   exit 2
 fi
+case "${dashboard_auth_mode}" in
+  clerk)
+    ;;
+  hybrid)
+    if [[ -z "${github_oauth_client_id}" ]]; then
+      printf 'JINA_GITHUB_OAUTH_CLIENT_ID is required when JINA_DASHBOARD_AUTH_MODE=hybrid\n' >&2
+      exit 2
+    fi
+    ;;
+  *)
+    printf 'JINA_DASHBOARD_AUTH_MODE must be clerk or hybrid for isolated staging\n' >&2
+    exit 2
+    ;;
+esac
 
 case "${review_board_pipeline_mode}" in
   paused)
@@ -152,6 +169,10 @@ for value in "${required_staging_values[@]}"; do
     exit 2
   fi
 done
+if [[ "${dashboard_auth_mode}" == "hybrid" ]]; then
+  gcloud secrets versions describe latest \
+    --secret="${github_oauth_client_secret}" --project="${project}" >/dev/null
+fi
 
 if [[ ! "${IMAGE_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   printf 'IMAGE_TAG is not a valid immutable Artifact Registry tag\n' >&2
@@ -456,7 +477,10 @@ else
     --wait
 fi
 
-api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=${require_worker_release_gate}~JINA_REVIEW_BOARD_PIPELINE_MODE=${review_board_pipeline_mode}~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=30000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
+api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=${require_worker_release_gate}~JINA_REVIEW_BOARD_PIPELINE_MODE=${review_board_pipeline_mode}~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=${dashboard_auth_mode}~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=https://github.com/apps/jina-staging-gcloud-omxyz/installations/new~GITHUB_APP_SLUG=jina-staging-gcloud-omxyz~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=30000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
+if [[ "${dashboard_auth_mode}" == "hybrid" ]]; then
+  api_env+="~GITHUB_OAUTH_CLIENT_ID=${github_oauth_client_id}"
+fi
 if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
   api_env+="~JINA_GITHUB_WEBHOOK_INBOX_ENABLED=true~GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION=${github_webhook_inbox_encryption_key_version}"
 fi
@@ -468,6 +492,9 @@ if [[ "${review_run_topic_mode}" == "relational" ]]; then
 fi
 api_env+="~JINA_SCHEDULER_OIDC_AUDIENCE=https://api.staging.usejina.com~JINA_SCHEDULER_OIDC_EMAIL=${scheduler_oidc_service_account}"
 api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
+if [[ "${dashboard_auth_mode}" == "hybrid" ]]; then
+  api_secrets+=",GITHUB_OAUTH_CLIENT_SECRET=${github_oauth_client_secret}:latest"
+fi
 if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
   api_secrets+=",GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY=${github_webhook_inbox_encryption_secret}:${github_webhook_inbox_encryption_key_version}"
 fi

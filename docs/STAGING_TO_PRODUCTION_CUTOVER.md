@@ -684,6 +684,12 @@ identity semantics. A production Clerk migration requires its own mapping table,
 account-linking policy, session transition, organization reconciliation, and rollback
 plan after the source cutover is stable.
 
+That separate migration is now specified in
+[`CLERK_IDENTITY_CUTOVER.md`](./CLERK_IDENTITY_CUTOVER.md). It reuses the existing
+live Clerk instance, retains Jina user/tenant UUIDs, keeps legacy membership
+provenance intact, introduces a hybrid session grace period, and forbids automatic
+tenant creation from the unreconciled Clerk directory.
+
 ## GitHub App inventory
 
 ### Production App

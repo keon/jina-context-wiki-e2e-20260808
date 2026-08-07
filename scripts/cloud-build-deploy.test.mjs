@@ -96,6 +96,9 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--max-instances=10/);
   assert.match(stagingDeployment, /--max-instances=5/);
   assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
+  assert.match(stagingDeployment, /DASHBOARD_AUTH_MODE=\$\{dashboard_auth_mode\}/);
+  assert.match(stagingDeployment, /JINA_GITHUB_OAUTH_CLIENT_ID is required/);
+  assert.match(stagingDeployment, /GITHUB_OAUTH_CLIENT_SECRET=\$\{github_oauth_client_secret\}:latest/);
   assert.match(stagingDeployment, /JINA_GRAPH_REQUEST_TIMEOUT_MS=30000/);
   assert.match(stagingCloudBuild, /JINA_REQUIRE_WORKER_RELEASE_GATE=true/);
   assert.match(stagingDeployment, /jina-staging-worker-release-credential/);
@@ -178,6 +181,8 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingCloudBuild, /IMAGE_TAG=staging-\$COMMIT_SHA/);
   assert.match(stagingCloudBuild, /JINA_CONTEXT_TENANT_ID=\$\{_JINA_CONTEXT_TENANT_ID\}/);
   assert.match(stagingCloudBuild, /JINA_REVIEW_BOARD_PIPELINE_MODE=v2/);
+  assert.match(stagingCloudBuild, /JINA_DASHBOARD_AUTH_MODE=\$\{_JINA_DASHBOARD_AUTH_MODE\}/);
+  assert.match(stagingCloudBuild, /JINA_GITHUB_OAUTH_CLIENT_ID=\$\{_JINA_GITHUB_OAUTH_CLIENT_ID\}/);
   assert.match(stagingCloudBuild, /JINA_GITHUB_WEBHOOK_INBOX_ENABLED=true/);
   assert.match(
     stagingCloudBuild,

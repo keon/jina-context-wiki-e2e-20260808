@@ -596,7 +596,13 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     if (!session) {
       return c.json({ tenants: [] });
     }
-    return c.json({ tenants: await listViewerTenants(session.user.id, session.userId) });
+    return c.json({
+      tenants: await listViewerTenants(
+        session.user.id,
+        session.userId,
+        session.membershipAuthority ?? "legacy",
+      ),
+    });
   });
 
   app.post(
@@ -604,7 +610,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
-      if (config.auth.mode === "clerk") {
+      if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
         throw new ApiError(409, "Organizations are managed through Clerk");
       }
       const session = await requireDashboardSession(c, config);
@@ -627,7 +633,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
-      if (config.auth.mode === "clerk") {
+      if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
         throw new ApiError(409, "Organizations are managed through Clerk");
       }
       const session = await requireDashboardSession(c, config);
@@ -1890,7 +1896,12 @@ async function requireTenantMembership(
   if (!session) {
     throw new ApiError(401, "dashboard authentication required");
   }
-  const role = await getTenantMembershipRole(session.user.id, tenantId, session.userId);
+  const role = await getTenantMembershipRole(
+    session.user.id,
+    tenantId,
+    session.userId,
+    session.membershipAuthority ?? "legacy",
+  );
   const denial = tenantAccessDenial(role, opts.requireAdmin);
   if (denial) {
     throw new ApiError(denial.status, denial.message);

@@ -68,7 +68,7 @@ export interface BillingConfig {
 }
 
 interface AuthConfig {
-  mode: "disabled" | "github" | "clerk";
+  mode: "disabled" | "github" | "hybrid" | "clerk";
   githubClientId?: string;
   githubClientSecret?: string;
   githubScopes: string;
@@ -299,7 +299,9 @@ function parseAuthConfig(env: NodeJS.ProcessEnv): AuthConfig {
   const explicitMode = optionalEnv(env, "DASHBOARD_AUTH_MODE");
   const hasGithubOAuth = Boolean(optionalEnv(env, "GITHUB_OAUTH_CLIENT_ID") && optionalEnv(env, "GITHUB_OAUTH_CLIENT_SECRET"));
   const hasClerk = Boolean(optionalEnv(env, "CLERK_PUBLISHABLE_KEY") && optionalEnv(env, "CLERK_SECRET_KEY"));
-  const mode = explicitMode === "clerk" || (!explicitMode && hasClerk)
+  const mode = explicitMode === "hybrid"
+    ? "hybrid"
+    : explicitMode === "clerk" || (!explicitMode && hasClerk)
     ? "clerk"
     : explicitMode === "github" || (!explicitMode && hasGithubOAuth)
       ? "github"
@@ -308,9 +310,14 @@ function parseAuthConfig(env: NodeJS.ProcessEnv): AuthConfig {
 
   return {
     mode,
-    githubClientId: mode === "github" ? requiredEnv(env, "GITHUB_OAUTH_CLIENT_ID") : optionalEnv(env, "GITHUB_OAUTH_CLIENT_ID"),
+    githubClientId:
+      mode === "github" || mode === "hybrid"
+        ? requiredEnv(env, "GITHUB_OAUTH_CLIENT_ID")
+        : optionalEnv(env, "GITHUB_OAUTH_CLIENT_ID"),
     githubClientSecret:
-      mode === "github" ? requiredEnv(env, "GITHUB_OAUTH_CLIENT_SECRET") : optionalEnv(env, "GITHUB_OAUTH_CLIENT_SECRET"),
+      mode === "github" || mode === "hybrid"
+        ? requiredEnv(env, "GITHUB_OAUTH_CLIENT_SECRET")
+        : optionalEnv(env, "GITHUB_OAUTH_CLIENT_SECRET"),
     githubScopes: env.GITHUB_OAUTH_SCOPES?.trim() || "read:user read:org repo",
     sessionCookieName: env.DASHBOARD_SESSION_COOKIE?.trim() || "jina_dashboard_session",
     oauthStateCookieName: env.DASHBOARD_OAUTH_STATE_COOKIE?.trim() || "jina_github_oauth_state",
@@ -318,8 +325,13 @@ function parseAuthConfig(env: NodeJS.ProcessEnv): AuthConfig {
     cookieSameSite: parseSameSite(env.DASHBOARD_COOKIE_SAMESITE, dashboardUrl.startsWith("https://") ? "None" : "Lax"),
     sessionTtlSeconds: parsePositiveInteger(env.DASHBOARD_SESSION_TTL_SECONDS, 60 * 60 * 24 * 7),
     clerkPublishableKey:
-      mode === "clerk" ? requiredEnv(env, "CLERK_PUBLISHABLE_KEY") : optionalEnv(env, "CLERK_PUBLISHABLE_KEY"),
-    clerkSecretKey: mode === "clerk" ? requiredEnv(env, "CLERK_SECRET_KEY") : optionalEnv(env, "CLERK_SECRET_KEY"),
+      mode === "clerk" || mode === "hybrid"
+        ? requiredEnv(env, "CLERK_PUBLISHABLE_KEY")
+        : optionalEnv(env, "CLERK_PUBLISHABLE_KEY"),
+    clerkSecretKey:
+      mode === "clerk" || mode === "hybrid"
+        ? requiredEnv(env, "CLERK_SECRET_KEY")
+        : optionalEnv(env, "CLERK_SECRET_KEY"),
   };
 }
 

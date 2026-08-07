@@ -26,6 +26,13 @@ staging deploy installs the Board-recorded 15-minute billing retry schedule and 
 OpenTelemetry sidecars, including the causal worker's release-gated sidecar. Production continues to use the
 coordinated `cloudbuild.yaml` path below.
 
+Staging dashboard auth defaults to Clerk. A reversible identity-migration rehearsal may
+set Cloud Build substitutions `_JINA_DASHBOARD_AUTH_MODE=hybrid` and the non-secret
+`_JINA_GITHUB_OAUTH_CLIENT_ID`; the deploy then binds
+`jina-staging-github-oauth-client-secret` and fails closed if either half of the OAuth
+pair is unavailable. The detailed identity/data procedure is
+[CLERK_IDENTITY_CUTOVER.md](./CLERK_IDENTITY_CUTOVER.md).
+
 The audited staging-to-production source consolidation, provider inventory, backup,
 and rollback runbook is
 [STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md).

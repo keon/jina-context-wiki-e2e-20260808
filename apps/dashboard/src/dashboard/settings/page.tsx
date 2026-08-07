@@ -1,6 +1,6 @@
 "use client";
 
-import { useSession, useUser } from "@clerk/nextjs";
+import { useClerk, useSession, useUser } from "@clerk/nextjs";
 import type { SessionWithActivitiesResource } from "@clerk/nextjs/types";
 import type { ChangeEvent, FormEvent } from "react";
 import { useCallback, useEffect, useState } from "react";
@@ -10,6 +10,7 @@ import { clerkErrorMessage } from "../lib/clerk-organization";
 
 export default function SettingsPage() {
   const { viewer } = useDashboard();
+  const { openSignIn } = useClerk();
   const { user, isLoaded, isSignedIn } = useUser();
   const { session } = useSession();
   const developerMode = useDeveloperMode();
@@ -149,6 +150,35 @@ export default function SettingsPage() {
     }
   };
 
+  const githubAccount = user?.externalAccounts.find((account) => account.provider === "github");
+
+  const connectGitHub = async () => {
+    if (!user) return;
+    setSaving("github");
+    setError(null);
+    setNotice(null);
+    try {
+      const redirectUrl = `${window.location.origin}/sso-callback`;
+      const account = githubAccount
+        ? await githubAccount.reauthorize({
+            redirectUrl,
+            additionalScopes: ["read:user", "read:org", "repo"],
+            oidcPrompt: "consent",
+          })
+        : await user.createExternalAccount({
+            strategy: "oauth_github",
+            redirectUrl,
+            additionalScopes: ["read:user", "read:org", "repo"],
+          });
+      const verificationUrl = account.verification?.externalVerificationRedirectURL;
+      if (!verificationUrl) throw new Error("GitHub did not return an authorization URL");
+      window.location.assign(verificationUrl.toString());
+    } catch (connectError) {
+      setError(clerkErrorMessage(connectError));
+      setSaving(null);
+    }
+  };
+
   const toggleDeveloperMode = async () => {
     setError(null);
     try {
@@ -170,8 +200,15 @@ export default function SettingsPage() {
   if (!isSignedIn || !user) {
     return (
       <div className="page-placeholder page-placeholder--compact">
-        <strong>User settings unavailable</strong>
-        <p>Sign in with Clerk to manage your profile and security settings.</p>
+        <strong>Move this session to Clerk</strong>
+        <p>Your existing Jina session is still active. Sign in to Clerk to link it without losing workspace access.</p>
+        <button
+          type="button"
+          className="btn btn--primary"
+          onClick={() => openSignIn({ fallbackRedirectUrl: "/settings" })}
+        >
+          Continue with Clerk
+        </button>
       </div>
     );
   }
@@ -424,6 +461,18 @@ export default function SettingsPage() {
                 </span>
               ))}
             </div>
+            <button
+              type="button"
+              className="btn btn--sm"
+              disabled={saving !== null}
+              onClick={() => void connectGitHub()}
+            >
+              {saving === "github"
+                ? "Opening GitHub…"
+                : githubAccount
+                  ? "Reconnect GitHub permissions"
+                  : "Connect GitHub"}
+            </button>
           </div>
         </div>
       </section>

@@ -16,7 +16,9 @@ interface DeveloperModeContextValue {
 
 const DeveloperModeContext = createContext<DeveloperModeContextValue | null>(null);
 const DEVELOPER_MODE_STORAGE_KEY = "jina.developer-mode";
-export const dashboardUsesGithubAuth = process.env.NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE === "github";
+const dashboardAuthMode = process.env.NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE;
+export const dashboardUsesGithubAuth = dashboardAuthMode === "github";
+const dashboardUsesHybridAuth = dashboardAuthMode === "hybrid";
 
 interface AppAuthContextValue {
   readonly ready: boolean;
@@ -42,8 +44,102 @@ export function AppAuthProvider({ children }: { readonly children: ReactNode }) 
   if (dashboardUsesGithubAuth) return <GithubAuthAdapter>{children}</GithubAuthAdapter>;
   return (
     <ClerkProvider>
-      <ClerkAuthAdapter>{children}</ClerkAuthAdapter>
+      {dashboardUsesHybridAuth ? (
+        <HybridAuthAdapter>{children}</HybridAuthAdapter>
+      ) : (
+        <ClerkAuthAdapter>{children}</ClerkAuthAdapter>
+      )}
     </ClerkProvider>
+  );
+}
+
+/**
+ * Clerk is primary in hybrid mode, but a browser carrying an unexpired Jina
+ * GitHub session remains signed in. This prevents a flag change from becoming
+ * a fleet-wide logout while users link their Clerk accounts naturally.
+ */
+function HybridAuthAdapter({ children }: { readonly children: ReactNode }) {
+  const { user, isLoaded } = useUser();
+  const { isSignedIn } = useAuth();
+  const { signOut } = useClerk();
+  const [legacyViewer, setLegacyViewer] = useState<ViewerResponse | null>(null);
+  const [legacyReady, setLegacyReady] = useState(false);
+
+  useEffect(() => {
+    if (!isLoaded || isSignedIn) {
+      setLegacyReady(isLoaded);
+      if (isSignedIn) setLegacyViewer(null);
+      return;
+    }
+    const controller = new AbortController();
+    setLegacyReady(false);
+    void fetch(apiUrl("/dashboard/me"), {
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal
+    })
+      .then(async (response) => (response.ok ? ((await response.json()) as ViewerResponse) : null))
+      .then((viewer) => {
+        if (!controller.signal.aborted) setLegacyViewer(viewer);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!controller.signal.aborted) setLegacyReady(true);
+      });
+    return () => controller.abort();
+  }, [isLoaded, isSignedIn]);
+
+  const clerkEmail = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses[0]?.emailAddress;
+  const legacyUser = legacyViewer?.user;
+  const auth = useMemo<AppAuthContextValue>(
+    () => ({
+      ready: isLoaded && (Boolean(isSignedIn) || legacyReady),
+      signedIn: Boolean(isSignedIn) || legacyViewer?.authenticated === true,
+      account: {
+        displayName: isSignedIn
+          ? (user?.fullName ?? user?.username ?? clerkEmail ?? "Account")
+          : legacyUser?.name?.trim() || legacyUser?.login || "Account",
+        ...(isSignedIn && clerkEmail
+          ? { email: clerkEmail }
+          : legacyUser?.login
+            ? { email: `@${legacyUser.login}` }
+            : {}),
+        ...(isSignedIn && user?.imageUrl
+          ? { imageUrl: user.imageUrl }
+          : legacyUser?.avatar_url
+            ? { imageUrl: legacyUser.avatar_url }
+            : {}),
+        signOut: async () => {
+          await fetch(apiUrl("/auth/logout"), {
+            method: "POST",
+            credentials: "include"
+          }).catch(() => undefined);
+          if (isSignedIn) {
+            await signOut({ redirectUrl: "/signin" });
+          } else {
+            window.location.assign("/signin");
+          }
+        }
+      }
+    }),
+    [clerkEmail, isLoaded, isSignedIn, legacyReady, legacyUser, legacyViewer?.authenticated, signOut, user]
+  );
+
+  return (
+    <AppAuthContext.Provider value={auth}>
+      <DeveloperModeProvider
+        ready={auth.ready}
+        userEnabled={user?.unsafeMetadata.developerMode === true}
+        {...(user
+          ? {
+              userKey: user.id,
+              persistUser: (enabled: boolean) => user.updateMetadata({ unsafeMetadata: { developerMode: enabled } })
+            }
+          : {})}
+      >
+        {children}
+      </DeveloperModeProvider>
+    </AppAuthContext.Provider>
   );
 }
 

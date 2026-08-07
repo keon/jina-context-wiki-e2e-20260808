@@ -41,7 +41,7 @@ interface DashboardTeam {
 }
 
 export interface ViewerResponse {
-  auth: { mode: "disabled" | "github" | "clerk"; enabled: boolean };
+  auth: { mode: "disabled" | "github" | "hybrid" | "clerk"; enabled: boolean };
   github_app?: { install_url?: string; installed?: boolean } | undefined;
   authenticated: boolean;
   user?: {
