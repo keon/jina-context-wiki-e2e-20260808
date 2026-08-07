@@ -4,6 +4,14 @@ import { ClerkProvider, SignIn, useClerk, useAuth, useUser } from "@clerk/nextjs
 import { isClerkAPIResponseError } from "@clerk/nextjs/errors";
 import { themeTokens } from "@jina/theme/tokens";
 import { apiUrl, loginUrl } from "../../dashboard/lib/api.ts";
+import {
+  createOnboardingProgress,
+  parseOnboardingProgress,
+  type OnboardingIntent,
+  type OnboardingProgress,
+  type OnboardingStep,
+  type OnboardingWorkspaceKind
+} from "../../dashboard/lib/onboarding.ts";
 import type { ViewerResponse } from "../../dashboard/lib/types.ts";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
@@ -25,8 +33,37 @@ interface AppAuthContextValue {
     readonly displayName: string;
     readonly email?: string;
     readonly imageUrl?: string;
+    readonly githubConnected: boolean;
+    readonly openSettings: () => void | Promise<void>;
     readonly signOut: () => void | Promise<void>;
   };
+  readonly onboarding: AppOnboardingState;
+  readonly organizationSetup: AppOrganizationSetup;
+}
+
+type OnboardingPatch = Partial<{
+  status: OnboardingProgress["status"];
+  step: OnboardingStep;
+  workspaceKind: OnboardingWorkspaceKind;
+  selectedTenantId: string;
+  intent: OnboardingIntent;
+}>;
+
+interface AppOnboardingState {
+  readonly progress: OnboardingProgress | null;
+  readonly saving: boolean;
+  readonly error: string | null;
+  readonly begin: () => Promise<OnboardingProgress>;
+  readonly update: (patch: OnboardingPatch) => Promise<OnboardingProgress>;
+  readonly complete: () => Promise<OnboardingProgress>;
+  readonly restart: () => Promise<OnboardingProgress>;
+  readonly clearError: () => void;
+}
+
+interface AppOrganizationSetup {
+  readonly supported: boolean;
+  readonly create: (name: string) => Promise<{ readonly id: string; readonly name: string }>;
+  readonly activate: (organizationId: string) => Promise<void>;
 }
 
 const AppAuthContext = createContext<AppAuthContextValue | null>(null);
@@ -50,8 +87,62 @@ export function AppAuthProvider({ children }: { readonly children: ReactNode }) 
 function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
   const { user, isLoaded } = useUser();
   const { isSignedIn } = useAuth();
-  const { signOut } = useClerk();
+  const clerk = useClerk();
+  const { signOut } = clerk;
+  const persistedProgress = parseOnboardingProgress(user?.unsafeMetadata.jinaOnboarding);
+  const [optimisticProgress, setOptimisticProgress] = useState<{
+    readonly userId: string;
+    readonly progress: OnboardingProgress;
+  } | null>(null);
+  const [onboardingSaving, setOnboardingSaving] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const email = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses[0]?.emailAddress;
+
+  const saveOnboarding = useCallback(
+    async (next: OnboardingProgress) => {
+      if (!user) throw new Error("Sign in before saving onboarding progress.");
+      setOptimisticProgress({ userId: user.id, progress: next });
+      setOnboardingSaving(true);
+      setOnboardingError(null);
+      try {
+        await user.updateMetadata({
+          unsafeMetadata: { ...user.unsafeMetadata, jinaOnboarding: next }
+        });
+        await user.reload();
+        return next;
+      } catch (cause) {
+        setOptimisticProgress(null);
+        const message = cause instanceof Error ? cause.message : "Onboarding progress could not be saved.";
+        setOnboardingError(message);
+        throw cause;
+      } finally {
+        setOnboardingSaving(false);
+      }
+    },
+    [user]
+  );
+
+  const optimisticForUser = optimisticProgress && optimisticProgress.userId === user?.id ? optimisticProgress : null;
+  const currentProgress = optimisticForUser?.progress ?? persistedProgress;
+  const begin = useCallback(
+    () => saveOnboarding(currentProgress?.status === "in_progress" ? currentProgress : createOnboardingProgress()),
+    [currentProgress, saveOnboarding]
+  );
+  const update = useCallback(
+    (patch: OnboardingPatch) => {
+      const base = currentProgress ?? createOnboardingProgress();
+      return saveOnboarding({ ...base, ...patch, updatedAt: new Date().toISOString() });
+    },
+    [currentProgress, saveOnboarding]
+  );
+  const complete = useCallback(() => {
+    const now = new Date().toISOString();
+    const base = currentProgress ?? createOnboardingProgress(now);
+    return saveOnboarding({ ...base, status: "complete", step: "finish", updatedAt: now, completedAt: now });
+  }, [currentProgress, saveOnboarding]);
+  const restart = useCallback(() => saveOnboarding(createOnboardingProgress()), [saveOnboarding]);
+  const clearOnboardingError = useCallback(() => setOnboardingError(null), []);
+
   const auth = useMemo<AppAuthContextValue>(
     () => ({
       ready: isLoaded,
@@ -60,10 +151,51 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
         displayName: user?.fullName ?? user?.username ?? email ?? "Account",
         ...(email ? { email } : {}),
         ...(user?.imageUrl ? { imageUrl: user.imageUrl } : {}),
+        githubConnected: Boolean(user?.externalAccounts.some((account) => account.provider === "github")),
+        openSettings: () => clerk.openUserProfile(),
         signOut: () => signOut({ redirectUrl: "/signin" })
+      },
+      onboarding: {
+        progress: currentProgress,
+        saving: onboardingSaving,
+        error: onboardingError,
+        begin,
+        update,
+        complete,
+        restart,
+        clearError: clearOnboardingError
+      },
+      organizationSetup: {
+        supported: true,
+        create: async (name: string) => {
+          const organization = await clerk.createOrganization({ name });
+          await clerk.setActive({ organization: organization.id });
+          return { id: organization.id, name: organization.name };
+        },
+        activate: async (organizationId: string) => {
+          await clerk.setActive({ organization: organizationId });
+        }
       }
     }),
-    [email, isLoaded, isSignedIn, signOut, user?.fullName, user?.imageUrl, user?.username]
+    [
+      begin,
+      clerk,
+      clearOnboardingError,
+      complete,
+      currentProgress,
+      email,
+      isLoaded,
+      isSignedIn,
+      onboardingError,
+      onboardingSaving,
+      restart,
+      signOut,
+      update,
+      user?.externalAccounts,
+      user?.fullName,
+      user?.imageUrl,
+      user?.username
+    ]
   );
   return (
     <AppAuthContext.Provider value={auth}>
@@ -73,7 +205,8 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
         {...(user
           ? {
               userKey: user.id,
-              persistUser: (enabled: boolean) => user.updateMetadata({ unsafeMetadata: { developerMode: enabled } })
+              persistUser: (enabled: boolean) =>
+                user.updateMetadata({ unsafeMetadata: { ...user.unsafeMetadata, developerMode: enabled } })
             }
           : {})}
       >
@@ -86,6 +219,9 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
 function GithubAuthAdapter({ children }: { readonly children: ReactNode }) {
   const [viewer, setViewer] = useState<ViewerResponse | null>(null);
   const [ready, setReady] = useState(false);
+  const [progress, setProgress] = useState<OnboardingProgress | null>(null);
+  const [progressReady, setProgressReady] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     void fetch(apiUrl("/dashboard/me"), {
@@ -106,15 +242,60 @@ function GithubAuthAdapter({ children }: { readonly children: ReactNode }) {
       });
     return () => controller.abort();
   }, []);
+  const storageKey = viewer?.user?.id ? `jina.onboarding.${viewer.user.id}` : null;
+  useEffect(() => {
+    if (!storageKey) {
+      setProgressReady(true);
+      return;
+    }
+    setProgressReady(false);
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      setProgress(parseOnboardingProgress(stored ? JSON.parse(stored) : null));
+    } catch {
+      setProgress(null);
+    } finally {
+      setProgressReady(true);
+    }
+  }, [storageKey]);
+
+  const persistProgress = useCallback(
+    async (next: OnboardingProgress) => {
+      if (!storageKey) throw new Error("Sign in before saving onboarding progress.");
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(next));
+        setProgress(next);
+        setOnboardingError(null);
+        return next;
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "Onboarding progress could not be saved.";
+        setOnboardingError(message);
+        throw cause;
+      }
+    },
+    [storageKey]
+  );
   const auth = useMemo<AppAuthContextValue>(() => {
     const user = viewer?.user;
+    const begin = () => persistProgress(progress?.status === "in_progress" ? progress : createOnboardingProgress());
+    const update = (patch: OnboardingPatch) => {
+      const base = progress ?? createOnboardingProgress();
+      return persistProgress({ ...base, ...patch, updatedAt: new Date().toISOString() });
+    };
+    const complete = () => {
+      const now = new Date().toISOString();
+      const base = progress ?? createOnboardingProgress(now);
+      return persistProgress({ ...base, status: "complete", step: "finish", updatedAt: now, completedAt: now });
+    };
     return {
-      ready,
+      ready: ready && progressReady,
       signedIn: viewer?.authenticated === true,
       account: {
         displayName: user?.name?.trim() || user?.login || "Account",
         ...(user?.login ? { email: `@${user.login}` } : {}),
         ...(user?.avatar_url ? { imageUrl: user.avatar_url } : {}),
+        githubConnected: viewer?.authenticated === true,
+        openSettings: () => window.location.assign(loginUrl()),
         signOut: async () => {
           await fetch(apiUrl("/auth/logout"), {
             method: "POST",
@@ -122,9 +303,26 @@ function GithubAuthAdapter({ children }: { readonly children: ReactNode }) {
           }).catch(() => undefined);
           window.location.assign("/signin");
         }
+      },
+      onboarding: {
+        progress,
+        saving: false,
+        error: onboardingError,
+        begin,
+        update,
+        complete,
+        restart: () => persistProgress(createOnboardingProgress()),
+        clearError: () => setOnboardingError(null)
+      },
+      organizationSetup: {
+        supported: false,
+        create: async () => {
+          throw new Error("Team workspace creation requires Clerk authentication.");
+        },
+        activate: async () => undefined
       }
     };
-  }, [ready, viewer]);
+  }, [onboardingError, persistProgress, progress, progressReady, ready, viewer]);
   return (
     <AppAuthContext.Provider value={auth}>
       <DeveloperModeProvider ready={ready}>{children}</DeveloperModeProvider>
@@ -212,7 +410,7 @@ export function AppSignIn() {
     <SignIn
       routing="hash"
       fallbackRedirectUrl="/reviews"
-      signUpFallbackRedirectUrl="/reviews"
+      signUpFallbackRedirectUrl="/onboarding"
       appearance={{
         // Clerk derives hover and disabled shades from these, so it needs real
         // values rather than var() references it cannot compute against. They
@@ -251,6 +449,18 @@ export function useAppAccount() {
     ready: context.ready,
     ...context.account
   };
+}
+
+export function useAppOnboarding(): AppOnboardingState & { readonly ready: boolean } {
+  const context = useContext(AppAuthContext);
+  if (!context) throw new Error("useAppOnboarding must be used within AppAuthProvider");
+  return { ready: context.ready, ...context.onboarding };
+}
+
+export function useAppOrganizationSetup(): AppOrganizationSetup {
+  const context = useContext(AppAuthContext);
+  if (!context) throw new Error("useAppOrganizationSetup must be used within AppAuthProvider");
+  return context.organizationSetup;
 }
 
 export function useDeveloperMode(): DeveloperModeContextValue {

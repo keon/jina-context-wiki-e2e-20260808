@@ -15,6 +15,10 @@ interface StubUser {
   readonly imageUrl: string;
   readonly primaryEmailAddress: { readonly emailAddress: string } | null;
   readonly emailAddresses: readonly { readonly emailAddress: string }[];
+  readonly unsafeMetadata?: Record<string, unknown>;
+  readonly externalAccounts?: readonly { readonly provider: string }[];
+  readonly updateMetadata?: (input: { readonly unsafeMetadata: Record<string, unknown> }) => Promise<unknown>;
+  readonly reload?: () => Promise<unknown>;
 }
 
 let user: StubUser | null = null;
@@ -36,13 +40,27 @@ export function useAuth() {
 }
 
 export function useUser() {
-  return { isLoaded: true, isSignedIn: user !== null, user };
+  return {
+    isLoaded: true,
+    isSignedIn: user !== null,
+    user: user
+      ? {
+          ...user,
+          unsafeMetadata: user.unsafeMetadata ?? {},
+          externalAccounts: user.externalAccounts ?? [],
+          updateMetadata: user.updateMetadata ?? (() => Promise.resolve()),
+          reload: user.reload ?? (() => Promise.resolve())
+        }
+      : null
+  };
 }
 
 export function useClerk() {
   return {
     openUserProfile: () => undefined,
     signOut: () => Promise.resolve(),
-    getOrganization: () => Promise.resolve(null)
+    getOrganization: () => Promise.resolve(null),
+    createOrganization: ({ name }: { readonly name: string }) => Promise.resolve({ id: "org_test", name }),
+    setActive: () => Promise.resolve()
   };
 }

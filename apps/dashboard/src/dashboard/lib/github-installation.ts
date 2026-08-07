@@ -1,9 +1,13 @@
 import type { SelectedTenant } from "./tenants";
 import { isTenantWritable } from "./tenants";
+import { apiUrl } from "./api";
+
+const ONBOARDING_STATE_PREFIX = "jina:v1:onboarding:";
 
 export interface GithubInstallationCallback {
   installationId: number;
   tenantId: string;
+  returnTo?: "onboarding";
 }
 
 export interface GithubConnection {
@@ -18,12 +22,16 @@ export interface GithubConnection {
 export function githubInstallationUrl(
   baseUrl: string | undefined,
   selected: SelectedTenant | null,
+  returnTo?: "onboarding",
 ): string | undefined {
   if (!baseUrl) return undefined;
   if (!selected || !isTenantWritable(selected)) return baseUrl;
   try {
     const url = new URL(baseUrl);
-    url.searchParams.set("state", selected.tenantId);
+    url.searchParams.set(
+      "state",
+      returnTo === "onboarding" ? `${ONBOARDING_STATE_PREFIX}${selected.tenantId}` : selected.tenantId,
+    );
     return url.toString();
   } catch {
     return baseUrl;
@@ -34,9 +42,41 @@ export function githubInstallationUrl(
 export function parseGithubInstallationCallback(search: string): GithubInstallationCallback | undefined {
   const params = new URLSearchParams(search);
   const installationId = Number(params.get("installation_id"));
-  const tenantId = params.get("state")?.trim() ?? "";
+  const state = params.get("state")?.trim() ?? "";
+  const markedForOnboarding = state.startsWith(ONBOARDING_STATE_PREFIX);
+  const tenantId = markedForOnboarding ? state.slice(ONBOARDING_STATE_PREFIX.length).trim() : state;
   if (!Number.isSafeInteger(installationId) || installationId <= 0 || !tenantId) return undefined;
-  return { installationId, tenantId };
+  return {
+    installationId,
+    tenantId,
+    ...(markedForOnboarding ? { returnTo: "onboarding" as const } : {}),
+  };
+}
+
+/**
+ * Claim an installation for a Jina tenant. GitHub's installation webhook can
+ * arrive just after the browser callback, so a conflict receives a short,
+ * bounded retry before the failure is shown to the user.
+ */
+export async function connectGithubInstallation(
+  tenantId: string,
+  installationId: number,
+  request: typeof fetch = fetch,
+  wait: (milliseconds: number) => Promise<void> = (milliseconds) =>
+    new Promise((resolve) => window.setTimeout(resolve, milliseconds)),
+): Promise<Response> {
+  const url = apiUrl(`/dashboard/tenants/${encodeURIComponent(tenantId)}/github/installations`);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const response = await request(url, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ installation_id: installationId }),
+    });
+    if (response.status !== 409 || attempt === 3) return response;
+    await wait(500 * 2 ** attempt);
+  }
+  throw new Error("Could not connect the GitHub installation");
 }
 
 export function normalizeGithubConnections(raw: unknown): GithubConnection[] {
