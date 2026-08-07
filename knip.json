@@ -7,6 +7,7 @@
         "autumn.config.ts",
         "evals/review/run-isolated-review.mjs",
         "scripts/context-production-preflight.mjs",
+        "scripts/verify-trigger-project.mjs",
         "e2e/support/stub-api.ts",
         "e2e/*.spec.ts"
       ],
