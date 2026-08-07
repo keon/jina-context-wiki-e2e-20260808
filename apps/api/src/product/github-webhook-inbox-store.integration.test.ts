@@ -65,17 +65,17 @@ test(
       assert.equal(await repository.hasDelivery("missing-guid"), false);
       assert.equal(await repository.reserveRedelivery({
         deliveryId: "missing-guid",
-        providerDeliveryId: 9001,
+        providerDeliveryId: "3835545665537048576",
         cooldownMs: 600_000,
       }), true);
       assert.equal(await repository.reserveRedelivery({
         deliveryId: "missing-guid",
-        providerDeliveryId: 9001,
+        providerDeliveryId: "3835545665537048576",
         cooldownMs: 600_000,
       }), false);
       await repository.recordRedeliveryResult({
         deliveryId: "missing-guid",
-        providerDeliveryId: 9001,
+        providerDeliveryId: "3835545665537048576",
         httpStatus: 202,
       });
       await control.query(
@@ -85,9 +85,15 @@ test(
       );
       assert.equal(await repository.reserveRedelivery({
         deliveryId: "missing-guid",
-        providerDeliveryId: 9002,
+        providerDeliveryId: "3835545665537048577",
         cooldownMs: 600_000,
       }), true);
+      const retainedProviderId = await control.query<{ provider_delivery_id: string }>(
+        `select provider_delivery_id::text as provider_delivery_id
+           from github_webhook_redelivery_requests
+          where github_delivery_id='missing-guid'`,
+      );
+      assert.equal(retainedProviderId.rows[0]?.provider_delivery_id, "3835545665537048577");
 
       await repository.capture(capture("delivery-2", "c".repeat(64), 42));
       const captureOnly = await repository.claim({
