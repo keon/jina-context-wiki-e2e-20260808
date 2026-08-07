@@ -11,7 +11,9 @@ RUN npm install -g pnpm@11.15.1
 COPY . .
 RUN pnpm install --frozen-lockfile \
   && pnpm --filter @jina/api... build \
-  && pnpm --filter @jina/api deploy --prod --legacy /out
+  && pnpm --filter @jina/api deploy --prod --legacy /out \
+  && test -f /out/dist/product/migrate-all.js \
+  && test -f /out/product-migrations/0031_github_webhook_inbox.sql
 
 FROM mirror.gcr.io/library/node:22-bookworm-slim
 

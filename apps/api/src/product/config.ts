@@ -13,6 +13,15 @@ export interface AppConfig {
   graph?: GraphConfig;
   schedulerOidc?: SchedulerOidcConfig;
   reviewBoardPipeline: ReviewBoardPipelineSelection;
+  githubWebhookInbox?: GithubWebhookInboxConfig;
+}
+
+export interface GithubWebhookInboxConfig {
+  readonly encryptionKey: Buffer;
+  readonly encryptionKeyVersion: string;
+  readonly leaseMs: number;
+  readonly maxBodyBytes: number;
+  readonly legacyForwardUrl?: string;
 }
 
 /**
@@ -75,6 +84,8 @@ interface AuthConfig {
 export function loadConfig(env = process.env): AppConfig {
   const dashboardUrl = dashboardUrlFromEnv(env);
   const dashboardAllowedOrigins = parseDashboardAllowedOrigins(env.DASHBOARD_ORIGIN, dashboardUrl);
+  const apiBaseUrl = normalizeBaseUrl(env.API_BASE_URL);
+  const githubWebhookInbox = parseGithubWebhookInboxConfig(env, apiBaseUrl);
   // Context and review workers rotate independently even though one API serves both.
   const internalApiToken = optionalEnv(env, "JINA_PRODUCT_INTERNAL_API_TOKEN") ?? requiredEnv(env, "INTERNAL_API_TOKEN");
   validateSecretsEncryptionKey(env);
@@ -85,13 +96,92 @@ export function loadConfig(env = process.env): AppConfig {
     internalApiToken,
     dashboardAllowedOrigins,
     dashboardUrl,
-    apiBaseUrl: normalizeBaseUrl(env.API_BASE_URL),
+    apiBaseUrl,
     auth: parseAuthConfig(env),
     billing: parseBillingConfig(env, dashboardUrl),
     graph: parseGraphConfig(env),
     reviewBoardPipeline: parseReviewBoardPipelineSelection(env),
+    ...(githubWebhookInbox ? { githubWebhookInbox } : {}),
     ...(parseSchedulerOidcConfig(env) ? { schedulerOidc: parseSchedulerOidcConfig(env) } : {}),
   };
+}
+
+function parseGithubWebhookInboxConfig(
+  env: NodeJS.ProcessEnv,
+  apiBaseUrl: string | undefined,
+): GithubWebhookInboxConfig | undefined {
+  const enabled = parseOptionalStrictBoolean(env.JINA_GITHUB_WEBHOOK_INBOX_ENABLED);
+  if (!enabled) return undefined;
+
+  const rawKey = requiredEnv(env, "GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY");
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(rawKey)) {
+    throw new Error(
+      "GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY must be canonical base64 for exactly 32 bytes",
+    );
+  }
+  const encryptionKey = Buffer.from(rawKey, "base64");
+  if (encryptionKey.length !== 32 || encryptionKey.toString("base64") !== rawKey) {
+    throw new Error(
+      "GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY must be canonical base64 for exactly 32 bytes",
+    );
+  }
+
+  const encryptionKeyVersion = requiredEnv(
+    env,
+    "GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION",
+  );
+  if (!/^[1-9][0-9]*$/.test(encryptionKeyVersion)) {
+    throw new Error("GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION must be a numeric Secret Manager version");
+  }
+
+  const legacyForwardUrl = optionalEnv(env, "JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL");
+  if (legacyForwardUrl) validateLegacyForwardUrl(legacyForwardUrl, apiBaseUrl);
+
+  return {
+    encryptionKey,
+    encryptionKeyVersion,
+    leaseMs: parseBoundedPositiveInteger(
+      env.JINA_GITHUB_WEBHOOK_INBOX_LEASE_MS,
+      120_000,
+      10_000,
+      10 * 60_000,
+      "JINA_GITHUB_WEBHOOK_INBOX_LEASE_MS",
+    ),
+    maxBodyBytes: parseBoundedPositiveInteger(
+      env.JINA_GITHUB_WEBHOOK_MAX_BODY_BYTES,
+      2 * 1024 * 1024,
+      1_024,
+      10 * 1024 * 1024,
+      "JINA_GITHUB_WEBHOOK_MAX_BODY_BYTES",
+    ),
+    ...(legacyForwardUrl ? { legacyForwardUrl } : {}),
+  };
+}
+
+function validateLegacyForwardUrl(value: string, apiBaseUrl: string | undefined): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL must be a valid HTTPS URL");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.pathname !== "/webhooks/github" ||
+    !parsed.hostname.endsWith(".a.run.app") ||
+    !parsed.hostname.includes("---")
+  ) {
+    throw new Error(
+      "JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL must be an exact tagged Cloud Run /webhooks/github HTTPS URL",
+    );
+  }
+  if (apiBaseUrl && parsed.origin === new URL(apiBaseUrl).origin) {
+    throw new Error("JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL must not target the public API origin");
+  }
 }
 
 function parseReviewBoardPipelineSelection(
@@ -305,6 +395,32 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   }
 
   return fallback;
+}
+
+function parseOptionalStrictBoolean(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  throw new Error("JINA_GITHUB_WEBHOOK_INBOX_ENABLED must be true or false");
+}
+
+function parseBoundedPositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  if (!value) return fallback;
+  if (!/^[1-9][0-9]*$/.test(value.trim())) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return parsed;
 }
 
 function parseSameSite(value: string | undefined, fallback: AuthConfig["cookieSameSite"]): AuthConfig["cookieSameSite"] {

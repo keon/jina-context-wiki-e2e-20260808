@@ -28,39 +28,102 @@ steps:
 
   - id: build-api
     name: gcr.io/cloud-builders/docker
-    waitFor: [validate]
+    waitFor: [validate-image-selection]
+    entrypoint: bash
     args:
-      - build
-      - --file=apps/api/Dockerfile
-      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID
-      - .
+      - -ceu
+      - |
+        if [[ "${_JINA_REUSE_EXISTING_IMAGE_TAG}" == "true" ]]; then
+          echo "Reusing accepted API image ${_JINA_EXISTING_IMAGE_TAG}"
+          exit 0
+        fi
+        docker build \
+          --file=apps/api/Dockerfile \
+          --label=org.opencontainers.image.revision=$COMMIT_SHA \
+          --label=org.opencontainers.image.source=https://github.com/omxyz/jina \
+          --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID \
+          .
 
   - id: build-worker
     name: gcr.io/cloud-builders/docker
-    waitFor: [validate]
+    waitFor: [validate-image-selection]
+    entrypoint: bash
     args:
-      - build
-      - --file=apps/worker/Dockerfile
-      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
-      - .
+      - -ceu
+      - |
+        if [[ "${_JINA_REUSE_EXISTING_IMAGE_TAG}" == "true" ]]; then
+          echo "Reusing accepted worker image ${_JINA_EXISTING_IMAGE_TAG}"
+          exit 0
+        fi
+        docker build \
+          --file=apps/worker/Dockerfile \
+          --label=org.opencontainers.image.revision=$COMMIT_SHA \
+          --label=org.opencontainers.image.source=https://github.com/omxyz/jina \
+          --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID \
+          .
 
   - id: build-dashboard
     name: gcr.io/cloud-builders/docker
-    waitFor: [validate]
+    waitFor: [validate-image-selection]
+    entrypoint: bash
     args:
-      - build
-      - --file=apps/dashboard/Dockerfile
-      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID
-      - .
+      - -ceu
+      - |
+        if [[ "${_JINA_REUSE_EXISTING_IMAGE_TAG}" == "true" ]]; then
+          echo "Reusing accepted dashboard image ${_JINA_EXISTING_IMAGE_TAG}"
+          exit 0
+        fi
+        docker build \
+          --file=apps/dashboard/Dockerfile \
+          --build-arg=NEXT_PUBLIC_API_BASE_URL=${_JINA_PUBLIC_API_BASE_URL} \
+          --build-arg=NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE=${_JINA_DASHBOARD_AUTH_MODE} \
+          --label=org.opencontainers.image.revision=$COMMIT_SHA \
+          --label=org.opencontainers.image.source=https://github.com/omxyz/jina \
+          --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID \
+          .
 
   - id: build-admin
     name: gcr.io/cloud-builders/docker
-    waitFor: [validate]
+    waitFor: [validate-image-selection]
+    entrypoint: bash
     args:
-      - build
-      - --file=apps/admin/Dockerfile
-      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID
-      - .
+      - -ceu
+      - |
+        if [[ "${_JINA_REUSE_EXISTING_IMAGE_TAG}" == "true" ]]; then
+          echo "Reusing accepted admin image ${_JINA_EXISTING_IMAGE_TAG}"
+          exit 0
+        fi
+        docker build \
+          --file=apps/admin/Dockerfile \
+          --label=org.opencontainers.image.revision=$COMMIT_SHA \
+          --label=org.opencontainers.image.source=https://github.com/omxyz/jina \
+          --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID \
+          .
+
+  - id: validate-image-selection
+    name: gcr.io/cloud-builders/docker
+    waitFor: [validate]
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        reuse="${_JINA_REUSE_EXISTING_IMAGE_TAG}"
+        tag="${_JINA_EXISTING_IMAGE_TAG}"
+        if [[ "$${reuse}" == "false" ]]; then
+          test -z "$${tag}"
+          exit 0
+        fi
+        [[ "$${reuse}" == "true" ]]
+        [[ "$${tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]
+        [[ "${_JINA_DEPLOYMENT_ACCEPTANCE_MODE}" == "mechanical" || "${_JINA_DEPLOYMENT_ACCEPTANCE_MODE}" == "full" ]]
+        for image in api worker dashboard admin; do
+          tagged="us-east1-docker.pkg.dev/$PROJECT_ID/jina/$${image}:$${tag}"
+          docker pull "$${tagged}"
+          revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$${tagged}")"
+          source="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$${tagged}")"
+          test "$${revision}" = "$COMMIT_SHA"
+          test "$${source}" = "https://github.com/omxyz/jina"
+        done
 
   - id: push-api
     name: gcr.io/cloud-builders/docker
@@ -69,6 +132,7 @@ steps:
     args:
       - -ceu
       - |
+        if [[ "${_JINA_REUSE_EXISTING_IMAGE_TAG}" == "true" ]]; then exit 0; fi
         docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID
 
   - id: push-worker
@@ -78,17 +142,28 @@ steps:
     args:
       - -ceu
       - |
+        if [[ "${_JINA_REUSE_EXISTING_IMAGE_TAG}" == "true" ]]; then exit 0; fi
         docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
 
   - id: push-dashboard
     name: gcr.io/cloud-builders/docker
     waitFor: [build-dashboard]
-    args: [push, us-east1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID]
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        if [[ "${_JINA_REUSE_EXISTING_IMAGE_TAG}" == "true" ]]; then exit 0; fi
+        docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID
 
   - id: push-admin
     name: gcr.io/cloud-builders/docker
     waitFor: [build-admin]
-    args: [push, us-east1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID]
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        if [[ "${_JINA_REUSE_EXISTING_IMAGE_TAG}" == "true" ]]; then exit 0; fi
+        docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID
 
   - id: deploy-backend
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:563.0.0
@@ -99,6 +174,8 @@ steps:
       - GCP_PROJECT_ID=$PROJECT_ID
       - GCP_REGION=us-east1
       - CLOUD_BUILD_ID=$BUILD_ID
+      - IMAGE_TAG=${_JINA_EXISTING_IMAGE_TAG}
+      - JINA_REUSE_EXISTING_IMAGE_TAG=${_JINA_REUSE_EXISTING_IMAGE_TAG}
       - CLOUD_SQL_INSTANCE=${_CLOUD_SQL_INSTANCE}
       - JINA_CONTEXT_GCS_BUCKET=${_JINA_CONTEXT_GCS_BUCKET}
       - JINA_TENANCY_MODE=${_JINA_TENANCY_MODE}
@@ -186,6 +263,10 @@ substitutions:
   _JINA_CONTEXT_DAYTONA_MODEL_DOMAINS: api.openai.com
   _JINA_CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS: ""
   _JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET: jina-v1-internal-api-token
+  # Production keeps the established GitHub session contract. Staging's Vercel
+  # project remains Clerk-backed and does not consume these image build args.
+  _JINA_PUBLIC_API_BASE_URL: https://api.usejina.com
+  _JINA_DASHBOARD_AUTH_MODE: github
   _JINA_WORKER_RELEASE_SECRET: jina-worker-release-credential
   # A measured full Board run takes about 2.5 hours. The acceptance poll gets
   # three hours, with a further fifteen-minute Cloud Run job envelope.
@@ -193,10 +274,16 @@ substitutions:
   _JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET: "24000000"
   _JINA_ACCEPTANCE_TIMEOUT_MS: "10800000"
   _JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS: "11700"
-  # Do not hold the worker generation paused behind a multi-hour Context build.
-  # Production Context acceptance runs after cutover as an ordinary observable
-  # build; an operator may still select "full" for an exceptional blocking gate.
-  _JINA_DEPLOYMENT_ACCEPTANCE_MODE: mechanical
+  # A source push may build and validate candidates, but production traffic is
+  # an explicit operator decision made only after the release evidence is
+  # accepted. Select "mechanical" for readiness-gated routing or "full" for the
+  # complete Context acceptance gate; the safe default never changes traffic.
+  _JINA_DEPLOYMENT_ACCEPTANCE_MODE: deferred
+  # An explicit mechanical/full rerun may reuse the exact images produced by
+  # the successful deferred build. validate-image-selection pulls all four
+  # images and requires their source labels to match this build's COMMIT_SHA.
+  _JINA_EXISTING_IMAGE_TAG: ""
+  _JINA_REUSE_EXISTING_IMAGE_TAG: "false"
   # Normal releases accept only the current schema. The first Context
   # production transition must override both values explicitly:
   #   _JINA_CONTEXT_RESET_MODE=legacy-once

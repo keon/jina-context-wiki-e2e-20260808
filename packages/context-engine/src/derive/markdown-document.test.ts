@@ -72,6 +72,8 @@ test("unlinking an omitted document preserves its label and every other rendered
   const source = [
     "See [Legacy deletion](../runbooks/legacy.md) and [Runtime](runtime.md).",
     "[The worker fences completion](src/worker.ts#L10-L12).",
+    "[Legacy evidence](../runbooks/legacy.md#L10-L12) remains a source citation.",
+    "[Encoded legacy evidence](../runbooks/legacy.md#L20%2D24) remains a source citation.",
     "![Legacy diagram](../runbooks/legacy.md)",
     "`[Legacy example](../runbooks/legacy.md)`",
     "<!-- [Legacy comment](../runbooks/legacy.md) -->"
@@ -82,9 +84,36 @@ test("unlinking an omitted document preserves its label and every other rendered
     [
       "See Legacy deletion and [Runtime](runtime.md).",
       "[The worker fences completion](src/worker.ts#L10-L12).",
+      "[Legacy evidence](../runbooks/legacy.md#L10-L12) remains a source citation.",
+      "[Encoded legacy evidence](../runbooks/legacy.md#L20%2D24) remains a source citation.",
       "![Legacy diagram](../runbooks/legacy.md)",
       "`[Legacy example](../runbooks/legacy.md)`",
       "<!-- [Legacy comment](../runbooks/legacy.md) -->"
+    ].join("\n")
+  );
+});
+
+test("unlinking omitted documents covers root-relative and reference-style links", () => {
+  const source = [
+    "See [Root](/runbooks/legacy.md), [Full][legacy], [Collapsed][], and [Shortcut].",
+    "Keep [Runtime][runtime].",
+    "",
+    "[legacy]: ../runbooks/legacy.md",
+    "[Collapsed]: /runbooks/legacy.md",
+    "[Shortcut]: ../runbooks/legacy.md#overview",
+    "[runtime]: runtime.md"
+  ].join("\n");
+
+  assert.equal(
+    unlinkMarkdownDocumentTargets(source, "components/api.md", new Set(["runbooks/legacy.md"])),
+    [
+      "See Root, Full, Collapsed, and Shortcut.",
+      "Keep [Runtime][runtime].",
+      "",
+      "[legacy]: ../runbooks/legacy.md",
+      "[Collapsed]: /runbooks/legacy.md",
+      "[Shortcut]: ../runbooks/legacy.md#overview",
+      "[runtime]: runtime.md"
     ].join("\n")
   );
 });
@@ -96,6 +125,7 @@ test("normalizes agent source locations to repository-relative GitHub line links
     "[portable quote](../../../../repository/additional/0/apps/worker/src/server.ts#L120-L126)",
     "[portable absolute](/workspace/repository/additional/0/packages/board/src/reducer.ts#L30)",
     "[portable stage relative](additional/0/apps/api/src/server.ts#L50-L52)",
+    "[encoded line range](packages/context-engine/src/index.ts#L10%2D14)",
     "[root quote](packages/github/src/webhooks.ts:91-94)",
     "[provider title](https://github.com/omxyz/jina/pull/161)"
   ].join("\n");
@@ -108,6 +138,7 @@ test("normalizes agent source locations to repository-relative GitHub line links
       "[portable quote](apps/worker/src/server.ts#L120-L126)",
       "[portable absolute](packages/board/src/reducer.ts#L30)",
       "[portable stage relative](apps/api/src/server.ts#L50-L52)",
+      "[encoded line range](packages/context-engine/src/index.ts#L10-L14)",
       "[root quote](packages/github/src/webhooks.ts#L91-L94)",
       "[provider title](https://github.com/omxyz/jina/pull/161)"
     ].join("\n")
@@ -119,6 +150,7 @@ test("normalizes agent source locations to repository-relative GitHub line links
     { claim: "portable quote", path: "apps/worker/src/server.ts", startLine: 120, endLine: 126 },
     { claim: "portable absolute", path: "packages/board/src/reducer.ts", startLine: 30, endLine: 30 },
     { claim: "portable stage relative", path: "apps/api/src/server.ts", startLine: 50, endLine: 52 },
+    { claim: "encoded line range", path: "packages/context-engine/src/index.ts", startLine: 10, endLine: 14 },
     { claim: "root quote", path: "packages/github/src/webhooks.ts", startLine: 91, endLine: 94 },
     { claim: "provider title", providerUrl: "https://github.com/omxyz/jina/pull/161" }
   ]);

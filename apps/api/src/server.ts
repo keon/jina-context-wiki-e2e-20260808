@@ -602,8 +602,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let devDeliverySequence = 0;
   let restoredVersion = 0;
   let mutations = Promise.resolve();
+  const contextFollowupPromotionRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const contextFollowupPromotionRetryAttempts = new Map<string, number>();
   const deliveries = new DeliveryCache(10_000);
   const ready = initialize();
+  // Initialization failures remain observable by every request through
+  // `await ready`, but attaching a handler immediately prevents Node from
+  // classifying a fast state-compatibility rejection as unhandled before the
+  // first request reaches the server.
+  void ready.catch(() => undefined);
 
   async function initialize(): Promise<void> {
     const stored = await config.stateStore?.load();
@@ -622,6 +629,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     intakeState = current.intakeState;
     devDeliverySequence = current.devDeliverySequence;
     compactHotBoard();
+    for (const task of intakeState.board.tasks) {
+      if (
+        task.type === contextBoardTaskTypes.build &&
+        isTerminalTaskStatus(task.status) &&
+        latestContextBoardFollowup(intakeState.board, task.id)
+      ) {
+        scheduleContextBoardFollowupPromotion(requiredString(task.metadata.tenantId, "tenantId"), task.id);
+      }
+    }
   }
 
   function snapshot(): ApiSnapshot {
@@ -1341,6 +1357,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               const recoveredBuild = findTask(prepared.state, build.id);
               const target = findTask(prepared.state, candidate);
               if (!recoveredBuild || !target) throw new Error("token-budget recovery task disappeared");
+              await assertContextBuildUnpublishedForRetry(recoveredBuild);
               assertContextOperatorRetrySafety(prepared.state, recoveredBuild, target);
               const retried = retryFailedBoardTask(prepared.state, {
                 buildTaskId,
@@ -1447,6 +1464,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (!visibleBuild) throw notFound("build not found");
       const repository = requiredRepositoryName(visibleBuild.metadata.repository, "repository");
       await requireRepositoryAccess(principal, repository);
+      await assertContextBuildUnpublishedForRetry(visibleBuild);
       const visibleTargets = taskIds.map((taskId) => {
         const target = findTask(intakeState.board, taskId);
         if (!target || target.metadata.contextBuildId !== visibleBuild.id || !isContextWorkTaskType(target.type)) {
@@ -1462,6 +1480,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         retried = await mutate(async () => {
           const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, operatorBatchRetryBuildId);
           if (!build) throw notFound("build not found");
+          await assertContextBuildUnpublishedForRetry(build);
           const targets = taskIds.map((taskId) => {
             const target = findTask(intakeState.board, taskId);
             if (!target || target.metadata.contextBuildId !== build.id || !isContextWorkTaskType(target.type)) {
@@ -1643,6 +1662,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       ) {
         throw notFound("build task not found");
       }
+      await assertContextBuildUnpublishedForRetry(visibleBuild);
       assertContextOperatorRetrySafety(intakeState.board, visibleBuild, visibleTarget);
 
       let quotaResumed = false;
@@ -1692,6 +1712,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           if (!build || !target || target.metadata.contextBuildId !== build.id || !isContextWorkTaskType(target.type)) {
             throw notFound("build task not found");
           }
+          await assertContextBuildUnpublishedForRetry(build);
           assertContextOperatorRetrySafety(prepared.state, build, target);
           const result = retryFailedBoardTask(prepared.state, {
             buildTaskId,
@@ -2821,7 +2842,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function tryPromoteContextBoardFollowup(tenantId: string, completedBuildTaskId: TaskId): Promise<boolean> {
     try {
-      return await promoteContextBoardFollowup(tenantId, completedBuildTaskId);
+      const promoted = await promoteContextBoardFollowup(tenantId, completedBuildTaskId);
+      if (promoted || !latestContextBoardFollowup(intakeState.board, completedBuildTaskId)) {
+        clearContextBoardFollowupPromotionRetry(tenantId, completedBuildTaskId);
+      } else {
+        scheduleContextBoardFollowupPromotion(tenantId, completedBuildTaskId);
+      }
+      return promoted;
     } catch (error) {
       logger.warn("deferred Context build promotion did not commit and requires reconciliation", {
         event: "context.build_followup_promotion_failed",
@@ -2829,7 +2856,71 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         completedBuildTaskId,
         ...errorLogFields(error)
       });
+      scheduleContextBoardFollowupPromotion(tenantId, completedBuildTaskId);
       return false;
+    }
+  }
+
+  function contextBoardFollowupPromotionRetryKey(tenantId: string, completedBuildTaskId: TaskId): string {
+    return `${tenantId}\u0000${completedBuildTaskId}`;
+  }
+
+  function clearContextBoardFollowupPromotionRetry(tenantId: string, completedBuildTaskId: TaskId): void {
+    const key = contextBoardFollowupPromotionRetryKey(tenantId, completedBuildTaskId);
+    const timer = contextFollowupPromotionRetryTimers.get(key);
+    if (timer) clearTimeout(timer);
+    contextFollowupPromotionRetryTimers.delete(key);
+    contextFollowupPromotionRetryAttempts.delete(key);
+  }
+
+  function scheduleContextBoardFollowupPromotion(tenantId: string, completedBuildTaskId: TaskId): void {
+    const key = contextBoardFollowupPromotionRetryKey(tenantId, completedBuildTaskId);
+    if (contextFollowupPromotionRetryTimers.has(key)) return;
+    const attempt = contextFollowupPromotionRetryAttempts.get(key) ?? 0;
+    const delayMs = Math.min(30_000, 250 * 2 ** Math.min(attempt, 7));
+    const timer = setTimeout(() => {
+      contextFollowupPromotionRetryTimers.delete(key);
+      void (async () => {
+        if (!latestContextBoardFollowup(intakeState.board, completedBuildTaskId)) {
+          clearContextBoardFollowupPromotionRetry(tenantId, completedBuildTaskId);
+          return;
+        }
+        try {
+          const promoted = await promoteContextBoardFollowup(tenantId, completedBuildTaskId);
+          if (promoted || !latestContextBoardFollowup(intakeState.board, completedBuildTaskId)) {
+            clearContextBoardFollowupPromotionRetry(tenantId, completedBuildTaskId);
+            return;
+          }
+        } catch (error) {
+          logger.warn("deferred Context build promotion reconciliation failed", {
+            event: "context.build_followup_promotion_retry_failed",
+            tenantId,
+            completedBuildTaskId,
+            attempt: attempt + 1,
+            ...errorLogFields(error)
+          });
+        }
+        contextFollowupPromotionRetryAttempts.set(key, attempt + 1);
+        scheduleContextBoardFollowupPromotion(tenantId, completedBuildTaskId);
+      })();
+    }, delayMs);
+    timer.unref();
+    contextFollowupPromotionRetryTimers.set(key, timer);
+  }
+
+  async function assertContextBuildUnpublishedForRetry(build: BoardTask): Promise<void> {
+    if (!config.contextBoardReleaseSeedStore) return;
+    const tenantId = requiredString(build.metadata.tenantId, "tenantId");
+    const repository = requiredRepositoryName(build.metadata.repository, "repository");
+    const ref = requiredString(build.metadata.ref, "ref");
+    const refSequence = requiredPositiveInteger(build.metadata.refSequence, "refSequence");
+    const currentRelease = await config.contextBoardReleaseSeedStore.findCurrentReleaseSeed({
+      tenantId,
+      repository,
+      ref
+    });
+    if (currentRelease && currentRelease.refSequence >= refSequence) {
+      throw new ApiError(409, "operator_retry_unsafe", "published Context tasks cannot be reopened");
     }
   }
 
@@ -6346,6 +6437,26 @@ function sanitizeSnapshotForCurrentRuntime(snapshot: ApiSnapshot): ApiSnapshot {
   const supportedTypes = new Set(
     [...taskTypeDefinitions, ...RUNTIME_BOARD_TASK_TYPE_DEFINITIONS].map((definition) => definition.type)
   );
+  const unsupportedTasks = snapshot.intakeState.board.tasks.filter((task) => !supportedTypes.has(task.type));
+  const unsupportedTaskIds = new Set(unsupportedTasks.map((task) => task.id));
+  const activeSupportedTaskIds = new Set(
+    snapshot.intakeState.board.tasks
+      .filter((task) => supportedTypes.has(task.type) && !isTerminalTaskStatus(task.status))
+      .map((task) => task.id)
+  );
+  const unsupportedWorkIsLive =
+    unsupportedTasks.some((task) => !isTerminalTaskStatus(task.status)) ||
+    snapshot.intakeState.board.outbox.some(
+      (message) => unsupportedTaskIds.has(message.taskId) && message.status !== "dispatched"
+    ) ||
+    snapshot.intakeState.board.dependencies.some(
+      (dependency) =>
+        activeSupportedTaskIds.has(dependency.taskId) && unsupportedTaskIds.has(dependency.dependsOnTaskId)
+    );
+  if (unsupportedWorkIsLive) {
+    const unsupportedTypes = [...new Set(unsupportedTasks.map((task) => task.type))].sort().join(", ");
+    throw new Error(`persisted Board contains active work unsupported by this runtime: ${unsupportedTypes}`);
+  }
   const tasks = snapshot.intakeState.board.tasks.filter((task) => supportedTypes.has(task.type));
   const taskIds = new Set(tasks.map((task) => task.id));
   return {

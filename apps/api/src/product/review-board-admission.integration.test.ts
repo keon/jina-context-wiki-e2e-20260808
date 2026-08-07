@@ -10,6 +10,10 @@ import { Pool } from "pg";
 import { getPool } from "./db.js";
 import { admitScheduledBillingRetry } from "./billing-board-admission.js";
 import {
+  GithubWebhookInboxEpochError,
+  PostgresGithubWebhookInboxRepository,
+} from "./github-webhook-inbox-store.js";
+import {
   admitBoardReview,
   admitBoardReviewV2,
   admitConfiguredBoardReview,
@@ -107,11 +111,24 @@ test(
       `);
       assert.deepEqual(rolledBack.rows[0], { reviews: "0", workflows: "0" });
 
+      const inboxRepository = new PostgresGithubWebhookInboxRepository();
+      assert.equal((await inboxRepository.snapshot()).control.firstV2WorkflowId, undefined);
+
       const v2First = await admitBoardReviewV2(reviewArrival("head-sha-v2"));
       const v2Replay = await admitBoardReviewV2(reviewArrival("head-sha-v2"));
       assert.equal(v2First.replayed, false);
       assert.equal(v2Replay.replayed, true);
       assert.equal(v2Replay.workflowId, v2First.workflowId);
+      const firstV2Epoch = (await inboxRepository.snapshot()).control;
+      assert.equal(firstV2Epoch.firstV2WorkflowId, v2First.workflowId);
+      await assert.rejects(
+        inboxRepository.transitionMode({
+          expectedGeneration: firstV2Epoch.generation,
+          mode: "legacy_forward",
+          updatedBy: "integration-test",
+        }),
+        (error: unknown) => error instanceof GithubWebhookInboxEpochError,
+      );
       const v2ReplayAfterV1Selection = await admitConfiguredBoardReview(
         reviewArrival("head-sha-v2"),
         { mode: "v1", v2Repositories: new Set() },

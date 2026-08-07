@@ -30,6 +30,15 @@ import { parseCodexConnectTelemetry } from "./codex-connect-telemetry.js";
 import { normalizeCodexHarnessAuthInput, normalizeHarnessModelInput } from "./codex-harness.js";
 import { dashboardOriginAllowed, type AppConfig } from "./config.js";
 import { ApiError, jsonError } from "./errors.js";
+import { GithubWebhookInboxService } from "./github-webhook-inbox.js";
+import { GithubWebhookRedeliveryReconciler } from "./github-webhook-redelivery-reconciler.js";
+import {
+  GithubWebhookInboxEpochError,
+  GithubWebhookInboxGenerationConflictError,
+  type GithubWebhookInboxMode,
+  type GithubWebhookInboxRepository,
+  PostgresGithubWebhookInboxRepository,
+} from "./github-webhook-inbox-store.js";
 import { handleGithubWebhook } from "./github.js";
 import {
   canUserAdministerInstallation,
@@ -106,10 +115,34 @@ import type { DashboardSession as Session } from "./auth.js";
 
 const FLOW_ID_LOG_VALUE = /^[a-zA-Z0-9_-]{8,80}$/;
 
-export function createApp(config: AppConfig): Hono {
+export interface ProductAppDependencies {
+  readonly githubWebhookInboxRepository?: GithubWebhookInboxRepository;
+  readonly fetch?: typeof fetch;
+  readonly githubAppJwtFactory?: () => string;
+}
+
+export function createApp(config: AppConfig, dependencies: ProductAppDependencies = {}): Hono {
   const boardWorkflowAdmitter = new ProductBoardWorkflowAdmitter({ pipeline: config.reviewBoardPipeline });
   const billing = createBillingService(config);
   const graphs = new GraphApiClient(config.graph);
+  const githubWebhookInboxRepository = config.githubWebhookInbox
+    ? dependencies.githubWebhookInboxRepository ?? new PostgresGithubWebhookInboxRepository()
+    : undefined;
+  const githubWebhookInbox = config.githubWebhookInbox && githubWebhookInboxRepository
+    ? new GithubWebhookInboxService(
+        config,
+        config.githubWebhookInbox,
+        githubWebhookInboxRepository,
+        dependencies.fetch,
+      )
+    : undefined;
+  const githubWebhookRedelivery = githubWebhookInboxRepository
+    ? new GithubWebhookRedeliveryReconciler(
+        githubWebhookInboxRepository,
+        dependencies.fetch,
+        dependencies.githubAppJwtFactory,
+      )
+    : undefined;
   const app = new Hono();
   // Credentialed CORS requires an explicit allowlist. When DASHBOARD_ORIGIN is "*"/unset
   // we must NOT reflect an arbitrary origin together with credentials:true (that would let
@@ -1478,29 +1511,149 @@ export function createApp(config: AppConfig): Hono {
     }
   });
 
-  app.post("/webhooks/github", async (c) => {
-    const rawBody = await c.req.text();
+  const processGithubWebhook = async (input: {
+    headers: Headers;
+    rawBody: Buffer;
+  }) => {
+    const rawBody = input.rawBody.toString("utf8");
     const response = await handleGithubWebhook({
       config,
       board: boardWorkflowAdmitter,
-      headers: c.req.raw.headers,
+      headers: input.headers,
       rawBody,
       billing,
     });
     try {
-      await graphs.relayGithubContext(c.req.raw.headers, rawBody);
+      await graphs.relayGithubContext(input.headers, rawBody);
     } catch (error) {
       console.warn("context_event_relay_failed", {
-        delivery_id: c.req.header("x-github-delivery"),
+        delivery_id: input.headers.get("x-github-delivery"),
         error: error instanceof Error ? error.message : String(error),
       });
-      // The review was already admitted. Preserve a non-2xx GitHub delivery so
-      // operators can redeliver Context while accurately identifying the
-      // Context admission stage as the failed dependency.
+      // With the inbox enabled this leaves the authoritative delivery retryable.
+      // In legacy direct mode the non-2xx response still allows manual redelivery.
       throw new ApiError(424, "Context event relay failed");
     }
+    return response;
+  };
 
-    return c.json(response);
+  app.post("/webhooks/github", async (c) => {
+    if (!githubWebhookInbox) {
+      const response = await processGithubWebhook({
+        headers: c.req.raw.headers,
+        rawBody: Buffer.from(await c.req.arrayBuffer()),
+      });
+      return c.json(response);
+    }
+
+    const rawBody = Buffer.from(await c.req.arrayBuffer());
+    let captured;
+    try {
+      captured = await githubWebhookInbox.capture(c.req.raw.headers, rawBody);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      console.error("github_webhook_inbox_capture_failed", {
+        delivery_id: c.req.header("x-github-delivery"),
+        event: c.req.header("x-github-event"),
+        error_code: error instanceof Error ? error.name : "unknown_error",
+      });
+      throw new ApiError(503, "GitHub webhook inbox is unavailable");
+    }
+    let processed;
+    try {
+      processed = await githubWebhookInbox.processOne(
+        captured.deliveryId,
+        (input) => processGithubWebhook(input),
+      );
+    } catch (error) {
+      // Capture already committed. A claim/retry bookkeeping outage must not
+      // turn a durable delivery into a failed GitHub response; the expired
+      // lease or pending row remains recoverable through the drain endpoint.
+      console.error("github_webhook_inbox_process_attempt_failed", {
+        delivery_id: captured.deliveryId,
+        event: captured.event,
+        error_code: error instanceof Error ? error.name : "unknown_error",
+      });
+      processed = {
+        deliveryId: captured.deliveryId,
+        disposition: "retry_wait" as const,
+      };
+    }
+
+    return c.json({
+      accepted: true,
+      captured: true,
+      event: captured.event,
+      ...(captured.action ? { action: captured.action } : {}),
+      delivery_id: captured.deliveryId,
+      inserted: captured.inserted,
+      inbox_disposition: processed.disposition,
+      ...(processed.response?.workflow_id
+        ? { workflow_id: processed.response.workflow_id }
+        : {}),
+    }, 202);
+  });
+
+  app.get("/internal/github-webhook-inbox", async (c) => {
+    authorizeInternal(c, config);
+    if (!githubWebhookInbox) throw new ApiError(409, "GitHub webhook inbox is not enabled");
+    return c.json(await githubWebhookInbox.snapshot());
+  });
+
+  app.post("/internal/github-webhook-inbox/mode", async (c) => {
+    authorizeInternal(c, config);
+    if (!githubWebhookInbox) throw new ApiError(409, "GitHub webhook inbox is not enabled");
+    const body = await c.req.json().catch(() => undefined) as Record<string, unknown> | undefined;
+    const expectedGeneration = body?.expected_generation;
+    const mode = body?.mode;
+    if (!Number.isSafeInteger(expectedGeneration) || (expectedGeneration as number) < 1) {
+      throw new ApiError(400, "expected_generation must be a positive integer");
+    }
+    if (!isGithubWebhookInboxMode(mode)) {
+      throw new ApiError(400, "mode is invalid");
+    }
+    try {
+      return c.json(await githubWebhookInbox.transitionMode({
+        expectedGeneration: expectedGeneration as number,
+        mode,
+        updatedBy: c.req.header("x-jina-principal-id")?.trim() || "internal-operator",
+      }));
+    } catch (error) {
+      if (
+        error instanceof GithubWebhookInboxGenerationConflictError ||
+        error instanceof GithubWebhookInboxEpochError
+      ) {
+        throw new ApiError(409, error.message);
+      }
+      throw error;
+    }
+  });
+
+  app.post("/internal/github-webhook-inbox/process", async (c) => {
+    await authorizeSchedule(c, config);
+    if (!githubWebhookInbox) throw new ApiError(409, "GitHub webhook inbox is not enabled");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const limit = body.limit === undefined ? 25 : body.limit;
+    if (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 100) {
+      throw new ApiError(400, "limit must be an integer from 1 through 100");
+    }
+    const results = await githubWebhookInbox.drain(
+      limit as number,
+      (input) => processGithubWebhook(input),
+    );
+    const redelivery = await githubWebhookRedelivery?.reconcile(Math.min(limit as number, 25));
+    return c.json({ processed: results.length, results, redelivery });
+  });
+
+  app.post("/internal/github-webhook-inbox/reconcile", async (c) => {
+    await authorizeSchedule(c, config);
+    if (!githubWebhookRedelivery) throw new ApiError(409, "GitHub webhook inbox is not enabled");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const limit = body.limit === undefined ? 25 : body.limit;
+    if (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 100) {
+      throw new ApiError(400, "limit must be an integer from 1 through 100");
+    }
+    return c.json(await githubWebhookRedelivery.reconcile(limit as number));
   });
 
   app.post("/internal/reviews/prepare", (c) => prepareReview(c, config, billing));
@@ -1579,6 +1732,13 @@ export function createApp(config: AppConfig): Hono {
   app.post("/internal/billing/retry", (c) => retryBilling(c, config, billing));
 
   return app;
+}
+
+function isGithubWebhookInboxMode(value: unknown): value is GithubWebhookInboxMode {
+  return value === "capture_only" ||
+    value === "canary_only" ||
+    value === "capture_and_process" ||
+    value === "legacy_forward";
 }
 
 export function parseReviewGraphAvailabilityBody(body: unknown): {

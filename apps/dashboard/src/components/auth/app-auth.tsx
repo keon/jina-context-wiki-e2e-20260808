@@ -3,15 +3,9 @@
 import { ClerkProvider, SignIn, useClerk, useAuth, useUser } from "@clerk/nextjs";
 import { isClerkAPIResponseError } from "@clerk/nextjs/errors";
 import { themeTokens } from "@jina/theme/tokens";
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode
-} from "react";
+import { apiUrl, loginUrl } from "../../dashboard/lib/api.ts";
+import type { ViewerResponse } from "../../dashboard/lib/types.ts";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 interface DeveloperModeContextValue {
   ready: boolean;
@@ -22,6 +16,20 @@ interface DeveloperModeContextValue {
 
 const DeveloperModeContext = createContext<DeveloperModeContextValue | null>(null);
 const DEVELOPER_MODE_STORAGE_KEY = "jina.developer-mode";
+export const dashboardUsesGithubAuth = process.env.NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE === "github";
+
+interface AppAuthContextValue {
+  readonly ready: boolean;
+  readonly signedIn: boolean;
+  readonly account: {
+    readonly displayName: string;
+    readonly email?: string;
+    readonly imageUrl?: string;
+    readonly signOut: () => void | Promise<void>;
+  };
+}
+
+const AppAuthContext = createContext<AppAuthContextValue | null>(null);
 
 /**
  * Jina's authentication boundary.
@@ -31,37 +39,134 @@ const DEVELOPER_MODE_STORAGE_KEY = "jina.developer-mode";
  * adapter while the visible application remains made from Jina components.
  */
 export function AppAuthProvider({ children }: { readonly children: ReactNode }) {
+  if (dashboardUsesGithubAuth) return <GithubAuthAdapter>{children}</GithubAuthAdapter>;
   return (
     <ClerkProvider>
-      <DeveloperModeProvider>{children}</DeveloperModeProvider>
+      <ClerkAuthAdapter>{children}</ClerkAuthAdapter>
     </ClerkProvider>
   );
 }
 
-function DeveloperModeProvider({ children }: { readonly children: ReactNode }) {
+function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
   const { user, isLoaded } = useUser();
+  const { isSignedIn } = useAuth();
+  const { signOut } = useClerk();
+  const email = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses[0]?.emailAddress;
+  const auth = useMemo<AppAuthContextValue>(
+    () => ({
+      ready: isLoaded,
+      signedIn: Boolean(isSignedIn),
+      account: {
+        displayName: user?.fullName ?? user?.username ?? email ?? "Account",
+        ...(email ? { email } : {}),
+        ...(user?.imageUrl ? { imageUrl: user.imageUrl } : {}),
+        signOut: () => signOut({ redirectUrl: "/signin" })
+      }
+    }),
+    [email, isLoaded, isSignedIn, signOut, user?.fullName, user?.imageUrl, user?.username]
+  );
+  return (
+    <AppAuthContext.Provider value={auth}>
+      <DeveloperModeProvider
+        ready={isLoaded}
+        userEnabled={user?.unsafeMetadata.developerMode === true}
+        {...(user
+          ? {
+              userKey: user.id,
+              persistUser: (enabled: boolean) => user.updateMetadata({ unsafeMetadata: { developerMode: enabled } })
+            }
+          : {})}
+      >
+        {children}
+      </DeveloperModeProvider>
+    </AppAuthContext.Provider>
+  );
+}
+
+function GithubAuthAdapter({ children }: { readonly children: ReactNode }) {
+  const [viewer, setViewer] = useState<ViewerResponse | null>(null);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(apiUrl("/dashboard/me"), {
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal
+    })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return (await response.json()) as ViewerResponse;
+      })
+      .then((next) => {
+        if (!controller.signal.aborted) setViewer(next);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!controller.signal.aborted) setReady(true);
+      });
+    return () => controller.abort();
+  }, []);
+  const auth = useMemo<AppAuthContextValue>(() => {
+    const user = viewer?.user;
+    return {
+      ready,
+      signedIn: viewer?.authenticated === true,
+      account: {
+        displayName: user?.name?.trim() || user?.login || "Account",
+        ...(user?.login ? { email: `@${user.login}` } : {}),
+        ...(user?.avatar_url ? { imageUrl: user.avatar_url } : {}),
+        signOut: async () => {
+          await fetch(apiUrl("/auth/logout"), {
+            method: "POST",
+            credentials: "include"
+          }).catch(() => undefined);
+          window.location.assign("/signin");
+        }
+      }
+    };
+  }, [ready, viewer]);
+  return (
+    <AppAuthContext.Provider value={auth}>
+      <DeveloperModeProvider ready={ready}>{children}</DeveloperModeProvider>
+    </AppAuthContext.Provider>
+  );
+}
+
+function DeveloperModeProvider({
+  children,
+  ready,
+  userKey,
+  userEnabled = false,
+  persistUser
+}: {
+  readonly children: ReactNode;
+  readonly ready: boolean;
+  readonly userKey?: string;
+  readonly userEnabled?: boolean;
+  readonly persistUser?: (enabled: boolean) => Promise<unknown>;
+}) {
   const [localEnabled, setLocalEnabled] = useState(false);
   const [optimisticEnabled, setOptimisticEnabled] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (user || typeof window === "undefined") return;
+    if (userKey || typeof window === "undefined") return;
     setLocalEnabled(window.localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === "true");
-  }, [user]);
+  }, [userKey]);
 
-  const persistedEnabled = user ? user.unsafeMetadata.developerMode === true : localEnabled;
+  const persistedEnabled = userKey ? userEnabled : localEnabled;
 
   useEffect(() => {
     setOptimisticEnabled(null);
-  }, [persistedEnabled, user?.id]);
+  }, [persistedEnabled, userKey]);
 
   const setEnabled = useCallback(
     async (enabled: boolean) => {
       setOptimisticEnabled(enabled);
       setSaving(true);
       try {
-        if (user) {
-          await user.updateMetadata({ unsafeMetadata: { developerMode: enabled } });
+        if (persistUser) {
+          await persistUser(enabled);
         } else {
           window.localStorage.setItem(DEVELOPER_MODE_STORAGE_KEY, String(enabled));
           setLocalEnabled(enabled);
@@ -73,28 +178,36 @@ function DeveloperModeProvider({ children }: { readonly children: ReactNode }) {
         setSaving(false);
       }
     },
-    [user],
+    [persistUser]
   );
 
   const value = useMemo<DeveloperModeContextValue>(
     () => ({
-      ready: isLoaded,
+      ready,
       enabled: optimisticEnabled ?? persistedEnabled,
       saving,
-      setEnabled,
+      setEnabled
     }),
-    [isLoaded, optimisticEnabled, persistedEnabled, saving, setEnabled],
+    [ready, optimisticEnabled, persistedEnabled, saving, setEnabled]
   );
 
   return <DeveloperModeContext.Provider value={value}>{children}</DeveloperModeContext.Provider>;
 }
 
 export function useAppAuth() {
-  const { isLoaded, isSignedIn } = useAuth();
-  return { ready: isLoaded, signedIn: Boolean(isSignedIn) };
+  const context = useContext(AppAuthContext);
+  if (!context) throw new Error("useAppAuth must be used within AppAuthProvider");
+  return { ready: context.ready, signedIn: context.signedIn };
 }
 
 export function AppSignIn() {
+  if (dashboardUsesGithubAuth) {
+    return (
+      <button className="btn btn--primary" type="button" onClick={() => window.location.assign(loginUrl())}>
+        Continue with GitHub
+      </button>
+    );
+  }
   return (
     <SignIn
       routing="hash"
@@ -124,25 +237,19 @@ export function AppSignIn() {
           footer: "auth-clerk-footer",
           socialButtonsBlockButton: "auth-clerk-social",
           formFieldInput: "auth-clerk-input",
-          formButtonPrimary: "auth-clerk-primary",
-        },
+          formButtonPrimary: "auth-clerk-primary"
+        }
       }}
     />
   );
 }
 
 export function useAppAccount() {
-  const { user, isLoaded } = useUser();
-  const { signOut } = useClerk();
-  const email = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses[0]?.emailAddress;
-  const displayName = user?.fullName ?? user?.username ?? email ?? "Account";
-
+  const context = useContext(AppAuthContext);
+  if (!context) throw new Error("useAppAccount must be used within AppAuthProvider");
   return {
-    ready: isLoaded,
-    displayName,
-    email,
-    imageUrl: user?.imageUrl,
-    signOut: () => signOut({ redirectUrl: "/signin" }),
+    ready: context.ready,
+    ...context.account
   };
 }
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { test } from "node:test";
 
 import {
@@ -13,6 +14,7 @@ import {
 } from "./app.js";
 import type { DashboardSession } from "./auth.js";
 import type { AppConfig } from "./config.js";
+import type { GithubWebhookInboxRepository } from "./github-webhook-inbox-store.js";
 import { deleteSession, getSession, saveSession } from "./store.js";
 
 /**
@@ -20,7 +22,11 @@ import { deleteSession, getSession, saveSession } from "./store.js";
  * undefined (no cookies needed); billing has no Autumn secret so it is unconfigured. This is enough to
  * exercise the topup route's origin guard, which runs BEFORE the session/billing checks.
  */
-function testConfig(overrides: { dashboardAllowedOrigins?: AppConfig["dashboardAllowedOrigins"] } = {}): AppConfig {
+function testConfig(overrides: {
+  dashboardAllowedOrigins?: AppConfig["dashboardAllowedOrigins"];
+  githubWebhookInbox?: AppConfig["githubWebhookInbox"];
+  reviewBoardPipeline?: AppConfig["reviewBoardPipeline"];
+} = {}): AppConfig {
   return {
     port: 8080,
     githubWebhookSecret: "whsec",
@@ -42,7 +48,86 @@ function testConfig(overrides: { dashboardAllowedOrigins?: AppConfig["dashboardA
       managedAiFeatureId: "managed_ai_access",
       enforce: "off",
     },
-    reviewBoardPipeline: { mode: "v1", v2Repositories: new Set() },
+    reviewBoardPipeline: overrides.reviewBoardPipeline ?? { mode: "v1", v2Repositories: new Set() },
+    ...(overrides.githubWebhookInbox
+      ? { githubWebhookInbox: overrides.githubWebhookInbox }
+      : {}),
+  };
+}
+
+test("GitHub inbox capture failure returns 503 and never acknowledges the delivery", async () => {
+  const repository = {
+    async capture() {
+      throw new Error("database unavailable");
+    },
+  } as unknown as GithubWebhookInboxRepository;
+  const app = createApp(inboxAppConfig(), { githubWebhookInboxRepository: repository });
+  const body = JSON.stringify({ action: "opened" });
+  const response = await app.request("/webhooks/github", {
+    method: "POST",
+    headers: githubHeaders(body),
+    body,
+  });
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "GitHub webhook inbox is unavailable" });
+});
+
+test("capture_only returns 202 after durable insert without reaching paused Board admission", async () => {
+  let captured = 0;
+  const repository = {
+    async capture() {
+      captured += 1;
+      return { inserted: true, status: "pending" as const };
+    },
+    async claim() {
+      return undefined;
+    },
+  } as unknown as GithubWebhookInboxRepository;
+  const app = createApp(inboxAppConfig(), { githubWebhookInboxRepository: repository });
+  const body = JSON.stringify({
+    action: "opened",
+    installation: { id: 456 },
+    repository: { id: 123, full_name: "omxyz/example" },
+    pull_request: { number: 42 },
+  });
+  const response = await app.request("/webhooks/github", {
+    method: "POST",
+    headers: githubHeaders(body),
+    body,
+  });
+
+  assert.equal(response.status, 202);
+  assert.equal(captured, 1);
+  assert.deepEqual(await response.json(), {
+    accepted: true,
+    captured: true,
+    event: "pull_request",
+    action: "opened",
+    delivery_id: "delivery-app-test",
+    inserted: true,
+    inbox_disposition: "not_claimed",
+  });
+});
+
+function inboxAppConfig(): AppConfig {
+  return testConfig({
+    reviewBoardPipeline: { mode: "paused", v2Repositories: new Set() },
+    githubWebhookInbox: {
+      encryptionKey: Buffer.alloc(32, 5),
+      encryptionKeyVersion: "4",
+      leaseMs: 120_000,
+      maxBodyBytes: 1024 * 1024,
+    },
+  });
+}
+
+function githubHeaders(body: string): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    "x-github-delivery": "delivery-app-test",
+    "x-github-event": "pull_request",
+    "x-hub-signature-256": `sha256=${createHmac("sha256", "whsec").update(body).digest("hex")}`,
   };
 }
 
