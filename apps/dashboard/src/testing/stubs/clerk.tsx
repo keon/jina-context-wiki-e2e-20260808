@@ -32,7 +32,7 @@ export function setClerkOrganization(next: { readonly id: string; readonly name:
   organization = next;
 }
 
-export function ClerkProvider({ children }: { readonly children: ReactNode }) {
+export function ClerkProvider({ children }: { readonly children: ReactNode; readonly [key: string]: unknown }) {
   return <>{children}</>;
 }
 
