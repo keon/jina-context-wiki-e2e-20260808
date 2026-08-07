@@ -1654,9 +1654,20 @@ every existing traffic tag. Cloud Run documents the etag as the resource fingerp
 for modification-conflict detection. A 409/412 abort restores the prior Scheduler
 state without fencing the inbox or issuing a compensating traffic update, so the
 release cannot overwrite the concurrent operator. Ambiguous failures after a request
-still use the existing generation fence and rollback path. The fake-cloud race proof
-changes the serving writer after final validation, observes a stale-etag rejection,
-and asserts zero traffic mutations; the focused promotion suite passes 25/25.
+still use the existing generation fence and an ownership-checked rollback path.
+The completed PATCH operation must return the exact service identity, serving revision,
+and new release-owned etag. Compensation is allowed only against that exact etag; a
+same-revision tag/config update is therefore protected just like a move to a third
+revision. Explicit rollback also uses the v2 etag mutation. If another writer changes
+traffic after PATCH acceptance or during Scheduler verification, the release leaves
+that traffic decision untouched and keeps both Scheduler and inbox processing fenced
+for explicit recovery. If the PATCH outcome is ambiguous and never returns an owned
+etag, compensation makes no traffic guess. The fake-cloud race proofs cover a stale
+pre-PATCH etag, a writer change before final verification, a writer change during
+Scheduler failure, a same-revision etag change, and an ambiguous PATCH failure; none
+overwrites newer state. An ambiguous explicit-rollback result likewise leaves Scheduler
+and inbox processing fenced instead of restoring execution against unknown traffic.
+The focused promotion suite passes 28/28.
 
 The exact production allowlist `proj_yrxsqjznkghpwsolfmjp` is a safety control, not a
 temporary convenience. Legacy project `proj_gmesnthgwwqledarlfip` still owns
