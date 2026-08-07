@@ -32,7 +32,7 @@ export class GithubWebhookRedeliveryReconciler {
     if (!listResponse.ok) {
       throw new ApiError(502, `GitHub failed-delivery listing returned ${listResponse.status}`);
     }
-    const deliveries = parseFailedDeliveries(await listResponse.json());
+    const deliveries = parseFailedDeliveries(parseGithubDeliveryList(await listResponse.text()));
     let alreadyCaptured = 0;
     let cooldownSkipped = 0;
     let requested = 0;
@@ -74,8 +74,33 @@ export class GithubWebhookRedeliveryReconciler {
 }
 
 interface FailedDelivery {
-  readonly id: number;
+  readonly id: string;
   readonly guid: string;
+}
+
+const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n;
+
+/**
+ * GitHub's App delivery IDs can exceed Number.MAX_SAFE_INTEGER while still
+ * fitting the PostgreSQL bigint column used by the recovery ledger. Preserve
+ * the exact decimal token during JSON parsing so neither the redelivery URL
+ * nor the recorded provider identity can be rounded.
+ */
+function parseGithubDeliveryList(text: string): unknown {
+  try {
+    return JSON.parse(
+      text,
+      (key: string, value: unknown, context?: { source?: string }) =>
+        key === "id" &&
+        typeof value === "number" &&
+        typeof context?.source === "string" &&
+        /^[0-9]+$/.test(context.source)
+          ? context.source
+          : value,
+    );
+  } catch {
+    throw new ApiError(502, "GitHub failed-delivery response was invalid");
+  }
 }
 
 function parseFailedDeliveries(value: unknown): FailedDelivery[] {
@@ -86,8 +111,9 @@ function parseFailedDeliveries(value: unknown): FailedDelivery[] {
     }
     const delivery = entry as Record<string, unknown>;
     if (
-      !Number.isSafeInteger(delivery.id) ||
-      (delivery.id as number) < 1 ||
+      typeof delivery.id !== "string" ||
+      !/^[1-9][0-9]{0,18}$/.test(delivery.id) ||
+      BigInt(delivery.id) > MAX_POSTGRES_BIGINT ||
       typeof delivery.guid !== "string" ||
       !/^[A-Za-z0-9._:-]{1,128}$/.test(delivery.guid) ||
       !Number.isSafeInteger(delivery.status_code) ||
@@ -96,7 +122,7 @@ function parseFailedDeliveries(value: unknown): FailedDelivery[] {
     ) {
       throw new ApiError(502, "GitHub failed-delivery entry was invalid");
     }
-    return { id: delivery.id as number, guid: delivery.guid };
+    return { id: delivery.id, guid: delivery.guid };
   });
 }
 

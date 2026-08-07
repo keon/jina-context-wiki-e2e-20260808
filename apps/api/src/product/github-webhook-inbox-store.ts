@@ -90,12 +90,12 @@ export interface GithubWebhookInboxRepository {
   hasDelivery(deliveryId: string): Promise<boolean>;
   reserveRedelivery(input: {
     readonly deliveryId: string;
-    readonly providerDeliveryId: number;
+    readonly providerDeliveryId: string;
     readonly cooldownMs: number;
   }): Promise<boolean>;
   recordRedeliveryResult(input: {
     readonly deliveryId: string;
-    readonly providerDeliveryId: number;
+    readonly providerDeliveryId: string;
     readonly httpStatus: number;
   }): Promise<void>;
   claim(input: {
@@ -246,7 +246,7 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
 
   async reserveRedelivery(input: {
     readonly deliveryId: string;
-    readonly providerDeliveryId: number;
+    readonly providerDeliveryId: string;
     readonly cooldownMs: number;
   }): Promise<boolean> {
     const rows = await query<{ github_delivery_id: string }>(
@@ -272,7 +272,7 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
 
   async recordRedeliveryResult(input: {
     readonly deliveryId: string;
-    readonly providerDeliveryId: number;
+    readonly providerDeliveryId: string;
     readonly httpStatus: number;
   }): Promise<void> {
     await query(
