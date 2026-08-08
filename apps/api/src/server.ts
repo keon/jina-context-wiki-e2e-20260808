@@ -142,6 +142,7 @@ import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 import { isProductApiRoute } from "./product-api-router.js";
 import {
+  ContextWikiSnapshotError,
   contextWikiStageNames,
   type ContextWikiStageExecutor,
   type ContextWikiStageName
@@ -8717,6 +8718,9 @@ function staleLease(): ApiError {
 
 function httpError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
+  if (error instanceof ContextWikiSnapshotError) {
+    return new ApiError(500, error.code, error.message);
+  }
   if (error instanceof BoardContextPublicationError) {
     const status = error.code === "invalid_publication" || error.code === "certification_mismatch" ? 400 : 409;
     return new ApiError(status, error.code, error.message);

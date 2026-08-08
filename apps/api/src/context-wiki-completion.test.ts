@@ -19,6 +19,7 @@ import {
 } from "@jina/shared-kernel";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
+import { ContextWikiSnapshotError } from "./context-wiki-execution.js";
 
 const TENANT = "tenant-wiki-callback";
 const INTERNAL_TOKEN = "internal-wiki-callback-token";
@@ -382,6 +383,11 @@ test("stage operations replay exact receipts, retry pre-effect failures, and rec
     async execute(input: { operationId: string; input: Readonly<Record<string, unknown>> }) {
       const count = (calls.get(input.operationId) ?? 0) + 1;
       calls.set(input.operationId, count);
+      if (input.operationId === "classified-snapshot") {
+        throw new ContextWikiSnapshotError("source-tree", {
+          cause: new Error("ghs_private-token-and-upstream-diagnostic")
+        });
+      }
       if (input.operationId === "transient" && count === 1) throw new Error("model unavailable before output");
       const output = { operationId: input.operationId, acceptedInput: input.input, modelCall: count };
       if (input.operationId === "page-artifact-crash" && count === 1) {
@@ -410,6 +416,19 @@ test("stage operations replay exact receipts, retry pre-effect failures, and rec
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
     const grant = await claimWikiExecution(baseUrl, "run_stagereplay1");
+    const classified = await post(
+      baseUrl,
+      `/internal/context/wiki/executions/${request.boardBuildId}/steps/snapshot`,
+      grant,
+      { operationId: "classified-snapshot", input: {} }
+    );
+    assert.equal(classified.response.status, 500);
+    assert.deepEqual(classified.body, {
+      accepted: false,
+      error: "wiki snapshot source tree failed",
+      code: "wiki_snapshot_source_tree_failed"
+    });
+    assert.doesNotMatch(JSON.stringify(classified.body), /private-token|upstream|diagnostic/i);
     const stage = (operationId: string, input: Record<string, unknown>) =>
       post(baseUrl, `/internal/context/wiki/executions/${request.boardBuildId}/steps/write-page`, grant, {
         operationId,

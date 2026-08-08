@@ -37,6 +37,63 @@ export const contextWikiStageNames = [
 
 export type ContextWikiStageName = (typeof contextWikiStageNames)[number];
 
+export const contextWikiSnapshotFailurePhases = [
+  "github-token",
+  "source-tree",
+  "policy-tree",
+  "policy",
+  "source-blobs",
+  "evidence-commit",
+  "artifact-write"
+] as const;
+
+export type ContextWikiSnapshotFailurePhase = (typeof contextWikiSnapshotFailurePhases)[number];
+
+const contextWikiSnapshotFailureDetails = {
+  "github-token": {
+    code: "wiki_snapshot_github_token_failed",
+    message: "wiki snapshot GitHub authorization failed"
+  },
+  "source-tree": {
+    code: "wiki_snapshot_source_tree_failed",
+    message: "wiki snapshot source tree failed"
+  },
+  "policy-tree": {
+    code: "wiki_snapshot_policy_tree_failed",
+    message: "wiki snapshot policy tree failed"
+  },
+  policy: { code: "wiki_snapshot_policy_failed", message: "wiki snapshot policy failed" },
+  "source-blobs": {
+    code: "wiki_snapshot_source_blobs_failed",
+    message: "wiki snapshot source blobs failed"
+  },
+  "evidence-commit": {
+    code: "wiki_snapshot_evidence_commit_failed",
+    message: "wiki snapshot evidence commit failed"
+  },
+  "artifact-write": {
+    code: "wiki_snapshot_artifact_write_failed",
+    message: "wiki snapshot artifact write failed"
+  }
+} as const satisfies Record<ContextWikiSnapshotFailurePhase, { readonly code: string; readonly message: string }>;
+
+export type ContextWikiSnapshotFailureCode =
+  (typeof contextWikiSnapshotFailureDetails)[ContextWikiSnapshotFailurePhase]["code"];
+
+export class ContextWikiSnapshotError extends Error {
+  readonly code: ContextWikiSnapshotFailureCode;
+
+  constructor(
+    readonly phase: ContextWikiSnapshotFailurePhase,
+    options: { readonly cause?: unknown } = {}
+  ) {
+    const detail = contextWikiSnapshotFailureDetails[phase];
+    super(detail.message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "ContextWikiSnapshotError";
+    this.code = detail.code;
+  }
+}
+
 export interface ContextWikiProjectedOutput {
   readonly releaseId: string;
   readonly generationId: string;
@@ -338,28 +395,32 @@ export class ContextWikiStageExecutor {
   private async snapshot(execution: ContextWikiStageExecution): Promise<SnapshotOutput> {
     const request = execution.request;
     const installationId = request.source.githubInstallationId;
-    if (!installationId) throw new Error("wiki source snapshot requires a GitHub installation ID");
     const mint = this.#deps.mintGitHubToken ?? createGitHubInstallationAccessToken;
-    const access = await mint(installationId, { repository: request.repository });
+    const access = await snapshotPhase("github-token", async () => {
+      if (!installationId) throw new Error("wiki source snapshot requires a GitHub installation ID");
+      return mint(installationId, { repository: request.repository });
+    });
     const fetchImpl = this.#deps.fetch ?? fetch;
-    const tree = await githubJson(
-      fetchImpl,
-      access.token,
-      `/repos/${request.repository}/git/trees/${request.source.commitSha}?recursive=1`
-    );
-    const rawEntries = arrayValue(recordValue(tree, "GitHub tree").tree, "GitHub tree entries")
-      .map((value) => recordValue(value, "GitHub tree entry"))
-      .filter((entry) => entry.type === "blob")
-      .map((entry) => ({
-        path: stringValue(entry.path, "GitHub tree path", 1_024),
-        sha: stringValue(entry.sha, "GitHub blob SHA", 64),
-        size: integerValue(entry.size, "GitHub blob size", 0)
-      }));
+    const rawEntries = await snapshotPhase("source-tree", async () => {
+      const tree = await githubJson(
+        fetchImpl,
+        access.token,
+        `/repos/${request.repository}/git/trees/${request.source.commitSha}?recursive=1`
+      );
+      return arrayValue(recordValue(tree, "GitHub tree").tree, "GitHub tree entries")
+        .map((value) => recordValue(value, "GitHub tree entry"))
+        .filter((entry) => entry.type === "blob")
+        .map((entry) => ({
+          path: stringValue(entry.path, "GitHub tree path", 1_024),
+          sha: stringValue(entry.sha, "GitHub blob SHA", 64),
+          size: integerValue(entry.size, "GitHub blob size", 0)
+        }));
+    });
     const policyCommit =
       request.source.scopeKind === "pull_request" && request.source.baseCommitSha
         ? request.source.baseCommitSha
         : request.source.commitSha;
-    const policyEntries =
+    const policyEntries = await snapshotPhase("policy-tree", async () =>
       policyCommit === request.source.commitSha
         ? rawEntries
         : arrayValue(
@@ -379,24 +440,27 @@ export class ContextWikiStageExecutor {
               path: stringValue(entry.path, "GitHub policy path", 1_024),
               sha: stringValue(entry.sha, "GitHub policy blob SHA", 64),
               size: integerValue(entry.size, "GitHub policy blob size", 0)
-            }));
-    const instruction = await readPolicyText(
-      fetchImpl,
-      access.token,
-      request.repository,
-      policyEntries,
-      ".jina/wiki/instruction.md",
-      64_000
+            }))
     );
-    const configText = await readPolicyText(
-      fetchImpl,
-      access.token,
-      request.repository,
-      policyEntries,
-      ".jina/config.json",
-      128_000
-    );
-    const wikiPolicy = parseWikiPolicy(configText);
+    const { instruction, wikiPolicy } = await snapshotPhase("policy", async () => {
+      const instruction = await readPolicyText(
+        fetchImpl,
+        access.token,
+        request.repository,
+        policyEntries,
+        ".jina/wiki/instruction.md",
+        64_000
+      );
+      const configText = await readPolicyText(
+        fetchImpl,
+        access.token,
+        request.repository,
+        policyEntries,
+        ".jina/config.json",
+        128_000
+      );
+      return { instruction, wikiPolicy: parseWikiPolicy(configText) };
+    });
     const exclusions = wikiPolicy.exclusions;
     const instructionDigest = sha256(instruction.replace(/\r\n?/g, "\n").trim());
     const exclusionPolicyDigest = fingerprint({
@@ -410,25 +474,27 @@ export class ContextWikiStageExecutor {
       .filter((entry) => !exclusions.some((pattern) => matchesGlob(entry.path, pattern)))
       .sort(sourcePriority);
 
-    const selected: SnapshotFile[] = [];
-    let selectedBytes = 0;
-    for (const entry of entries) {
-      if (selected.length >= MAX_SOURCE_FILES || selectedBytes + entry.size > MAX_SOURCE_BYTES) continue;
-      const blob = recordValue(
-        await githubJson(fetchImpl, access.token, `/repos/${request.repository}/git/blobs/${entry.sha}`),
-        "GitHub blob"
-      );
-      if (blob.encoding !== "base64") continue;
-      const content = Buffer.from(stringValue(blob.content, "GitHub blob content", 1_000_000), "base64").toString(
-        "utf8"
-      );
-      if (!isText(content)) continue;
-      const normalized = content.replace(/\r\n?/g, "\n").slice(0, MAX_FILE_BYTES);
-      selected.push({ path: entry.path, sha: entry.sha, size: Buffer.byteLength(normalized), content: normalized });
-      selectedBytes += Buffer.byteLength(normalized);
-    }
-    if (selected.length === 0) throw new Error("repository snapshot contains no supported source files");
-    selected.sort((left, right) => left.path.localeCompare(right.path));
+    const selected = await snapshotPhase("source-blobs", async () => {
+      const files: SnapshotFile[] = [];
+      let selectedBytes = 0;
+      for (const entry of entries) {
+        if (files.length >= MAX_SOURCE_FILES || selectedBytes + entry.size > MAX_SOURCE_BYTES) continue;
+        const blob = recordValue(
+          await githubJson(fetchImpl, access.token, `/repos/${request.repository}/git/blobs/${entry.sha}`),
+          "GitHub blob"
+        );
+        if (blob.encoding !== "base64") continue;
+        const content = Buffer.from(stringValue(blob.content, "GitHub blob content", 1_000_000), "base64").toString(
+          "utf8"
+        );
+        if (!isText(content)) continue;
+        const normalized = content.replace(/\r\n?/g, "\n").slice(0, MAX_FILE_BYTES);
+        files.push({ path: entry.path, sha: entry.sha, size: Buffer.byteLength(normalized), content: normalized });
+        selectedBytes += Buffer.byteLength(normalized);
+      }
+      if (files.length === 0) throw new Error("repository snapshot contains no supported source files");
+      return files.sort((left, right) => left.path.localeCompare(right.path));
+    });
     const sourceDigest = fingerprint(
       selected.map((file) => ({ path: file.path, sha: file.sha, contentSha256: sha256(file.content) }))
     );
@@ -478,29 +544,33 @@ export class ContextWikiStageExecutor {
       improvementFindings,
       ...(parent ? { parent } : {})
     };
-    const checkpoint = await new IngestEvidenceService(this.#deps.evidenceStore).ingest({
-      tenantId: request.tenantId,
-      repository: request.repository,
-      ref: request.source.ref,
-      refSequence: request.source.refSequence ?? 1,
-      commitSha: request.source.commitSha,
-      files: selected.map((file) => ({
-        path: file.path,
-        blobSha: file.sha,
-        body: file.content,
-        executable: false
-      })),
-      aclFingerprint: repositoryAclFingerprint(request.tenantId, request.repository),
-      observationFrontier: JSON.stringify({
-        source: "github-tree-v1",
+    const checkpoint = await snapshotPhase("evidence-commit", () =>
+      new IngestEvidenceService(this.#deps.evidenceStore).ingest({
+        tenantId: request.tenantId,
+        repository: request.repository,
+        ref: request.source.ref,
+        refSequence: request.source.refSequence ?? 1,
         commitSha: request.source.commitSha,
-        selectedFiles: selected.length,
-        omittedFiles: artifact.omittedFileCount
-      }),
-      createdAt: this.#deps.now?.() ?? new Date().toISOString(),
-      sourceComplete: artifact.omittedFileCount === 0
-    });
-    const snapshotArtifact = await this.putArtifact(request, "evidence-snapshot", "wiki-source.json", artifact);
+        files: selected.map((file) => ({
+          path: file.path,
+          blobSha: file.sha,
+          body: file.content,
+          executable: false
+        })),
+        aclFingerprint: repositoryAclFingerprint(request.tenantId, request.repository),
+        observationFrontier: JSON.stringify({
+          source: "github-tree-v1",
+          commitSha: request.source.commitSha,
+          selectedFiles: selected.length,
+          omittedFiles: artifact.omittedFileCount
+        }),
+        createdAt: this.#deps.now?.() ?? new Date().toISOString(),
+        sourceComplete: artifact.omittedFileCount === 0
+      })
+    );
+    const snapshotArtifact = await snapshotPhase("artifact-write", () =>
+      this.putArtifact(request, "evidence-snapshot", "wiki-source.json", artifact)
+    );
     const output: SnapshotOutput = {
       snapshotArtifact,
       checkpointId: checkpoint.id,
@@ -1720,6 +1790,14 @@ async function githubJson(fetchImpl: typeof fetch, token: string, path: string):
   });
   if (!response.ok) throw new Error(`GitHub wiki snapshot request failed with ${response.status}`);
   return response.json();
+}
+
+async function snapshotPhase<T>(phase: ContextWikiSnapshotFailurePhase, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (cause) {
+    throw new ContextWikiSnapshotError(phase, { cause });
+  }
 }
 
 async function readPolicyText(

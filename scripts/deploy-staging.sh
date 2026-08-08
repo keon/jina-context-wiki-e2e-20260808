@@ -31,6 +31,7 @@ github_webhook_inbox_scheduler_job="jina-github-webhook-inbox-staging"
 causal_activation_job="jina-causal-graph-release-activate-staging"
 worker_release_activation_job="jina-worker-release-activate-staging"
 api_service_account="jina-api-staging@${project}.iam.gserviceaccount.com"
+build_service_account="jina-cloud-build-staging@${project}.iam.gserviceaccount.com"
 scheduler_oidc_service_account="${JINA_SCHEDULER_OIDC_SERVICE_ACCOUNT:-${api_service_account}}"
 context_worker_service_account="jina-context-worker-staging@${project}.iam.gserviceaccount.com"
 task_worker_service_account="jina-task-worker-staging@${project}.iam.gserviceaccount.com"
@@ -90,6 +91,7 @@ required_staging_values=(
   "${runtime_user}"
   "${artifact_bucket}"
   "${artifact_repository}"
+  "${build_service_account}"
   "${api_service}"
   "${scheduler_oidc_service_account}"
   "${context_worker_service}"
@@ -147,6 +149,96 @@ if [[ ! "${context_tenant_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F
   exit 2
 fi
 
+artifact_bucket_bootstrap_hint() {
+  cat >&2 <<EOF
+A platform operator must precreate gs://${artifact_bucket} in ${region}
+with uniform bucket-level access and no lifecycle rules, then grant
+roles/storage.admin to ${build_service_account} on that bucket only.
+See the staging bootstrap instructions in docs/DEPLOYMENT.md.
+EOF
+}
+
+require_artifact_bucket_prerequisites() {
+  local bucket_description bucket_policy
+  if ! bucket_description="$(gcloud storage buckets describe "gs://${artifact_bucket}" \
+    --project="${project}" --format=json 2>/dev/null)"; then
+    printf 'Artifact bucket gs://%s is missing or unreadable.\n' "${artifact_bucket}" >&2
+    artifact_bucket_bootstrap_hint
+    exit 2
+  fi
+
+  if ! BUCKET_DESCRIPTION="${bucket_description}" \
+    EXPECTED_BUCKET="${artifact_bucket}" \
+    EXPECTED_LOCATION="${region}" \
+    python3 -c '
+import json
+import os
+import sys
+
+bucket = json.loads(os.environ["BUCKET_DESCRIPTION"])
+expected_bucket = os.environ["EXPECTED_BUCKET"]
+expected_location = os.environ["EXPECTED_LOCATION"].upper()
+errors = []
+if bucket.get("name") != expected_bucket:
+    errors.append(f"name must be {expected_bucket}")
+if bucket.get("location") != expected_location or bucket.get("location_type") != "region":
+    errors.append(f"location must be the region {expected_location}")
+if bucket.get("uniform_bucket_level_access") is not True:
+    errors.append("uniform bucket-level access must be enabled")
+lifecycle = bucket.get("lifecycle")
+if lifecycle and (not isinstance(lifecycle, dict) or lifecycle.get("rule")):
+    errors.append("lifecycle rules must be absent; Context retention is reference-aware")
+if errors:
+    sys.stderr.write("Artifact bucket prerequisite failed: " + "; ".join(errors) + "\n")
+    raise SystemExit(2)
+'; then
+    artifact_bucket_bootstrap_hint
+    exit 2
+  fi
+
+  if ! bucket_policy="$(gcloud storage buckets get-iam-policy "gs://${artifact_bucket}" \
+    --project="${project}" --format=json 2>/dev/null)"; then
+    printf 'Cannot read IAM for artifact bucket gs://%s.\n' "${artifact_bucket}" >&2
+    artifact_bucket_bootstrap_hint
+    exit 2
+  fi
+
+  if ! BUCKET_POLICY="${bucket_policy}" \
+    BUILD_MEMBER="serviceAccount:${build_service_account}" \
+    python3 -c '
+import json
+import os
+import sys
+
+policy = json.loads(os.environ["BUCKET_POLICY"])
+build_member = os.environ["BUILD_MEMBER"]
+bindings = policy.get("bindings", [])
+has_admin = any(
+    binding.get("role") == "roles/storage.admin"
+    and build_member in binding.get("members", [])
+    and not binding.get("condition")
+    for binding in bindings
+)
+public_members = {"allUsers", "allAuthenticatedUsers"}
+is_public = any(
+    public_members.intersection(binding.get("members", []))
+    for binding in bindings
+)
+if not has_admin:
+    sys.stderr.write(
+        "Artifact bucket prerequisite failed: "
+        f"{build_member} needs an unconditional bucket-scoped roles/storage.admin binding\n"
+    )
+    raise SystemExit(2)
+if is_public:
+    sys.stderr.write("Artifact bucket prerequisite failed: public IAM principals are forbidden\n")
+    raise SystemExit(2)
+'; then
+    artifact_bucket_bootstrap_hint
+    exit 2
+  fi
+}
+
 for image in "${api_image}" "${worker_image}"; do
   gcloud artifacts docker images describe "${image}" --project="${project}" >/dev/null
 done
@@ -184,7 +276,7 @@ done
 gcloud secrets versions describe "${product_internal_token_version}" \
   --secret="${product_internal_token_secret}" --project="${project}" >/dev/null
 gcloud secrets describe "${worker_release_credential_secret}" --project="${project}" >/dev/null
-gcloud storage buckets describe "gs://${artifact_bucket}" --project="${project}" >/dev/null
+require_artifact_bucket_prerequisites
 
 serving_revision() {
   local service="$1"
@@ -407,6 +499,14 @@ rollback_failed_staging_release() {
   exit "${status}"
 }
 trap rollback_failed_staging_release EXIT
+
+# Context artifacts and wiki bundles are immutable, create-only API writes.
+# The prerequisite check proves this build can maintain IAM on this bucket
+# without granting it storage administration over the staging project.
+gcloud storage buckets add-iam-policy-binding "gs://${artifact_bucket}" \
+  --member="serviceAccount:${api_service_account}" \
+  --role="roles/storage.objectUser" \
+  --quiet >/dev/null
 
 if [[ "${JINA_SKIP_STAGING_MIGRATIONS:-false}" == "true" ]]; then
   deployed_migration_image="$(gcloud run jobs describe "${migration_job}" \

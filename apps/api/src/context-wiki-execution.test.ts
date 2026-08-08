@@ -19,7 +19,9 @@ import {
 } from "@jina/context-engine";
 import { contextMermaidForbiddenDirective, type WikiTriggerRequestV1 } from "@jina/shared-kernel";
 import {
+  ContextWikiSnapshotError,
   ContextWikiStageExecutor,
+  contextWikiSnapshotFailurePhases,
   type ContextWikiActivatedOutput,
   type ContextWikiProjectedOutput,
   type ContextWikiPublicationRuntime,
@@ -55,6 +57,103 @@ const request: WikiTriggerRequestV1 = {
     tags: ["kind:context-wiki-build"]
   }
 };
+
+test("snapshot failures expose only stable phase codes and messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jina-context-wiki-failures-"));
+  const privateDetail = "ghs_private-token-and-upstream-diagnostic";
+  const expectedCodes = {
+    "github-token": "wiki_snapshot_github_token_failed",
+    "source-tree": "wiki_snapshot_source_tree_failed",
+    "policy-tree": "wiki_snapshot_policy_tree_failed",
+    policy: "wiki_snapshot_policy_failed",
+    "source-blobs": "wiki_snapshot_source_blobs_failed",
+    "evidence-commit": "wiki_snapshot_evidence_commit_failed",
+    "artifact-write": "wiki_snapshot_artifact_write_failed"
+  } as const;
+  try {
+    for (const phase of contextWikiSnapshotFailurePhases) {
+      const artifacts = new FileContextArtifactStore(join(root, phase));
+      const evidence = new MemoryContextEngineStore();
+      if (phase === "evidence-commit") {
+        Object.defineProperty(evidence, "commitSnapshot", {
+          value: async () => {
+            throw new Error(privateDetail);
+          }
+        });
+      }
+      if (phase === "artifact-write") {
+        Object.defineProperty(artifacts, "put", {
+          value: async () => {
+            throw new Error(privateDetail);
+          }
+        });
+      }
+      const phaseRequest: WikiTriggerRequestV1 =
+        phase === "policy-tree"
+          ? {
+              ...request,
+              source: {
+                ...request.source,
+                ref: "refs/pull/7/head",
+                scopeKind: "pull_request",
+                scopeKey: "7",
+                baseCommitSha
+              }
+            }
+          : request;
+      const phaseFetch: typeof fetch = async (input) => {
+        const path = new URL(String(input)).pathname;
+        if (
+          (phase === "source-tree" && path.includes(`/git/trees/${commitSha}`)) ||
+          (phase === "policy-tree" && path.includes(`/git/trees/${baseCommitSha}`)) ||
+          (phase === "policy" && path.endsWith(`/git/blobs/${"6".repeat(40)}`)) ||
+          (phase === "source-blobs" && path.endsWith(`/git/blobs/${"1".repeat(40)}`))
+        ) {
+          throw new Error(`${privateDetail} authorization=Bearer installation-token-private`);
+        }
+        return githubFetch(input);
+      };
+      const executor = new ContextWikiStageExecutor({
+        artifactStore: artifacts,
+        contentStore: new MemoryWikiContentStore(),
+        evidenceStore: evidence,
+        publication: new RecordingPublicationRuntime(),
+        mintGitHubToken:
+          phase === "github-token"
+            ? async () => {
+                throw new Error(privateDetail);
+              }
+            : async () => ({ token: "installation-token-private", permissions: { contents: "read" } }),
+        fetch: phaseFetch,
+        now: () => "2026-08-08T12:00:00.000Z"
+      });
+
+      await assert.rejects(
+        () =>
+          executor.execute({
+            request: phaseRequest,
+            requestDigest: "b".repeat(64),
+            triggerParentRunId: "run_failure_test",
+            authorizedAt: "2026-08-08T12:00:00.000Z",
+            operationId: `snapshot-${phase}`,
+            stage: "snapshot",
+            input: {}
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof ContextWikiSnapshotError);
+          assert.equal(error.phase, phase);
+          assert.equal(error.code, expectedCodes[phase]);
+          assert.doesNotMatch(error.message, /private-token|upstream-diagnostic|Bearer|ghs_/i);
+          assert.doesNotMatch(error.stack ?? "", /private-token|upstream-diagnostic|Bearer|ghs_/i);
+          assert.ok(error.cause instanceof Error);
+          return true;
+        }
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("builds a usable source-grounded wiki before delegating publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-context-wiki-"));
