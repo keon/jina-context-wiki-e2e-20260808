@@ -82,6 +82,24 @@ test("parseGenerateWikiPayload validates canonical digest and attempt", () => {
   );
 });
 
+test("parseGenerateWikiPayload rejects a queue not declared by the Trigger deployment", () => {
+  const mismatched = {
+    ...request,
+    options: { ...request.options, queue: "undeclared-wiki-queue" }
+  };
+  assert.throws(
+    () =>
+      parseGenerateWikiPayload({
+        schemaVersion: 1,
+        requestDigest: canonicalSha256(mismatched),
+        dispatchNonce: "n".repeat(32),
+        attempt: 1,
+        request: mismatched
+      }),
+    /queue must be context-wiki/
+  );
+});
+
 test("wiki request parser rejects unknown fields and invalid ref sequencing", () => {
   const requestDigest = canonicalSha256({ ...request, unexpected: true });
   assert.throws(

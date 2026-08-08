@@ -1,3 +1,5 @@
+import { CONTEXT_WIKI_TRIGGER_QUEUE_NAME } from "@jina/shared-kernel";
+
 const TRIGGER_TERMINAL_STATUSES = new Set([
   "COMPLETED",
   "FAILED",
@@ -50,6 +52,9 @@ export class ContextTriggerClient {
     },
     signal?: AbortSignal
   ): Promise<{ readonly id: string }> {
+    if (options.queue !== CONTEXT_WIKI_TRIGGER_QUEUE_NAME) {
+      throw new Error(`Context Trigger queue must be ${CONTEXT_WIKI_TRIGGER_QUEUE_NAME}`);
+    }
     const response = await this.request(
       `/api/v1/tasks/${encodeURIComponent(taskIdentifier)}/trigger`,
       {
