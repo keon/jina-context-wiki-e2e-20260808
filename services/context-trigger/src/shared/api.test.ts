@@ -458,6 +458,41 @@ test("API failures expose bounded status/code without response secrets", async (
   );
 });
 
+test("Trigger preserves a stable snapshot root code without exposing API diagnostics", async () => {
+  const privateDetail = "ghs_private-token-and-upstream-diagnostic";
+  const client = new ContextWikiApiClient({
+    env,
+    fetch: async () =>
+      Response.json(
+        {
+          accepted: false,
+          code: "wiki_snapshot_source_tree_failed",
+          error: "wiki snapshot source tree failed",
+          diagnostic: privateDetail
+        },
+        { status: 500 }
+      )
+  });
+
+  await assert.rejects(
+    () =>
+      client.runStage({
+        authorityId: "build-1",
+        stage: "snapshot",
+        executionGrant: "scoped-grant",
+        operationId: "operation-1",
+        stageInput: {}
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ContextWikiApiError);
+      assert.equal(error.status, 500);
+      assert.equal(error.code, "wiki_snapshot_source_tree_failed");
+      assert.doesNotMatch(error.message, /private-token|upstream|diagnostic/i);
+      return true;
+    }
+  );
+});
+
 test("API client rejects oversized responses before parsing", async () => {
   const client = new ContextWikiApiClient({
     env,

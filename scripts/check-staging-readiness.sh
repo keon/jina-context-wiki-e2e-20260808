@@ -8,6 +8,8 @@ trigger_name="${JINA_STAGING_CLOUD_BUILD_TRIGGER:-jina-staging-deploy}"
 connection_name="${JINA_STAGING_CLOUD_BUILD_CONNECTION:-jina-github}"
 repository_name="${JINA_STAGING_CLOUD_BUILD_REPOSITORY:-jina}"
 staging_deployer="jina-cloud-build-staging@${staging_project}.iam.gserviceaccount.com"
+api_service_account="jina-api-staging@${staging_project}.iam.gserviceaccount.com"
+artifact_bucket="${JINA_STAGING_CONTEXT_GCS_BUCKET:-${staging_project}-context-artifacts-us-east1}"
 cloud_build_service_agent="service-679811160186@gcp-sa-cloudbuild.iam.gserviceaccount.com"
 repository_resource="projects/${staging_project}/locations/${cloud_build_region}/connections/${connection_name}/repositories/${repository_name}"
 failures=0
@@ -118,6 +120,51 @@ if [[ "${context_tenant_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{
   pass "${trigger_name} carries an explicit staging Context tenant UUID"
 else
   fail "${trigger_name} requires a UUID-valued _JINA_CONTEXT_TENANT_ID substitution"
+fi
+
+artifact_bucket_json="$(gcloud storage buckets describe "gs://${artifact_bucket}" \
+  --project="${staging_project}" --format=json 2>/dev/null || true)"
+if jq -e --arg bucket "${artifact_bucket}" --arg location "${region^^}" '
+    .name == $bucket and
+    .location == $location and
+    .location_type == "region" and
+    .uniform_bucket_level_access == true and
+    ((.lifecycle // {} | .rule // []) | length == 0)
+  ' <<<"${artifact_bucket_json}" >/dev/null; then
+  pass "Staging Context artifact bucket is regional, uniform, and has no lifecycle rules"
+else
+  fail "Staging Context artifact bucket must be regional, uniform, and have no lifecycle rules"
+fi
+
+artifact_bucket_policy="$(gcloud storage buckets get-iam-policy "gs://${artifact_bucket}" \
+  --project="${staging_project}" --format=json 2>/dev/null || true)"
+if jq -e --arg member "serviceAccount:${staging_deployer}" '
+    .bindings[]? |
+    select(.role == "roles/storage.admin" and (.condition // null) == null) |
+    .members[]? | select(. == $member)
+  ' <<<"${artifact_bucket_policy}" >/dev/null; then
+  pass "Automatic staging deployer administers only the Context artifact bucket"
+else
+  fail "Automatic staging deployer requires bucket-scoped roles/storage.admin on the Context artifact bucket"
+fi
+if jq -e --arg member "serviceAccount:${api_service_account}" '
+    .bindings[]? |
+    select(.role == "roles/storage.objectUser" and (.condition // null) == null) |
+    .members[]? | select(. == $member)
+  ' <<<"${artifact_bucket_policy}" >/dev/null; then
+  pass "Staging API can read and write Context artifacts"
+else
+  fail "Staging API requires bucket-scoped roles/storage.objectUser on the Context artifact bucket"
+fi
+if ! jq -e 'type == "object" and (.bindings | type == "array")' \
+  <<<"${artifact_bucket_policy}" >/dev/null; then
+  fail "Staging Context artifact bucket IAM policy is unreadable"
+elif jq -e '
+    any(.bindings[]?.members[]?; . == "allUsers" or . == "allAuthenticatedUsers")
+  ' <<<"${artifact_bucket_policy}" >/dev/null; then
+  fail "Staging Context artifact bucket must not grant public IAM access"
+else
+  pass "Staging Context artifact bucket has no public IAM principals"
 fi
 
 release_secret_policy="$(gcloud secrets get-iam-policy \

@@ -48,6 +48,7 @@ const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
 const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
 const publicApiCandidateDeployment = await readFile("scripts/deploy-public-api-candidate.mjs", "utf8");
 const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
+const stagingReadiness = await readFile("scripts/check-staging-readiness.sh", "utf8");
 const contextTriggerDeployment = await readFile(".github/workflows/deploy-context-trigger.yml", "utf8");
 const contextTriggerPackage = JSON.parse(await readFile("services/context-trigger/package.json", "utf8"));
 const stagingSerialization = await readFile("scripts/serialize-cloud-build-deploy.sh", "utf8");
@@ -252,6 +253,25 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
     stagingCloudBuild,
     /serviceAccount: projects\/jina-staging-20260802\/serviceAccounts\/jina-cloud-build-staging@jina-staging-20260802\.iam\.gserviceaccount\.com/
   );
+  assert.match(stagingDeployment, /storage buckets get-iam-policy "gs:\/\/\$\{artifact_bucket\}"/);
+  assert.match(stagingDeployment, /\nrequire_artifact_bucket_prerequisites\n/);
+  assert.match(stagingDeployment, /roles\/storage\.admin/);
+  assert.match(stagingDeployment, /public IAM principals are forbidden/);
+  assert.match(
+    stagingDeployment,
+    /storage buckets add-iam-policy-binding "gs:\/\/\$\{artifact_bucket\}"[\s\S]+?serviceAccount:\$\{api_service_account\}[\s\S]+?roles\/storage\.objectUser/
+  );
+  assert.ok(
+    stagingDeployment.indexOf("\nrequire_artifact_bucket_prerequisites\n") <
+      stagingDeployment.indexOf('storage buckets add-iam-policy-binding "gs://${artifact_bucket}"')
+  );
+  assert.ok(
+    stagingDeployment.indexOf('storage buckets add-iam-policy-binding "gs://${artifact_bucket}"') <
+      stagingDeployment.indexOf('gcloud run jobs deploy "${migration_job}"')
+  );
+  assert.match(stagingReadiness, /roles\/storage\.admin/);
+  assert.match(stagingReadiness, /roles\/storage\.objectUser/);
+  assert.match(stagingReadiness, /allAuthenticatedUsers/);
   assert.match(stagingSerialization, /build\.get\("buildTriggerId"\) == os\.environ\["TRIGGER_ID"\]/);
   assert.match(stagingSerialization, /build\.get\("createTime", ""\) < os\.environ\["CURRENT_CREATE_TIME"\]/);
   assert.match(stagingSerialization, /active = \{"QUEUED", "PENDING", "WORKING"\}/);
