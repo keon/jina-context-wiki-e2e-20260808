@@ -122,6 +122,7 @@ import { contextPagePublicationDisposition, resolveContextPageOmission } from ".
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
+import { ContextTriggerClient } from "./context-trigger-client.js";
 import { contextPhaseCandidateArtifact } from "./phase-checkpoint-artifact.js";
 import { runtimeWorkerId } from "./worker-identity.js";
 import {
@@ -158,6 +159,8 @@ import {
   type SupportedWorkerTopic
 } from "./worker-topics.js";
 
+type LegacyContextWorkerTopic = Exclude<ContextWorkerTopic, "run-wiki-build">;
+
 const execFileAsync = promisify(execFile);
 const BOARD_MODEL_TOPICS = new Set<ExecutableWorkerTopic>([
   "run-context-page-plan",
@@ -166,10 +169,10 @@ const BOARD_MODEL_TOPICS = new Set<ExecutableWorkerTopic>([
 ]);
 
 function boardWorkArtifactKindForTopic(
-  topic: ContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic
+  topic: LegacyContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic
 ): ContextArtifactKind {
   if (CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic)) {
-    return contextWorkflowBoardArtifactKindForTopic(topic as ContextWorkerTopic);
+    return contextWorkflowBoardArtifactKindForTopic(topic as LegacyContextWorkerTopic);
   }
   switch (topic) {
     case "run-context-research-plan":
@@ -252,6 +255,17 @@ interface WorkMetadataByTopic {
   readonly "run-review": RelationalReviewTaskMetadata;
   readonly "github-installation-backfill": InstallationBackfillWorkerMetadata;
   readonly "billing-retry": BillingRetryWorkerMetadata;
+  readonly "run-wiki-build": {
+    readonly tenantId: string;
+    readonly repository: string;
+    readonly ref: string;
+    readonly refSequence?: number;
+    readonly commitSha: string;
+    readonly locale: string;
+    readonly contextBuildId: string;
+    readonly requestDigest: string;
+    readonly triggerRequest: Record<string, unknown>;
+  };
   readonly "run-context-input-snapshot": ContextBoardWorkerMetadata;
   readonly "run-context-page-plan": ContextBoardWorkerMetadata & {
     readonly inputArtifact: ContextArtifactRef;
@@ -326,6 +340,7 @@ type ClaimedWork<T extends ExecutableWorkerTopic = ExecutableWorkerTopic> = T ex
 
 type WorkResult =
   | { readonly outcome: "done"; readonly result?: Record<string, unknown> }
+  | { readonly outcome: "deferred"; readonly triggerParentRunId: string }
   | {
       readonly outcome: "retry";
       readonly reason: string;
@@ -433,6 +448,16 @@ const completionRetryDelayMs = positiveInt(process.env.WORKER_COMPLETION_RETRY_D
 const gitCommandTimeoutMs = positiveInt(process.env.CONTEXT_GIT_COMMAND_TIMEOUT_MS, 5 * 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
+const contextTriggerClient = topics.includes("run-wiki-build")
+  ? new ContextTriggerClient({
+      apiBaseUrl: requiredEnv("JINA_CONTEXT_TRIGGER_API_URL"),
+      secretKey: requiredEnv("JINA_CONTEXT_TRIGGER_SECRET_KEY"),
+      ...(process.env.JINA_CONTEXT_TRIGGER_PREVIEW_BRANCH?.trim()
+        ? { previewBranch: process.env.JINA_CONTEXT_TRIGGER_PREVIEW_BRANCH.trim() }
+        : {}),
+      requestTimeoutMs: positiveInt(process.env.JINA_CONTEXT_TRIGGER_REQUEST_TIMEOUT_MS, 30_000)
+    })
+  : undefined;
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const causalGraphOpenAiApiKey = process.env.CAUSAL_GRAPH_OPENAI_API_KEY?.trim();
 const causalGraphOnlyWorker =
@@ -738,7 +763,7 @@ async function execute(work: ClaimedWork<SupportedWorkerTopic>): Promise<void> {
       });
       await executeClaimedWork(work);
       const outcome = lastWork?.outcome ?? "unknown";
-      const success = outcome === "done" || outcome === "waiting_external";
+      const success = outcome === "done" || outcome === "waiting_external" || outcome === "deferred";
       span.addEvent("board.task.finished", {
         "jina.board.task.outcome": outcome,
         ...(lastWork?.failureCategory ? { "jina.board.task.failure_category": lastWork.failureCategory } : {})
@@ -840,6 +865,15 @@ async function executeClaimedWork(work: ClaimedWork<SupportedWorkerTopic>): Prom
       lastWork = { topic: work.message.topic, outcome: "lease_lost", finishedAt: new Date().toISOString() };
       return;
     }
+    if (result.outcome === "deferred") {
+      lastWork = {
+        topic: work.message.topic,
+        outcome: result.outcome,
+        finishedAt: new Date().toISOString()
+      };
+      logStageOutcome(work, startedAt, result);
+      return;
+    }
     try {
       await complete(work, result);
     } catch (error) {
@@ -923,6 +957,15 @@ function logStageOutcome(
       : result === undefined
         ? "unknown"
         : undefined);
+  if (result?.outcome === "deferred") {
+    metrics.count("worker.tasks", { topic: work.message.topic, outcome: "deferred" });
+    stageLogger.info(`${work.message.topic} handed off for asynchronous completion`, {
+      event: "stage.deferred",
+      ...base,
+      triggerParentRunId: result.triggerParentRunId
+    });
+    return;
+  }
   if (reason !== undefined) {
     const failureCategory =
       result?.outcome === "retry" || result?.outcome === "failed" || result?.outcome === "effect_retry"
@@ -963,7 +1006,7 @@ function logStageOutcome(
   );
 }
 
-type StandardWorkerTopic = Exclude<SupportedWorkerTopic, "run-review">;
+type StandardWorkerTopic = Exclude<SupportedWorkerTopic, "run-review" | "run-wiki-build">;
 type TopicHandler<T extends StandardWorkerTopic> = (work: ClaimedWork<T>) => Promise<Record<string, unknown>>;
 type TopicHandlers = { readonly [T in StandardWorkerTopic]: TopicHandler<T> };
 
@@ -981,6 +1024,9 @@ const topicHandlers = {
 } satisfies TopicHandlers;
 
 async function executeTopic<T extends SupportedWorkerTopic>(work: ClaimedWork<T>): Promise<WorkResult> {
+  if (work.topic === "run-wiki-build") {
+    return runWikiBuild(work);
+  }
   if (work.topic === "run-review") {
     return runRelationalReview(work);
   }
@@ -988,6 +1034,52 @@ async function executeTopic<T extends SupportedWorkerTopic>(work: ClaimedWork<T>
   // the exhaustive `satisfies` check above proves it once for every entry.
   const handler = topicHandlers[work.topic] as unknown as (claimed: ClaimedWork<T>) => Promise<Record<string, unknown>>;
   return { outcome: "done", result: await handler(work) };
+}
+
+async function runWikiBuild(work: ClaimedWork<"run-wiki-build">): Promise<WorkResult> {
+  if (!contextTriggerClient) throw new Error("Context Trigger client is not configured");
+  const leaseAttempt = requiredPositiveInteger(work.message.attempt, "wiki Board attempt");
+  const writeFenceToken = requiredString(work.message.writeFenceToken, "wiki write fence token");
+  const authority = await internalApiJson<unknown>("/internal/context/wiki/dispatch/authorize", {
+    messageId: work.message.id,
+    leaseId: work.message.leaseId,
+    taskId: work.task.id,
+    attempt: leaseAttempt,
+    writeFenceToken
+  });
+  if (!isRecord(authority) || !isRecord(authority.request)) {
+    throw new Error("Context wiki dispatch authority response is invalid");
+  }
+  const requestDigest = requiredDigest(authority.requestDigest, "wiki requestDigest");
+  if (requestDigest !== work.task.metadata.requestDigest) {
+    throw new Error("Context wiki dispatch authority changed the request digest");
+  }
+  const attempt = requiredPositiveInteger(authority.attempt, "wiki dispatch attempt");
+  const dispatchNonce = requiredString(authority.dispatchNonce, "wiki dispatch nonce");
+  const requestOptions = isRecord(authority.request.options) ? authority.request.options : {};
+  const idempotencyKey = requiredString(requestOptions.idempotencyKey, "wiki idempotencyKey");
+  const concurrencyKey = requiredString(requestOptions.concurrencyKey, "wiki concurrencyKey");
+  const queue = requiredString(requestOptions.queue, "wiki queue");
+  const tags = requiredStringArray(requestOptions.tags, "wiki tags", 10);
+  const run = await contextTriggerClient.dispatch(
+    "generate-wiki",
+    { request: authority.request, requestDigest, dispatchNonce, attempt },
+    { idempotencyKey, concurrencyKey, queue, tags },
+    activeLease?.controller.signal
+  );
+  logger.info("Context wiki Trigger parent dispatched", {
+    event: "context.wiki.trigger_dispatched",
+    taskId: work.task.id,
+    triggerParentRunId: run.id,
+    requestDigest: requestDigest.slice(0, 16),
+    attempt
+  });
+  // Trigger owns all work after dispatch and completes the Board task through
+  // its scoped callback. Deliberately leave this lease unrenewed: the callback
+  // atomically consumes either a leased or pending outbox message, while lease
+  // expiry permits the same idempotent Trigger run to be rediscovered after a
+  // worker crash without occupying worker capacity for the build duration.
+  return { outcome: "deferred", triggerParentRunId: run.id };
 }
 
 async function runContextInputSnapshot(
@@ -1171,7 +1263,7 @@ async function runContextPageBuild(work: ClaimedWork<"run-context-page-build">):
 }
 
 function internalStageWork<T extends EmbeddedContextStageTopic>(
-  work: ClaimedWork<ContextWorkerTopic>,
+  work: ClaimedWork<LegacyContextWorkerTopic>,
   topic: T,
   metadata: WorkMetadataByTopic[T]
 ): ClaimedWork<T> {
@@ -1659,7 +1751,7 @@ async function captureContextInput(work: ClaimedWork<"run-context-input-snapshot
 }
 
 async function uploadContextBoardArtifact(
-  work: ClaimedWork<ContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<LegacyContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
   input: {
     readonly kind: ContextArtifactKind;
     readonly name: string;
@@ -1729,7 +1821,7 @@ interface WorkerPhaseCheckpoint {
 }
 
 function contextPhaseCheckpointKey(
-  work: ClaimedWork<ContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<LegacyContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
   contract: string,
   phase: string,
   input: unknown
@@ -1781,7 +1873,7 @@ async function recordContextBoardPhaseCheckpoint(
 }
 
 async function checkpointedContextCandidate(
-  work: ClaimedWork<ContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
+  work: ClaimedWork<LegacyContextWorkerTopic | EmbeddedContextStageTopic | CausalGraphWorkerTopic>,
   input: {
     readonly phase: string;
     readonly checkpointKey: string;
@@ -1837,7 +1929,7 @@ async function checkpointedContextCandidate(
 }
 
 async function loadPriorContext(
-  work: ClaimedWork<ContextWorkerTopic | EmbeddedContextStageTopic>
+  work: ClaimedWork<LegacyContextWorkerTopic | EmbeddedContextStageTopic>
 ): Promise<PriorContextPacket | undefined> {
   const seed = work.task.metadata.priorRelease;
   if (!seed) return undefined;
@@ -3909,7 +4001,10 @@ async function renew(work: ClaimedWork): Promise<void> {
   recordApiSuccess();
 }
 
-async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
+async function complete(
+  work: ClaimedWork,
+  result: Exclude<WorkResult, { readonly outcome: "deferred" }>
+): Promise<void> {
   const modelCompletionOutcome =
     result.outcome === "waiting_external" || result.outcome === "effect_retry" ? "failed" : result.outcome;
   const modelUsage =
@@ -4200,6 +4295,28 @@ function parseClaimedWork(value: unknown): ClaimedWork<SupportedWorkerTopic> {
       }
     } as ClaimedWork<SupportedWorkerTopic>;
   }
+  if (topic === "run-wiki-build") {
+    return {
+      topic,
+      message: { ...message, topic },
+      task: {
+        id: taskId,
+        metadata: {
+          tenantId: requiredString(metadata.tenantId, "task tenantId"),
+          repository: requiredString(metadata.repository, "task repository"),
+          ref: requiredString(metadata.ref, "task ref"),
+          ...(metadata.refSequence === undefined
+            ? {}
+            : { refSequence: requiredPositiveInteger(metadata.refSequence, "task refSequence") }),
+          commitSha: requiredGitSha(metadata.commitSha, "task commitSha"),
+          locale: requiredString(metadata.locale, "task locale"),
+          contextBuildId: requiredString(metadata.contextBuildId, "task contextBuildId"),
+          requestDigest: requiredDigest(metadata.requestDigest, "task requestDigest"),
+          triggerRequest: requiredRecord(metadata.triggerRequest, "task triggerRequest")
+        }
+      }
+    };
+  }
   if (isBoardTopic(topic)) {
     const common = repositoryMetadata(metadata);
     const contextMetadata = {
@@ -4247,7 +4364,7 @@ function isDurableBoardTopic(topic: string): topic is SupportedWorkerTopic {
 
 function boardWorkMetadata(
   metadata: Record<string, unknown>,
-  topic: ContextWorkerTopic | CausalGraphWorkerTopic
+  topic: LegacyContextWorkerTopic | CausalGraphWorkerTopic
 ): Omit<ContextBoardWorkerMetadata, keyof RepositoryContextMetadata> {
   const dependencyResults = parseContextBoardDependencyResults(metadata.dependencyResults);
   const base = {
@@ -4517,6 +4634,11 @@ function requiredDigest(value: unknown, name: string): string {
   const digest = requiredString(value, name);
   if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error(`${name} must be a SHA-256 digest`);
   return digest;
+}
+
+function requiredStringArray(value: unknown, name: string, maximum: number): string[] {
+  if (!Array.isArray(value) || value.length > maximum) throw new Error(`${name} must contain at most ${maximum} items`);
+  return value.map((entry, index) => requiredString(entry, `${name}[${index}]`));
 }
 
 function requiredGitSha(value: unknown, name: string): string {

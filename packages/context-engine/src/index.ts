@@ -9,11 +9,14 @@ export * from "./ports/context-engine-store.js";
 export * from "./ports/context-quota-store.js";
 export * from "./ports/context-phase-checkpoint-store.js";
 export * from "./ports/artifact-store.js";
+export * from "./ports/wiki-content-store.js";
+export * from "./ports/wiki-audit-artifact-store.js";
 export * from "./ports/evidence-store.js";
 export * from "./ports/issue-graph-store.js";
 export * from "./ports/hierarchy.js";
 export * from "./publication/board-publication.js";
 export * from "./publication/board-pageindex-attachment.js";
+export * from "./publication/wiki-release-v2.js";
 
 export * from "./memory/store.js";
 

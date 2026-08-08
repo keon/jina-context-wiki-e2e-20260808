@@ -267,7 +267,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   );
 });
 
-test("MCP exposes exactly the four context-pack tools and never synthesizes an answer", async () => {
+test("MCP exposes release-explicit context packs and grounded ask_context", async () => {
   const client = new Client({ name: "jina-context-api-test", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
     requestInit: { headers: contextHeaders() }
@@ -277,7 +277,7 @@ test("MCP exposes exactly the four context-pack tools and never synthesizes an a
     const tools = await client.listTools();
     assert.deepEqual(
       tools.tools.map((tool) => tool.name),
-      ["search_context", "list_context", "read_context", "diff_context"]
+      ["search_context", "list_context", "read_context", "diff_context", "ask_context"]
     );
     const result = await client.callTool({
       name: "search_context",
@@ -933,7 +933,8 @@ test("pull-request intake queues a PR-preview Context build", async () => {
     body: JSON.stringify({
       repository,
       pullRequestNumber: 77,
-      headSha: "f".repeat(40)
+      headSha: "f".repeat(40),
+      baseSha: "a".repeat(40)
     })
   });
   assert.equal(delivery.response.status, 202);
@@ -986,7 +987,8 @@ test("the unified webhook admits Context work without creating duplicate review 
     installation: { id: 140435029 },
     pull_request: {
       number: pullRequestNumber,
-      head: { sha: headSha }
+      head: { sha: headSha },
+      base: { sha: "c".repeat(40) }
     }
   };
 
@@ -1191,7 +1193,7 @@ test("a newer relayed ref build queues behind stale work without consuming anoth
     action,
     repository: { full_name: relayRepository, default_branch: "main" },
     installation: { id: 140435029 },
-    pull_request: { number: pullRequestNumber, head: { sha: headSha } }
+    pull_request: { number: pullRequestNumber, head: { sha: headSha }, base: { sha: firstHead } }
   });
 
   const opened = await signedGitHubWebhook(

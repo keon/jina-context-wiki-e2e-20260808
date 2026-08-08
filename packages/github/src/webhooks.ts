@@ -12,6 +12,7 @@ export type GitHubWebhookEvent =
       readonly type: "pull_request.opened";
       readonly pullRequestNumber: number;
       readonly headSha: string;
+      readonly baseSha: string;
       readonly title?: string;
       readonly url?: string;
       readonly authorId?: number;
@@ -23,6 +24,7 @@ export type GitHubWebhookEvent =
       readonly type: "pull_request.synchronize";
       readonly pullRequestNumber: number;
       readonly headSha: string;
+      readonly baseSha: string;
       readonly title?: string;
       readonly url?: string;
       readonly authorId?: number;
@@ -157,10 +159,12 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
     const pullRequestNumber = requiredPositiveInteger(root.number ?? pullRequest.number, "pull_request.number");
 
     const head = requiredRecord(pullRequest.head, "pull_request.head");
+    const base = requiredRecord(pullRequest.base, "pull_request.base");
     const event = {
       type: action === "opened" ? ("pull_request.opened" as const) : ("pull_request.synchronize" as const),
       pullRequestNumber,
       headSha: requiredString(head.sha, "pull_request.head.sha"),
+      baseSha: requiredString(base.sha, "pull_request.base.sha"),
       ...optionalStringProperty("title", pullRequest.title),
       ...optionalStringProperty("url", pullRequest.html_url),
       ...optionalNestedNumberProperty("authorId", pullRequest.user, "id"),

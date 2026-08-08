@@ -19,7 +19,7 @@ FROM mirror.gcr.io/library/node:22-bookworm-slim
 
 WORKDIR /app
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates chromium \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build --chown=node:node /out ./
 COPY --chown=node:node scripts/context-production-preflight.mjs /opt/jina/context-production-preflight.mjs

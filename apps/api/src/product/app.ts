@@ -351,6 +351,53 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     },
   );
 
+  app.post(
+    "/dashboard/tenants/:tenantId/operations/context/ask",
+    requireDashboardOrigin,
+    requireJsonContentType,
+    async (c) => {
+      const session = await requireDashboardSession(c, config);
+      const tenantId = tenantIdParam(c);
+      await requireTenantMembership(session, tenantId, { requireAdmin: false });
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      const repository = typeof body.repository === "string" ? body.repository.trim() : "";
+      const releaseId = typeof body.releaseId === "string" ? body.releaseId.trim() : "";
+      const question = typeof body.question === "string" ? body.question.trim() : "";
+      const maxEvidenceItems = typeof body.maxEvidenceItems === "number" ? body.maxEvidenceItems : undefined;
+      if (!repository || !releaseId || !question) {
+        throw new ApiError(400, "repository, releaseId, and question are required");
+      }
+      if (question.length > 4_000) throw new ApiError(400, "question must not exceed 4000 characters");
+      if (maxEvidenceItems !== undefined && (!Number.isInteger(maxEvidenceItems) || maxEvidenceItems < 1 || maxEvidenceItems > 25)) {
+        throw new ApiError(400, "maxEvidenceItems must be an integer from 1 to 25");
+      }
+      return c.json(
+        await graphs.askContextWiki(await tenantGraphContext(tenantId, repository), {
+          repository,
+          releaseId,
+          question,
+          ...(maxEvidenceItems === undefined ? {} : { maxEvidenceItems }),
+        }),
+      );
+    },
+  );
+
+  app.get("/dashboard/tenants/:tenantId/operations/context/export", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    const repository = requiredDashboardQuery(c, "repository");
+    const releaseId = requiredDashboardQuery(c, "releaseId");
+    const locale = c.req.query("locale")?.trim();
+    return c.json(
+      await graphs.exportContextWiki(await tenantGraphContext(tenantId, repository), {
+        repository,
+        releaseId,
+        ...(locale ? { locale } : {}),
+      }),
+    );
+  });
+
   app.post("/dashboard/integrations", requireDashboardOrigin, requireJsonContentType, async (c) => {
     const session = await requireDashboardSession(c, config);
     if (!session) {

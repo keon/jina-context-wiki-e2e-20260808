@@ -14,11 +14,12 @@
   },
   "dependencies": {
     "@clerk/nextjs": "^7.6.5",
+    "@jina/shared-kernel": "workspace:*",
     "@jina/theme": "workspace:*",
     "@jina/ui": "workspace:*",
     "@tanstack/react-query": "5.101.4",
     "geist": "^1.7.2",
-    "mermaid": "^11.16.1",
+    "mermaid": "11.16.1",
     "next": "~16.2.12",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

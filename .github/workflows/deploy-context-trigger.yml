@@ -1,0 +1,184 @@
+name: Deploy Context Wiki Trigger
+
+# The Context wiki service is an isolated Trigger.dev project. It deliberately
+# does not inherit review-workflow project refs, tokens, or runtime credentials.
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - services/context-trigger/**
+      - .github/workflows/deploy-context-trigger.yml
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "GitHub deployment environment to use"
+        required: true
+        type: choice
+        default: Staging
+        options:
+          - Staging
+          - Production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-context-trigger-${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
+    defaults:
+      run:
+        working-directory: services/context-trigger
+    env:
+      DEPLOY_ENVIRONMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_environment || (github.ref_name == 'main' && 'Production' || 'Staging') }}
+      STAGING_CONTEXT_TRIGGER_ACCESS_TOKEN_VALUE: ${{ secrets.STAGING_JINA_CONTEXT_TRIGGER_ACCESS_TOKEN }}
+      PRODUCTION_CONTEXT_TRIGGER_ACCESS_TOKEN_VALUE: ${{ secrets.JINA_CONTEXT_TRIGGER_ACCESS_TOKEN }}
+      CONTEXT_TRIGGER_API_URL_VALUE: ${{ vars.JINA_CONTEXT_TRIGGER_API_URL }}
+      CONTEXT_TRIGGER_PROJECT_REF_VALUE: ${{ vars.JINA_CONTEXT_TRIGGER_PROJECT_REF }}
+      REVIEW_TRIGGER_PROJECT_REF_VALUE: ${{ vars.JINA_TRIGGER_PROJECT_REF }}
+      CONTEXT_INTERNAL_API_URL_VALUE: ${{ vars.JINA_CONTEXT_INTERNAL_API_URL }}
+      STAGING_CONTEXT_TRIGGER_SERVICE_TOKEN_VALUE: ${{ secrets.STAGING_JINA_CONTEXT_TRIGGER_SERVICE_TOKEN }}
+      PRODUCTION_CONTEXT_TRIGGER_SERVICE_TOKEN_VALUE: ${{ secrets.JINA_CONTEXT_TRIGGER_SERVICE_TOKEN }}
+      WIKI_AUDIT_POLICY_VERSION_VALUE: ${{ vars.JINA_WIKI_AUDIT_POLICY_VERSION }}
+      WIKI_AUDITOR_CONFIG_DIGEST_VALUE: ${{ vars.JINA_WIKI_AUDITOR_CONFIG_DIGEST }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve and validate Context Trigger configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          write_env() {
+            local name="$1"
+            local value="${2:-}"
+            local delimiter="JINA_${name}_${RANDOM}_${RANDOM}"
+            {
+              echo "${name}<<${delimiter}"
+              printf '%s\n' "$value"
+              echo "$delimiter"
+            } >> "$GITHUB_ENV"
+          }
+
+          case "$DEPLOY_ENVIRONMENT" in
+            Production)
+              if [ "$GITHUB_REF_NAME" != "main" ]; then
+                echo "Production deploys must run from main" >&2
+                exit 1
+              fi
+              TRIGGER_ACCESS_TOKEN="$PRODUCTION_CONTEXT_TRIGGER_ACCESS_TOKEN_VALUE"
+              CONTEXT_INTERNAL_API_TOKEN="$PRODUCTION_CONTEXT_TRIGGER_SERVICE_TOKEN_VALUE"
+              trigger_environment="prod"
+              ;;
+            Staging)
+              if [ "$GITHUB_REF_NAME" != "staging" ]; then
+                echo "Staging deploys must run from the staging branch" >&2
+                exit 1
+              fi
+              TRIGGER_ACCESS_TOKEN="$STAGING_CONTEXT_TRIGGER_ACCESS_TOKEN_VALUE"
+              CONTEXT_INTERNAL_API_TOKEN="$STAGING_CONTEXT_TRIGGER_SERVICE_TOKEN_VALUE"
+              trigger_environment="staging"
+              ;;
+            *)
+              echo "Unsupported deployment environment: $DEPLOY_ENVIRONMENT" >&2
+              exit 1
+              ;;
+          esac
+
+          TRIGGER_API_URL="${CONTEXT_TRIGGER_API_URL_VALUE:-https://api.trigger.dev}"
+          TRIGGER_PROJECT_REF="$CONTEXT_TRIGGER_PROJECT_REF_VALUE"
+          API_BASE_URL="$CONTEXT_INTERNAL_API_URL_VALUE"
+          CONTEXT_WIKI_AUDIT_POLICY_VERSION="$WIKI_AUDIT_POLICY_VERSION_VALUE"
+          CONTEXT_WIKI_AUDITOR_CONFIG_DIGEST="$WIKI_AUDITOR_CONFIG_DIGEST_VALUE"
+
+          required=(
+            TRIGGER_ACCESS_TOKEN
+            TRIGGER_PROJECT_REF
+            REVIEW_TRIGGER_PROJECT_REF_VALUE
+            API_BASE_URL
+            CONTEXT_INTERNAL_API_TOKEN
+            CONTEXT_WIKI_AUDIT_POLICY_VERSION
+            CONTEXT_WIKI_AUDITOR_CONFIG_DIGEST
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing required Context Trigger deployment configuration:" >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+          case "$API_BASE_URL" in
+            https://*) ;;
+            *)
+              echo "JINA_CONTEXT_INTERNAL_API_URL must be an HTTPS origin" >&2
+              exit 1
+              ;;
+          esac
+          if [[ ! "$CONTEXT_WIKI_AUDIT_POLICY_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "JINA_WIKI_AUDIT_POLICY_VERSION must be a bounded identifier" >&2
+            exit 1
+          fi
+          if [[ ! "$CONTEXT_WIKI_AUDITOR_CONFIG_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "JINA_WIKI_AUDITOR_CONFIG_DIGEST must be a lowercase SHA-256 digest" >&2
+            exit 1
+          fi
+          if [ "$TRIGGER_PROJECT_REF" = "$REVIEW_TRIGGER_PROJECT_REF_VALUE" ]; then
+            echo "Context may not use the review Trigger.dev project" >&2
+            exit 1
+          fi
+          if [ "$DEPLOY_ENVIRONMENT" = "Staging" ]; then
+            if [[ "$API_BASE_URL" != *staging* ]]; then
+              echo "Staging JINA_CONTEXT_INTERNAL_API_URL must contain staging" >&2
+              exit 1
+            fi
+            # The production project is documented and must never be selected by
+            # the staging environment. Context also may not silently reuse it.
+            if [ "$TRIGGER_PROJECT_REF" = "proj_gmesnthgwwqledarlfip" ]; then
+              echo "Staging Context may not use the production review Trigger.dev project" >&2
+              exit 1
+            fi
+          fi
+
+          write_env TRIGGER_ACCESS_TOKEN "$TRIGGER_ACCESS_TOKEN"
+          write_env TRIGGER_API_URL "$TRIGGER_API_URL"
+          write_env TRIGGER_PROJECT_REF "$TRIGGER_PROJECT_REF"
+          write_env API_BASE_URL "$API_BASE_URL"
+          write_env CONTEXT_INTERNAL_API_TOKEN "$CONTEXT_INTERNAL_API_TOKEN"
+          write_env CONTEXT_WIKI_AUDIT_POLICY_VERSION "$CONTEXT_WIKI_AUDIT_POLICY_VERSION"
+          write_env CONTEXT_WIKI_AUDITOR_CONFIG_DIGEST "$CONTEXT_WIKI_AUDITOR_CONFIG_DIGEST"
+          write_env CONTEXT_TRIGGER_DEPLOY_ENV "$trigger_environment"
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+          cache: npm
+          cache-dependency-path: services/context-trigger/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify isolated Context project identity
+        env:
+          EXPECTED_TRIGGER_PROJECT_NAME: jina-context-wiki
+          EXPECTED_TRIGGER_ORGANIZATION_SLUG: om-labs-77da
+        run: node ../../scripts/verify-trigger-project.mjs
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Deploy Context Trigger.dev project
+        run: npm run deploy -- --env "$CONTEXT_TRIGGER_DEPLOY_ENV"

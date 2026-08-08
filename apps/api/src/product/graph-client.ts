@@ -927,6 +927,30 @@ export class GraphApiClient {
     });
   }
 
+  /** Answer from one immutable Context wiki release with citations and audit status. */
+  async askContextWiki(
+    context: RequestContext,
+    input: { repository: string; releaseId: string; question: string; maxEvidenceItems?: number },
+  ): Promise<unknown> {
+    return this.request("/wiki/ask", context, {
+      method: "POST",
+      body: input,
+    });
+  }
+
+  /** Hydrate the portable canonical wiki bundle for an authorized release. */
+  async exportContextWiki(
+    context: RequestContext,
+    input: { repository: string; releaseId: string; locale?: string },
+  ): Promise<unknown> {
+    const query = new URLSearchParams({
+      repository: input.repository,
+      releaseId: input.releaseId,
+      ...(input.locale ? { locale: input.locale } : {}),
+    });
+    return this.request(`/wiki/export?${query.toString()}`, context);
+  }
+
   /**
    * Return whether the graph service has published any graph head for this
    * repository. This deliberately uses the scoped list endpoint without

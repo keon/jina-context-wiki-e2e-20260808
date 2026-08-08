@@ -46,6 +46,10 @@ product_internal_token_secret="jina-staging-internal-api-token"
 product_internal_token_version="${JINA_PRODUCT_INTERNAL_TOKEN_VERSION:?JINA_PRODUCT_INTERNAL_TOKEN_VERSION is required and must be a numeric pinned Secret Manager version}"
 product_encryption_secret="jina-staging-secrets-encryption-key"
 github_webhook_inbox_encryption_secret="jina-staging-github-webhook-inbox-encryption-key"
+context_trigger_secret="jina-staging-context-trigger-secret-key"
+context_trigger_service_token_secret="jina-staging-context-trigger-service-token"
+context_execution_grant_secret="jina-staging-context-execution-grant-secret"
+context_trigger_dispatch_secret="jina-staging-context-trigger-dispatch-secret"
 clerk_secret="jina-staging-clerk-secret-key"
 graph_token_secret="jina-staging-graph-api-token"
 graph_internal_token_secret="jina-staging-graph-internal-token"
@@ -104,6 +108,10 @@ required_staging_values=(
   "${product_internal_token_secret}"
   "${product_encryption_secret}"
   "${github_webhook_inbox_encryption_secret}"
+  "${context_trigger_secret}"
+  "${context_trigger_service_token_secret}"
+  "${context_execution_grant_secret}"
+  "${context_trigger_dispatch_secret}"
   "${clerk_secret}"
   "${graph_token_secret}"
   "${graph_internal_token_secret}"
@@ -158,6 +166,10 @@ for secret_name in \
   "${checkpoint_secret}" \
   "${product_internal_token_secret}" \
   "${product_encryption_secret}" \
+  "${context_trigger_secret}" \
+  "${context_trigger_service_token_secret}" \
+  "${context_execution_grant_secret}" \
+  "${context_trigger_dispatch_secret}" \
   "${clerk_secret}" \
   "${graph_token_secret}" \
   "${graph_internal_token_secret}" \
@@ -428,12 +440,12 @@ else
     --wait
 fi
 
-api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=${require_worker_release_gate}~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com,https://jina-staging-dashboard.vercel.app~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=${github_app_install_url}~GITHUB_APP_SLUG=${github_app_slug}~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=30000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
+api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=${require_worker_release_gate}~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~JINA_WIKI_PIPELINE_MODE=trigger~JINA_WIKI_GENERATOR_POLICY_VERSION=wiki-generator-v1~JINA_WIKI_DEFAULT_LOCALE=en~JINA_WIKI_AUDIT_POLICY_VERSION=audit.v1~JINA_WIKI_AUDIT_FIX_ENABLED=true~JINA_WIKI_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com,https://jina-staging-dashboard.vercel.app~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=${github_app_install_url}~GITHUB_APP_SLUG=${github_app_slug}~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=30000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
 if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
   api_env+="~JINA_GITHUB_WEBHOOK_INBOX_ENABLED=true~GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION=${github_webhook_inbox_encryption_key_version}"
 fi
 api_env+="~JINA_SCHEDULER_OIDC_AUDIENCE=https://api.staging.usejina.com~JINA_SCHEDULER_OIDC_EMAIL=${scheduler_oidc_service_account}"
-api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
+api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},JINA_CONTEXT_TRIGGER_SERVICE_TOKEN=${context_trigger_service_token_secret}:latest,JINA_CONTEXT_EXECUTION_GRANT_SECRET=${context_execution_grant_secret}:latest,JINA_CONTEXT_TRIGGER_DISPATCH_SECRET=${context_trigger_dispatch_secret}:latest,OPENAI_API_KEY=${openai_secret}:latest,SECRETS_ENCRYPTION_KEY=${product_encryption_secret}:latest,CLERK_SECRET_KEY=${clerk_secret}:latest,JINA_GRAPH_API_TOKEN=${graph_token_secret}:latest,JINA_GRAPH_INTERNAL_TOKEN=${graph_internal_token_secret}:latest,AUTUMN_SECRET_KEY=${autumn_secret}:latest"
 if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
   api_secrets+=",GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY=${github_webhook_inbox_encryption_secret}:${github_webhook_inbox_encryption_key_version}"
 fi
@@ -593,7 +605,7 @@ if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
 fi
 unset scheduler_audience
 
-context_topics="run-context-input-snapshot|run-context-page-plan|run-context-page-build|run-context-publication"
+context_topics="run-wiki-build|run-context-input-snapshot|run-context-page-plan|run-context-page-build|run-context-publication"
 release_id="${IMAGE_TAG}"
 release_credential="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 release_secret_version_name="$(
@@ -610,8 +622,8 @@ if [[ ! "${release_secret_version}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 unset release_credential release_secret_version_name
 
-context_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${context_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=jina-staging-context-openai~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex~CONTEXT_DAYTONA_SNAPSHOT=jina-context-board-codex-0-145-0-bwrap-v2"
-context_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
+context_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${context_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REQUIRE_GITHUB_INSTALLATION=false~JINA_CONTEXT_TRIGGER_API_URL=https://api.trigger.dev~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=jina-staging-context-openai~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex~CONTEXT_DAYTONA_SNAPSHOT=jina-context-board-codex-0-145-0-bwrap-v2"
+context_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_credential_secret}:${release_secret_version},JINA_CONTEXT_TRIGGER_SECRET_KEY=${context_trigger_secret}:latest,DAYTONA_API_KEY=${daytona_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
 gcloud --quiet run deploy "${context_worker_service}" \
   --project="${project}" \
   --region="${region}" \

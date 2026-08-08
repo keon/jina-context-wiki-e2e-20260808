@@ -38,9 +38,11 @@ gcloud builds triggers run jina-staging-deploy \
   --sha="${release_sha}"
 ```
 
-The build and deployment identity is
+The core Cloud Run build and deployment identity is
 `jina-cloud-build-staging@jina-staging-20260802.iam.gserviceaccount.com`; staging does not
-use a GitHub Actions deployment identity or GitHub environment secrets. The account has
+use a GitHub Actions identity for Cloud Run deployment. The separate Context Trigger.dev
+deployment described below uses its own GitHub environment credentials and cannot mutate
+the Cloud Run lane. The Cloud Build account has
 the project deployment roles checked by `scripts/check-staging-readiness.sh`, plus
 `roles/secretmanager.secretVersionAdder` only on
 `jina-staging-causal-graph-worker-release-credential`; only the staging project's Cloud
@@ -57,6 +59,66 @@ attachment are part of the pull-request contract.
 The v2 database transition is complete: routine staging deploys use the unified
 `jina-v2-migrate-staging` job, and the retired one-time cutover job and legacy database
 credentials must remain absent.
+
+## Context wiki Trigger.dev deployment
+
+Wiki generation and non-gating audit run in the isolated
+`services/context-trigger` Trigger.dev project. They do not run in the review project,
+and Trigger tasks receive no database URL, Cloud SQL credential, GCS key, GitHub App key,
+or bucket-wide permission. Every data operation uses a short-lived, operation-scoped
+grant against the Context API. The Context worker only dispatches `run-wiki-build`; the
+single Board task is completed later by the storage-attested Trigger callback.
+
+Create these staging Secret Manager secrets before the first deploy:
+
+```sh
+staging_project=jina-staging-20260802
+for secret_name in \
+  jina-staging-context-trigger-secret-key \
+  jina-staging-context-trigger-service-token \
+  jina-staging-context-execution-grant-secret \
+  jina-staging-context-trigger-dispatch-secret; do
+  gcloud secrets describe "$secret_name" --project="$staging_project" >/dev/null 2>&1 || \
+    gcloud secrets create "$secret_name" --project="$staging_project" \
+      --replication-policy=automatic
+done
+```
+
+The service token must have the same value in Secret Manager and the GitHub `Staging`
+environment. Store independently generated 32-byte values for the service token,
+execution-grant HMAC key, and dispatch HMAC key; put the isolated Context Trigger runtime
+secret key only in `jina-staging-context-trigger-secret-key`. Grant the API service
+account access to the service-token and two HMAC secrets. Grant the Context worker
+service account access only to the Context Trigger runtime key.
+
+Configure the GitHub `Staging` environment with:
+
+- secret `STAGING_JINA_CONTEXT_TRIGGER_ACCESS_TOKEN`: deploy token for the isolated
+  Context Trigger project;
+- secret `STAGING_JINA_CONTEXT_TRIGGER_SERVICE_TOKEN`: the same bootstrap token mounted
+  on the API;
+- variables `JINA_CONTEXT_TRIGGER_PROJECT_REF`, `JINA_TRIGGER_PROJECT_REF`,
+  `JINA_CONTEXT_INTERNAL_API_URL=https://api.staging.usejina.com`,
+  `JINA_CONTEXT_TRIGGER_API_URL=https://api.trigger.dev`,
+  `JINA_WIKI_AUDIT_POLICY_VERSION=audit.v1`, and a lowercase SHA-256
+  `JINA_WIKI_AUDITOR_CONFIG_DIGEST`.
+
+`JINA_CONTEXT_TRIGGER_PROJECT_REF` must differ from both the staging review project and
+the production review project. Deploy the Trigger project from the exact staging SHA:
+
+```sh
+gh workflow run deploy-context-trigger.yml \
+  --repo=omxyz/jina --ref=staging -f target_environment=Staging
+gh run watch --repo=omxyz/jina --exit-status
+```
+
+The ordinary source-bound staging Cloud Build deploy then mounts
+`JINA_WIKI_PIPELINE_MODE=trigger` and the three API authority secrets, and adds
+`run-wiki-build` to the Context worker. Existing four-stage Context topics remain during
+the compatibility window so already-admitted work can drain; new wiki admissions always
+create exactly one Board task. `scripts/check-staging-readiness.sh` verifies the four
+Context Trigger secrets, while `scripts/cloud-build-deploy.test.mjs` statically verifies
+the runtime isolation and environment contract.
 
 Cloud Build validates, builds, and deploys one coordinated release to
 `jina-v2/us-east1`. API, worker, dashboard, and admin images are built from the same

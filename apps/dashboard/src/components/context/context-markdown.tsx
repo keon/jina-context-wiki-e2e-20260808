@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { contextMermaidConfig } from "@jina/shared-kernel/mermaid-config";
 import { resolveContextMarkdownLink } from "../../lib/context-citations.ts";
 import type { ContextCatalogDocument, ContextRelease } from "../../lib/types.ts";
 
@@ -12,13 +13,7 @@ let mermaidLoader: Promise<(typeof import("mermaid"))["default"]> | undefined;
 
 function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
   mermaidLoader ??= import("mermaid").then(({ default: mermaid }) => {
-    mermaid.initialize({
-      startOnLoad: false,
-      suppressErrorRendering: true,
-      securityLevel: "strict",
-      theme: "dark",
-      fontFamily: "ui-sans-serif, system-ui, sans-serif"
-    });
+    mermaid.initialize(contextMermaidConfig);
     return mermaid;
   });
   return mermaidLoader;

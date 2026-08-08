@@ -37,12 +37,16 @@ import {
   contextWorkflowBoardTaskTypeDefinitions,
   contextWorkflowBoardTaskTypes,
   contextWorkflowBoardTopics,
+  contextWikiBoardTaskType,
+  contextWikiBoardTaskTypeDefinitions,
+  contextWikiBoardTopic,
   causalGraphBoardTaskTypes,
   causalGraphBoardTaskTypeDefinitions,
   causalGraphBoardTopics,
   contextArtifactKinds,
   contextArtifactKey,
   contextArtifactScopePrefix,
+  fingerprint,
   boardPageIndexAttachmentInputDigest,
   assertContextPriorReleaseMatches,
   isContextArtifactKeyInScope,
@@ -53,6 +57,7 @@ import {
   parseContextPriorReleaseSeed,
   parseCausalGraphBoardTaskResult,
   parseContextWorkflowBoardTaskResult,
+  parseContextWikiBoardTaskResult,
   parseBoardPageIndexTreeArtifact,
   isCausalGraphBoardTaskType,
   isContextWorkflowBoardTaskType,
@@ -90,12 +95,20 @@ import {
   controlBoardWorkerTopics,
   entityId,
   nowIso,
+  parseWikiTriggerRequest,
   reviewWorkerTopic,
   supportedWorkerTopics,
   type IsoTimestamp
 } from "@jina/shared-kernel";
 import { constantTimeEquals } from "./secure-compare.js";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
+import { admitContextWikiBuild } from "./context-wiki-admission.js";
+import { applyActivatedWikiCompletion } from "./context-wiki-terminal.js";
+import {
+  contextWikiOrchestrator,
+  parseContextWikiPipelineRouting,
+  type ContextWikiPipelineRouting
+} from "./context-wiki-pipeline.js";
 import {
   contextBuildBoardState,
   contextBuildHasOperatorRecovery,
@@ -105,6 +118,17 @@ import {
 import { compactTerminalContextBuildHistory } from "./context-board-compaction.js";
 import { applyCausalGraphBoardTaskResult } from "./causal-graph-runtime.js";
 import { applyContextWorkflowBoardTaskResult } from "./context-workflow-runtime.js";
+import {
+  authorizeContextWikiDispatch,
+  assertContextWikiExecutionActive,
+  claimContextWikiParent,
+  contextWikiClaimedAt,
+  contextWikiClaimedExecutions,
+  contextWikiExecutionOperations,
+  mintContextWikiExecutionGrant,
+  verifyContextWikiExecutionGrant,
+  type ContextWikiExecutionGrant
+} from "./context-wiki-authority.js";
 import { ContextBoardPublicationService } from "./context-board-publication.js";
 import { IssueGraphCatalogService } from "./issue-graph-catalog.js";
 import {
@@ -117,6 +141,31 @@ import { handleContextMcpRequest } from "./mcp.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 import { isProductApiRoute } from "./product-api-router.js";
+import {
+  contextWikiStageNames,
+  type ContextWikiStageExecutor,
+  type ContextWikiStageName
+} from "./context-wiki-execution.js";
+import {
+  parseAuditWikiCompletedOutput,
+  parseAuditWikiRequest,
+  parseAuditWikiTerminalFailure,
+  type ContextWikiAuditAdmission,
+  type ContextWikiAuditCoordinator
+} from "./context-wiki-audit.js";
+import {
+  ContextWikiQueryService,
+  WikiSelectorError,
+  canonicalWikiLocale,
+  parseWikiSelector,
+  parseWikiSelectorObject,
+  selectorFieldsFromUrl,
+  type WikiContentBundleReader,
+  type ActivatedWikiBuildReceipt,
+  type WikiReleaseIdentity,
+  type WikiReleaseQueryStore,
+  type WikiSelector
+} from "./context-wiki-query.js";
 
 const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
 const MAX_CONTEXT_BOARD_ARTIFACT_BYTES = 20 * 1024 * 1024;
@@ -129,10 +178,14 @@ const WORKER_LEASE_MS = 30 * 60 * 1000;
 // deadline; every completion remains protected by its write fence.
 const DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 * 60 * 1000;
 const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
+const WIKI_STAGE_OPERATION_LEASE_MS = 5 * 60 * 1000;
+const WIKI_STAGE_OPERATION_RENEW_MS = 60 * 1000;
+const WIKI_STAGE_OPERATION_WAIT_MS = 250;
+const WIKI_STAGE_OPERATION_MAX_WAIT_MS = 28 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = supportedWorkerTopics;
 const BASE_RELATIONAL_BOARD_TOPICS = new Set<string>([reviewWorkerTopic, ...controlBoardWorkerTopics]);
-const CONTEXT_BOARD_TOPICS = new Set<string>(Object.values(contextWorkflowBoardTopics));
+const CONTEXT_BOARD_TOPICS = new Set<string>([contextWikiBoardTopic, ...Object.values(contextWorkflowBoardTopics)]);
 const CAUSAL_GRAPH_TOPICS = new Set<string>(Object.values(causalGraphBoardTopics));
 const MODEL_BOARD_TOPICS = new Set<string>([
   contextWorkflowBoardTopics.planner,
@@ -153,12 +206,15 @@ const RETRYABLE_WORKER_FAILURE_CATEGORIES = new Set([
   "model"
 ]);
 const RUNTIME_BOARD_TASK_TYPE_DEFINITIONS = [
+  ...contextWikiBoardTaskTypeDefinitions,
   ...contextWorkflowBoardTaskTypeDefinitions,
   ...causalGraphBoardTaskTypeDefinitions
 ];
 
 function isBoardWorkTaskType(value: string): boolean {
-  return isContextWorkflowBoardTaskType(value) || isCausalGraphBoardTaskType(value);
+  return (
+    value === contextWikiBoardTaskType || isContextWorkflowBoardTaskType(value) || isCausalGraphBoardTaskType(value)
+  );
 }
 
 function isContextWorkTaskType(value: string): boolean {
@@ -166,6 +222,9 @@ function isContextWorkTaskType(value: string): boolean {
 }
 
 function boardWorkArtifactKind(taskType: string): ContextArtifactKind {
+  if (taskType === contextWikiBoardTaskType) {
+    throw new Error("Context wiki work is artifacted by Trigger.dev stages");
+  }
   if (isContextWorkflowBoardTaskType(taskType)) {
     return contextWorkflowBoardArtifactKind(taskType);
   }
@@ -174,6 +233,8 @@ function boardWorkArtifactKind(taskType: string): ContextArtifactKind {
 
 function boardTaskArtifactKinds(taskType: string): ReadonlySet<ContextArtifactKind> {
   switch (taskType) {
+    case contextWikiBoardTaskType:
+      return new Set();
     case contextWorkflowBoardTaskTypes.planner:
       return new Set(["research-plan", "research-report", "publication-plan"]);
     case contextWorkflowBoardTaskTypes.page:
@@ -212,6 +273,22 @@ export interface ApiServerConfig {
   readonly contextApiToken?: string;
   readonly contextApiTenantId?: string;
   readonly contextApiPrincipalId?: string;
+  /** Bootstrap identity accepted only for Context Trigger claim/execution routes. */
+  readonly contextWikiTriggerServiceToken?: string;
+  /** HMAC key for short-lived repository/operation-scoped Context Trigger grants. */
+  readonly contextWikiExecutionGrantSecret?: string;
+  /** HMAC key for pre-dispatch one-use parent-run nonces. */
+  readonly contextWikiDispatchSecret?: string;
+  readonly contextWikiPipelineRouting?: ContextWikiPipelineRouting;
+  readonly contextWikiStageExecutor?: Pick<ContextWikiStageExecutor, "execute"> &
+    Partial<Pick<ContextWikiStageExecutor, "recover">>;
+  readonly contextWikiAuditCoordinator?: ContextWikiAuditCoordinator;
+  readonly contextWikiAuditFixEnabled?: boolean;
+  readonly contextWikiReleaseQueryStore?: WikiReleaseQueryStore;
+  readonly contextWikiContentBundleReader?: WikiContentBundleReader;
+  readonly contextWikiDefaultBranch?: string;
+  readonly contextWikiDefaultLocale?: string;
+  readonly contextWikiAuditPolicyVersion?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
   readonly mcpAllowedOrigins?: readonly string[];
   readonly contextWorkerLeaseMs?: number;
@@ -307,6 +384,7 @@ interface Principal {
    */
   readonly scopes?: readonly ContextScope[];
   readonly tokenId?: string;
+  readonly contextWikiGrant?: ContextWikiExecutionGrant;
 }
 
 type ContextScope = "context:query" | "context:read" | "context:build" | "context:admin";
@@ -467,13 +545,32 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   // A static secret shaped like an issued token would be shadowed by the token
   // branch and could never authenticate, taking the deployment offline. Refuse at
   // construction rather than at the first request.
-  for (const staticToken of [config.internalApiToken, config.contextApiToken]) {
+  for (const staticToken of [config.internalApiToken, config.contextApiToken, config.contextWikiTriggerServiceToken]) {
     if (staticToken?.startsWith("jina_atk_")) {
       throw new Error("static API tokens must not use the jina_atk_ prefix reserved for issued tokens");
     }
   }
   if (config.internalApiToken && config.contextApiToken && config.internalApiToken === config.contextApiToken) {
     throw new Error("internal and Context API tokens must be distinct");
+  }
+  if (
+    config.contextWikiTriggerServiceToken &&
+    (config.contextWikiTriggerServiceToken === config.internalApiToken ||
+      config.contextWikiTriggerServiceToken === config.contextApiToken)
+  ) {
+    throw new Error("Context Trigger service token must be distinct from other static API tokens");
+  }
+  if (
+    (config.contextWikiTriggerServiceToken ||
+      config.contextWikiExecutionGrantSecret ||
+      config.contextWikiDispatchSecret) &&
+    (!config.contextWikiTriggerServiceToken ||
+      !config.contextWikiExecutionGrantSecret ||
+      !config.contextWikiDispatchSecret)
+  ) {
+    throw new Error(
+      "Context Trigger service token, execution-grant secret, and dispatch secret must be configured together"
+    );
   }
   if (config.internalApiPrincipalId && !normalizedForwardedPrincipal(config.internalApiPrincipalId)) {
     throw new Error("internalApiPrincipalId must be a recognisable user, tenant or service principal");
@@ -482,11 +579,23 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     throw new Error("requireWorkerReleaseGate requires a durable stateStore");
   }
   const logger = config.logger ?? createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
+  const contextWikiRouting = config.contextWikiPipelineRouting ?? parseContextWikiPipelineRouting(process.env);
   const metrics = new MetricsRegistry();
   const startedAt = nowIso();
   const contextStore: ContextEngineStore = config.contextStore ?? new MemoryContextEngineStore();
   const contextPhaseCheckpointStore = config.contextPhaseCheckpointStore ?? new MemoryContextPhaseCheckpointStore();
   const contextCatalog = new ContextCatalogService(contextStore);
+  const contextWikiQuery = config.contextWikiReleaseQueryStore
+    ? new ContextWikiQueryService(
+        config.contextWikiReleaseQueryStore,
+        {
+          defaultBranch: config.contextWikiDefaultBranch?.trim() || "main",
+          defaultLocale: config.contextWikiDefaultLocale?.trim() || "en",
+          auditPolicyVersion: config.contextWikiAuditPolicyVersion?.trim() || "wiki-audit-v1"
+        },
+        config.contextWikiContentBundleReader
+      )
+    : undefined;
   const issueGraphCatalog = config.contextArtifactStore
     ? new IssueGraphCatalogService(contextStore, config.contextArtifactStore)
     : undefined;
@@ -839,7 +948,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 401, { error: "unauthorized" });
       return;
     }
-    const isInternal = hasInternalApiCredential(request, config);
+    const isInternal =
+      hasInternalApiCredential(request, config) ||
+      principal.principalId === "svc:context-wiki-trigger" ||
+      principal.principalId === "svc:context-wiki-execution";
     if (url.pathname.startsWith("/internal/") && !isInternal && url.pathname !== "/internal/context/access/sync") {
       json(response, 401, { error: "internal credential required" });
       return;
@@ -857,6 +969,836 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (!allowed) {
         throw new ApiError(403, "insufficient_scope", "token scope does not permit this route");
       }
+    }
+
+    if (request.method === "POST" && url.pathname === "/internal/context/wiki/dispatch/authorize") {
+      if (!config.contextWikiDispatchSecret) throw new Error("Context wiki Trigger authority is not configured");
+      const body = parseJsonObject(await readRawBody(request));
+      const authorized = await mutate(async () => {
+        const lease = leasedBoardTask(intakeState.board, principal.tenantId, body, nowIso());
+        if (lease.task.type !== "build-wiki") throw invalidRequest("leased task is not a wiki build");
+        const requestDigest = requiredString(lease.task.metadata.requestDigest, "requestDigest");
+        const triggerRequest = plainObject(lease.task.metadata.triggerRequest, "triggerRequest");
+        const result = authorizeContextWikiDispatch(intakeState.board, {
+          taskId: lease.task.id,
+          requestDigest,
+          attempt: lease.message.payload.attempt,
+          secret: config.contextWikiDispatchSecret!,
+          now: nowIso()
+        });
+        intakeState = { ...intakeState, board: result.state };
+        return {
+          boardBuildId: lease.task.id,
+          request: triggerRequest,
+          requestDigest,
+          dispatchNonce: result.dispatchNonce,
+          attempt: lease.message.payload.attempt
+        };
+      });
+      if (!authorized) throw new ApiError(409, "conflict", "wiki dispatch authorization raced another update");
+      json(response, 200, authorized);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/internal/context/wiki/executions/claim") {
+      if (!config.contextWikiExecutionGrantSecret) throw new Error("Context wiki execution grants are not configured");
+      const body = parseJsonObject(await readRawBody(request));
+      if (body.kind === "audit") {
+        if (!config.contextWikiAuditCoordinator) throw new Error("Context wiki audits are not configured");
+        const auditRequest = parseAuditWikiRequest(body.request);
+        if (
+          auditRequest.auditId !== requiredString(body.auditId, "auditId") ||
+          auditRequest.releaseId !== requiredString(body.releaseId, "releaseId") ||
+          auditRequest.auditInputDigest !== requiredString(body.auditInputDigest, "auditInputDigest")
+        ) {
+          throw invalidRequest("audit claim identity does not match its request");
+        }
+        const triggerParentRunId = requiredString(body.triggerParentRunId, "triggerParentRunId");
+        const claimedAt = nowIso();
+        const grant = mintContextWikiExecutionGrant({
+          secret: config.contextWikiExecutionGrantSecret,
+          kind: "audit",
+          subjectId: auditRequest.auditId,
+          tenantId: auditRequest.tenantId,
+          repository: auditRequest.repository,
+          triggerParentRunId,
+          authorityDigest: auditRequest.auditInputDigest,
+          locale: auditRequest.locale,
+          operations: [
+            "release:read",
+            "artifact:put",
+            "stage:audit",
+            "audit:complete",
+            "audit:fail",
+            "audit:admit-fix"
+          ],
+          auditRequest: { ...auditRequest },
+          now: claimedAt,
+          ttlSeconds: 6 * 60 * 60
+        });
+        await config.contextWikiAuditCoordinator.claim(
+          {
+            schemaVersion: 1,
+            dispatchNonce: requiredString(body.dispatchNonce, "dispatchNonce"),
+            request: auditRequest
+          },
+          { triggerParentRunId, claimedAt }
+        );
+        json(response, 200, { executionGrant: grant.token, expiresAt: grant.grant.expiresAt, request: auditRequest });
+        return;
+      }
+      if (body.kind !== "build") {
+        throw invalidRequest("wiki execution claim kind is invalid");
+      }
+      const taskId = entityId<"task">(requiredString(body.boardBuildId, "boardBuildId")) as TaskId;
+      const requestDigest = requiredString(body.requestDigest, "requestDigest");
+      const triggerParentRunId = requiredString(body.triggerParentRunId, "triggerParentRunId");
+      const attempt = requiredPositiveInteger(body.attempt, "attempt");
+      const claimed = await mutate(async () => {
+        const task = findTask(intakeState.board, taskId);
+        if (!task || task.type !== "build-wiki") throw notFound("wiki build not found");
+        const next = claimContextWikiParent(intakeState.board, {
+          taskId,
+          requestDigest,
+          attempt,
+          dispatchNonce: requiredString(body.dispatchNonce, "dispatchNonce"),
+          triggerParentRunId,
+          now: nowIso()
+        });
+        intakeState = { ...intakeState, board: next };
+        const claimedAt = contextWikiClaimedAt(next, { taskId, requestDigest, attempt });
+        if (!claimedAt) throw new Error("wiki parent claim time was not recorded");
+        const triggerRequest = plainObject(task.metadata.triggerRequest, "triggerRequest");
+        const grant = mintContextWikiExecutionGrant({
+          secret: config.contextWikiExecutionGrantSecret!,
+          kind: "build",
+          subjectId: task.id,
+          tenantId: requiredString(task.metadata.tenantId, "tenantId"),
+          repository: requiredRepositoryName(task.metadata.repository, "repository"),
+          triggerParentRunId,
+          authorityDigest: requestDigest,
+          locale: requiredString(task.metadata.locale, "locale"),
+          operations: contextWikiExecutionOperations.filter(
+            (operation) => !operation.startsWith("audit:") && operation !== "stage:audit"
+          ),
+          now: claimedAt,
+          ttlSeconds: 6 * 60 * 60
+        });
+        return { executionGrant: grant.token, expiresAt: grant.grant.expiresAt, request: triggerRequest };
+      });
+      if (!claimed) throw new ApiError(409, "conflict", "wiki execution claim raced another update");
+      json(response, 200, claimed);
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/internal/context/wiki/executions/reconciliation/due") {
+      if (!config.contextWikiExecutionGrantSecret) throw new Error("Context wiki execution grants are not configured");
+      const limit = Number(url.searchParams.get("limit") ?? "100");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        throw invalidRequest("wiki reconciliation limit is invalid");
+      }
+      // Validate scheduler-owned inputs even though Board authority, not the
+      // caller's clock, determines which executions are returned.
+      requiredTimestamp(url.searchParams.get("timestamp"), "timestamp");
+      requiredString(url.searchParams.get("scheduleId"), "scheduleId");
+      await reload();
+      const due = contextWikiClaimedExecutions(intakeState.board, {
+        limit,
+        ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {})
+      });
+      const executions = due.executions.map((execution) => {
+        const grant = mintContextWikiExecutionGrant({
+          secret: config.contextWikiExecutionGrantSecret!,
+          kind: "build",
+          subjectId: execution.boardBuildId,
+          tenantId: execution.tenantId,
+          repository: execution.repository,
+          triggerParentRunId: execution.triggerParentRunId,
+          authorityDigest: execution.requestDigest,
+          locale: execution.locale,
+          operations: ["board:complete", "board:fail"],
+          now: nowIso(),
+          ttlSeconds: 15 * 60
+        });
+        return {
+          schemaVersion: 1,
+          boardBuildId: execution.boardBuildId,
+          triggerParentRunId: execution.triggerParentRunId,
+          requestDigest: execution.requestDigest,
+          executionGrant: grant.token
+        };
+      });
+      json(response, 200, { executions, ...(due.nextCursor ? { nextCursor: due.nextCursor } : {}) });
+      return;
+    }
+
+    const wikiStageRoute = /^\/internal\/context\/wiki\/executions\/([^/]+)\/steps\/([^/]+)$/.exec(url.pathname);
+    if (request.method === "POST" && wikiStageRoute) {
+      if (!config.contextWikiExecutionGrantSecret) throw new Error("Context wiki execution grants are not configured");
+      const authorityId = decodeURIComponent(wikiStageRoute[1]!);
+      const stageValue = decodeURIComponent(wikiStageRoute[2]!);
+      if (!contextWikiStageNames.includes(stageValue as ContextWikiStageName)) {
+        throw notFound("wiki stage not found");
+      }
+      const stage = stageValue as ContextWikiStageName;
+      const grant = principal.contextWikiGrant;
+      if (!grant || grant.subjectId !== authorityId) {
+        throw new ApiError(403, "forbidden", "wiki execution grant does not match this execution");
+      }
+      const authorization = firstHeader(request.headers.authorization);
+      const token = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
+      verifyContextWikiExecutionGrant(token, {
+        secret: config.contextWikiExecutionGrantSecret,
+        now: nowIso(),
+        operation: `stage:${stage}`
+      });
+      const body = parseJsonObject(await readRawBody(request));
+      const operationId = requiredString(body.operationId, "operationId");
+      const stageInput = plainObject(body.input, "input");
+      if (stage === "audit") {
+        if (grant.kind !== "audit" || !grant.auditRequest || !config.contextWikiAuditCoordinator) {
+          throw new ApiError(403, "forbidden", "audit execution grant is invalid");
+        }
+        const auditRequest = parseAuditWikiRequest(grant.auditRequest);
+        const output = await runDurableWikiStageOperation({
+          grant,
+          stage,
+          operationId,
+          input: stageInput,
+          recover: () =>
+            config.contextWikiAuditCoordinator!.recoverRun({
+              request: auditRequest,
+              triggerParentRunId: grant.triggerParentRunId,
+              operationId
+            }),
+          execute: async () => {
+            return config.contextWikiAuditCoordinator!.run({
+              request: auditRequest,
+              triggerParentRunId: grant.triggerParentRunId,
+              operationId,
+              now: grant.issuedAt
+            });
+          }
+        });
+        json(response, 200, { operationId, status: "completed", output });
+        return;
+      }
+      if (grant.kind !== "build" || !config.contextWikiStageExecutor) {
+        throw new ApiError(403, "forbidden", "build execution grant is invalid");
+      }
+      await reload();
+      const task = findTask(intakeState.board, entityId<"task">(authorityId));
+      if (!task || task.type !== contextWikiBoardTaskType) throw notFound("wiki build not found");
+      const triggerRequest = parseWikiTriggerRequest(task.metadata.triggerRequest);
+      if (
+        triggerRequest.tenantId !== grant.tenantId ||
+        triggerRequest.repository !== grant.repository ||
+        triggerRequest.requestedLocale !== grant.locale ||
+        requiredString(task.metadata.requestDigest, "requestDigest") !== grant.authorityDigest
+      ) {
+        throw new ApiError(403, "forbidden", "wiki execution grant escaped its repository scope");
+      }
+      const output = await runDurableWikiStageOperation({
+        grant,
+        stage,
+        operationId,
+        input: stageInput,
+        authorizeMiss: async () => {
+          await reload();
+          const current = findTask(intakeState.board, task.id);
+          try {
+            if (!current) throw new Error("wiki build not found");
+            assertContextWikiExecutionActive(intakeState.board, {
+              taskId: current.id,
+              requestDigest: grant.authorityDigest,
+              triggerParentRunId: grant.triggerParentRunId
+            });
+          } catch {
+            throw new ApiError(409, "wiki_execution_revoked", "wiki build authority is no longer active");
+          }
+        },
+        ...(config.contextWikiStageExecutor.recover
+          ? {
+              recover: () =>
+                config.contextWikiStageExecutor!.recover!({
+                  request: triggerRequest,
+                  requestDigest: grant.authorityDigest,
+                  triggerParentRunId: grant.triggerParentRunId,
+                  authorizedAt: grant.issuedAt,
+                  operationId,
+                  stage,
+                  input: stageInput
+                })
+            }
+          : {}),
+        execute: async () => {
+          return config.contextWikiStageExecutor!.execute({
+            request: triggerRequest,
+            requestDigest: grant.authorityDigest,
+            triggerParentRunId: grant.triggerParentRunId,
+            authorizedAt: grant.issuedAt,
+            operationId,
+            stage,
+            input: stageInput
+          });
+        }
+      });
+      json(response, 200, { operationId, status: "completed", output });
+      return;
+    }
+
+    const wikiCompletionRoute = /^\/internal\/context\/wiki\/executions\/([^/]+)\/complete$/.exec(url.pathname);
+    if (request.method === "POST" && wikiCompletionRoute) {
+      if (!config.contextWikiExecutionGrantSecret) throw new Error("Context wiki execution grants are not configured");
+      const authorityId = decodeURIComponent(wikiCompletionRoute[1]!);
+      const authorization = firstHeader(request.headers.authorization);
+      const verifiedGrant = verifyContextWikiExecutionGrant(
+        authorization?.startsWith("Bearer ") ? authorization.slice(7) : "",
+        {
+          secret: config.contextWikiExecutionGrantSecret,
+          now: nowIso(),
+          operation: "board:complete"
+        }
+      );
+      if (
+        verifiedGrant.kind !== "build" ||
+        verifiedGrant.subjectId !== authorityId ||
+        principal.contextWikiGrant?.subjectId !== authorityId
+      ) {
+        throw new ApiError(403, "forbidden", "wiki completion grant does not match this execution");
+      }
+      const body = parseJsonObject(await readRawBody(request));
+      const taskId = entityId<"task">(authorityId) as TaskId;
+      const completion = await mutate(async () => {
+        const task = findTask(intakeState.board, taskId);
+        if (!task || task.type !== contextWikiBoardTaskType) throw notFound("wiki build not found");
+        const result = parseContextWikiBoardTaskResult(intakeState.board, task.id, body.result);
+        if (
+          result.requestDigest !== verifiedGrant.authorityDigest ||
+          result.triggerParentRunId !== verifiedGrant.triggerParentRunId ||
+          result.tenantId !== verifiedGrant.tenantId ||
+          result.repository !== verifiedGrant.repository ||
+          result.locale !== verifiedGrant.locale
+        ) {
+          throw new ApiError(403, "forbidden", "wiki completion escaped its execution grant");
+        }
+        await assertActivatedWikiResult(task, result);
+        const resultDigest = fingerprintBytes(Buffer.from(JSON.stringify(result), "utf8"));
+        const priorReceipt = intakeState.board.events.find(
+          (event) =>
+            event.taskId === task.id &&
+            event.type === "context.wiki_trigger_completion_recorded" &&
+            event.payload?.requestDigest === result.requestDigest
+        );
+        if (priorReceipt) {
+          if (
+            task.status !== "done" ||
+            priorReceipt.payload?.triggerParentRunId !== result.triggerParentRunId ||
+            priorReceipt.payload.resultDigest !== resultDigest ||
+            priorReceipt.payload.releaseId !== result.releaseId
+          ) {
+            throw new ApiError(409, "completion_replay_conflict", "replayed wiki completion changed its result");
+          }
+          return { replay: true, tenantId: result.tenantId, buildId: task.id };
+        }
+        try {
+          assertContextWikiExecutionActive(intakeState.board, {
+            taskId: task.id,
+            requestDigest: result.requestDigest,
+            triggerParentRunId: result.triggerParentRunId
+          });
+        } catch {
+          throw new ApiError(409, "wiki_execution_revoked", "wiki build authority is no longer active");
+        }
+        const message = intakeState.board.outbox.find(
+          (candidate) => candidate.taskId === task.id && candidate.topic === contextWikiBoardTopic
+        );
+        if (!message || message.status === "dispatched") {
+          throw new ApiError(409, "wiki_completion_state_invalid", "wiki build dispatch is not awaiting completion");
+        }
+        const now = nowIso();
+        let board = markOutboxDispatched(intakeState.board, message.id, now);
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: task.id,
+            eventType: completionEventType(message.topic),
+            payload: wikiCompletionEventPayload(result)
+          },
+          { actor: RUN_ACTOR, now }
+        ).state;
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: task.id,
+            eventType: "context.wiki_trigger_completion_recorded",
+            payload: {
+              messageId: message.id,
+              attempt: message.payload.attempt,
+              triggerParentRunId: result.triggerParentRunId,
+              requestDigest: result.requestDigest,
+              releaseId: result.releaseId,
+              resultDigest
+            }
+          },
+          { actor: RUN_ACTOR, now }
+        ).state;
+        const transitioned = applyCommand(
+          board,
+          { command: "TransitionTask", taskId: task.id, toStatus: "done" },
+          { actor: RUN_ACTOR, now }
+        );
+        if (!transitioned.accepted) {
+          throw new Error(
+            `wiki Trigger completion transition was rejected: ${transitioned.rejection?.reason ?? "unknown reason"}`
+          );
+        }
+        intakeState = { ...intakeState, board: reduceBoard(transitioned.state, now) };
+        return { replay: false, tenantId: result.tenantId, buildId: task.id };
+      });
+      if (!completion) throw new ApiError(409, "conflict", "wiki completion raced another update");
+      await config.contextQuotaService?.completeBuild({
+        tenantId: completion.tenantId,
+        buildId: completion.buildId
+      });
+      json(response, 200, { accepted: true, replay: completion.replay });
+      return;
+    }
+
+    const wikiFailureRoute = /^\/internal\/context\/wiki\/executions\/([^/]+)\/fail$/.exec(url.pathname);
+    if (request.method === "POST" && wikiFailureRoute) {
+      if (!config.contextWikiExecutionGrantSecret) throw new Error("Context wiki execution grants are not configured");
+      const authorityId = decodeURIComponent(wikiFailureRoute[1]!);
+      const authorization = firstHeader(request.headers.authorization);
+      const verifiedGrant = verifyContextWikiExecutionGrant(
+        authorization?.startsWith("Bearer ") ? authorization.slice(7) : "",
+        {
+          secret: config.contextWikiExecutionGrantSecret,
+          now: nowIso(),
+          operation: "board:fail"
+        }
+      );
+      if (
+        verifiedGrant.kind !== "build" ||
+        verifiedGrant.subjectId !== authorityId ||
+        principal.contextWikiGrant?.subjectId !== authorityId
+      ) {
+        throw new ApiError(403, "forbidden", "wiki failure grant does not match this execution");
+      }
+      const body = parseJsonObject(await readRawBody(request));
+      const failure = parseWikiTriggerTerminalFailureBody(body.failure);
+      if (
+        failure.boardBuildId !== authorityId ||
+        failure.requestDigest !== verifiedGrant.authorityDigest ||
+        failure.triggerParentRunId !== verifiedGrant.triggerParentRunId
+      ) {
+        throw new ApiError(403, "forbidden", "wiki failure escaped its execution grant");
+      }
+      const taskId = entityId<"task">(authorityId) as TaskId;
+      const settled = await mutate(async () => {
+        const task = findTask(intakeState.board, taskId);
+        if (!task || task.type !== contextWikiBoardTaskType) throw notFound("wiki build not found");
+        if (
+          task.metadata.requestDigest !== verifiedGrant.authorityDigest ||
+          task.metadata.tenantId !== verifiedGrant.tenantId ||
+          task.metadata.repository !== verifiedGrant.repository ||
+          task.metadata.locale !== verifiedGrant.locale
+        ) {
+          throw new ApiError(403, "forbidden", "wiki failure grant escaped its Board scope");
+        }
+
+        const successReceipt = intakeState.board.events.find(
+          (event) =>
+            event.taskId === task.id &&
+            event.type === "context.wiki_trigger_completion_recorded" &&
+            event.payload?.requestDigest === failure.requestDigest &&
+            event.payload?.triggerParentRunId === failure.triggerParentRunId
+        );
+        if (successReceipt) {
+          if (task.status !== "done") {
+            throw new ApiError(409, "completion_replay_conflict", "wiki success receipt is not terminal");
+          }
+          return { replay: true, outcome: "completed" as const, tenantId: verifiedGrant.tenantId, buildId: task.id };
+        }
+
+        // Storage activation is authoritative. If activation committed before
+        // the terminal callback, complete the Board task and never overwrite
+        // the published release with a failure outcome.
+        const activatedRaw = await config.contextWikiReleaseQueryStore?.findActivatedWikiBuildReceipt?.({
+          tenantId: verifiedGrant.tenantId,
+          repository: verifiedGrant.repository,
+          boardBuildId: task.id,
+          requestDigest: failure.requestDigest
+        });
+        if (activatedRaw) {
+          const activated = activatedWikiBoardResult(intakeState.board, task, activatedRaw);
+          if (
+            activated.triggerParentRunId !== failure.triggerParentRunId ||
+            activated.requestDigest !== failure.requestDigest
+          ) {
+            throw new ApiError(409, "wiki_activation_mismatch", "activated wiki belongs to another execution");
+          }
+          await assertActivatedWikiResult(task, activated);
+          const now = nowIso();
+          const reconciled = applyActivatedWikiCompletion(intakeState.board, activated, now, "terminal_failure");
+          intakeState = { ...intakeState, board: reconciled.state };
+          return { replay: false, outcome: "completed" as const, tenantId: verifiedGrant.tenantId, buildId: task.id };
+        }
+
+        const failureDigest = fingerprintBytes(Buffer.from(JSON.stringify(failure), "utf8"));
+        const priorFailure = intakeState.board.events.find(
+          (event) =>
+            event.taskId === task.id &&
+            event.type === "context.wiki_trigger_failure_recorded" &&
+            event.payload?.requestDigest === failure.requestDigest
+        );
+        if (priorFailure) {
+          if (
+            task.status !== "failed" ||
+            priorFailure.payload?.triggerParentRunId !== failure.triggerParentRunId ||
+            priorFailure.payload?.failureDigest !== failureDigest
+          ) {
+            throw new ApiError(409, "failure_replay_conflict", "replayed wiki failure changed its result");
+          }
+          return { replay: true, outcome: "failed" as const, tenantId: verifiedGrant.tenantId, buildId: task.id };
+        }
+        try {
+          assertContextWikiExecutionActive(intakeState.board, {
+            taskId: task.id,
+            requestDigest: failure.requestDigest,
+            triggerParentRunId: failure.triggerParentRunId
+          });
+        } catch {
+          throw new ApiError(409, "wiki_execution_revoked", "wiki build authority is no longer active");
+        }
+        const message = intakeState.board.outbox.find(
+          (candidate) => candidate.taskId === task.id && candidate.topic === contextWikiBoardTopic
+        );
+        if (!message || message.status === "dispatched") {
+          throw new ApiError(409, "wiki_completion_state_invalid", "wiki build dispatch is not awaiting completion");
+        }
+        const now = nowIso();
+        let board = markOutboxDispatched(intakeState.board, message.id, now);
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: task.id,
+            eventType: `${message.topic}.failed`,
+            payload: {
+              reason: "Trigger.dev wiki workflow ended before release activation",
+              failureCategory: "trigger_execution",
+              failureCode: failure.code,
+              failedAt: failure.failedAt
+            }
+          },
+          { actor: RUN_ACTOR, now }
+        ).state;
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: task.id,
+            eventType: "context.wiki_trigger_failure_recorded",
+            payload: {
+              messageId: message.id,
+              attempt: message.payload.attempt,
+              triggerParentRunId: failure.triggerParentRunId,
+              requestDigest: failure.requestDigest,
+              failureCode: failure.code,
+              failureSource: failure.source,
+              failureDigest
+            }
+          },
+          { actor: RUN_ACTOR, now }
+        ).state;
+        const transitioned = applyCommand(
+          board,
+          { command: "TransitionTask", taskId: task.id, toStatus: "failed" },
+          { actor: RUN_ACTOR, now }
+        );
+        if (!transitioned.accepted) throw new Error("wiki Trigger failure transition was rejected");
+        intakeState = { ...intakeState, board: reduceBoard(transitioned.state, now) };
+        return { replay: false, outcome: "failed" as const, tenantId: verifiedGrant.tenantId, buildId: task.id };
+      });
+      if (!settled) throw new ApiError(409, "conflict", "wiki failure raced another update");
+      await config.contextQuotaService?.completeBuild({ tenantId: settled.tenantId, buildId: settled.buildId });
+      json(response, 200, { accepted: true, replay: settled.replay, outcome: settled.outcome });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/internal/context/wiki/audits/dispatch") {
+      if (!config.contextWikiAuditCoordinator) throw new Error("Context wiki audits are not configured");
+      if (!hasInternalApiCredential(request, config) && principal.principalId !== "svc:context-wiki-trigger") {
+        throw new ApiError(401, "unauthorized", "manual audit dispatch requires an internal Trigger credential");
+      }
+      const body = parseJsonObject(await readRawBody(request));
+      requireExactFields(
+        body,
+        ["tenantId", "repository", "releaseId", "locale", "auditPolicyVersion", "auditorConfigDigest", "timestamp"],
+        "manual audit dispatch"
+      );
+      const tenantId = requiredString(body.tenantId, "tenantId");
+      const repository = requiredRepositoryName(body.repository, "repository");
+      if (principal.tenantId !== "*" && principal.tenantId !== tenantId) {
+        throw notFound("published wiki release not found");
+      }
+      let payload;
+      try {
+        payload = await config.contextWikiAuditCoordinator.dispatch({
+          tenantId,
+          repository,
+          releaseId: requiredString(body.releaseId, "releaseId"),
+          locale: requiredString(body.locale, "locale"),
+          auditPolicyVersion: requiredString(body.auditPolicyVersion, "auditPolicyVersion"),
+          auditorConfigDigest: requiredSha256(body.auditorConfigDigest, "auditorConfigDigest"),
+          timestamp: requiredTimestamp(body.timestamp, "timestamp")
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("manual audit release is not published")) {
+          throw notFound("published wiki release not found");
+        }
+        if (error instanceof Error && error.message.includes("locale is invalid")) {
+          throw invalidRequest("locale is invalid");
+        }
+        throw error;
+      }
+      json(response, 200, payload);
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/internal/context/wiki/audits/reconciliation/due") {
+      if (!config.contextWikiAuditCoordinator || !config.contextWikiExecutionGrantSecret) {
+        throw new Error("Context wiki audits are not configured");
+      }
+      const limit = Number(url.searchParams.get("limit") ?? "100");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        throw invalidRequest("audit reconciliation limit is invalid");
+      }
+      requiredTimestamp(url.searchParams.get("timestamp"), "timestamp");
+      requiredString(url.searchParams.get("scheduleId"), "scheduleId");
+      const tenantIds = config.sharedIdentityResolver
+        ? await config.sharedIdentityResolver.listTenantIds()
+        : [config.tenantId ?? config.contextApiTenantId ?? principal.tenantId].filter((value) => value !== "*");
+      const due = await config.contextWikiAuditCoordinator.reconciliationDue({
+        tenantIds,
+        ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+        limit
+      });
+      const audits = due.runs.map((run) => {
+        const auditRequest = {
+          schemaVersion: 1 as const,
+          taskIdentifier: "audit-wiki" as const,
+          auditId: run.auditId,
+          tenantId: run.tenantId,
+          repository: run.repository,
+          releaseId: run.releaseId,
+          locale: run.locale,
+          publicSnapshotDigest: run.publicSnapshotDigest,
+          auditPolicyVersion: run.auditPolicyVersion,
+          auditorConfigDigest: run.auditorConfigDigest,
+          auditWindow: run.auditWindow,
+          auditInputDigest: run.auditInputDigest
+        };
+        const grant = mintContextWikiExecutionGrant({
+          secret: config.contextWikiExecutionGrantSecret!,
+          kind: "audit",
+          subjectId: run.auditId,
+          tenantId: run.tenantId,
+          repository: run.repository,
+          triggerParentRunId: run.triggerRunId,
+          authorityDigest: run.auditInputDigest,
+          locale: run.locale,
+          operations: ["audit:complete", "audit:fail"],
+          auditRequest,
+          now: nowIso(),
+          ttlSeconds: 15 * 60
+        });
+        return {
+          schemaVersion: 1,
+          auditId: run.auditId,
+          triggerParentRunId: run.triggerRunId,
+          auditInputDigest: run.auditInputDigest,
+          request: auditRequest,
+          executionGrant: grant.token
+        };
+      });
+      json(response, 200, { audits, ...(due.nextCursor ? { nextCursor: due.nextCursor } : {}) });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/internal/context/wiki/audits/improvements/due") {
+      if (!config.contextWikiAuditCoordinator || !config.contextWikiExecutionGrantSecret) {
+        throw new Error("Context wiki audits are not configured");
+      }
+      const limit = Number(url.searchParams.get("limit") ?? "100");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        throw invalidRequest("audit improvement limit is invalid");
+      }
+      requiredTimestamp(url.searchParams.get("timestamp"), "timestamp");
+      requiredString(url.searchParams.get("scheduleId"), "scheduleId");
+      const tenantIds = config.sharedIdentityResolver
+        ? await config.sharedIdentityResolver.listTenantIds()
+        : [config.tenantId ?? config.contextApiTenantId ?? principal.tenantId].filter((value) => value !== "*");
+      const due = await config.contextWikiAuditCoordinator.improvementsDue({
+        tenantIds,
+        ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+        limit
+      });
+      const audits = due.runs.map((run) => {
+        const auditRequest = {
+          schemaVersion: 1 as const,
+          taskIdentifier: "audit-wiki" as const,
+          auditId: run.auditId,
+          tenantId: run.tenantId,
+          repository: run.repository,
+          releaseId: run.releaseId,
+          locale: run.locale,
+          publicSnapshotDigest: run.publicSnapshotDigest,
+          auditPolicyVersion: run.auditPolicyVersion,
+          auditorConfigDigest: run.auditorConfigDigest,
+          auditWindow: run.auditWindow,
+          auditInputDigest: run.auditInputDigest
+        };
+        const grant = mintContextWikiExecutionGrant({
+          secret: config.contextWikiExecutionGrantSecret!,
+          kind: "audit",
+          subjectId: run.auditId,
+          tenantId: run.tenantId,
+          repository: run.repository,
+          triggerParentRunId: run.triggerRunId,
+          authorityDigest: run.auditInputDigest,
+          locale: run.locale,
+          operations: ["audit:admit-fix"],
+          auditRequest,
+          now: nowIso(),
+          ttlSeconds: 15 * 60
+        });
+        return {
+          schemaVersion: 1,
+          auditId: run.auditId,
+          triggerParentRunId: run.triggerRunId,
+          auditInputDigest: run.auditInputDigest,
+          request: auditRequest,
+          executionGrant: grant.token
+        };
+      });
+      json(response, 200, { audits, ...(due.nextCursor ? { nextCursor: due.nextCursor } : {}) });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/internal/context/wiki/audits/due") {
+      if (!config.contextWikiAuditCoordinator) throw new Error("Context wiki audits are not configured");
+      const tenantIds = config.sharedIdentityResolver
+        ? await config.sharedIdentityResolver.listTenantIds()
+        : [config.tenantId ?? config.contextApiTenantId ?? principal.tenantId].filter((value) => value !== "*");
+      const limit = Number(url.searchParams.get("limit") ?? "100");
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw invalidRequest("audit limit is invalid");
+      const due = await config.contextWikiAuditCoordinator.due({
+        tenantIds,
+        auditPolicyVersion: requiredString(url.searchParams.get("auditPolicyVersion"), "auditPolicyVersion"),
+        auditorConfigDigest: requiredString(url.searchParams.get("auditorConfigDigest"), "auditorConfigDigest"),
+        timestamp: requiredString(url.searchParams.get("timestamp"), "timestamp"),
+        ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+        limit
+      });
+      json(response, 200, due);
+      return;
+    }
+
+    const auditCompleteRoute = /^\/internal\/context\/wiki\/audits\/([^/]+)\/complete$/.exec(url.pathname);
+    if (request.method === "POST" && auditCompleteRoute) {
+      if (!config.contextWikiAuditCoordinator || !config.contextWikiExecutionGrantSecret) {
+        throw new Error("Context wiki audits are not configured");
+      }
+      const auditId = decodeURIComponent(auditCompleteRoute[1]!);
+      const grant = principal.contextWikiGrant;
+      if (!grant || grant.kind !== "audit" || grant.subjectId !== auditId || !grant.auditRequest) {
+        throw new ApiError(403, "forbidden", "audit completion grant is invalid");
+      }
+      const authorization = firstHeader(request.headers.authorization);
+      verifyContextWikiExecutionGrant(authorization?.startsWith("Bearer ") ? authorization.slice(7) : "", {
+        secret: config.contextWikiExecutionGrantSecret,
+        now: nowIso(),
+        operation: "audit:complete"
+      });
+      const body = parseJsonObject(await readRawBody(request));
+      const result = parseAuditWikiCompletedOutput(body.result);
+      const receipt = await config.contextWikiAuditCoordinator.complete({
+        request: parseAuditWikiRequest(grant.auditRequest),
+        triggerParentRunId: grant.triggerParentRunId,
+        result
+      });
+      json(response, 200, receipt);
+      return;
+    }
+
+    const auditFailureRoute = /^\/internal\/context\/wiki\/audits\/([^/]+)\/fail$/.exec(url.pathname);
+    if (request.method === "POST" && auditFailureRoute) {
+      if (!config.contextWikiAuditCoordinator || !config.contextWikiExecutionGrantSecret) {
+        throw new Error("Context wiki audits are not configured");
+      }
+      const auditId = decodeURIComponent(auditFailureRoute[1]!);
+      const grant = principal.contextWikiGrant;
+      if (!grant || grant.kind !== "audit" || grant.subjectId !== auditId || !grant.auditRequest) {
+        throw new ApiError(403, "forbidden", "audit failure grant is invalid");
+      }
+      const authorization = firstHeader(request.headers.authorization);
+      verifyContextWikiExecutionGrant(authorization?.startsWith("Bearer ") ? authorization.slice(7) : "", {
+        secret: config.contextWikiExecutionGrantSecret,
+        now: nowIso(),
+        operation: "audit:fail"
+      });
+      const body = parseJsonObject(await readRawBody(request));
+      requireExactFields(body, ["failure"], "audit failure completion");
+      const failure = parseAuditWikiTerminalFailure(body.failure);
+      if (
+        failure.auditId !== auditId ||
+        failure.triggerParentRunId !== grant.triggerParentRunId ||
+        failure.auditInputDigest !== grant.authorityDigest
+      ) {
+        throw new ApiError(403, "forbidden", "audit failure escaped its execution grant");
+      }
+      const receipt = await config.contextWikiAuditCoordinator.fail({
+        request: parseAuditWikiRequest(grant.auditRequest),
+        failure
+      });
+      json(response, 200, { accepted: true, replay: !receipt.created, outcome: receipt.result.outcome });
+      return;
+    }
+
+    const auditFixRoute = /^\/internal\/context\/wiki\/audits\/([^/]+)\/admit-fix$/.exec(url.pathname);
+    if (request.method === "POST" && auditFixRoute) {
+      if (!config.contextWikiAuditCoordinator || !config.contextWikiExecutionGrantSecret) {
+        throw new Error("Context wiki audits are not configured");
+      }
+      const auditId = decodeURIComponent(auditFixRoute[1]!);
+      const grant = principal.contextWikiGrant;
+      if (!grant || grant.kind !== "audit" || grant.subjectId !== auditId || !grant.auditRequest) {
+        throw new ApiError(403, "forbidden", "audit follow-up grant is invalid");
+      }
+      const authorization = firstHeader(request.headers.authorization);
+      verifyContextWikiExecutionGrant(authorization?.startsWith("Bearer ") ? authorization.slice(7) : "", {
+        secret: config.contextWikiExecutionGrantSecret,
+        now: nowIso(),
+        operation: "audit:admit-fix"
+      });
+      const auditRequest = parseAuditWikiRequest(grant.auditRequest);
+      const body = parseJsonObject(await readRawBody(request));
+      requireExactFields(body, ["operationId"], "audit follow-up admission");
+      if (requiredString(body.operationId, "operationId") !== `wiki-audit:${auditRequest.auditInputDigest}:admit-fix`) {
+        throw new ApiError(409, "operation_replay_conflict", "audit follow-up operation identity changed");
+      }
+      const admission = contextWikiAuditFixAdmission(auditRequest);
+      const decision = await config.contextWikiAuditCoordinator.admitFix({
+        request: auditRequest,
+        now: grant.issuedAt,
+        ...(admission ? { admission } : {})
+      });
+      json(response, 200, decision);
+      return;
     }
 
     if (request.method === "POST" && url.pathname === "/internal/context/access/sync") {
@@ -906,46 +1848,40 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             requireIssuedTokenScope(principal, "context:query");
             const repository = requiredRepositoryName(input.repository, "repository");
             await requireRepositoryAccess(principal, repository);
-            return resultAfterCredentialRevalidation(request, principal, () =>
-              catalogCall(() =>
-                deterministicContextSearch({
-                  ...catalogAccess(principal, repository),
-                  query: input.query,
-                  ...(input.ref ? { ref: input.ref } : {}),
-                  ...(input.releaseId ? { releaseId: input.releaseId } : {}),
-                  ...(input.limit ? { limit: input.limit } : {})
-                })
-              )
-            );
+            return resultAfterCredentialRevalidation(request, principal, async () => {
+              const resolved = await resolveWikiCatalogSelection(principal, repository, input.selector, input.locale);
+              return withWikiSearchEnvelope(
+                await catalogCall(() =>
+                  deterministicContextSearch({
+                    ...resolved.access,
+                    query: input.query,
+                    ...(input.limit ? { limit: input.limit } : {})
+                  })
+                ),
+                resolved
+              );
+            });
           },
           list: async (input) => {
             requireIssuedTokenScope(principal, "context:read");
             const repository = requiredRepositoryName(input.repository, "repository");
             await requireRepositoryAccess(principal, repository);
-            return resultAfterCredentialRevalidation(request, principal, () =>
-              catalogCall(() =>
-                contextCatalog.listContext({
-                  ...catalogAccess(principal, repository),
-                  ...(input.ref ? { ref: input.ref } : {}),
-                  ...(input.releaseId ? { releaseId: input.releaseId } : {})
-                })
-              )
-            );
+            return resultAfterCredentialRevalidation(request, principal, async () => {
+              const resolved = await resolveWikiCatalogSelection(principal, repository, input.selector, input.locale);
+              return withWikiRelease(await catalogCall(() => contextCatalog.listContext(resolved.access)), resolved);
+            });
           },
           read: async (input) => {
             requireIssuedTokenScope(principal, "context:read");
             const repository = requiredRepositoryName(input.repository, "repository");
             await requireRepositoryAccess(principal, repository);
-            return resultAfterCredentialRevalidation(request, principal, () =>
-              catalogCall(() =>
-                contextCatalog.readContext({
-                  ...catalogAccess(principal, repository),
-                  document: input.document,
-                  ...(input.ref ? { ref: input.ref } : {}),
-                  ...(input.releaseId ? { releaseId: input.releaseId } : {})
-                })
-              )
-            );
+            return resultAfterCredentialRevalidation(request, principal, async () => {
+              const resolved = await resolveWikiCatalogSelection(principal, repository, input.selector, input.locale);
+              return withWikiRelease(
+                await catalogCall(() => contextCatalog.readContext({ ...resolved.access, document: input.document })),
+                resolved
+              );
+            });
           },
           diff: async (input) => {
             requireIssuedTokenScope(principal, "context:read");
@@ -960,6 +1896,43 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 })
               )
             );
+          },
+          ask: async (input) => {
+            requireIssuedTokenScope(principal, "context:query");
+            const repository = requiredRepositoryName(input.repository, "repository");
+            await requireRepositoryAccess(principal, repository);
+            return resultAfterCredentialRevalidation(request, principal, async () => {
+              const resolved = await resolveWikiCatalogSelection(principal, repository, input.selector, input.locale);
+              const searched = await catalogCall(() =>
+                deterministicContextSearch({
+                  ...resolved.access,
+                  query: input.question,
+                  limit: input.maxEvidenceItems ?? 8
+                })
+              );
+              const evidence = searched.results
+                .flatMap((item) => item.excerpts)
+                .filter(Boolean)
+                .slice(0, input.maxEvidenceItems ?? 8);
+              return {
+                release: resolved.release ? { id: resolved.release.releaseId, ...resolved.release } : searched.release,
+                answer:
+                  evidence.length > 0
+                    ? evidence.map((excerpt, index) => `${index + 1}. ${excerpt}`).join("\n\n")
+                    : "No grounded wiki evidence matched the question in this release.",
+                citations: [
+                  ...new Map(
+                    searched.results
+                      .flatMap((item) => item.citations)
+                      .map((citation) => [citation.citationId ?? JSON.stringify(citation.anchor), citation] as const)
+                  ).values()
+                ],
+                conflicts: [],
+                coverage: { matchedDocuments: searched.results.length, evidenceItems: evidence.length },
+                usage: { inputTokens: 0, outputTokens: 0, costMicros: 0 },
+                audit: resolved.audit
+              };
+            });
           }
         },
         body
@@ -1138,6 +2111,179 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (config.sharedIdentityResolver && !githubInstallationId) throw notFound("repository context not found");
       const buildRepository = identity?.repository ?? repository;
       const buildRef = optionalString(body.ref) ?? identity?.defaultBranch ?? "main";
+      if (
+        contextWikiOrchestrator(contextWikiRouting, {
+          tenantId: principal.tenantId,
+          repository: buildRepository
+        }) === "trigger"
+      ) {
+        const requestedGenerationReason = optionalString(body.generationReason);
+        if (
+          requestedGenerationReason &&
+          requestedGenerationReason !== "manual_refresh" &&
+          requestedGenerationReason !== "translation"
+        ) {
+          throw invalidRequest("generationReason must be manual_refresh or translation");
+        }
+        const locale = canonicalWikiLocale(
+          optionalString(body.locale),
+          process.env.JINA_WIKI_DEFAULT_LOCALE?.trim() ?? "en"
+        );
+        const sourceReleaseId =
+          requestedGenerationReason === "translation"
+            ? requiredString(body.sourceReleaseId, "sourceReleaseId")
+            : undefined;
+        const sourceLocale =
+          requestedGenerationReason === "translation"
+            ? canonicalWikiLocale(requiredString(body.sourceLocale, "sourceLocale"), "en")
+            : undefined;
+        const translationSource = sourceReleaseId
+          ? await config.contextWikiReleaseQueryStore?.findPublishedWikiRelease({
+              tenantId: principal.tenantId,
+              repository: buildRepository,
+              releaseId: sourceReleaseId
+            })
+          : undefined;
+        if (
+          requestedGenerationReason === "translation" &&
+          (!translationSource || translationSource.locale !== sourceLocale || translationSource.locale === locale)
+        ) {
+          throw invalidRequest("translation source release/locale is invalid or matches the target locale");
+        }
+        const requestedScopeKind = translationSource?.scopeKind ?? optionalString(body.scopeKind) ?? "branch";
+        if (
+          requestedScopeKind !== "branch" &&
+          requestedScopeKind !== "pull_request" &&
+          requestedScopeKind !== "commit"
+        ) {
+          throw invalidRequest("scopeKind must be branch, pull_request, or commit");
+        }
+        if (translationSource && body.scopeKind !== undefined && body.scopeKind !== requestedScopeKind) {
+          throw invalidRequest("translation scopeKind must match the source release");
+        }
+        const resolvedCommitSha = translationSource?.commitSha ?? requiredGitSha(commitSha, "commitSha");
+        if (translationSource && commitSha && requiredGitSha(commitSha, "commitSha") !== resolvedCommitSha) {
+          throw invalidRequest("translation commitSha must match the source release");
+        }
+        const pullRequestNumber =
+          requestedScopeKind === "pull_request"
+            ? translationSource
+              ? requiredPositiveInteger(Number(translationSource.scopeKey), "source pullRequest")
+              : requiredPositiveInteger(body.pullRequest, "pullRequest")
+            : undefined;
+        const baseCommitSha =
+          requestedScopeKind === "pull_request" ? requiredGitSha(body.baseCommitSha, "baseCommitSha") : undefined;
+        const requestKey = optionalString(body.requestKey) ?? randomUUID();
+        const canonicalRef =
+          requestedScopeKind === "commit"
+            ? `refs/commits/${resolvedCommitSha}`
+            : requestedScopeKind === "pull_request"
+              ? `refs/pull/${pullRequestNumber}/head`
+              : (translationSource?.ref ?? `refs/heads/${buildRef.replace(/^refs\/heads\//, "")}`);
+        let newlyReservedWikiBuildId: string | undefined;
+        let settledActivatedBuildIds: readonly string[] = [];
+        const performAdmission = (current: WikiReleaseIdentity | undefined) =>
+          mutate(async () => {
+            const reconciled = await reconcileActivatedWikiBeforeAdmission(intakeState.board, {
+              tenantId: principal.tenantId,
+              repository: buildRepository,
+              ref: canonicalRef,
+              locale,
+              current
+            });
+            intakeState = { ...intakeState, board: reconciled.state };
+            settledActivatedBuildIds = reconciled.settledBuildIds;
+            await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, principal.tenantId);
+            const legacyPriorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
+              tenantId: principal.tenantId,
+              repository: buildRepository,
+              ref: canonicalRef,
+              locale
+            });
+            const priorRelease = current ?? legacyPriorRelease;
+            const admission = admitContextWikiBuild(intakeState.board, {
+              tenantId: principal.tenantId,
+              repository: buildRepository,
+              scopeKind: requestedScopeKind,
+              scopeKey:
+                requestedScopeKind === "commit"
+                  ? resolvedCommitSha
+                  : requestedScopeKind === "pull_request"
+                    ? String(pullRequestNumber)
+                    : (translationSource?.scopeKey ?? buildRef.replace(/^refs\/heads\//, "")),
+              commitSha: resolvedCommitSha,
+              ...(baseCommitSha ? { baseCommitSha } : {}),
+              ...(githubInstallationId ? { githubInstallationId } : {}),
+              requestKey,
+              generationReason:
+                requestedGenerationReason === "translation"
+                  ? "translation"
+                  : priorRelease
+                    ? "manual_refresh"
+                    : "initial",
+              ...(priorRelease && requestedGenerationReason !== "translation"
+                ? { parentReleaseId: priorRelease.releaseId }
+                : {}),
+              ...(translationSource
+                ? {
+                    sourceReleaseId: translationSource.releaseId,
+                    sourceLocale: translationSource.locale,
+                    releaseFamilyId: translationSource.releaseFamilyId
+                  }
+                : {}),
+              locale,
+              ...(priorRelease?.refSequence ? { priorRefSequence: priorRelease.refSequence } : {}),
+              generatorPolicyVersion: process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || "wiki-generator-v1",
+              now: nowIso()
+            });
+            if (admission.outcome === "created" && config.contextQuotaService) {
+              await config.contextQuotaService.admitBuild({
+                tenantId: principal.tenantId,
+                buildId: admission.build.buildTaskId,
+                replacesBuildIds: admission.supersededBuildTaskIds
+              });
+              newlyReservedWikiBuildId = admission.build.buildTaskId;
+            }
+            intakeState = { ...intakeState, board: admission.state };
+            return admission;
+          });
+        const admittedWiki =
+          requestedScopeKind === "commit"
+            ? await performAdmission(undefined)
+            : await withWikiMutableRefAdmissionLock(
+                { tenantId: principal.tenantId, repository: buildRepository, ref: canonicalRef, locale },
+                performAdmission
+              );
+        if (!admittedWiki) {
+          if (newlyReservedWikiBuildId && config.contextQuotaService) {
+            await config.contextQuotaService
+              .completeBuild({ tenantId: principal.tenantId, buildId: newlyReservedWikiBuildId })
+              .catch(() => undefined);
+          }
+          throw new ApiError(409, "conflict", "wiki build admission raced another update");
+        }
+        if (config.contextQuotaService) {
+          await Promise.all(
+            settledActivatedBuildIds.map((buildId) =>
+              config
+                .contextQuotaService!.completeBuild({ tenantId: principal.tenantId, buildId })
+                .catch(() => undefined)
+            )
+          );
+        }
+        await settleSupersededContextBuildQuotas(
+          config.contextQuotaService,
+          intakeState.board,
+          principal.tenantId,
+          admittedWiki.supersededBuildTaskIds
+        );
+        json(response, admittedWiki.outcome === "created" ? 202 : 200, {
+          build: publicContextBoardBuild(admittedWiki.state, admittedWiki.build.buildTaskId),
+          duplicate: admittedWiki.outcome === "duplicate",
+          deferred: false
+        });
+        return;
+      }
       let newlyReservedBuildId: string | undefined;
       const admitted = await mutate(async () => {
         await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, principal.tenantId);
@@ -1522,17 +2668,66 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (query.length > 4_000) throw invalidRequest("query must be at most 4000 characters");
       const limit = body.limit === undefined ? undefined : requiredPositiveInteger(body.limit, "limit");
       if (limit !== undefined && limit > 25) throw invalidRequest("limit must be at most 25");
-      const result = await resultAfterCredentialRevalidation(request, principal, () =>
-        catalogCall(() =>
+      const selector = wikiSelectorFromBody(body);
+      const locale = optionalString(body.locale);
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const resolved = await resolveWikiCatalogSelection(principal, repository, selector, locale);
+        return withWikiSearchEnvelope(
+          await catalogCall(() =>
+            deterministicContextSearch({
+              ...resolved.access,
+              query,
+              ...(limit ? { limit } : {})
+            })
+          ),
+          resolved
+        );
+      });
+      json(response, 200, result);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/wiki/ask") {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      const body = parseJsonObject(await readRawBody(request, MAX_CONTEXT_QUERY_REQUEST_BYTES));
+      const repository = requiredRepositoryName(body.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      const question = requiredString(body.question, "question");
+      if (question.length > 4_000) throw invalidRequest("question must be at most 4000 characters");
+      const maxEvidenceItems =
+        body.maxEvidenceItems === undefined ? 8 : requiredPositiveInteger(body.maxEvidenceItems, "maxEvidenceItems");
+      if (maxEvidenceItems > 25) throw invalidRequest("maxEvidenceItems must be at most 25");
+      const selector = wikiSelectorFromBody(body);
+      const locale = optionalString(body.locale);
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const resolved = await resolveWikiCatalogSelection(principal, repository, selector, locale);
+        const searched = await catalogCall(() =>
           deterministicContextSearch({
-            ...catalogAccess(principal, repository),
-            query,
-            ...(optionalString(body.ref) ? { ref: optionalString(body.ref)! } : {}),
-            ...(optionalString(body.releaseId) ? { releaseId: optionalString(body.releaseId)! } : {}),
-            ...(limit ? { limit } : {})
+            ...resolved.access,
+            query: question,
+            limit: maxEvidenceItems
           })
-        )
-      );
+        );
+        const synthesis = synthesizeWikiAnswer(question, searched, maxEvidenceItems);
+        return {
+          release: resolved.release ? { id: resolved.release.releaseId, ...resolved.release } : searched.release,
+          answer: synthesis.answer,
+          citations: synthesis.citations,
+          conflicts: synthesis.conflicts,
+          coverage: {
+            retrievalMethod: searched.retrieval.method,
+            matchedDocuments: searched.results.length,
+            evidenceItems: synthesis.evidenceItems,
+            citedEvidenceItems: synthesis.citedEvidenceItems,
+            uncitedEvidenceItems: synthesis.uncitedEvidenceItems,
+            answerMode: "deterministic-cited-synthesis-v1"
+          },
+          usage: { inputTokens: 0, outputTokens: 0, costMicros: 0 },
+          audit: resolved.audit
+        };
+      });
       json(response, 200, result);
       return;
     }
@@ -1621,16 +2816,47 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ? [requiredRepositoryName(requestedRepository, "repository")]
         : await permittedRepositories(principal);
       if (requestedRepository) await requireRepositoryAccess(principal, repositories[0]!);
-      const releases = await resultAfterCredentialRevalidation(request, principal, async () => ({
-        // Each catalog places the highest sequence for a ref before its
-        // history. A global timestamp sort could make an older release appear
-        // current.
-        releases: (
+      const selector = wikiSelectorFromUrl(url);
+      const locale = optionalQuery(url, "locale");
+      const limit = optionalBoundedQueryInteger(url, "limit", 100, 200);
+      const releases = await resultAfterCredentialRevalidation(request, principal, async () => {
+        if (contextWikiQuery) {
+          const listed = (
+            await Promise.all(
+              repositories.map((repository) =>
+                contextWikiQuery.list({
+                  tenantId: principal.tenantId,
+                  repository,
+                  ...(selector ? { selector } : {}),
+                  ...(locale ? { locale } : {}),
+                  limit
+                })
+              )
+            )
+          ).flat();
+          return { releases: listed.map(({ release, audit }) => ({ id: release.releaseId, ...release, audit })) };
+        }
+        // Each legacy catalog preserves its authoritative current pointer
+        // before historical releases. A global timestamp sort would undo that
+        // after an intentional rollback to an older certified release.
+        const legacy = (
           await Promise.all(
             repositories.map((repository) => contextCatalog.listReleases(catalogAccess(principal, repository)))
           )
-        ).flat()
-      }));
+        ).flat();
+        const filtered = selector
+          ? legacy.filter((release) =>
+              "releaseId" in selector
+                ? release.id === selector.releaseId
+                : "commitSha" in selector
+                  ? release.commitSha === selector.commitSha
+                  : "pullRequest" in selector
+                    ? release.ref === `refs/pull/${selector.pullRequest}/head`
+                    : release.ref === selector.branch || release.ref === `refs/heads/${selector.branch}`
+            )
+          : legacy;
+        return { releases: filtered.slice(0, limit) };
+      });
       json(response, 200, releases);
       return;
     }
@@ -1641,15 +2867,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
       await requireRepositoryAccess(principal, repository);
-      const result = await resultAfterCredentialRevalidation(request, principal, () =>
-        catalogCall(() =>
-          contextCatalog.listContext({
-            ...catalogAccess(principal, repository),
-            ...(optionalQuery(url, "ref") ? { ref: optionalQuery(url, "ref")! } : {}),
-            ...(optionalQuery(url, "releaseId") ? { releaseId: optionalQuery(url, "releaseId")! } : {})
-          })
-        )
-      );
+      const selector = wikiSelectorFromUrl(url);
+      const locale = optionalQuery(url, "locale");
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const resolved = await resolveWikiCatalogSelection(principal, repository, selector, locale);
+        return withWikiRelease(await catalogCall(() => contextCatalog.listContext(resolved.access)), resolved);
+      });
       json(response, 200, result);
       return;
     }
@@ -1661,16 +2884,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
       await requireRepositoryAccess(principal, repository);
       const document = requiredString(url.searchParams.get("document"), "document");
-      const result = await resultAfterCredentialRevalidation(request, principal, () =>
-        catalogCall(() =>
-          contextCatalog.readContext({
-            ...catalogAccess(principal, repository),
-            document,
-            ...(optionalQuery(url, "ref") ? { ref: optionalQuery(url, "ref")! } : {}),
-            ...(optionalQuery(url, "releaseId") ? { releaseId: optionalQuery(url, "releaseId")! } : {})
-          })
-        )
-      );
+      const selector = wikiSelectorFromUrl(url);
+      const locale = optionalQuery(url, "locale");
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const resolved = await resolveWikiCatalogSelection(principal, repository, selector, locale);
+        return withWikiRelease(
+          await catalogCall(() => contextCatalog.readContext({ ...resolved.access, document })),
+          resolved
+        );
+      });
       json(response, 200, result);
       return;
     }
@@ -1683,14 +2905,55 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await requireRepositoryAccess(principal, repository);
       const fromReleaseId = requiredString(url.searchParams.get("fromReleaseId"), "fromReleaseId");
       const toReleaseId = requiredString(url.searchParams.get("toReleaseId"), "toReleaseId");
-      const result = await resultAfterCredentialRevalidation(request, principal, () =>
-        catalogCall(() =>
+      const fromLocale = optionalQuery(url, "fromLocale");
+      const toLocale = optionalQuery(url, "toLocale");
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const [fromResolved, toResolved] = await Promise.all([
+          resolveWikiCatalogSelection(principal, repository, { releaseId: fromReleaseId }, fromLocale),
+          resolveWikiCatalogSelection(principal, repository, { releaseId: toReleaseId }, toLocale)
+        ]);
+        const diff = await catalogCall(() =>
           contextCatalog.diffContext({
             ...catalogAccess(principal, repository),
-            fromReleaseId,
-            toReleaseId
+            fromReleaseId: fromResolved.release?.generationId ?? fromReleaseId,
+            toReleaseId: toResolved.release?.generationId ?? toReleaseId
           })
-        )
+        );
+        return {
+          ...diff,
+          from: fromResolved.release
+            ? { ...diff.from, id: fromResolved.release.releaseId, ...fromResolved.release }
+            : diff.from,
+          to: toResolved.release ? { ...diff.to, id: toResolved.release.releaseId, ...toResolved.release } : diff.to,
+          audit: { from: fromResolved.audit, to: toResolved.audit }
+        };
+      });
+      json(response, 200, result);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/wiki/export") {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      if (!contextWikiQuery || !config.contextWikiContentBundleReader) {
+        throw new ApiError(503, "context_export_unavailable", "wiki export storage is not configured");
+      }
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      await requireRepositoryAccess(principal, repository);
+      const selector = wikiSelectorFromUrl(url);
+      const locale = optionalQuery(url, "locale");
+      const result = await resultAfterCredentialRevalidation(request, principal, () =>
+        contextWikiQuery.export({
+          tenantId: principal.tenantId,
+          repository,
+          ...(selector ? { selector } : {}),
+          ...(locale ? { locale } : {})
+        })
+      );
+      response.setHeader(
+        "content-disposition",
+        `attachment; filename="${result.release.releaseId}-${result.release.locale}.wiki.json"`
       );
       json(response, 200, result);
       return;
@@ -2305,6 +3568,490 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 404, { error: "not found" });
   }
 
+  async function assertActivatedWikiResult(
+    task: BoardTask,
+    completed: ReturnType<typeof parseContextWikiBoardTaskResult>
+  ): Promise<void> {
+    const store = config.contextWikiReleaseQueryStore;
+    if (!store?.findActivatedWikiBuildReceipt) {
+      throw new Error("activated wiki completion verification is not configured");
+    }
+    const receipt = await store.findActivatedWikiBuildReceipt({
+      tenantId: requiredString(task.metadata.tenantId, "tenantId"),
+      repository: requiredRepositoryName(task.metadata.repository, "repository"),
+      boardBuildId: task.id,
+      requestDigest: completed.requestDigest
+    });
+    if (
+      !receipt ||
+      receipt.boardBuildId !== completed.boardBuildId ||
+      receipt.triggerParentRunId !== completed.triggerParentRunId ||
+      receipt.requestDigest !== completed.requestDigest ||
+      receipt.releaseId !== completed.releaseId ||
+      receipt.releaseFamilyId !== completed.releaseFamilyId ||
+      receipt.commitSha !== completed.commitSha ||
+      receipt.locale !== completed.locale ||
+      receipt.publicSnapshotDigest !== completed.publicSnapshotDigest ||
+      receipt.releaseArtifactSha256 !== completed.releaseArtifactSha256 ||
+      receipt.contentBundleArtifactSha256 !== completed.contentBundleArtifactSha256 ||
+      receipt.pageindexAttachmentId !== completed.pageindexAttachmentId ||
+      receipt.activationOperationDigest !== completed.activationOperationDigest ||
+      fingerprint(receipt.usage) !== fingerprint(completed.usage) ||
+      receipt.completedAt !== completed.completedAt
+    ) {
+      throw new ApiError(409, "wiki_activation_mismatch", "wiki completion does not match the activated release");
+    }
+  }
+
+  async function withWikiMutableRefAdmissionLock<T>(
+    input: { readonly tenantId: string; readonly repository: string; readonly ref: string; readonly locale: string },
+    operation: (current: WikiReleaseIdentity | undefined) => Promise<T>
+  ): Promise<T> {
+    const store = config.contextWikiReleaseQueryStore;
+    return store?.withCurrentPublishedWikiReleaseLock
+      ? store.withCurrentPublishedWikiReleaseLock(input, operation)
+      : operation(undefined);
+  }
+
+  async function reconcileActivatedWikiBeforeAdmission(
+    state: BoardState,
+    input: {
+      readonly tenantId: string;
+      readonly repository: string;
+      readonly ref: string;
+      readonly locale: string;
+      readonly current: WikiReleaseIdentity | undefined;
+    }
+  ): Promise<{ readonly state: BoardState; readonly settledBuildIds: readonly string[] }> {
+    if (!input.current) return { state, settledBuildIds: [] };
+    const candidates = state.tasks.filter(
+      (task) =>
+        task.type === contextWikiBoardTaskType &&
+        task.status === "in_progress" &&
+        task.metadata.tenantId === input.tenantId &&
+        task.metadata.repository === input.repository &&
+        task.metadata.ref === input.ref &&
+        task.metadata.locale === input.locale &&
+        task.metadata.refSequence === input.current!.refSequence &&
+        task.metadata.commitSha === input.current!.commitSha
+    );
+    if (candidates.length === 0) return { state, settledBuildIds: [] };
+    if (candidates.length !== 1) throw new Error("activated wiki release resolves to multiple active Board tasks");
+    const task = candidates[0]!;
+    const requestDigest = requiredString(task.metadata.requestDigest, "requestDigest");
+    const receipt = await config.contextWikiReleaseQueryStore?.findActivatedWikiBuildReceipt?.({
+      tenantId: requiredString(task.metadata.tenantId, "tenantId"),
+      repository: requiredRepositoryName(task.metadata.repository, "repository"),
+      boardBuildId: task.id,
+      requestDigest
+    });
+    if (!receipt || receipt.releaseId !== input.current.releaseId) {
+      throw new Error("current wiki release has no exact activated Board receipt");
+    }
+    const completed = activatedWikiBoardResult(state, task, receipt);
+    const applied = applyActivatedWikiCompletion(state, completed, nowIso(), "newer_admission");
+    return { state: applied.state, settledBuildIds: applied.replay ? [] : [task.id] };
+  }
+
+  function activatedWikiBoardResult(
+    state: BoardState,
+    task: BoardTask,
+    receipt: ActivatedWikiBuildReceipt
+  ): ReturnType<typeof parseContextWikiBoardTaskResult> {
+    return parseContextWikiBoardTaskResult(state, task.id, {
+      schemaVersion: 1,
+      status: "completed",
+      boardBuildId: receipt.boardBuildId,
+      triggerParentRunId: receipt.triggerParentRunId,
+      requestDigest: receipt.requestDigest,
+      tenantId: requiredString(task.metadata.tenantId, "tenantId"),
+      repository: requiredRepositoryName(task.metadata.repository, "repository"),
+      commitSha: receipt.commitSha,
+      locale: receipt.locale,
+      releaseFamilyId: receipt.releaseFamilyId,
+      releaseId: receipt.releaseId,
+      generationId: receipt.releaseId,
+      releaseArtifactSha256: receipt.releaseArtifactSha256,
+      contentBundleArtifactSha256: receipt.contentBundleArtifactSha256,
+      publicSnapshotDigest: receipt.publicSnapshotDigest,
+      pageindexAttachmentId: receipt.pageindexAttachmentId,
+      activationOperationDigest: receipt.activationOperationDigest,
+      usage: receipt.usage,
+      completedAt: receipt.completedAt
+    });
+  }
+
+  async function runDurableWikiStageOperation(input: {
+    readonly grant: ContextWikiExecutionGrant;
+    readonly stage: ContextWikiStageName;
+    readonly operationId: string;
+    readonly input: Record<string, unknown>;
+    readonly authorizeMiss?: () => Promise<void>;
+    readonly recover?: () => Promise<unknown>;
+    readonly execute: () => Promise<unknown>;
+  }): Promise<unknown> {
+    if (!config.contextArtifactStore) {
+      throw new Error("durable Context wiki stage operation receipts are not configured");
+    }
+    const phase = "wiki-trigger-operation";
+    const operationDigest = fingerprintBytes(
+      Buffer.from(
+        `${input.grant.authorityDigest}\0${input.grant.triggerParentRunId}\0${input.stage}\0${input.operationId}`,
+        "utf8"
+      )
+    );
+    const checkpointKey = `${operationDigest}:completed`;
+    const inputDigest = fingerprint(input.input);
+    const ownerToken = randomUUID();
+    const waitDeadline = Date.now() + WIKI_STAGE_OPERATION_MAX_WAIT_MS;
+    while (true) {
+      const cached = await contextPhaseCheckpointStore.read({
+        tenantId: input.grant.tenantId,
+        taskId: input.grant.subjectId,
+        phase,
+        checkpointKey
+      });
+      if (cached) return readWikiStageOperationReceipt(cached.artifact, input, inputDigest);
+
+      const claimedAt = nowIso();
+      const claim = await contextPhaseCheckpointStore.claimOperation({
+        tenantId: input.grant.tenantId,
+        repository: input.grant.repository,
+        buildId: input.grant.subjectId,
+        taskId: input.grant.subjectId,
+        phase,
+        operationKey: operationDigest,
+        inputDigest,
+        ownerToken,
+        now: claimedAt,
+        leaseDurationMs: WIKI_STAGE_OPERATION_LEASE_MS
+      });
+      if (claim.outcome === "conflict") {
+        throw new ApiError(409, "operation_replay_conflict", "wiki stage operation replay changed its input");
+      }
+      if (claim.outcome === "held") {
+        if (Date.now() >= waitDeadline) {
+          throw new ApiError(409, "operation_in_progress", "wiki stage operation is still in progress");
+        }
+        await waitForWikiStageOperation();
+        continue;
+      }
+
+      let stopped = false;
+      let leaseLost = false;
+      let renewalTimer: NodeJS.Timeout | undefined;
+      const scheduleRenewal = () => {
+        renewalTimer = setTimeout(() => {
+          void (async () => {
+            try {
+              const renewed = await contextPhaseCheckpointStore.renewOperation({
+                tenantId: input.grant.tenantId,
+                taskId: input.grant.subjectId,
+                phase,
+                operationKey: operationDigest,
+                ownerToken,
+                now: nowIso(),
+                leaseDurationMs: WIKI_STAGE_OPERATION_LEASE_MS
+              });
+              if (!renewed) leaseLost = true;
+            } catch {
+              // A transient store outage leaves the existing five-minute lease
+              // intact. Retry renewal while this process still owns execution.
+            }
+            if (!stopped && !leaseLost) scheduleRenewal();
+          })();
+        }, WIKI_STAGE_OPERATION_RENEW_MS);
+        renewalTimer.unref();
+      };
+      scheduleRenewal();
+      try {
+        // The preceding cache read and lease claim are separate short
+        // transactions. Recheck after winning to close a completion/release
+        // interleaving without holding a database connection during execution.
+        const raced = await contextPhaseCheckpointStore.read({
+          tenantId: input.grant.tenantId,
+          taskId: input.grant.subjectId,
+          phase,
+          checkpointKey
+        });
+        if (raced) return readWikiStageOperationReceipt(raced.artifact, input, inputDigest);
+
+        // Only a previously attested, no-side-effect receipt may replay after
+        // terminal Board reconciliation. Any recovery materialization or first
+        // execution must still own live authority.
+        await input.authorizeMiss?.();
+        const recovered = await input.recover?.();
+        const output = recovered === undefined ? await input.execute() : recovered;
+        if (leaseLost) {
+          throw new ApiError(409, "operation_lease_lost", "wiki stage operation lease was lost");
+        }
+        const envelope = {
+          version: 1,
+          authorityId: input.grant.subjectId,
+          requestDigest: input.grant.authorityDigest,
+          triggerParentRunId: input.grant.triggerParentRunId,
+          stage: input.stage,
+          operationId: input.operationId,
+          inputDigest,
+          output
+        };
+        const content = `${JSON.stringify(envelope)}\n`;
+        if (Buffer.byteLength(content, "utf8") > 512 * 1024) {
+          throw new Error("Context wiki stage operation receipt exceeds 524288 bytes");
+        }
+        const artifact = await config.contextArtifactStore.put({
+          tenantId: input.grant.tenantId,
+          repository: input.grant.repository,
+          buildId: input.grant.subjectId,
+          kind: "context-draft",
+          name: `wiki-operation-${operationDigest}-completed.json`,
+          contentType: "application/json",
+          content
+        });
+        const recorded = await contextPhaseCheckpointStore.record({
+          tenantId: input.grant.tenantId,
+          repository: input.grant.repository,
+          buildId: input.grant.subjectId,
+          taskId: input.grant.subjectId,
+          phase,
+          checkpointKey,
+          attempt: 1,
+          artifact,
+          recordedAt: nowIso()
+        });
+        return readWikiStageOperationReceipt(recorded.checkpoint.artifact, input, inputDigest);
+      } finally {
+        stopped = true;
+        if (renewalTimer) clearTimeout(renewalTimer);
+        await contextPhaseCheckpointStore
+          .releaseOperation({
+            tenantId: input.grant.tenantId,
+            taskId: input.grant.subjectId,
+            phase,
+            operationKey: operationDigest,
+            ownerToken
+          })
+          .catch(() => undefined);
+      }
+    }
+  }
+
+  function waitForWikiStageOperation(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, WIKI_STAGE_OPERATION_WAIT_MS));
+  }
+
+  async function readWikiStageOperationReceipt(
+    artifact: ContextArtifactRef,
+    expected: {
+      readonly grant: ContextWikiExecutionGrant;
+      readonly stage: ContextWikiStageName;
+      readonly operationId: string;
+    },
+    inputDigest: string
+  ): Promise<unknown> {
+    if (!config.contextArtifactStore) throw new Error("Context wiki stage operation receipt store is unavailable");
+    let value: unknown;
+    try {
+      value = JSON.parse(Buffer.from(await config.contextArtifactStore.get(artifact)).toString("utf8"));
+    } catch {
+      throw new Error("Context wiki stage operation receipt is unreadable");
+    }
+    const receipt = requiredRecord(value, "wiki stage operation receipt");
+    const keys = [
+      "version",
+      "authorityId",
+      "requestDigest",
+      "triggerParentRunId",
+      "stage",
+      "operationId",
+      "inputDigest",
+      "output"
+    ];
+    if (Object.keys(receipt).length !== keys.length || Object.keys(receipt).some((key) => !keys.includes(key))) {
+      throw new Error("Context wiki stage operation receipt schema is invalid");
+    }
+    if (
+      receipt.version !== 1 ||
+      receipt.authorityId !== expected.grant.subjectId ||
+      receipt.requestDigest !== expected.grant.authorityDigest ||
+      receipt.triggerParentRunId !== expected.grant.triggerParentRunId ||
+      receipt.stage !== expected.stage ||
+      receipt.operationId !== expected.operationId
+    ) {
+      throw new Error("Context wiki stage operation receipt escaped its execution authority");
+    }
+    if (receipt.inputDigest !== inputDigest) {
+      throw new ApiError(409, "operation_replay_conflict", "wiki stage operation replay changed its input");
+    }
+    return receipt.output;
+  }
+
+  function contextWikiAuditFixAdmission(
+    auditedRequest: ReturnType<typeof parseAuditWikiRequest>
+  ): ContextWikiAuditAdmission | undefined {
+    const releaseStore = config.contextWikiReleaseQueryStore;
+    if (!config.contextWikiAuditFixEnabled || !releaseStore?.withCurrentPublishedWikiReleaseLock) return undefined;
+    return {
+      admit: async ({ request, reportArtifact, findingsDigest }) => {
+        const audited = await releaseStore.findPublishedWikiRelease({
+          tenantId: request.tenantId,
+          repository: request.repository,
+          releaseId: request.releaseId
+        });
+        if (
+          !audited ||
+          audited.scopeKind === "commit" ||
+          audited.locale !== request.locale ||
+          audited.publicSnapshotDigest !== request.publicSnapshotDigest
+        ) {
+          return { admissionOutcome: "policy_denied" };
+        }
+        return releaseStore.withCurrentPublishedWikiReleaseLock!(
+          {
+            tenantId: auditedRequest.tenantId,
+            repository: auditedRequest.repository,
+            ref: audited.ref,
+            locale: audited.locale
+          },
+          async (current) => {
+            if (
+              !current ||
+              current.releaseId !== audited.releaseId ||
+              current.commitSha !== audited.commitSha ||
+              current.publicSnapshotDigest !== audited.publicSnapshotDigest ||
+              current.locale !== audited.locale ||
+              current.refSequence === undefined
+            ) {
+              return { admissionOutcome: "superseded" as const };
+            }
+            const currentRefSequence = current.refSequence;
+            let settledActivatedBuildIds: readonly string[] = [];
+            const admitted = await mutate(async () => {
+              const reconciled = await reconcileActivatedWikiBeforeAdmission(intakeState.board, {
+                tenantId: request.tenantId,
+                repository: request.repository,
+                ref: current.ref,
+                locale: current.locale,
+                current
+              });
+              intakeState = { ...intakeState, board: reconciled.state };
+              settledActivatedBuildIds = reconciled.settledBuildIds;
+              const newerBoardBuildExists = intakeState.board.tasks.some(
+                (task) =>
+                  task.type === contextWikiBoardTaskType &&
+                  task.metadata.tenantId === request.tenantId &&
+                  task.metadata.repository === request.repository &&
+                  task.metadata.ref === current.ref &&
+                  task.metadata.locale === current.locale &&
+                  typeof task.metadata.refSequence === "number" &&
+                  task.metadata.refSequence > currentRefSequence &&
+                  task.status !== "failed" &&
+                  task.status !== "canceled"
+              );
+              if (newerBoardBuildExists) return { admissionOutcome: "superseded" as const };
+              await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, request.tenantId);
+              const sourceTask = [...intakeState.board.tasks]
+                .filter(
+                  (task) =>
+                    task.type === contextWikiBoardTaskType &&
+                    task.metadata.tenantId === request.tenantId &&
+                    task.metadata.repository === request.repository &&
+                    task.metadata.ref === current.ref &&
+                    task.metadata.locale === current.locale &&
+                    task.metadata.commitSha === current.commitSha
+                )
+                .sort(
+                  (left, right) => Number(right.metadata.refSequence ?? 0) - Number(left.metadata.refSequence ?? 0)
+                )[0];
+              const sourceTriggerRequest = sourceTask
+                ? parseWikiTriggerRequest(sourceTask.metadata.triggerRequest)
+                : undefined;
+              const resolvedIdentity = sourceTriggerRequest?.source.githubInstallationId
+                ? undefined
+                : await config.sharedIdentityResolver?.resolveRepository({
+                    tenantId: request.tenantId,
+                    repository: request.repository
+                  });
+              const githubInstallationId = sourceTriggerRequest?.source.githubInstallationId
+                ? sourceTriggerRequest.source.githubInstallationId
+                : resolvedIdentity?.githubInstallationId
+                  ? requiredPositiveInteger(
+                      Number(resolvedIdentity.githubInstallationId),
+                      "resolved githubInstallationId"
+                    )
+                  : undefined;
+              if (!githubInstallationId) return { admissionOutcome: "policy_denied" as const };
+              const admission = admitContextWikiBuild(intakeState.board, {
+                tenantId: request.tenantId,
+                repository: request.repository,
+                scopeKind: current.scopeKind,
+                scopeKey: current.scopeKey,
+                commitSha: current.commitSha,
+                githubInstallationId,
+                requestKey: `wiki-audit-fix:${request.auditId}`,
+                generationReason: "daily_audit_fix",
+                parentReleaseId: current.releaseId,
+                improvement: {
+                  auditId: request.auditId,
+                  auditedReleaseId: current.releaseId,
+                  auditInputDigest: request.auditInputDigest,
+                  findingsArtifact: {
+                    uri: reportArtifact.uri,
+                    key: reportArtifact.key,
+                    contentType: reportArtifact.contentType,
+                    bytes: reportArtifact.bytes,
+                    sha256: reportArtifact.sha256,
+                    objectGeneration: reportArtifact.objectGeneration
+                  },
+                  findingsDigest
+                },
+                locale: current.locale,
+                priorRefSequence: currentRefSequence,
+                generatorPolicyVersion: process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || "wiki-generator-v1",
+                now: nowIso()
+              });
+              if (admission.outcome === "created" && config.contextQuotaService) {
+                await config.contextQuotaService.admitBuild({
+                  tenantId: request.tenantId,
+                  buildId: admission.build.buildTaskId,
+                  replacesBuildIds: admission.supersededBuildTaskIds
+                });
+              }
+              intakeState = { ...intakeState, board: admission.state };
+              return {
+                admissionOutcome:
+                  admission.outcome === "created" ? ("admitted" as const) : ("already_admitted" as const),
+                boardBuildId: admission.build.buildTaskId,
+                supersededBuildTaskIds: admission.supersededBuildTaskIds
+              };
+            });
+            if (!admitted) throw new ApiError(409, "conflict", "wiki audit-fix admission raced another update");
+            if (config.contextQuotaService) {
+              await Promise.all(
+                settledActivatedBuildIds.map((buildId) =>
+                  config
+                    .contextQuotaService!.completeBuild({ tenantId: request.tenantId, buildId })
+                    .catch(() => undefined)
+                )
+              );
+            }
+            if ("supersededBuildTaskIds" in admitted) {
+              await settleSupersededContextBuildQuotas(
+                config.contextQuotaService,
+                intakeState.board,
+                request.tenantId,
+                admitted.supersededBuildTaskIds
+              );
+            }
+            return "boardBuildId" in admitted
+              ? { admissionOutcome: admitted.admissionOutcome, boardBuildId: admitted.boardBuildId }
+              : { admissionOutcome: admitted.admissionOutcome };
+          }
+        );
+      }
+    };
+  }
+
   /**
    * Admit Context work from the same signed GitHub delivery already processed
    * by the review handler. The original raw body and signature are verified
@@ -2361,15 +4108,36 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const identity = await resolveWebhookIdentity(webhook);
     const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
     let newlyReservedBuildIds: readonly string[] = [];
-    const result = await mutate(async () => {
-      const context = await admitContextWebhook(webhook, deliveryId, tenantId, identity);
-      newlyReservedBuildIds = context.reservedBuildIds;
-      return {
-        outcome: context.outcome,
-        createdTaskIds: context.createdTaskIds,
-        supersededBuildTaskIds: context.supersededBuildTaskIds
-      };
-    }, deliveryId);
+    const repository = identity?.repository ?? webhook.repository;
+    const wikiRef = !isContextTrigger(webhook.event)
+      ? undefined
+      : webhook.event.type === "push"
+        ? `refs/heads/${webhook.event.ref.slice("refs/heads/".length)}`
+        : webhook.event.type === "pull_request.opened" || webhook.event.type === "pull_request.synchronize"
+          ? `refs/pull/${webhook.event.pullRequestNumber}/head`
+          : undefined;
+    const wikiLocale = canonicalWikiLocale(
+      process.env.JINA_WIKI_DEFAULT_LOCALE?.trim(),
+      config.contextWikiDefaultLocale ?? "en"
+    );
+    const mutableWikiScope =
+      wikiRef && contextWikiOrchestrator(contextWikiRouting, { tenantId, repository }) === "trigger"
+        ? { tenantId, repository, ref: wikiRef, locale: wikiLocale }
+        : undefined;
+    const performAdmission = (current: WikiReleaseIdentity | undefined) =>
+      mutate(async () => {
+        const context = await admitContextWebhook(webhook, deliveryId, tenantId, identity, current);
+        newlyReservedBuildIds = context.reservedBuildIds;
+        return {
+          outcome: context.outcome,
+          createdTaskIds: context.createdTaskIds,
+          supersededBuildTaskIds: context.supersededBuildTaskIds,
+          settledActivatedBuildIds: context.settledActivatedBuildIds
+        };
+      }, deliveryId);
+    const result = mutableWikiScope
+      ? await withWikiMutableRefAdmissionLock(mutableWikiScope, performAdmission)
+      : await performAdmission(undefined);
     if (!result && config.contextQuotaService) {
       await Promise.all(
         newlyReservedBuildIds.map((buildId) =>
@@ -2378,6 +4146,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
     }
     if (result) {
+      if (config.contextQuotaService) {
+        await Promise.all(
+          result.settledActivatedBuildIds.map((buildId) =>
+            config.contextQuotaService!.completeBuild({ tenantId, buildId }).catch(() => undefined)
+          )
+        );
+      }
       await settleSupersededContextBuildQuotas(
         config.contextQuotaService,
         intakeState.board,
@@ -2393,15 +4168,23 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     webhook: ParsedGitHubWebhook,
     deliveryId: string,
     tenantId: string,
-    identity: ResolvedRepositoryIdentity | undefined
+    identity: ResolvedRepositoryIdentity | undefined,
+    currentPublished: WikiReleaseIdentity | undefined
   ): Promise<{
     outcome: "created" | "duplicate" | "ignored";
     createdTaskIds: TaskId[];
     supersededBuildTaskIds: readonly TaskId[];
     reservedBuildIds: readonly string[];
+    settledActivatedBuildIds: readonly string[];
   }> {
     if (!isContextTrigger(webhook.event)) {
-      return { outcome: "ignored", createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
+      return {
+        outcome: "ignored",
+        createdTaskIds: [],
+        supersededBuildTaskIds: [],
+        reservedBuildIds: [],
+        settledActivatedBuildIds: []
+      };
     }
     // GitHub's delivery describes the repository at event time and is fresher
     // than a provisioned identity row after a default-branch rename. Reject an
@@ -2413,11 +4196,88 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       defaultBranch &&
       webhook.event.ref.slice("refs/heads/".length) !== defaultBranch
     ) {
-      return { outcome: "ignored", createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
+      return {
+        outcome: "ignored",
+        createdTaskIds: [],
+        supersededBuildTaskIds: [],
+        reservedBuildIds: [],
+        settledActivatedBuildIds: []
+      };
     }
     await reconcileContextQuotas(config.contextQuotaService, intakeState.board, tenantId);
     const repository = identity?.repository ?? webhook.repository;
     const ref = contextTriggerRef(webhook.event, defaultBranch);
+    if (
+      webhook.event.type !== "issue.opened" &&
+      contextWikiOrchestrator(contextWikiRouting, { tenantId, repository }) === "trigger"
+    ) {
+      const scopeKind = webhook.event.type === "push" ? "branch" : "pull_request";
+      const scopeKey =
+        webhook.event.type === "push"
+          ? webhook.event.ref.slice("refs/heads/".length)
+          : String(webhook.event.pullRequestNumber);
+      const canonicalRef = scopeKind === "branch" ? `refs/heads/${scopeKey}` : `refs/pull/${scopeKey}/head`;
+      const locale = canonicalWikiLocale(
+        process.env.JINA_WIKI_DEFAULT_LOCALE?.trim(),
+        config.contextWikiDefaultLocale ?? "en"
+      );
+      const reconciled = await reconcileActivatedWikiBeforeAdmission(intakeState.board, {
+        tenantId,
+        repository,
+        ref: canonicalRef,
+        locale,
+        current: currentPublished
+      });
+      intakeState = { ...intakeState, board: reconciled.state };
+      await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, tenantId);
+      const legacyPriorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
+        tenantId,
+        repository,
+        ref: canonicalRef,
+        locale
+      });
+      const priorRelease = currentPublished ?? legacyPriorRelease;
+      const headSha = webhook.event.headSha.toLowerCase();
+      const requestKey =
+        scopeKind === "branch"
+          ? `github:push:${repository}:${scopeKey}:${headSha}:${deliveryId}`
+          : `github:pull:${repository}:${scopeKey}:${headSha}:${deliveryId}`;
+      const admission = admitContextWikiBuild(intakeState.board, {
+        tenantId,
+        repository,
+        scopeKind,
+        scopeKey,
+        commitSha: headSha,
+        ...(webhook.event.type === "pull_request.opened" || webhook.event.type === "pull_request.synchronize"
+          ? { baseCommitSha: webhook.event.baseSha }
+          : {}),
+        ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
+        requestKey,
+        generationReason: priorRelease ? "source_update" : "initial",
+        ...(priorRelease ? { parentReleaseId: priorRelease.releaseId } : {}),
+        locale,
+        ...(priorRelease ? { priorRefSequence: priorRelease.refSequence } : {}),
+        generatorPolicyVersion: process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || "wiki-generator-v1",
+        now: nowIso()
+      });
+      const reservedBuildIds: string[] = [];
+      if (admission.outcome === "created" && config.contextQuotaService) {
+        await config.contextQuotaService.admitBuild({
+          tenantId,
+          buildId: admission.build.buildTaskId,
+          replacesBuildIds: admission.supersededBuildTaskIds
+        });
+        reservedBuildIds.push(admission.build.buildTaskId);
+      }
+      intakeState = { ...intakeState, board: admission.state };
+      return {
+        outcome: admission.outcome,
+        createdTaskIds: admission.outcome === "created" ? [admission.build.buildTaskId] : [],
+        supersededBuildTaskIds: admission.supersededBuildTaskIds,
+        reservedBuildIds,
+        settledActivatedBuildIds: reconciled.settledBuildIds
+      };
+    }
     const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
       tenantId,
       repository,
@@ -2447,9 +4307,21 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           activeBuildTaskId: admission.activeBuildTaskId,
           requestKey: admission.requestKey
         });
-        return { outcome: "created", createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
+        return {
+          outcome: "created",
+          createdTaskIds: [],
+          supersededBuildTaskIds: [],
+          reservedBuildIds: [],
+          settledActivatedBuildIds: []
+        };
       }
-      return { outcome: admission.outcome, createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
+      return {
+        outcome: admission.outcome,
+        createdTaskIds: [],
+        supersededBuildTaskIds: [],
+        reservedBuildIds: [],
+        settledActivatedBuildIds: []
+      };
     }
     const reservedBuildIds: string[] = [];
     if (config.contextQuotaService) {
@@ -2474,7 +4346,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       outcome: "created",
       createdTaskIds: [admission.build.buildTaskId, admission.build.graphTaskId, admission.build.snapshotTaskId],
       supersededBuildTaskIds: admission.supersededBuildTaskIds,
-      reservedBuildIds
+      reservedBuildIds,
+      settledActivatedBuildIds: []
     };
   }
 
@@ -2847,6 +4720,183 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       principalId: principal.principalId,
       repository,
       tenantAdmin: isTenantAdmin(principal)
+    };
+  }
+
+  async function resolveWikiCatalogSelection(
+    principal: Principal,
+    repository: string,
+    selector: WikiSelector | undefined,
+    locale: string | undefined
+  ): Promise<{
+    readonly access: ReturnType<typeof catalogAccess> & { readonly ref?: string; readonly releaseId?: string };
+    readonly release?: WikiReleaseIdentity;
+    readonly audit: {
+      readonly quality: "not_audited" | "passed" | "needs_improvement" | "error";
+      readonly auditId?: string;
+      readonly auditPolicyVersion?: string;
+      readonly auditedAt?: string;
+      readonly summary?: Readonly<Record<string, unknown>>;
+    };
+  }> {
+    if (contextWikiQuery) {
+      try {
+        const resolved = await contextWikiQuery.resolve({
+          tenantId: principal.tenantId,
+          repository,
+          ...(selector ? { selector } : {}),
+          ...(locale ? { locale } : {})
+        });
+        return {
+          access: { ...catalogAccess(principal, repository), releaseId: resolved.release.generationId },
+          ...resolved
+        };
+      } catch (error) {
+        if (error instanceof WikiSelectorError) {
+          if (error.message.includes("not found")) throw notFound("context not found");
+          throw invalidRequest(error.message);
+        }
+        throw error;
+      }
+    }
+    const defaultLocale = config.contextWikiDefaultLocale?.trim() || "en";
+    if (
+      locale !== undefined &&
+      canonicalWikiLocale(locale, defaultLocale) !== canonicalWikiLocale(undefined, defaultLocale)
+    ) {
+      throw notFound("context not found");
+    }
+    const selected = selector ?? { branch: config.contextWikiDefaultBranch?.trim() || "main" };
+    if ("releaseId" in selected) {
+      return {
+        access: { ...catalogAccess(principal, repository), releaseId: selected.releaseId },
+        audit: { quality: "not_audited" }
+      };
+    }
+    const ref =
+      "commitSha" in selected
+        ? `refs/commits/${selected.commitSha}`
+        : "pullRequest" in selected
+          ? `refs/pull/${selected.pullRequest}/head`
+          : selected.branch;
+    return { access: { ...catalogAccess(principal, repository), ref }, audit: { quality: "not_audited" } };
+  }
+
+  function wikiSelectorFromBody(
+    body: Readonly<Record<string, unknown>>,
+    allowOmitted = true
+  ): WikiSelector | undefined {
+    try {
+      if (body.selector !== undefined) {
+        if (["releaseId", "branch", "pullRequest", "commitSha", "ref"].some((field) => body[field] !== undefined)) {
+          throw new WikiSelectorError("selector cannot be combined with top-level selector fields");
+        }
+        return parseWikiSelectorObject(body.selector, { allowOmitted });
+      }
+      return parseWikiSelector(body, { allowOmitted });
+    } catch (error) {
+      if (error instanceof WikiSelectorError) throw invalidRequest(error.message);
+      throw error;
+    }
+  }
+
+  function wikiSelectorFromUrl(url: URL, allowOmitted = true): WikiSelector | undefined {
+    try {
+      return parseWikiSelector(selectorFieldsFromUrl(url.searchParams), { allowOmitted });
+    } catch (error) {
+      if (error instanceof WikiSelectorError) throw invalidRequest(error.message);
+      throw error;
+    }
+  }
+
+  function withWikiRelease<T extends { readonly release: unknown }>(
+    result: T,
+    resolved: Awaited<ReturnType<typeof resolveWikiCatalogSelection>>
+  ): T & { readonly release: unknown; readonly audit: typeof resolved.audit } {
+    return {
+      ...result,
+      release: resolved.release
+        ? {
+            ...(typeof result.release === "object" && result.release !== null ? result.release : {}),
+            id: resolved.release.releaseId,
+            ...resolved.release
+          }
+        : result.release,
+      audit: resolved.audit
+    };
+  }
+
+  function withWikiSearchEnvelope(
+    result: Awaited<ReturnType<ContextCatalogService["searchContext"]>>,
+    resolved: Awaited<ReturnType<typeof resolveWikiCatalogSelection>>
+  ) {
+    const released = withWikiRelease(result, resolved);
+    return {
+      ...released,
+      results: released.results.map((item) => ({
+        ...item,
+        documentPath: item.logicalId,
+        excerpt: item.excerpts[0] ?? ""
+      })),
+      conflicts: [],
+      coverage: {
+        retrievalMethod: released.retrieval.method,
+        matchedDocuments: released.results.length
+      }
+    };
+  }
+
+  function synthesizeWikiAnswer(
+    question: string,
+    searched: Awaited<ReturnType<ContextCatalogService["searchContext"]>>,
+    limit: number
+  ) {
+    const evidence = searched.results
+      .flatMap((item) =>
+        item.excerpts.map((excerpt) => ({
+          documentPath: item.logicalId,
+          title: item.title,
+          excerpt: excerpt.replace(/\s+/g, " ").trim(),
+          citations: item.citations
+        }))
+      )
+      .filter((item) => item.excerpt.length > 0)
+      .slice(0, limit);
+    const cited = evidence.filter((item) => item.citations.length > 0);
+    const questionTerms = answerTerms(question);
+    const statements = evidence.map((item) => ({
+      documentPath: item.documentPath,
+      title: item.title,
+      statement: bestGroundedStatement(item.excerpt, questionTerms),
+      cited: item.citations.length > 0
+    }));
+    const citations = [
+      ...new Map(
+        cited
+          .flatMap((item) => item.citations)
+          .map((citation) => [citation.citationId ?? JSON.stringify(citation.anchor), citation] as const)
+      ).values()
+    ];
+    const conflicts = detectGroundedConflicts(statements);
+    const answer =
+      statements.length === 0
+        ? "No citation-grounded wiki evidence matched the question in this release."
+        : [
+            `The published wiki supports these points for “${question.replace(/\s+/g, " ").trim()}”:`,
+            ...statements.map(
+              (item) => `- ${item.statement} [${item.documentPath}${item.cited ? "" : "; citation unavailable"}]`
+            ),
+            ...(conflicts.length > 0
+              ? ["The retrieved pages contain potentially conflicting statements; review the conflicts field."]
+              : [])
+          ].join("\n");
+    return {
+      answer,
+      citations,
+      conflicts,
+      evidenceItems: evidence.length,
+      citedEvidenceItems: cited.length,
+      uncitedEvidenceItems: evidence.length - cited.length
     };
   }
 
@@ -3740,31 +5790,39 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       isBoardWorkTaskType(currentTask.type) &&
       (ownsCurrentLease || isCompletionReplay)
     ) {
-      const isContextWorkflowTask = isContextWorkflowBoardTaskType(currentTask.type);
-      const parsed = isContextWorkflowTask
-        ? parseContextWorkflowBoardTaskResult(intakeState.board, currentTask.id, body.result)
-        : parseCausalGraphBoardTaskResult(intakeState.board, currentTask.id, body.result);
-      assertCurrentTaskCompletionArtifact(
-        currentTask,
-        requiredString(currentTask.metadata.contextBuildId, "contextBuildId"),
-        attempt,
-        parsed.outputArtifact,
-        isContextWorkflowTask
-          ? contextWorkflowCompletionArtifactKind(parsed as ContextWorkflowBoardTaskResult)
-          : boardWorkArtifactKind(currentTask.type),
-        "releaseId" in parsed && typeof parsed.releaseId === "string" ? parsed.releaseId : undefined
-      );
-      if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
-      const content = await config.contextArtifactStore.get(parsed.outputArtifact);
-      if (
-        content.byteLength !== parsed.outputArtifact.bytes ||
-        fingerprintBytes(content) !== parsed.outputArtifact.sha256
-      ) {
-        throw invalidRequest("completion artifact bytes do not match their immutable reference");
+      if (currentTask.type === contextWikiBoardTaskType) {
+        const parsed = parseContextWikiBoardTaskResult(intakeState.board, currentTask.id, body.result);
+        await assertActivatedWikiResult(currentTask, parsed);
+        verifiedContextResult = {
+          resultDigest: fingerprintBytes(Buffer.from(JSON.stringify(parsed), "utf8"))
+        };
+      } else {
+        const isContextWorkflowTask = isContextWorkflowBoardTaskType(currentTask.type);
+        const parsed = isContextWorkflowTask
+          ? parseContextWorkflowBoardTaskResult(intakeState.board, currentTask.id, body.result)
+          : parseCausalGraphBoardTaskResult(intakeState.board, currentTask.id, body.result);
+        assertCurrentTaskCompletionArtifact(
+          currentTask,
+          requiredString(currentTask.metadata.contextBuildId, "contextBuildId"),
+          attempt,
+          parsed.outputArtifact,
+          isContextWorkflowTask
+            ? contextWorkflowCompletionArtifactKind(parsed as ContextWorkflowBoardTaskResult)
+            : boardWorkArtifactKind(currentTask.type),
+          "releaseId" in parsed && typeof parsed.releaseId === "string" ? parsed.releaseId : undefined
+        );
+        if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
+        const content = await config.contextArtifactStore.get(parsed.outputArtifact);
+        if (
+          content.byteLength !== parsed.outputArtifact.bytes ||
+          fingerprintBytes(content) !== parsed.outputArtifact.sha256
+        ) {
+          throw invalidRequest("completion artifact bytes do not match their immutable reference");
+        }
+        verifiedContextResult = {
+          resultDigest: fingerprintBytes(Buffer.from(JSON.stringify(parsed), "utf8"))
+        };
       }
-      verifiedContextResult = {
-        resultDigest: fingerprintBytes(Buffer.from(JSON.stringify(parsed), "utf8"))
-      };
     }
     const completed = await mutate(
       async () => {
@@ -3928,11 +5986,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         let board = intakeState.board;
         let completionPayload: Record<string, unknown>;
         if (terminalOutcome === "done" && isBoardWorkTaskType(task.type)) {
-          const applied = isContextWorkflowBoardTaskType(task.type)
-            ? applyContextWorkflowBoardTaskResult(board, boardTaskId, body.result, now)
-            : applyCausalGraphBoardTaskResult(board, boardTaskId, body.result, now);
-          board = applied.state;
-          completionPayload = applied.result;
+          if (task.type === contextWikiBoardTaskType) {
+            const completedWiki = parseContextWikiBoardTaskResult(board, boardTaskId, body.result);
+            completionPayload = wikiCompletionEventPayload(completedWiki);
+          } else {
+            const applied = isContextWorkflowBoardTaskType(task.type)
+              ? applyContextWorkflowBoardTaskResult(board, boardTaskId, body.result, now)
+              : applyCausalGraphBoardTaskResult(board, boardTaskId, body.result, now);
+            board = applied.state;
+            completionPayload = applied.result;
+          }
         } else {
           completionPayload =
             terminalOutcome === "failed"
@@ -4062,6 +6125,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       await tryPromoteContextBoardFollowup(tenantId, completedBuild.id);
     }
+    if (completed.buildTerminal && completedBuild?.type === contextWikiBoardTaskType) {
+      await config.contextQuotaService?.completeBuild({ tenantId, buildId: completedBuild.id });
+    }
     json(response, 200, { accepted: true });
   }
 
@@ -4189,7 +6255,11 @@ function causalGraphIssueTraceRoute(pathname: string): string | undefined {
 }
 
 function isContextBuildTaskType(type: string): boolean {
-  return type === contextWorkflowBoardTaskTypes.build || type === causalGraphBoardTaskTypes.build;
+  return (
+    type === contextWikiBoardTaskType ||
+    type === contextWorkflowBoardTaskTypes.build ||
+    type === causalGraphBoardTaskTypes.build
+  );
 }
 
 function publicIssueGraphRelease(release: IssueGraphRelease) {
@@ -4225,6 +6295,40 @@ async function authenticatedPrincipal(
     // caller would be whoever the headers claim.
     const principal = await verifyApiToken(presented);
     return principal && assertedIdentity(request, config, principal);
+  }
+  if (presented?.startsWith("jina_weg_") && config.contextWikiExecutionGrantSecret) {
+    // Execution grants are bearer capabilities for one wiki run. Never promote
+    // them to a general internal-service identity on unrelated `/internal/*`
+    // routes, even when their signature and tenant binding are otherwise valid.
+    if (!isContextWikiExecutionGrantRoute(request.method ?? "GET", pathname)) return undefined;
+    let grant: ContextWikiExecutionGrant;
+    try {
+      grant = verifyContextWikiExecutionGrant(presented, {
+        secret: config.contextWikiExecutionGrantSecret,
+        now: nowIso()
+      });
+    } catch {
+      return undefined;
+    }
+    return {
+      tenantId: grant.tenantId,
+      principalId: "svc:context-wiki-execution",
+      forwarded: true,
+      contextWikiGrant: grant
+    };
+  }
+  const contextWikiBootstrap = Boolean(
+    config.contextWikiTriggerServiceToken &&
+    authorization === `Bearer ${config.contextWikiTriggerServiceToken}` &&
+    (pathname === "/internal/context/wiki/executions/claim" ||
+      pathname === "/internal/context/wiki/executions/reconciliation/due" ||
+      pathname === "/internal/context/wiki/audits/dispatch" ||
+      pathname === "/internal/context/wiki/audits/reconciliation/due" ||
+      pathname === "/internal/context/wiki/audits/improvements/due" ||
+      pathname === "/internal/context/wiki/audits/due")
+  );
+  if (contextWikiBootstrap) {
+    return { tenantId: "*", principalId: "svc:context-wiki-trigger", forwarded: true };
   }
   if (trustsDevIdentityHeaders(config)) {
     return {
@@ -4358,7 +6462,7 @@ function requireIssuedTokenScope(principal: Principal, required: ContextScope): 
  */
 function requiredScope(pathname: string, method: string): ContextScope | "internal-only" {
   if (method === "POST") {
-    if (pathname === "/mcp" || pathname === "/wiki/search") return "context:query";
+    if (pathname === "/mcp" || pathname === "/wiki/search" || pathname === "/wiki/ask") return "context:query";
     if (pathname === "/wiki/build" || pathname === "/causal-graph/build") return "context:build";
     if (contextTaskRetryRoute(pathname) || contextBuildTokenBudgetRoute(pathname)) {
       return "context:admin";
@@ -4377,6 +6481,7 @@ function requiredScope(pathname: string, method: string): ContextScope | "intern
     pathname === "/wiki/list" ||
     pathname === "/wiki/read" ||
     pathname === "/wiki/diff" ||
+    pathname === "/wiki/export" ||
     pathname === "/causal-graph/issues" ||
     pathname === "/causal-graph" ||
     pathname.startsWith("/causal-graph/issues/")
@@ -4419,12 +6524,22 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
       : undefined;
   return {
     id: task.id,
-    buildKind: task.type === causalGraphBoardTaskTypes.build ? "causal_graph" : "documentation",
+    buildKind:
+      task.type === causalGraphBoardTaskTypes.build
+        ? "causal_graph"
+        : task.type === contextWikiBoardTaskType
+          ? "wiki"
+          : "documentation",
     status: task.status,
     tenantId: requiredString(task.metadata.tenantId, "context build tenantId"),
     repository: requiredRepositoryName(task.metadata.repository, "context build repository"),
     ref: requiredString(task.metadata.ref, "context build ref"),
-    refSequence: requiredPositiveInteger(task.metadata.refSequence, "context build refSequence"),
+    ...(task.metadata.refSequence === undefined
+      ? {}
+      : { refSequence: requiredPositiveInteger(task.metadata.refSequence, "context build refSequence") }),
+    ...(typeof task.metadata.locale === "string" ? { locale: task.metadata.locale } : {}),
+    ...(typeof task.metadata.orchestrator === "string" ? { orchestrator: task.metadata.orchestrator } : {}),
+    ...(typeof task.metadata.pipelineVersion === "string" ? { pipelineVersion: task.metadata.pipelineVersion } : {}),
     ...(typeof task.metadata.commitSha === "string" ? { commitSha: task.metadata.commitSha } : {}),
     ...(typeof task.metadata.trigger === "string" ? { trigger: task.metadata.trigger } : {}),
     ...(executionBudget
@@ -4690,6 +6805,14 @@ function publicContextFailureFromEvent(
     return publicContextFailureFromCategory(event.payload?.failureCategory, event.payload?.reason);
   }
   return undefined;
+}
+
+function isContextWikiExecutionGrantRoute(method: string, pathname: string): boolean {
+  if (method !== "POST") return false;
+  return (
+    /^\/internal\/context\/wiki\/executions\/[^/]+\/(?:steps\/[^/]+|complete|fail)$/.test(pathname) ||
+    /^\/internal\/context\/wiki\/audits\/[^/]+\/(?:complete|fail|admit-fix)$/.test(pathname)
+  );
 }
 
 function publicContextFailureFromCategory(
@@ -5957,6 +8080,92 @@ function completionEventType(topic: string): string {
   return topic === "run-review" ? "review.completed" : `${topic}.completed`;
 }
 
+function wikiCompletionEventPayload(
+  completed: ReturnType<typeof parseContextWikiBoardTaskResult>
+): Record<string, unknown> {
+  return {
+    schemaVersion: completed.schemaVersion,
+    status: completed.status,
+    triggerParentRunId: completed.triggerParentRunId,
+    requestDigest: completed.requestDigest,
+    releaseId: completed.releaseId,
+    generationId: completed.generationId,
+    publicSnapshotDigest: completed.publicSnapshotDigest,
+    pageindexAttachmentId: completed.pageindexAttachmentId,
+    activationOperationDigest: completed.activationOperationDigest,
+    usage: completed.usage,
+    completedAt: completed.completedAt
+  };
+}
+
+function answerTerms(value: string): ReadonlySet<string> {
+  const stop = new Set([
+    "about",
+    "after",
+    "before",
+    "does",
+    "from",
+    "have",
+    "into",
+    "that",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with"
+  ]);
+  return new Set((value.toLowerCase().match(/[a-z0-9][a-z0-9_-]{2,}/g) ?? []).filter((term) => !stop.has(term)));
+}
+
+function bestGroundedStatement(excerpt: string, questionTerms: ReadonlySet<string>): string {
+  const sentences = excerpt
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  const ranked = sentences
+    .map((sentence, index) => ({
+      sentence,
+      index,
+      score: [...answerTerms(sentence)].filter((term) => questionTerms.has(term)).length
+    }))
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+  const selected = ranked[0]?.sentence ?? excerpt;
+  return selected.length <= 600 ? selected : `${selected.slice(0, 597)}...`;
+}
+
+function detectGroundedConflicts(
+  statements: readonly { readonly documentPath: string; readonly statement: string }[]
+): readonly {
+  readonly leftDocumentPath: string;
+  readonly rightDocumentPath: string;
+  readonly reason: string;
+}[] {
+  const conflicts: {
+    leftDocumentPath: string;
+    rightDocumentPath: string;
+    reason: string;
+  }[] = [];
+  for (let leftIndex = 0; leftIndex < statements.length; leftIndex += 1) {
+    const left = statements[leftIndex]!;
+    const leftTerms = answerTerms(left.statement);
+    const leftNegated = /\b(?:cannot|can't|does not|doesn't|never|no|not)\b/i.test(left.statement);
+    for (let rightIndex = leftIndex + 1; rightIndex < statements.length; rightIndex += 1) {
+      const right = statements[rightIndex]!;
+      const rightNegated = /\b(?:cannot|can't|does not|doesn't|never|no|not)\b/i.test(right.statement);
+      if (leftNegated === rightNegated) continue;
+      const overlap = [...answerTerms(right.statement)].filter((term) => leftTerms.has(term));
+      if (overlap.length < 3) continue;
+      conflicts.push({
+        leftDocumentPath: left.documentPath,
+        rightDocumentPath: right.documentPath,
+        reason: `Retrieved statements disagree in polarity around: ${overlap.slice(0, 6).join(", ")}`
+      });
+    }
+  }
+  return conflicts;
+}
+
 function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
   const repository = requiredRepositoryName(body.repository, "repository");
   const defaultBranch = optionalString(body.defaultBranch);
@@ -5990,7 +8199,8 @@ function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
     event: {
       type: "pull_request.opened",
       pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber"),
-      headSha: requiredGitSha(body.headSha, "headSha")
+      headSha: requiredGitSha(body.headSha, "headSha"),
+      baseSha: requiredGitSha(body.baseSha, "baseSha")
     }
   };
 }
@@ -6081,6 +8291,7 @@ const METRICS_ROUTES = new Set([
   "/wiki/build",
   "/causal-graph/build",
   "/wiki/search",
+  "/wiki/ask",
   "/causal-graph/issues",
   "/causal-graph/issues/:id",
   "/causal-graph/issues/:id/trace",
@@ -6089,6 +8300,7 @@ const METRICS_ROUTES = new Set([
   "/wiki/list",
   "/wiki/read",
   "/wiki/diff",
+  "/wiki/export",
   "/wiki/metrics",
   "/internal/context/access/sync",
   "/internal/context/review-access",
@@ -6102,6 +8314,15 @@ const METRICS_ROUTES = new Set([
   "/internal/context/board/artifacts/read",
   "/internal/context/board/phase-checkpoints",
   "/internal/context/board/phase-checkpoints/read",
+  "/internal/context/wiki/dispatch/authorize",
+  "/internal/context/wiki/executions/claim",
+  "/internal/context/wiki/executions/reconciliation/due",
+  "/internal/context/wiki/executions/:id/complete",
+  "/internal/context/wiki/executions/:id/fail",
+  "/internal/context/wiki/audits/dispatch",
+  "/internal/context/wiki/audits/reconciliation/due",
+  "/internal/context/wiki/audits/improvements/due",
+  "/internal/context/wiki/audits/due",
   "/internal/worker/claim",
   "/internal/worker/renew",
   "/internal/worker/release",
@@ -6127,6 +8348,12 @@ function metricsRoute(pathname: string): string {
     return "/internal/context/builds/:id/cancel";
   }
   if (routeId(pathname, "/internal/context/tokens/", "/revoke")) return "/internal/context/tokens/:id/revoke";
+  if (/^\/internal\/context\/wiki\/executions\/[^/]+\/complete$/.test(pathname)) {
+    return "/internal/context/wiki/executions/:id/complete";
+  }
+  if (/^\/internal\/context\/wiki\/executions\/[^/]+\/fail$/.test(pathname)) {
+    return "/internal/context/wiki/executions/:id/fail";
+  }
   return METRICS_ROUTES.has(pathname) ? pathname : "(unknown)";
 }
 
@@ -6138,7 +8365,7 @@ function isReadOnlyContextRoute(method: string | undefined, pathname: string): b
         pathname === "/healthz" ||
         pathname === "/task-types" ||
         pathname.startsWith("/wiki/"))) ||
-    (method === "POST" && (pathname === "/wiki/search" || pathname === "/mcp"))
+    (method === "POST" && (pathname === "/wiki/search" || pathname === "/wiki/ask" || pathname === "/mcp"))
   );
 }
 
@@ -6199,6 +8426,19 @@ function parseJsonObject(value: Uint8Array): Record<string, unknown> {
   return parsed;
 }
 
+function plainObject(value: unknown, field: string): Record<string, unknown> {
+  if (!isRecord(value)) throw invalidRequest(`${field} must be an object`);
+  return value;
+}
+
+function requireExactFields(value: Record<string, unknown>, fields: readonly string[], label: string): void {
+  const expected = new Set(fields);
+  const actual = Object.keys(value);
+  if (actual.length !== fields.length || actual.some((field) => !expected.has(field))) {
+    throw invalidRequest(`${label} has unknown or missing fields`);
+  }
+}
+
 function parseJsonValue(value: Uint8Array): unknown {
   try {
     return JSON.parse(Buffer.from(value).toString("utf8"));
@@ -6231,6 +8471,58 @@ function requiredTimestamp(value: unknown, field: string): string {
   const parsed = new Date(requiredString(value, field));
   if (!Number.isFinite(parsed.getTime())) throw invalidRequest(`${field} must be an ISO-8601 timestamp`);
   return parsed.toISOString();
+}
+
+function parseWikiTriggerTerminalFailureBody(value: unknown): {
+  readonly schemaVersion: 1;
+  readonly boardBuildId: string;
+  readonly triggerParentRunId: string;
+  readonly requestDigest: string;
+  readonly code:
+    | "trigger_failed"
+    | "trigger_crashed"
+    | "trigger_system_failure"
+    | "trigger_expired"
+    | "trigger_timed_out"
+    | "trigger_canceled";
+  readonly source: "on_failure" | "reconciler";
+  readonly failedAt: string;
+} {
+  const failure = requiredRecord(value, "failure");
+  const allowed = new Set([
+    "schemaVersion",
+    "boardBuildId",
+    "triggerParentRunId",
+    "requestDigest",
+    "code",
+    "source",
+    "failedAt"
+  ]);
+  if (Object.keys(failure).some((key) => !allowed.has(key)) || Object.keys(failure).length !== allowed.size) {
+    throw invalidRequest("failure must use the exact terminal failure schema");
+  }
+  if (failure.schemaVersion !== 1) throw invalidRequest("failure schemaVersion must be 1");
+  const code = requiredString(failure.code, "failure.code");
+  const codes = new Set([
+    "trigger_failed",
+    "trigger_crashed",
+    "trigger_system_failure",
+    "trigger_expired",
+    "trigger_timed_out",
+    "trigger_canceled"
+  ] as const);
+  if (!codes.has(code as never)) throw invalidRequest("failure.code is invalid");
+  const source = requiredString(failure.source, "failure.source");
+  if (source !== "on_failure" && source !== "reconciler") throw invalidRequest("failure.source is invalid");
+  return {
+    schemaVersion: 1,
+    boardBuildId: requiredString(failure.boardBuildId, "failure.boardBuildId"),
+    triggerParentRunId: requiredString(failure.triggerParentRunId, "failure.triggerParentRunId"),
+    requestDigest: requiredSha256(failure.requestDigest, "failure.requestDigest"),
+    code: code as ReturnType<typeof parseWikiTriggerTerminalFailureBody>["code"],
+    source,
+    failedAt: requiredTimestamp(failure.failedAt, "failure.failedAt")
+  };
 }
 
 function requiredDerivationProgressDocumentPath(value: unknown, field: string): string {

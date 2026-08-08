@@ -48,6 +48,7 @@ const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
 const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
 const publicApiCandidateDeployment = await readFile("scripts/deploy-public-api-candidate.mjs", "utf8");
 const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
+const contextTriggerDeployment = await readFile(".github/workflows/deploy-context-trigger.yml", "utf8");
 const stagingSerialization = await readFile("scripts/serialize-cloud-build-deploy.sh", "utf8");
 const stagingCloudBuild = await readFile("cloudbuild.staging.yaml", "utf8");
 
@@ -96,6 +97,29 @@ test("production deployment shell is syntactically valid", async () => {
   await execFileAsync(process.execPath, ["--check", "scripts/context-production-trigger-e2e.mjs"]);
 });
 
+test("staging routes new wiki builds through the isolated Context Trigger project", () => {
+  assert.match(stagingDeployment, /JINA_WIKI_PIPELINE_MODE=trigger/);
+  assert.match(stagingDeployment, /context_topics="run-wiki-build\|/);
+  assert.match(stagingDeployment, /JINA_CONTEXT_TRIGGER_API_URL=https:\/\/api\.trigger\.dev/);
+  assert.match(stagingDeployment, /JINA_CONTEXT_TRIGGER_SECRET_KEY=\$\{context_trigger_secret\}:latest/);
+  assert.match(
+    stagingDeployment,
+    /JINA_CONTEXT_TRIGGER_SERVICE_TOKEN=\$\{context_trigger_service_token_secret\}:latest/
+  );
+  assert.match(stagingDeployment, /JINA_CONTEXT_EXECUTION_GRANT_SECRET=\$\{context_execution_grant_secret\}:latest/);
+  assert.match(stagingDeployment, /JINA_CONTEXT_TRIGGER_DISPATCH_SECRET=\$\{context_trigger_dispatch_secret\}:latest/);
+});
+
+test("Context Trigger deployment is isolated and syncs only its bounded runtime contract", () => {
+  assert.match(contextTriggerDeployment, /JINA_CONTEXT_TRIGGER_PROJECT_REF/);
+  assert.match(contextTriggerDeployment, /CONTEXT_WIKI_AUDIT_POLICY_VERSION/);
+  assert.match(contextTriggerDeployment, /CONTEXT_WIKI_AUDITOR_CONFIG_DIGEST/);
+  assert.match(contextTriggerDeployment, /EXPECTED_TRIGGER_PROJECT_NAME: jina-context-wiki/);
+  assert.match(contextTriggerDeployment, /node \.\.\/\.\.\/scripts\/verify-trigger-project\.mjs/);
+  assert.match(contextTriggerDeployment, /npm run deploy -- --env "\$CONTEXT_TRIGGER_DEPLOY_ENV"/);
+  assert.doesNotMatch(contextTriggerDeployment, /DATABASE_URL|GITHUB_APP_PRIVATE_KEY|CONTEXT_GCS_BUCKET/);
+});
+
 test("production Cloud Build declares image validation before every dependent build step", () => {
   const validationStep = cloudBuild.indexOf("  - id: validate-image-selection");
   const firstDependent = cloudBuild.indexOf("    waitFor: [validate-image-selection]");
@@ -121,7 +145,7 @@ test("staging uses one v2 database connection and one migration job", async () =
   );
   assert.match(
     stagingDeployment,
-    /context_topics="run-context-input-snapshot\|run-context-page-plan\|run-context-page-build\|run-context-publication"/
+    /context_topics="run-wiki-build\|run-context-input-snapshot\|run-context-page-plan\|run-context-page-build\|run-context-publication"/
   );
   assert.match(stagingDeployment, /--min-instances=3/);
   assert.match(stagingDeployment, /--max-instances=10/);

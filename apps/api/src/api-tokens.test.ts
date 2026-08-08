@@ -122,7 +122,7 @@ const bearer = (secret: string): RequestInit => ({ headers: { authorization: `Be
 async function mcpTool(
   baseUrl: string,
   secret: string,
-  name: "search_context" | "list_context" | "read_context" | "diff_context",
+  name: "search_context" | "list_context" | "read_context" | "diff_context" | "ask_context",
   args: Record<string, unknown>
 ) {
   const client = new Client({ name: "api-token-adversary", version: "1.0.0" });

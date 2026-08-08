@@ -4,6 +4,7 @@
  * only one process.
  */
 export const reviewWorkerTopic = "run-review" as const;
+export const contextWikiWorkerTopic = "run-wiki-build" as const;
 
 export const controlBoardTopics = {
   githubInstallationBackfill: "github-installation-backfill",
@@ -63,6 +64,7 @@ export type CausalGraphWorkerTopic = (typeof causalGraphBoardTopics)[keyof typeo
 
 export const supportedWorkerTopics = [
   reviewWorkerTopic,
+  contextWikiWorkerTopic,
   ...controlBoardWorkerTopics,
   ...contextWorkflowWorkerTopics,
   ...causalGraphWorkerTopics

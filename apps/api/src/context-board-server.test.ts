@@ -914,7 +914,7 @@ test("a newer PR delivery queues behind leased work without settling or cancelin
   const rawBody = JSON.stringify({
     action: "synchronize",
     repository: { full_name: repository, default_branch: "main" },
-    pull_request: { number: 88, head: { sha: secondHead } }
+    pull_request: { number: 88, head: { sha: secondHead }, base: { sha: firstHead } }
   });
   const signature = `sha256=${createHmac("sha256", webhookSecret).update(rawBody).digest("hex")}`;
   const deliver = () =>

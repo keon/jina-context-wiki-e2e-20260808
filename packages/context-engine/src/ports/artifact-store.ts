@@ -34,6 +34,8 @@ export interface ContextArtifactWrite {
   readonly content: string | Uint8Array;
 }
 
+export type ContextArtifactLookup = Omit<ContextArtifactWrite, "content">;
+
 export interface ContextArtifactRef {
   readonly uri: string;
   readonly key: string;
@@ -46,6 +48,8 @@ export interface ContextArtifactRef {
 export interface ContextArtifactStore {
   put(input: ContextArtifactWrite): Promise<ContextArtifactRef>;
   get(ref: ContextArtifactRef): Promise<Uint8Array>;
+  /** Finds an immutable artifact at its exact deterministic key, when supported. */
+  find?(input: ContextArtifactLookup): Promise<ContextArtifactRef | undefined>;
 }
 
 export interface ContextArtifactScope {
@@ -166,6 +170,26 @@ export class FileContextArtifactStore implements ContextArtifactStore {
       throw new Error("local artifact bytes do not match their immutable reference");
     }
     return content;
+  }
+
+  async find(input: ContextArtifactLookup): Promise<ContextArtifactRef | undefined> {
+    const key = contextArtifactKey({ ...input, content: "" });
+    let target: string;
+    try {
+      target = await this.readableTarget(key);
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+      if (code === "ENOENT") return undefined;
+      throw error;
+    }
+    const content = await readFile(target);
+    return {
+      uri: pathToFileURL(target).href,
+      key,
+      contentType: input.contentType,
+      bytes: content.byteLength,
+      sha256: artifactSha256(content)
+    };
   }
 
   private target(root: string, key: string): string {

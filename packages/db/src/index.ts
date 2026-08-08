@@ -7,11 +7,28 @@ export type { PostgresJsonStateStoreConfig, WorkerReleaseGuard } from "./postgre
 export { PostgresSharedIdentityStore } from "./postgres-shared-identity-store.js";
 export { ContextDatabase } from "./context/database.js";
 export { PostgresContextEngineStore } from "./context/store.js";
+export { PostgresEvidenceStore } from "./context/evidence-store.js";
 export { ContextQuotaStoreError, PostgresContextQuotaStore } from "./context/context-quota-store.js";
 export { PostgresContextPhaseCheckpointRepository } from "./context/context-phase-checkpoint-repository.js";
 export { GcsContextArtifactStore } from "./context/gcs-artifact-store.js";
+export { GcsWikiArtifactStore } from "./context/gcs-wiki-artifact-store.js";
 export { PostgresBoardContextPublicationRepository } from "./context/board-publication-repository.js";
 export { PostgresBoardPageIndexAttachmentRepository } from "./context/board-pageindex-attachment-repository.js";
+export {
+  PostgresWikiTriggerPublicationRepository,
+  type PublishedWikiAuditSummary,
+  type PublishedWikiReleaseIdentity,
+  type PublishedWikiReleaseInputs
+} from "./context/wiki-publication-repository.js";
+export {
+  PostgresWikiAuditRepository,
+  type DueWikiAudit,
+  type WikiAuditRunClaim,
+  type WikiAuditFollowupOutcome,
+  type WikiAuditFollowupRecord,
+  type WikiAuditOutcome,
+  type WikiReleaseAuditRecord
+} from "./context/wiki-audit-repository.js";
 export { PostgresIssueGraphRepository } from "./context/issue-graph-repository.js";
 export { BoardAdmissionConflictError, RelationalBoardRepository } from "./board/repository.js";
 export type {

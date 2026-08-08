@@ -6,9 +6,12 @@
         "autumn.config.ts",
         "scripts/context-production-preflight.mjs",
         "scripts/verify-trigger-project.mjs",
-        "scripts/verify-trigger-source-manifest.mjs"
+        "scripts/verify-trigger-source-manifest.mjs",
+        "services/context-trigger/trigger.config.ts",
+        "services/context-trigger/src/trigger/*.ts",
+        "services/context-trigger/src/**/*.test.ts"
       ],
-      "ignoreDependencies": ["pg"]
+      "ignoreDependencies": ["pg", "@trigger.dev/build", "@trigger.dev/sdk"]
     },
     "apps/api": {
       "entry": [
@@ -18,7 +21,8 @@
         "src/product/migrate-all.ts",
         "src/product/sync-github-webhook.ts",
         "src/**/*.test.ts"
-      ]
+      ],
+      "ignoreDependencies": ["mermaid"]
     },
     "apps/worker": {
       "entry": ["src/server.ts", "src/acceptance.ts", "src/**/*.test.ts"]

@@ -1,0 +1,33 @@
+{
+  "name": "jina-context-trigger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "trigger dev",
+    "deploy": "trigger deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@trigger.dev/sdk": "4.5.9"
+  },
+  "devDependencies": {
+    "@trigger.dev/build": "4.5.9",
+    "trigger.dev": "4.5.9",
+    "tsx": "4.19.2",
+    "typescript": "5.8.3"
+  },
+  "overrides": {
+    "@opentelemetry/core": "^2.10.0",
+    "cookie": "^2.0.1",
+    "engine.io": "^6.6.9",
+    "engine.io-client": "^6.6.6",
+    "esbuild": "^0.28.1",
+    "nanoid": "^3.3.17",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3",
+    "tar": "^7.5.22",
+    "ws": "^8.21.1"
+  }
+}

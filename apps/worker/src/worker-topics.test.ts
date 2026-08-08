@@ -44,10 +44,10 @@ test("run-review is the single relational review worker topic", () => {
   assert.deepEqual(configuredWorkerTopics("run-review"), ["run-review"]);
 });
 
-test("every Context topic requires the production Board executor preflight", () => {
+test("legacy Context stages require the production Board executor while the Trigger bridge does not", () => {
   assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics("run-review")), false);
   for (const topic of CONTEXT_BOARD_TOPICS) {
-    assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics(topic)), true, topic);
+    assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics(topic)), topic !== "run-wiki-build", topic);
   }
 });
 
