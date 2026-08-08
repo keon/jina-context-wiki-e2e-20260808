@@ -29,7 +29,8 @@ import { ContextWikiStageExecutor } from "./context-wiki-execution.js";
 import { ApiOwnedContextWikiPublicationRuntime } from "./context-wiki-publication.js";
 import { ContextWikiAuditCoordinator } from "./context-wiki-audit.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
-import type { ApiSnapshot, ApiStateStore } from "./server.js";
+import { createDedicatedBoardStateStore } from "./postgres-runtime-config.js";
+import type { ApiSnapshot } from "./server.js";
 
 const port = Number(process.env.PORT ?? 4000);
 const openTelemetry = startOpenTelemetry({
@@ -81,7 +82,14 @@ const contextDatabase = postgresConfig
       manageRoles: process.env.JINA_DB_MANAGE_ROLES === "true"
     })
   : undefined;
-const stateStore = createStateStore(postgresConfig, contextDatabase?.pool);
+const stateStore = createDedicatedBoardStateStore(
+  postgresConfig,
+  (config) =>
+    new PostgresJsonStateStore<ApiSnapshot>({
+      ...config,
+      manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
+    })
+);
 const contextStore = createContextStore(contextDatabase);
 const contextEvidenceStore = contextDatabase
   ? new PostgresEvidenceStore(contextDatabase)
@@ -287,18 +295,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       }
       void openTelemetry.shutdown();
     });
-  });
-}
-
-function createStateStore(
-  config: PostgresJsonStateStoreConfig | undefined,
-  sharedPool: ContextDatabase["pool"] | undefined
-): ApiStateStore | undefined {
-  if (!config) return undefined;
-  return new PostgresJsonStateStore<ApiSnapshot>({
-    ...config,
-    ...(sharedPool ? { pool: sharedPool } : {}),
-    manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
   });
 }
 

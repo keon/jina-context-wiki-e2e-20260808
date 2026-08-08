@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Pool, PoolClient } from "pg";
-import { ContextDatabase, contextTenantScope } from "./context/database.js";
+import { CONTEXT_DATABASE_CONNECTION_TIMEOUT_MS, ContextDatabase, contextTenantScope } from "./context/database.js";
+
+test("ContextDatabase bounds pool checkout by default and preserves an explicit override", async () => {
+  const defaultDatabase = new ContextDatabase({ manageSchema: false });
+  const overriddenDatabase = new ContextDatabase({ manageSchema: false, connectionTimeoutMillis: 2_500 });
+  try {
+    assert.equal(defaultDatabase.pool.options.connectionTimeoutMillis, CONTEXT_DATABASE_CONNECTION_TIMEOUT_MS);
+    assert.equal(overriddenDatabase.pool.options.connectionTimeoutMillis, 2_500);
+  } finally {
+    await Promise.all([defaultDatabase.close(), overriddenDatabase.close()]);
+  }
+});
 
 test("ContextDatabase separates pool, setup, operation, commit, and total latency", async () => {
   const database = new ContextDatabase({ manageSchema: false });

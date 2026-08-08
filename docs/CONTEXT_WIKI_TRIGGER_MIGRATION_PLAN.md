@@ -298,12 +298,16 @@ The claim exchanges the one-use dispatch nonce and actual Trigger parent-run ide
 
 The scoped stage executor performs source reads, artifact writes, finalization, projection, and activation inside the API trust boundary. Trigger receives only bounded stage outputs containing immutable references and release identities. All GCS byte validation, PostgreSQL prepare/activation, audit insertion, due selection, follow-up admission, RLS, and advisory-lock operations remain API-owned.
 
-Stage transport and replay are bounded independently from short control calls. Claim,
-completion, failure, due-selection, and other control requests use a 30-second HTTP
-deadline. Stage requests use a 29-minute deadline, leaving one minute inside each
-30-minute Trigger child `maxDuration` for response validation and cleanup. Response
-bodies remain size-bounded, and transport timeouts expose only the stable
-`api_timeout` classification.
+Stage transport and replay are bounded independently by route class. Lightweight
+due-selection, dispatch, and other read/control requests use a 30-second HTTP
+deadline. Replay-safe build/audit claims and terminal completion/failure callbacks
+use a 120-second deadline because they can wait behind the serialized durable Board
+mutation lane. Stage requests use a 29-minute deadline, leaving one minute inside
+each 30-minute Trigger child `maxDuration` for response validation and cleanup.
+Response bodies remain size-bounded, and transport timeouts expose only the stable
+`api_timeout` classification. A claim retry must preserve the exact request digest,
+dispatch nonce, attempt, and Trigger parent-run ID so a late commit replays the one
+persisted authority rather than creating another writer.
 
 The API records each completed stage result as an immutable operation artifact plus a
 durable phase checkpoint bound to the exact authority ID, request digest, Trigger
