@@ -34,6 +34,10 @@ import { readContextTriggerEnv, type ContextTriggerEnv } from "./env.js";
 
 const MAX_API_RESPONSE_BYTES = 1024 * 1024;
 export const CONTEXT_API_CONTROL_TIMEOUT_MS = 30_000;
+// Claims and terminal callbacks can wait behind serialized durable Board
+// mutations. They are replay-safe, so give an in-flight commit time to settle
+// while keeping the deadline well inside the parent task's one-hour budget.
+export const CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS = 2 * 60_000;
 // Trigger stage tasks have a 30-minute maxDuration. Leave one minute for the
 // child to validate the receipt, return its output, and run lifecycle cleanup.
 export const CONTEXT_API_STAGE_TIMEOUT_MS = 29 * 60_000;
@@ -94,7 +98,8 @@ export class ContextWikiApiClient {
           triggerParentRunId: input.triggerParentRunId,
           dispatchNonce: input.payload.dispatchNonce,
           attempt: input.payload.attempt
-        }
+        },
+        timeoutMs: CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS
       }),
       parseWikiTriggerRequest
     );
@@ -117,7 +122,8 @@ export class ContextWikiApiClient {
           triggerParentRunId: input.triggerParentRunId,
           dispatchNonce: input.payload.dispatchNonce,
           request: input.payload.request
-        }
+        },
+        timeoutMs: CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS
       }),
       parseAuditWikiRequest
     );
@@ -151,7 +157,8 @@ export class ContextWikiApiClient {
       method: "POST",
       path: `/internal/context/wiki/executions/${encodeURIComponent(input.boardBuildId)}/complete`,
       bearer: input.executionGrant,
-      body: { result: input.result }
+      body: { result: input.result },
+      timeoutMs: CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS
     });
     if (
       value === null ||
@@ -175,7 +182,8 @@ export class ContextWikiApiClient {
       method: "POST",
       path: `/internal/context/wiki/executions/${encodeURIComponent(input.boardBuildId)}/fail`,
       bearer: input.executionGrant,
-      body: { failure: parseWikiTriggerTerminalFailure(input.failure) }
+      body: { failure: parseWikiTriggerTerminalFailure(input.failure) },
+      timeoutMs: CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS
     });
     if (
       value === null ||
@@ -348,7 +356,8 @@ export class ContextWikiApiClient {
       method: "POST",
       path: `/internal/context/wiki/audits/${encodeURIComponent(input.auditId)}/complete`,
       bearer: input.executionGrant,
-      body: { operationId: input.operationId, result: input.result }
+      body: { operationId: input.operationId, result: input.result },
+      timeoutMs: CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS
     });
   }
 
@@ -361,7 +370,8 @@ export class ContextWikiApiClient {
       method: "POST",
       path: `/internal/context/wiki/audits/${encodeURIComponent(input.auditId)}/fail`,
       bearer: input.executionGrant,
-      body: { failure: parseAuditWikiTerminalFailure(input.failure) }
+      body: { failure: parseAuditWikiTerminalFailure(input.failure) },
+      timeoutMs: CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS
     });
     if (
       value === null ||
