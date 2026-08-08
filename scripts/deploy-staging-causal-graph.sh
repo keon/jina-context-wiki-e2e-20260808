@@ -26,6 +26,10 @@ migration_service_account="jina-migration-staging@${project}.iam.gserviceaccount
 
 owner_password_secret="jina-staging-owner-db-password"
 internal_token_secret="jina-v2-staging-internal-api-token"
+# The worker binary requires the product internal token at startup regardless
+# of topic set; the production causal deploy already pins it the same way.
+product_internal_token_secret="jina-staging-internal-api-token"
+product_internal_token_version="${JINA_PRODUCT_INTERNAL_TOKEN_VERSION:?JINA_PRODUCT_INTERNAL_TOKEN_VERSION is required and must be a numeric pinned Secret Manager version}"
 release_credential_secret="jina-staging-causal-graph-worker-release-credential"
 daytona_secret="jina-staging-daytona-api-key"
 openai_secret="jina-staging-openai-api-key"
@@ -145,7 +149,7 @@ worker_revision_suffix="${release_suffix}-r${release_secret_version}"
 worker_revision="${worker_service}-${worker_revision_suffix}"
 
 worker_environment="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_API_URL=${api_url}~JINA_WORKER_CLAIM_MODE=enabled~WORKER_TOPICS=${causal_topics}~JINA_WORKER_RELEASE_ID=${release_id}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=7800000~CONTEXT_COMPLETION_TIMEOUT_MS=600000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY~CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=128000~CONTEXT_CODEX_COMPACT_TOKENS=96000~CAUSAL_GRAPH_CODEX_MODEL=gpt-5.6-terra~CAUSAL_GRAPH_DERIVE_SECONDS=900~CONTEXT_DAYTONA_SNAPSHOT=${daytona_snapshot}"
-worker_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,CAUSAL_GRAPH_OPENAI_API_KEY=${openai_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
+worker_secrets="INTERNAL_API_TOKEN=${internal_token_secret}:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_version},JINA_WORKER_RELEASE_CREDENTIAL=${release_credential_secret}:${release_secret_version},DAYTONA_API_KEY=${daytona_secret}:latest,CAUSAL_GRAPH_OPENAI_API_KEY=${openai_secret}:latest,GITHUB_APP_ID=${github_app_id_secret}:latest,GITHUB_APP_PRIVATE_KEY=${github_app_private_key_secret}:latest,GITHUB_CLONE_TOKEN=${github_clone_token_secret}:latest"
 
 # A first revision can receive traffic, but the API rejects all of its claims
 # until the activation job records this exact release id, credential, and
