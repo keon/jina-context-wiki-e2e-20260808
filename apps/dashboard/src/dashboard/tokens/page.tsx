@@ -16,8 +16,6 @@ type LoadState = "loading" | "loaded" | "unavailable";
 interface ApiToken {
   id: string;
   name: string;
-  principal_id?: string;
-  principalId?: string;
   scopes: string[];
   createdAt: string;
   expiresAt: string;
@@ -47,6 +45,11 @@ const DEFAULT_SCOPES = ["context:query", "context:read"];
 
 function tokensUrl(selected: SelectedTenant): string {
   return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/tokens`);
+}
+
+function tokenMark(name: string): string {
+  const letters = name.replace(/[^\p{L}\p{N}]/gu, "");
+  return (letters.slice(0, 2) || "TK").toUpperCase();
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -185,14 +188,16 @@ export default function TokensPage() {
   const active = tokens.filter((token) => !token.revokedAt);
 
   return (
-    <div>
+    <div className="settings-page">
       <header className="route-intro">
-        <h1>API tokens</h1>
-        <p className="route-intro__scope">
-          Tokens authenticate external access to this workspace — MCP clients, the wiki API, and the
-          causal graph. The secret is shown once at creation and stored only as a hash. Connect a
-          client on the <Link href="/mcp">MCP page</Link>.
-        </p>
+        <div>
+          <h1>API tokens</h1>
+          <p>
+            Authenticate external access to this workspace — MCP clients, the wiki API, and the
+            causal graph. Secrets are shown once and stored only as a hash. Connect a client on the{" "}
+            <Link href="/mcp">MCP page</Link>.
+          </p>
+        </div>
       </header>
 
       {message ? (
@@ -205,139 +210,166 @@ export default function TokensPage() {
       ) : null}
 
       {mintedSecret ? (
-        <section className="integration-group" aria-label="New token secret">
-          <h2>“{mintedSecret.name}” created</h2>
-          <p>Copy the secret now — it cannot be shown again.</p>
-          <pre className="code-block code-block--sm">{mintedSecret.secret}</pre>
-          <div className="integration-row__actions">
-            <button
-              type="button"
-              className="btn btn--primary btn--sm"
-              aria-label={copied ? "Copied" : "Copy secret"}
-              onClick={() => {
-                void copyText(mintedSecret.secret).then((ok) => setCopied(ok));
-              }}
-            >
-              {copied ? "Copied" : "Copy secret"}
-            </button>
-            <button
-              type="button"
-              className="btn btn--sm btn--ghost"
-              onClick={() => setMintedSecret(null)}
-            >
-              Done
-            </button>
+        <section className="settings-card" aria-label="New token secret">
+          <div className="settings-card__head">
+            <div>
+              <h2>“{mintedSecret.name}” created</h2>
+              <p>Copy the secret now — it cannot be shown again.</p>
+            </div>
+          </div>
+          <div className="settings-form">
+            <pre className="code-block code-block--sm">{mintedSecret.secret}</pre>
+            <div className="settings-form__actions">
+              <button
+                type="button"
+                className="btn btn--sm btn--ghost"
+                onClick={() => setMintedSecret(null)}
+              >
+                Done
+              </button>
+              <button
+                type="button"
+                className="btn btn--primary btn--sm"
+                aria-label={copied ? "Copied" : "Copy secret"}
+                onClick={() => {
+                  void copyText(mintedSecret.secret).then((ok) => setCopied(ok));
+                }}
+              >
+                {copied ? "Copied" : "Copy secret"}
+              </button>
+            </div>
           </div>
         </section>
       ) : null}
 
       {writable ? (
-        <section className="integration-group" aria-label="Create token">
-          <h2>Create token</h2>
-          <div className="settings-field">
-            <label htmlFor="token-name">Name</label>
-            <input
-              id="token-name"
-              className="input"
-              value={name}
-              maxLength={200}
-              placeholder="e.g. Claude Code on my laptop"
-              onChange={(event) => setName(event.target.value)}
-            />
+        <section className="settings-card" aria-label="Create token">
+          <div className="settings-card__head">
+            <div>
+              <h2>Create token</h2>
+              <p>Scopes bound what the token can reach; expiry is required.</p>
+            </div>
           </div>
-          <fieldset className="settings-field">
-            <legend>Scopes</legend>
-            {SCOPE_OPTIONS.map((option) => (
-              <label key={option.scope} className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={scopes.includes(option.scope)}
-                  onChange={() => toggleScope(option.scope)}
-                />{" "}
-                {option.label} <span className="checkbox-row__hint">— {option.description}</span>
-              </label>
-            ))}
-          </fieldset>
-          <div className="settings-field">
-            <label htmlFor="token-expiry">Expires</label>
-            <select
-              id="token-expiry"
-              className="input"
-              value={expiresInMinutes}
-              onChange={(event) => setExpiresInMinutes(Number(event.target.value))}
-            >
-              {EXPIRY_OPTIONS.map((option) => (
-                <option key={option.minutes} value={option.minutes}>
-                  {option.label}
-                </option>
+          <div className="settings-form">
+            <label className="settings-field">
+              <span>Name</span>
+              <input
+                className="input"
+                value={name}
+                maxLength={200}
+                placeholder="e.g. Claude Code on my laptop"
+                onChange={(event) => setName(event.target.value)}
+              />
+            </label>
+            <div className="settings-field">
+              <span>Scopes</span>
+              {SCOPE_OPTIONS.map((option) => (
+                <label key={option.scope} className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={scopes.includes(option.scope)}
+                    onChange={() => toggleScope(option.scope)}
+                  />{" "}
+                  {option.label} <span className="checkbox-row__hint">— {option.description}</span>
+                </label>
               ))}
-            </select>
+            </div>
+            <label className="settings-field">
+              <span>Expires</span>
+              <select
+                className="input"
+                value={expiresInMinutes}
+                onChange={(event) => setExpiresInMinutes(Number(event.target.value))}
+              >
+                {EXPIRY_OPTIONS.map((option) => (
+                  <option key={option.minutes} value={option.minutes}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="settings-form__actions">
+              <button
+                type="button"
+                className="btn btn--primary btn--sm"
+                disabled={minting || !name.trim() || scopes.length === 0}
+                onClick={() => void mint()}
+              >
+                {minting ? "Creating…" : "Create token"}
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            className="btn btn--primary btn--sm"
-            disabled={minting || !name.trim() || scopes.length === 0}
-            onClick={() => void mint()}
-          >
-            {minting ? "Creating…" : "Create token"}
-          </button>
         </section>
       ) : null}
 
       <section className="integration-group" aria-label="Tokens">
-        <h2>Active tokens</h2>
+        <div className="integration-group__head">
+          <h2>Active tokens</h2>
+        </div>
         {state === "loading" ? (
-          <p>Loading tokens…</p>
+          <div className="settings-card">
+            <p className="settings-card__empty">Loading tokens…</p>
+          </div>
         ) : state === "unavailable" ? (
-          <p>Tokens are unavailable right now.</p>
+          <div className="settings-card">
+            <p className="settings-card__empty">Tokens are unavailable right now.</p>
+          </div>
         ) : active.length === 0 ? (
-          <p>No API tokens yet.</p>
+          <div className="settings-card">
+            <p className="settings-card__empty">No API tokens yet.</p>
+          </div>
         ) : (
-          active.map((token) => (
-            <div key={token.id} className="integration-row">
-              <div>
-                <strong>{token.name}</strong>{" "}
-                {token.scopes.map((tokenScope) => (
-                  <Badge key={tokenScope}>{tokenScope}</Badge>
-                ))}
-                <p className="integration-row__metadata">
-                  Created {formatDate(token.createdAt)} · Expires {formatDate(token.expiresAt)}
-                  {token.lastUsedAt ? ` · Last used ${formatDate(token.lastUsedAt)}` : " · Never used"}
-                </p>
-              </div>
-              {writable ? (
-                <div className="integration-row__actions">
-                  {confirmRevoke === token.id ? (
-                    <>
-                      <button
-                        type="button"
-                        className="btn btn--sm btn--primary"
-                        disabled={revoking === token.id}
-                        onClick={() => void revoke(token.id)}
-                      >
-                        {revoking === token.id ? "Revoking…" : "Confirm revoke"}
-                      </button>
+          <div className="integration-rows">
+            {active.map((token) => (
+              <div key={token.id} className="integration-row">
+                <span className="integration-mark">{tokenMark(token.name)}</span>
+                <div className="integration-row__main">
+                  <div className="integration-row__titleline">
+                    <strong>{token.name}</strong>
+                    {token.scopes.map((tokenScope) => (
+                      <Badge key={tokenScope}>{tokenScope}</Badge>
+                    ))}
+                  </div>
+                  <p className="integration-row__metadata">
+                    <span>Created {formatDate(token.createdAt)}</span>
+                    <span>Expires {formatDate(token.expiresAt)}</span>
+                    <span>{token.lastUsedAt ? `Last used ${formatDate(token.lastUsedAt)}` : "Never used"}</span>
+                  </p>
+                </div>
+                {writable ? (
+                  <div className="integration-row__actions">
+                    {confirmRevoke === token.id ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn--sm btn--ghost"
+                          onClick={() => setConfirmRevoke(null)}
+                        >
+                          Keep
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn--sm btn--primary"
+                          disabled={revoking === token.id}
+                          onClick={() => void revoke(token.id)}
+                        >
+                          {revoking === token.id ? "Revoking…" : "Confirm revoke"}
+                        </button>
+                      </>
+                    ) : (
                       <button
                         type="button"
                         className="btn btn--sm btn--ghost"
-                        onClick={() => setConfirmRevoke(null)}
+                        onClick={() => setConfirmRevoke(token.id)}
                       >
-                        Keep
+                        Revoke
                       </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn btn--sm btn--ghost"
-                      onClick={() => setConfirmRevoke(token.id)}
-                    >
-                      Revoke
-                    </button>
-                  )}
-                </div>
-              ) : null}
-            </div>
-          ))
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
         )}
       </section>
     </div>

@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { Badge } from "../components/ui";
 import { apiUrl } from "../lib/api";
 import { CONFIG_STALE_TIME_MS, DashboardRequestError } from "../lib/query-client";
 import { tenantQueryKey } from "../lib/query-keys";
@@ -16,28 +17,32 @@ interface TokensResponse {
   mcp_endpoint: string | null;
 }
 
-const MCP_TOOLS: { name: string; title: string; description: string; scope: string }[] = [
+const MCP_TOOLS: { name: string; mark: string; title: string; description: string; scope: string }[] = [
   {
     name: "search_context",
+    mark: "SE",
     title: "Search context",
     description:
-      "Deterministically select relevant wiki nodes with lexical scoring and return document excerpts with immutable evidence citations.",
+      "Deterministically select relevant wiki nodes with lexical scoring and return excerpts with immutable citations.",
     scope: "context:query",
   },
   {
     name: "list_context",
+    mark: "LI",
     title: "List context",
     description: "List derived wiki documents and their deterministic PageIndex-style hierarchy.",
     scope: "context:read",
   },
   {
     name: "read_context",
+    mark: "RE",
     title: "Read context",
     description: "Read one complete derived wiki document with its immutable source citations.",
     scope: "context:read",
   },
   {
     name: "diff_context",
+    mark: "DI",
     title: "Diff context",
     description: "Compare two immutable wiki releases without using a model.",
     scope: "context:read",
@@ -97,8 +102,9 @@ function Snippet({ label, value }: { label: string; value: string }) {
   }, [copied]);
   return (
     <div className="settings-field">
-      <div className="integration-row__actions">
-        <strong>{label}</strong>
+      <span>{label}</span>
+      <pre className="code-block code-block--sm">{value}</pre>
+      <div className="settings-form__actions">
         <button
           type="button"
           className="btn btn--sm btn--ghost"
@@ -110,7 +116,6 @@ function Snippet({ label, value }: { label: string; value: string }) {
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre className="code-block code-block--sm">{value}</pre>
     </div>
   );
 }
@@ -143,65 +148,99 @@ export default function McpPage() {
   const hasActiveToken = (tokensQuery.data?.tokens ?? []).some((token) => !token.revokedAt);
 
   return (
-    <div>
+    <div className="settings-page">
       <header className="route-intro">
-        <h1>MCP</h1>
-        <p className="route-intro__scope">
-          Use Jina from any MCP client: the wiki is exposed as four read-only MCP tools, and the
-          same token reaches the causal graph over HTTP. Authentication is a workspace API token —{" "}
-          {hasActiveToken ? (
-            <>
-              manage yours on the <Link href="/tokens">API tokens page</Link>.
-            </>
-          ) : (
-            <>
-              create one on the <Link href="/tokens">API tokens page</Link> first.
-            </>
-          )}
-        </p>
+        <div>
+          <h1>MCP</h1>
+          <p>
+            Use Jina from any MCP client: the wiki is exposed as four read-only tools, and the same
+            token reaches the causal graph over HTTP.{" "}
+            {hasActiveToken ? (
+              <>
+                Manage tokens on the <Link href="/tokens">API tokens page</Link>.
+              </>
+            ) : (
+              <>
+                Create a token on the <Link href="/tokens">API tokens page</Link> first.
+              </>
+            )}
+          </p>
+        </div>
       </header>
 
       {state === "loading" ? (
-        <p>Loading MCP details…</p>
+        <section className="settings-card" aria-label="MCP status">
+          <p className="settings-card__empty">Loading MCP details…</p>
+        </section>
       ) : state === "unavailable" ? (
-        <p>MCP details are unavailable right now.</p>
+        <section className="settings-card" aria-label="MCP status">
+          <p className="settings-card__empty">MCP details are unavailable right now.</p>
+        </section>
       ) : !endpoint ? (
-        <p>MCP is not configured for this environment.</p>
+        <section className="settings-card" aria-label="MCP status">
+          <p className="settings-card__empty">MCP is not configured for this environment.</p>
+        </section>
       ) : (
         <>
-          <section className="integration-group" aria-label="Endpoint">
-            <h2>Endpoint</h2>
-            <p>
-              Streamable HTTP, stateless, JSON responses. Send a bearer token with{" "}
-              <code>context:query</code> or <code>context:read</code> scope.
-            </p>
-            <Snippet label="MCP endpoint" value={endpoint} />
+          <section className="settings-card" aria-label="Endpoint">
+            <div className="settings-card__head">
+              <div>
+                <h2>Endpoint</h2>
+                <p>
+                  Streamable HTTP, stateless. Send a bearer token with <code>context:query</code> or{" "}
+                  <code>context:read</code> scope.
+                </p>
+              </div>
+            </div>
+            <div className="settings-form">
+              <Snippet label="MCP endpoint" value={endpoint} />
+            </div>
           </section>
 
-          <section className="integration-group" aria-label="Connect a client">
-            <h2>Connect a client</h2>
-            <Snippet label="Claude Code" value={claudeCodeSnippet(endpoint)} />
-            <Snippet label="Claude Desktop / Cursor (JSON)" value={jsonClientSnippet(endpoint)} />
-            <Snippet label="Codex (TOML)" value={codexSnippet(endpoint)} />
+          <section className="settings-card" aria-label="Connect a client">
+            <div className="settings-card__head">
+              <div>
+                <h2>Connect a client</h2>
+                <p>Paste one of these into your client, then substitute your token.</p>
+              </div>
+            </div>
+            <div className="settings-form">
+              <Snippet label="Claude Code" value={claudeCodeSnippet(endpoint)} />
+              <Snippet label="Claude Desktop / Cursor (JSON)" value={jsonClientSnippet(endpoint)} />
+              <Snippet label="Codex (TOML)" value={codexSnippet(endpoint)} />
+            </div>
           </section>
 
           <section className="integration-group" aria-label="Tools">
-            <h2>Wiki tools</h2>
-            {MCP_TOOLS.map((tool) => (
-              <div key={tool.name} className="integration-row">
-                <div>
-                  <strong>{tool.title}</strong> <code>{tool.name}</code>
-                  <p className="integration-row__metadata">
-                    {tool.description} Requires <code>{tool.scope}</code>.
-                  </p>
+            <div className="integration-group__head">
+              <h2>Wiki tools</h2>
+            </div>
+            <div className="integration-rows">
+              {MCP_TOOLS.map((tool) => (
+                <div key={tool.name} className="integration-row">
+                  <span className="integration-mark">{tool.mark}</span>
+                  <div className="integration-row__main">
+                    <div className="integration-row__titleline">
+                      <strong>{tool.title}</strong>
+                      <code>{tool.name}</code>
+                      <Badge>{tool.scope}</Badge>
+                    </div>
+                    <p className="integration-row__metadata">
+                      <span>{tool.description}</span>
+                    </p>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </section>
 
-          <section className="integration-group" aria-label="Beyond MCP">
-            <h2>Causal graph and reviews</h2>
-            <p>
+          <section className="settings-card" aria-label="Beyond MCP">
+            <div className="settings-card__head">
+              <div>
+                <h2>Causal graph and reviews</h2>
+              </div>
+            </div>
+            <p className="settings-card__note">
               The causal graph is served over HTTP with the same token:{" "}
               <code>GET {endpoint.replace(/\/mcp$/, "")}/causal-graph</code> and{" "}
               <code>…/causal-graph/issues</code> (scope <code>context:read</code>). Review runs are
