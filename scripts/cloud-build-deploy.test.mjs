@@ -49,6 +49,7 @@ const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
 const publicApiCandidateDeployment = await readFile("scripts/deploy-public-api-candidate.mjs", "utf8");
 const stagingDeployment = await readFile("scripts/deploy-staging.sh", "utf8");
 const contextTriggerDeployment = await readFile(".github/workflows/deploy-context-trigger.yml", "utf8");
+const contextTriggerPackage = JSON.parse(await readFile("services/context-trigger/package.json", "utf8"));
 const stagingSerialization = await readFile("scripts/serialize-cloud-build-deploy.sh", "utf8");
 const stagingCloudBuild = await readFile("cloudbuild.staging.yaml", "utf8");
 
@@ -111,6 +112,7 @@ test("staging routes new wiki builds through the isolated Context Trigger projec
 });
 
 test("Context Trigger deployment is isolated and syncs only its bounded runtime contract", () => {
+  assert.equal(contextTriggerPackage.packageManager, "npm@10.8.2");
   assert.match(contextTriggerDeployment, /JINA_CONTEXT_TRIGGER_PROJECT_REF/);
   assert.match(contextTriggerDeployment, /CONTEXT_WIKI_AUDIT_POLICY_VERSION/);
   assert.match(contextTriggerDeployment, /CONTEXT_WIKI_AUDITOR_CONFIG_DIGEST/);
