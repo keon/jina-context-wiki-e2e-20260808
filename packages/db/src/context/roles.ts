@@ -45,6 +45,10 @@ revoke all on all sequences in schema jina_context from public;
 revoke execute on all functions in schema jina_context from public;
 
 grant usage on schema jina_context to ${CONTEXT_ROLES.join(",")};
+-- api_tokens lives in public (promoted by product migration 0038). The token
+-- capability must not depend on the default PUBLIC usage grant, which hardened
+-- databases (and test databases that recreate the schema) revoke.
+grant usage on schema public to jina_context_tokens;
 
 grant select on
   jina_context.repositories,jina_context.repository_access,

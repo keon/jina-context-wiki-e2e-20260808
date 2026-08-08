@@ -93,6 +93,13 @@ import type { DashboardSession as Session } from "./auth.js";
 
 const FLOW_ID_LOG_VALUE = /^[a-zA-Z0-9_-]{8,80}$/;
 
+// Dashboard-issued tokens never carry context:admin; administrative Context
+// routes stay behind internally minted credentials. Bounds mirror the graph
+// service's own mint limits.
+const DASHBOARD_TOKEN_SCOPES = ["context:query", "context:read", "context:build"];
+const MIN_TOKEN_MINUTES = 5;
+const MAX_TOKEN_MINUTES = 525_600;
+
 export interface ProductAppDependencies {
   readonly githubWebhookInboxRepository?: GithubWebhookInboxRepository;
   readonly fetch?: typeof fetch;
@@ -793,6 +800,74 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
         await tenantGraphContext(tenantId),
         { graphId, repository, query },
       ));
+    },
+  );
+
+  // Tenant API tokens for external use (MCP, wiki, causal graph): member
+  // read, admin mint/revoke. Tokens are minted by the graph service; the
+  // tenant and principal come from the authenticated session and membership
+  // check, never from the request body. The secret appears once in the mint
+  // response and is never retrievable afterwards.
+  app.get("/dashboard/tenants/:tenantId/tokens", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    return c.json({
+      tokens: await graphs.listTenantApiTokens(tenantId),
+      mcp_endpoint: graphs.mcpEndpoint() ?? null,
+    });
+  });
+
+  app.post(
+    "/dashboard/tenants/:tenantId/tokens",
+    requireDashboardOrigin,
+    requireJsonContentType,
+    async (c) => {
+      const session = await requireDashboardSession(c, config);
+      const tenantId = tenantIdParam(c);
+      await requireTenantMembership(session, tenantId, { requireAdmin: true });
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      if (!name || name.length > 200) {
+        throw new ApiError(400, "token name is required and must be at most 200 characters");
+      }
+      const scopes = Array.isArray(body.scopes)
+        ? [...new Set(body.scopes.filter((scope): scope is string => typeof scope === "string"))]
+        : [];
+      if (scopes.length === 0 || !scopes.every((scope) => DASHBOARD_TOKEN_SCOPES.includes(scope))) {
+        throw new ApiError(400, `scopes must be a non-empty subset of: ${DASHBOARD_TOKEN_SCOPES.join(", ")}`);
+      }
+      const expiresInMinutes = body.expiresInMinutes;
+      if (
+        typeof expiresInMinutes !== "number" ||
+        !Number.isInteger(expiresInMinutes) ||
+        expiresInMinutes < MIN_TOKEN_MINUTES ||
+        expiresInMinutes > MAX_TOKEN_MINUTES
+      ) {
+        throw new ApiError(
+          400,
+          `expiresInMinutes must be an integer between ${MIN_TOKEN_MINUTES} and ${MAX_TOKEN_MINUTES}`,
+        );
+      }
+      const minted = await graphs.mintTenantApiToken(tenantId, { name, scopes, expiresInMinutes });
+      c.header("cache-control", "no-store");
+      return c.json(
+        { secret: minted.secret, token: minted.token, mcp_endpoint: graphs.mcpEndpoint() ?? null },
+        201,
+      );
+    },
+  );
+
+  app.post(
+    "/dashboard/tenants/:tenantId/tokens/:tokenId/revoke",
+    requireDashboardOrigin,
+    async (c) => {
+      const session = await requireDashboardSession(c, config);
+      const tenantId = tenantIdParam(c);
+      await requireTenantMembership(session, tenantId, { requireAdmin: true });
+      const tokenId = c.req.param("tokenId")?.trim();
+      if (!tokenId) throw new ApiError(400, "token id is required");
+      return c.json({ token: await graphs.revokeTenantApiToken(tenantId, tokenId) });
     },
   );
 

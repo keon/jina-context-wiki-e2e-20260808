@@ -756,3 +756,42 @@ test("mutating routes are not tagged and are never revalidated away", async () =
   assert.equal(res.status, 401, "if-none-match must not short-circuit a POST");
   assert.equal(res.headers.get("etag"), null);
 });
+
+// Tenant API token routes: the same origin/content-type/session guard chain as
+// the other credentialed tenant writes, applied before any graph call.
+test("POST tokens rejects a non-allowlisted Origin with 403", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/tenants/tenant-1/tokens", {
+    method: "POST",
+    headers: { origin: "https://evil.example", ...JSON_HEADERS },
+    body: "{}",
+  });
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "origin not allowed" });
+});
+
+test("POST tokens rejects a non-JSON content type with 415", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/tenants/tenant-1/tokens", {
+    method: "POST",
+    headers: { origin: "https://dash.example", "content-type": "text/plain" },
+    body: "{}",
+  });
+  assert.equal(res.status, 415);
+});
+
+test("token routes require a dashboard session", async () => {
+  const app = createApp(testConfig());
+  const list = await app.request("/dashboard/tenants/tenant-1/tokens");
+  assert.equal(list.status, 401);
+  const mint = await app.request("/dashboard/tenants/tenant-1/tokens", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ name: "t", scopes: ["context:read"], expiresInMinutes: 60 }),
+  });
+  assert.equal(mint.status, 401);
+  const revoke = await app.request("/dashboard/tenants/tenant-1/tokens/tok_1/revoke", {
+    method: "POST",
+  });
+  assert.equal(revoke.status, 401);
+});
