@@ -74,12 +74,15 @@ export default function TokensPage() {
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
 
-  // A workspace switch must never leak another workspace's one-time secret.
+  // A workspace switch must never leak another workspace's one-time secret,
+  // and must not carry over busy state a fenced-off response can no longer clear.
   useEffect(() => {
     setMintedSecret(null);
     setMessage(null);
     setConfirmRevoke(null);
     setCopied(false);
+    setMinting(false);
+    setRevoking(null);
   }, [selected?.tenantId]);
 
   const tokensQuery = useQuery<TokensResponse>({
@@ -156,6 +159,8 @@ export default function TokensPage() {
       const response = await fetch(`${tokensUrl(selected)}/${encodeURIComponent(tokenId)}/revoke`, {
         method: "POST",
         credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: "{}",
       });
       if (!isCurrentTenant(requestTenantId)) return;
       if (!response.ok) {

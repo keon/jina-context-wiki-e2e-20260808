@@ -861,6 +861,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
   app.post(
     "/dashboard/tenants/:tenantId/tokens/:tokenId/revoke",
     requireDashboardOrigin,
+    requireJsonContentType,
     async (c) => {
       const session = await requireDashboardSession(c, config);
       const tenantId = tenantIdParam(c);

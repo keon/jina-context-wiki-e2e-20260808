@@ -792,6 +792,18 @@ test("token routes require a dashboard session", async () => {
   assert.equal(mint.status, 401);
   const revoke = await app.request("/dashboard/tenants/tenant-1/tokens/tok_1/revoke", {
     method: "POST",
+    headers: JSON_HEADERS,
+    body: "{}",
   });
   assert.equal(revoke.status, 401);
+});
+
+test("POST token revoke rejects a non-JSON content type with 415", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/tenants/tenant-1/tokens/tok_1/revoke", {
+    method: "POST",
+    headers: { origin: "https://dash.example", "content-type": "text/plain" },
+    body: "{}",
+  });
+  assert.equal(res.status, 415);
 });
