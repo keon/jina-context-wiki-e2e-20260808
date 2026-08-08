@@ -10,6 +10,7 @@ import { resolveContextMarkdownLink } from "../../lib/context-citations.ts";
 import type { ContextCatalogDocument, ContextRelease } from "../../lib/types.ts";
 
 let mermaidLoader: Promise<(typeof import("mermaid"))["default"]> | undefined;
+const MERMAID_RENDER_TIMEOUT_MS = 2_000;
 
 function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
   mermaidLoader ??= import("mermaid").then(({ default: mermaid }) => {
@@ -32,20 +33,40 @@ function MermaidDiagram({ source }: { readonly source: string }) {
 
   useEffect(() => {
     let active = true;
+    let settled = false;
     const diagramId = `context-mermaid-${reactId.replace(/[^a-z0-9_-]/gi, "")}`;
     setSvg("");
     setRenderFailed(false);
+    const timeout = globalThis.setTimeout(() => {
+      if (!active || settled) return;
+      settled = true;
+      removeMermaidArtifacts(diagramId);
+      setRenderFailed(true);
+    }, MERMAID_RENDER_TIMEOUT_MS);
     void loadMermaid()
       .then((mermaid) => mermaid.render(diagramId, source))
       .then(({ svg: rendered }) => {
-        if (active) setSvg(rendered);
+        if (!active || settled) {
+          removeMermaidArtifacts(diagramId);
+          return;
+        }
+        settled = true;
+        globalThis.clearTimeout(timeout);
+        setSvg(rendered);
       })
       .catch(() => {
+        if (settled) {
+          removeMermaidArtifacts(diagramId);
+          return;
+        }
+        settled = true;
+        globalThis.clearTimeout(timeout);
         removeMermaidArtifacts(diagramId);
         if (active) setRenderFailed(true);
       });
     return () => {
       active = false;
+      globalThis.clearTimeout(timeout);
       removeMermaidArtifacts(diagramId);
     };
   }, [reactId, source]);
