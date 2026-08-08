@@ -30,12 +30,6 @@ test("Context runtime expands snapshot directly to the page planner", () => {
   const planner = applied.state.tasks.find((task) => task.type === contextWorkflowBoardTaskTypes.planner);
   assert.ok(planner);
   assert.equal(findTask(applied.state, created.buildTaskId)?.metadata.commitSha, COMMIT);
-  assert.equal(
-    applied.state.tasks.some((task) =>
-      ["plan-context-research", "research-context-subject", "plan-context-publication"].includes(task.type)
-    ),
-    false
-  );
 });
 
 test("Context runtime expands one planner result to affected pages and one publisher", () => {
@@ -83,20 +77,9 @@ test("Context runtime expands one planner result to affected pages and one publi
     requiredDependencies(applied.state, publishers[0]!.id).sort(),
     [initial.plannerTaskId, ...pageTasks.map((task) => task.id)].sort()
   );
-  assert.equal(
-    applied.state.tasks.some((task) =>
-      [
-        "challenge-context-sources",
-        "evaluate-context-tasks",
-        "repair-context-gaps",
-        "certify-context-release"
-      ].includes(task.type)
-    ),
-    false
-  );
 });
 
-test("Context runtime rejects pre-cutover result envelopes", () => {
+test("Context runtime rejects result envelopes without the current contract", () => {
   const initial = createContextWorkflowBoardBuild(createEmptyBoardState(), buildScope());
   assert.throws(
     () =>

@@ -28,7 +28,7 @@ test("relational Board migration and admission are durable and replay-safe", { s
         workflowId,
         tenantId: "tenant-relational-board",
         workflowType: "pr_review",
-        pipelineVersion: "pr_review.v1",
+        pipelineVersion: "fixture.pipeline.current",
         subjectType: "github_pull_request",
         subjectId: "123:42:head-sha",
         dedupeKey: "review:123:42:head-sha",
@@ -37,16 +37,16 @@ test("relational Board migration and admission are durable and replay-safe", { s
         tasks: [
           {
             id: prepareTaskId,
-            taskType: "prepare-review",
-            topic: "prepare-review",
+            taskType: "fixture-prepare",
+            topic: "fixture-prepare",
             status: "queued",
             maxAttempts: 3
           },
           {
             id: runtimeTaskId,
             parentTaskId: prepareTaskId,
-            taskType: "runtime-review",
-            topic: "runtime-review",
+            taskType: "fixture-runtime",
+            topic: "fixture-runtime",
             status: "blocked",
             maxAttempts: 3
           }
@@ -69,7 +69,7 @@ test("relational Board migration and admission are durable and replay-safe", { s
       repository.admitWorkflow(client, {
         tenantId: "tenant-relational-board",
         workflowType: "pr_review",
-        pipelineVersion: "pr_review.v1",
+        pipelineVersion: "fixture.pipeline.current",
         subjectType: "github_pull_request",
         subjectId: "123:42:head-sha",
         dedupeKey: "review:123:42:head-sha",
@@ -87,7 +87,7 @@ test("relational Board migration and admission are durable and replay-safe", { s
         repository.admitWorkflow(client, {
           tenantId: "tenant-relational-board",
           workflowType: "different_workflow",
-          pipelineVersion: "pr_review.v1",
+          pipelineVersion: "fixture.pipeline.current",
           subjectType: "github_pull_request",
           subjectId: "123:42:head-sha",
           dedupeKey: "review:123:42:head-sha",

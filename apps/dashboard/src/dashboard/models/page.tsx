@@ -69,22 +69,16 @@ const TRIGGERS: { value: ReviewTriggerMode; title: string; description: string }
   { value: "manual_only", title: "Manual only", description: "Review only when @usejina is mentioned in a comment." },
 ];
 
-function modelProviderUrl(selected: SelectedTenant | null): string {
-  return selected
-    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/model-provider`)
-    : apiUrl("/dashboard/model-provider");
+function modelProviderUrl(selected: SelectedTenant): string {
+  return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/model-provider`);
 }
 
-function modelSettingsUrl(selected: SelectedTenant | null): string {
-  return selected
-    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/model-settings`)
-    : apiUrl("/dashboard/model-settings");
+function modelSettingsUrl(selected: SelectedTenant): string {
+  return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/model-settings`);
 }
 
-function reviewTriggerUrl(selected: SelectedTenant | null): string {
-  return selected
-    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/review-trigger`)
-    : apiUrl("/dashboard/review-trigger");
+function reviewTriggerUrl(selected: SelectedTenant): string {
+  return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/review-trigger`);
 }
 
 function normalizeProvider(value: unknown): ModelProvider {
@@ -128,10 +122,10 @@ export default function ModelsPage() {
     queryKey: configKey,
     queryFn: async ({ signal }) => {
       const [providerData, settingsData, catalogData, triggerData] = await Promise.all([
-        readJson(modelProviderUrl(selected), signal),
-        readJson(modelSettingsUrl(selected), signal),
+        readJson(modelProviderUrl(selected!), signal),
+        readJson(modelSettingsUrl(selected!), signal),
         readJson(apiUrl("/dashboard/models"), signal),
-        readJson(reviewTriggerUrl(selected), signal),
+        readJson(reviewTriggerUrl(selected!), signal),
       ]);
       const providerRecord = providerData as { provider?: unknown };
       const catalogRecord = catalogData as { models?: unknown; defaults?: unknown };
@@ -144,6 +138,7 @@ export default function ModelsPage() {
         defaults: normalizeStageDefaults(catalogRecord?.defaults) ?? { ...FALLBACK_STAGE_DEFAULTS },
       };
     },
+    enabled: Boolean(selected),
     staleTime: CONFIG_STALE_TIME_MS,
   });
 
@@ -193,7 +188,7 @@ export default function ModelsPage() {
     setProvider(next);
     markSaving();
     try {
-      const response = await fetch(modelProviderUrl(selected), {
+      const response = await fetch(modelProviderUrl(selected!), {
         method: "PUT",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -221,7 +216,7 @@ export default function ModelsPage() {
     setSettings(next);
     markSaving();
     try {
-      const response = await fetch(modelSettingsUrl(selected), {
+      const response = await fetch(modelSettingsUrl(selected!), {
         method: "PUT",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -248,7 +243,7 @@ export default function ModelsPage() {
     setTrigger(next);
     markSaving();
     try {
-      const response = await fetch(reviewTriggerUrl(selected), {
+      const response = await fetch(reviewTriggerUrl(selected!), {
         method: "PUT",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -287,7 +282,9 @@ export default function ModelsPage() {
         </div>
       </header>
 
-      {pageState === "unavailable" ? (
+      {!selected ? (
+        <ModelsState title="No workspace selected" detail="Select a workspace to configure model routing." />
+      ) : pageState === "unavailable" ? (
         <ModelsState
           title="Models are temporarily unavailable"
           detail="Your saved routing has not been changed. Retry when the dashboard service is reachable."

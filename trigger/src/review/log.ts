@@ -36,7 +36,7 @@ export function reviewContextLogSummary(context: CodegraphReviewContextResult): 
     changed_file_count: context.changedFiles.length,
     changed_files: cappedList(context.changedFiles, MAX_FILES),
     diff_stat_preview: previewText(context.diffStat, LONG_PREVIEW_CHARS),
-    codegraph_preview: previewText(context.codegraphMarkdown, LONG_PREVIEW_CHARS),
+    codegraph_preview: previewText(context.codegraphMarkdown, LONG_PREVIEW_CHARS)
   };
 }
 
@@ -47,7 +47,7 @@ export function runtimeReviewLogSummary(
     unanchoredFindings?: RuntimeReviewFinding[];
     lowConfidenceFindings?: RuntimeReviewFinding[];
     comments?: unknown[];
-  },
+  }
 ): Record<string, unknown> {
   return {
     status: result.status,
@@ -56,20 +56,19 @@ export function runtimeReviewLogSummary(
     changed_file_count: result.changedFiles.length,
     areas_count: result.areas.length,
     tasks_count: result.areas.reduce((sum, area) => sum + area.tasks.length, 0),
-    blocked_count: result.areas.reduce((sum, area) => sum + area.blocked.length, 0),
     findings_count: result.findings.length,
     publishable_findings_count: reviewRequest?.publishableFindings?.length ?? 0,
     inline_comment_count: reviewRequest?.comments?.length ?? 0,
     unanchored_findings_count: reviewRequest?.unanchoredFindings?.length ?? 0,
     low_confidence_findings_held_back: reviewRequest?.lowConfidenceFindings?.length ?? 0,
-    merge_score: result.readiness?.score ?? result.finalReview?.readiness.score,
+    merge_score: result.readiness?.score,
     merge_recommendation: previewOptional(
-      result.readiness?.recommendation ?? result.finalReview?.readiness.recommendation,
-      TEXT_PREVIEW_CHARS,
+      result.readiness?.recommendation,
+      TEXT_PREVIEW_CHARS
     ),
     merge_rationale: previewOptional(
-      result.readiness?.rationale ?? result.finalReview?.readiness.rationale,
-      TEXT_PREVIEW_CHARS,
+      result.readiness?.rationale,
+      TEXT_PREVIEW_CHARS
     ),
     publication_area_count: result.publication?.areaSummaries.length ?? 0,
     publication_issue_count: result.publication?.issues.length ?? 0,
@@ -84,7 +83,7 @@ export function runtimeReviewLogSummary(
     context_graph_queries_failed: result.model_call_summary?.contextGraphQueriesFailed,
     ...jinaConfigurationLogSummary(result),
     findings: summarizeFindingsForLog(result.findings, reviewRequest),
-    error: previewOptional(result.error, TEXT_PREVIEW_CHARS),
+    error: previewOptional(result.error, TEXT_PREVIEW_CHARS)
   };
 }
 
@@ -99,9 +98,7 @@ export function runtimeReviewArtifactLogSummary(result: RuntimeReviewResult): Re
     task_count: area.tasks.length,
     issue_count: area.issues.length,
     non_issue_count: area.nonIssues.length,
-    blocked_count: area.blocked.length,
-    tool_call_count: area.toolCalls.length,
-    error: previewOptional(area.error, TEXT_PREVIEW_CHARS),
+    error: previewOptional(area.error, TEXT_PREVIEW_CHARS)
   }));
   const publicationIssues = (result.publication?.issues ?? []).slice(0, MAX_FINDINGS).map((issue) => ({
     title: previewText(issue.title, TEXT_PREVIEW_CHARS),
@@ -109,7 +106,7 @@ export function runtimeReviewArtifactLogSummary(result: RuntimeReviewResult): Re
     severity_description: previewText(issue.severityDescription, TEXT_PREVIEW_CHARS),
     body_preview: previewText(issue.body, TEXT_PREVIEW_CHARS),
     source_fingerprint_count: issue.sourceFingerprints.length,
-    source_fingerprints: cappedList(issue.sourceFingerprints, MAX_FILES),
+    source_fingerprints: cappedList(issue.sourceFingerprints, MAX_FILES)
   }));
 
   return {
@@ -118,24 +115,24 @@ export function runtimeReviewArtifactLogSummary(result: RuntimeReviewResult): Re
       scope_rationale: previewOptional(result.plan.scopeRationale, TEXT_PREVIEW_CHARS),
       intent_summary: previewOptional(result.plan.intentSummary, TEXT_PREVIEW_CHARS),
       planned_area_count: result.plan.areas.length,
-      investigation_rounds: [...new Set(result.plan.areas.map((area) => area.round).filter(Boolean))],
+      investigation_rounds: [...new Set(result.plan.areas.map((area) => area.round).filter(Boolean))]
     },
     investigations: {
       total_count: result.areas.length,
       omitted_count: Math.max(0, result.areas.length - areas.length),
-      areas,
+      areas
     },
     summarizer: {
-      completed: Boolean(result.finalReview || result.publication || result.readiness),
-      summary: previewOptional(result.finalReviewSummary ?? result.finalReview?.summary, TEXT_PREVIEW_CHARS),
-      merge_score: result.readiness?.score ?? result.finalReview?.readiness.score,
+      completed: Boolean(result.publication || result.readiness),
+      summary: previewOptional(result.summary, TEXT_PREVIEW_CHARS),
+      merge_score: result.readiness?.score,
       merge_recommendation: previewOptional(
-        result.readiness?.recommendation ?? result.finalReview?.readiness.recommendation,
-        TEXT_PREVIEW_CHARS,
+        result.readiness?.recommendation,
+        TEXT_PREVIEW_CHARS
       ),
       merge_rationale: previewOptional(
-        result.readiness?.rationale ?? result.finalReview?.readiness.rationale,
-        TEXT_PREVIEW_CHARS,
+        result.readiness?.rationale,
+        TEXT_PREVIEW_CHARS
       ),
       area_summary_count: result.publication?.areaSummaries.length ?? 0,
       issue_count: result.publication?.issues.length ?? 0,
@@ -143,8 +140,8 @@ export function runtimeReviewArtifactLogSummary(result: RuntimeReviewResult): Re
       dismissed_candidate_count: result.publication?.dismissedCandidates?.length ?? 0,
       issues_omitted_count: Math.max(0, (result.publication?.issues.length ?? 0) - publicationIssues.length),
       issues: publicationIssues,
-      error: previewOptional(result.finalReview?.error ?? result.error, TEXT_PREVIEW_CHARS),
-    },
+      error: previewOptional(result.error, TEXT_PREVIEW_CHARS)
+    }
   };
 }
 
@@ -168,7 +165,7 @@ function jinaConfigurationLogSummary(result: RuntimeReviewResult): Record<string
     jina_proposed_config_source: change.proposedConfig?.source ?? "defaults",
     jina_proposed_config_warning_count: change.proposedWarnings.length,
     jina_proposed_config_warnings: change.proposedWarnings.map((warning) => previewText(warning, TEXT_PREVIEW_CHARS)),
-    jina_proposed_config_applied_to_current_review: change.appliesToCurrentReview,
+    jina_proposed_config_applied_to_current_review: change.appliesToCurrentReview
   };
 }
 
@@ -178,7 +175,7 @@ export function summarizeFindingsForLog<T extends LogFinding>(
     publishableFindings?: readonly T[];
     unanchoredFindings?: readonly T[];
     lowConfidenceFindings?: readonly T[];
-  } = {},
+  } = {}
 ): FindingLogSummary {
   const publishable = new Set(publishability.publishableFindings ?? []);
   const unanchored = new Set(publishability.unanchoredFindings ?? []);
@@ -188,7 +185,7 @@ export function summarizeFindingsForLog<T extends LogFinding>(
   return {
     total_count: findings.length,
     omitted_count: Math.max(0, findings.length - visible.length),
-    findings: visible.map((finding) => findingLogEntry(finding, { publishable, unanchored, lowConfidence })),
+    findings: visible.map((finding) => findingLogEntry(finding, { publishable, unanchored, lowConfidence }))
   };
 }
 
@@ -198,7 +195,7 @@ function findingLogEntry<T extends LogFinding>(
     publishable: Set<T>;
     unanchored: Set<T>;
     lowConfidence: Set<T>;
-  },
+  }
 ): Record<string, unknown> {
   const entry: Record<string, unknown> = {
     fingerprint: finding.fingerprint,
@@ -216,7 +213,7 @@ function findingLogEntry<T extends LogFinding>(
     evidence_preview: evidencePreview(finding),
     publishable: publishability.publishable.has(finding),
     unanchored: publishability.unanchored.has(finding),
-    low_confidence_held_back: publishability.lowConfidence.has(finding),
+    low_confidence_held_back: publishability.lowConfidence.has(finding)
   };
 
   for (const key of Object.keys(entry)) {
@@ -246,7 +243,7 @@ function evidencePreview(finding: LogFinding): string | undefined {
 function cappedList(values: readonly string[], max: number): { values: string[]; omitted_count: number } {
   return {
     values: values.slice(0, max),
-    omitted_count: Math.max(0, values.length - max),
+    omitted_count: Math.max(0, values.length - max)
   };
 }
 

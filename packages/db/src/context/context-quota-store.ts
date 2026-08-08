@@ -117,9 +117,6 @@ function parseQuotaLedger(value: unknown, tenantId: string): ContextTenantQuotaL
     timestamp(artifact.committedAt, `${label}.committedAt`);
   });
   nonNegativeInteger(ledger.artifactBytes, "quota ledger artifactBytes");
-  objectMap(ledger.artifactDeletionOperations, "quota ledger artifactDeletionOperations", (entry, label) =>
-    nonEmptyString(record(entry, label).artifactId, `${label}.artifactId`)
-  );
   const model = record(ledger.modelMonth, "quota ledger modelMonth");
   month(model.month, "quota ledger modelMonth.month");
   for (const field of ["requests", "inputTokens", "outputTokens", "cachedInputTokens", "reservedTokens"] as const) {

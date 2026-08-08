@@ -9,11 +9,11 @@ export const WORKSPACE_SESSION_ERROR_MESSAGE =
 
 export function tenantAuthorizationErrorMessage(
   status: number,
-  authMode: "disabled" | "github" | "hybrid" | "clerk",
+  authMode: "disabled" | "clerk",
   payload?: unknown,
 ): string | null {
   if (status === 403) return tenantAccessErrorMessage(payload);
-  if (status === 401 && (authMode === "clerk" || authMode === "hybrid")) {
+  if (status === 401 && authMode === "clerk") {
     return WORKSPACE_SESSION_ERROR_MESSAGE;
   }
   return null;

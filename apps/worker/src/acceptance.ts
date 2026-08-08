@@ -195,15 +195,9 @@ export async function runProductionContextAcceptance(
           : undefined;
       if (remediationMode) {
         remediationAttempts += 1;
-        const checkpoint =
-          remediationMode === "page_remediation"
-            ? "page"
-            : remediationMode === "gate_remediation"
-              ? "global gate"
-              : "recoverable stage";
         log(
           `Production context build ${buildId} resumed from a retained ` +
-            `${checkpoint} checkpoint (${remediationAttempts}/${MAX_PRODUCTION_REMEDIATIONS})`
+            `task checkpoint (${remediationAttempts}/${MAX_PRODUCTION_REMEDIATIONS})`
         );
         await delay(pollIntervalMs);
         continue;
@@ -410,24 +404,6 @@ export async function runProductionContextAcceptance(
   );
 
   const { releaseId, commitSha, releaseCount, documentCount, citationCount, mcpCitationCount } = queryAcceptance;
-
-  // Projection consumers drain asynchronously, so reading the depth once the
-  // instant a build completes asks whether they have finished yet, not whether
-  // they finish. A release failed on exactly that -- acl and retention each one
-  // deep, moments from empty -- so this waits for the backlog to drain and only
-  // fails if it stays.
-  const backlogDeadline = Date.now() + (optionalPositiveInteger(process.env.ACCEPTANCE_BACKLOG_TIMEOUT_MS) ?? 120_000);
-  for (;;) {
-    const metrics = await apiJson(fetchImpl, `${apiUrl}/wiki/metrics?repository=${encodeURIComponent(repository)}`, {
-      headers: internalHeaders
-    });
-    const pending = Object.entries(record(metrics.outboxDepthByConsumer)).filter(([, value]) => Number(value) > 0);
-    if (pending.length === 0) break;
-    if (Date.now() >= backlogDeadline) {
-      throw new Error(`production context backlog is not empty: ${JSON.stringify(pending)}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-  }
   const webSurfaceCount = config.webSurfaceChecks
     ? await verifyProductionWebSurfaces(fetchImpl, config.webSurfaceChecks, {
         repository,
@@ -1047,7 +1023,6 @@ export function productionAcceptanceExitCode(error: unknown): number {
   if (/published release|certified release|release.*commit|commitSha/.test(message)) return 21;
   if (/context document catalog|derived context/.test(message)) return 22;
   if (/citation|retrieval|search|returned no context|unexpectedly generated an answer|MCP/.test(message)) return 23;
-  if (message.includes("backlog")) return 24;
   return 25;
 }
 
@@ -1098,7 +1073,7 @@ async function verifyWorkerHealth(
   throw new Error(`worker health verification failed: ${lastFailure ?? "no response"}`);
 }
 
-export type ProductionRemediationMode = "page_remediation" | "gate_remediation" | "checkpoint_retry";
+export type ProductionRemediationMode = "checkpoint_retry";
 
 export async function requestProductionRemediation(input: {
   readonly fetchImpl: typeof fetch;
@@ -1122,30 +1097,27 @@ export async function requestProductionRemediation(input: {
   if (taskIds.length !== 1) {
     throw new Error("production remediation must identify exactly one recovery target");
   }
-  const remediationMode: ProductionRemediationMode =
-    mode === "page_remediation" || mode === "gate_remediation" ? mode : "checkpoint_retry";
-  const requestMode =
-    remediationMode === "page_remediation"
-      ? "page-remediation"
-      : remediationMode === "gate_remediation"
-        ? "gate-remediation"
-        : "checkpoint-retry";
-  await apiJson(input.fetchImpl, `${input.apiUrl}/wiki/builds/${encodeURIComponent(input.buildId)}/retry`, {
-    method: "POST",
-    headers: input.internalHeaders,
-    body: JSON.stringify({
-      taskIds,
-      requestKey:
-        `production-acceptance:${input.requestScope}:${input.buildId}:` +
-        `${requestMode}:${input.attempt}:${taskIds[0]}`,
-      reason:
-        remediationMode === "page_remediation"
-          ? "Production acceptance resumed one bounded citation-quality page from its retained checkpoint; preserve supported bindings and repair only current findings."
-          : remediationMode === "gate_remediation"
-            ? "Production acceptance resumed one bounded global quality-gate pass from its retained draft and gate checkpoints; repair only current findings."
-            : "Production acceptance resumed one recoverable stage from retained upstream checkpoints; use its Board failure observations and preserve completed work."
-    })
-  });
+  if (mode !== undefined && mode !== "ordinary" && mode !== "deadline_recovery") {
+    const renderedMode = typeof mode === "string" ? mode : JSON.stringify(mode);
+    throw new Error(`production remediation received unsupported mode ${renderedMode ?? "<unserializable>"}`);
+  }
+  const remediationMode = "checkpoint_retry" as const;
+  const taskId = taskIds[0]!;
+  await apiJson(
+    input.fetchImpl,
+    `${input.apiUrl}/wiki/builds/${encodeURIComponent(input.buildId)}/tasks/${encodeURIComponent(taskId)}/retry`,
+    {
+      method: "POST",
+      headers: input.internalHeaders,
+      body: JSON.stringify({
+        requestKey:
+          `production-acceptance:${input.requestScope}:${input.buildId}:` +
+          `checkpoint-retry:${input.attempt}:${taskId}`,
+        reason:
+          "Production acceptance resumed one recoverable task from retained upstream checkpoints; use its Board failure observations and preserve completed work."
+      })
+    }
+  );
   return remediationMode;
 }
 

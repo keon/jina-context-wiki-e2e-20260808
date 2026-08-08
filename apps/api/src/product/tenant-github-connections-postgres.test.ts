@@ -3,12 +3,10 @@ import { test } from "node:test";
 
 import pg from "pg";
 
-import { rollbackInstallationTenantMove } from "./installation-tenant-transition.js";
-
 const connectionString = process.env.TEST_DATABASE_URL;
 
 test(
-  "one Jina tenant owns repositories from multiple exact GitHub installations and can roll back safely",
+  "one Jina tenant owns repositories from multiple exact GitHub installations",
   { skip: connectionString ? false : "TEST_DATABASE_URL is not configured" },
   async () => {
     assert.ok(connectionString);
@@ -21,7 +19,6 @@ test(
       getReviewGraphTarget,
       isGithubInstallationInstaller,
       listTenantRepositoryAccess,
-      listViewerTenants,
       recordInstallation,
     } = await import("./store.js");
 
@@ -56,10 +53,6 @@ test(
       assert.ok(tenantA);
       assert.ok(tenantB);
       assert.notEqual(tenantA, tenantB);
-      assert.deepEqual(
-        new Set((await listViewerTenants(seed + 3)).map((tenant) => tenant.tenant_id)),
-        new Set([tenantA, tenantB]),
-      );
       assert.equal(await isGithubInstallationInstaller(installationB, seed + 3), true);
       await client.query(
         `update installations
@@ -100,24 +93,6 @@ test(
         `update installations set created_at = now() where github_installation_id = $1`,
         [installationB],
       );
-      await client.query(
-        `insert into repositories
-           (tenant_id, github_repo_id, owner, name, default_branch, private, enabled)
-         values ($1, $2, 'multi-org-b', 'legacy-unmapped', 'main', true, true)`,
-        [tenantB, seed + 22],
-      );
-      await assert.rejects(
-        connectGithubInstallationToTenant({
-          tenantId: tenantA,
-          installationId: installationB,
-          account: { id: seed + 2, login: "multi-org-b", type: "Organization" },
-          repositories: [],
-          movedByGithubUserId: seed + 3,
-        }),
-        /unresolved legacy repositories/,
-      );
-      await client.query("delete from repositories where github_repo_id = $1", [seed + 22]);
-
       const connected = await connectGithubInstallationToTenant({
         tenantId: tenantA,
         installationId: installationB,
@@ -128,11 +103,6 @@ test(
         movedByGithubUserId: seed + 3,
       });
       assert.deepEqual(connected, { tenantId: tenantA, moved: true });
-      assert.deepEqual(
-        (await listViewerTenants(seed + 3)).map((tenant) => tenant.tenant_id),
-        [tenantA],
-        "the empty account-derived source workspace is retired from the switcher",
-      );
       assert.equal(
         await recordInstallation({
           installationId: reinstalledB,
@@ -163,42 +133,11 @@ test(
       );
       assert.equal((await getDispatchBillingContext(installationB))?.tenantId, tenantA);
 
-      // Dry-run the actual rollback primitive inside a transaction. Both the
-      // installation and repository return to their original workspace.
-      await client.query("begin");
-      await client.query(
-        `insert into repositories
-           (tenant_id, github_repo_id, owner, name, default_branch, private, enabled)
-         values ($1, $2, 'unknown', 'legacy-unmapped', 'main', true, true)`,
-        [tenantA, seed + 23],
-      );
-      await assert.rejects(
-        rollbackInstallationTenantMove(client, installationB, "postgres-test"),
-        /repository scope changed/,
-      );
-      await client.query("rollback");
-
-      await client.query("begin");
-      const rollback = await rollbackInstallationTenantMove(client, installationB, "postgres-test");
-      assert.deepEqual(rollback, { fromTenantId: tenantA, toTenantId: tenantB });
-      const reverted = await client.query<{ installation_tenant: string; repository_tenant: string }>(
-        `select installation.tenant_id as installation_tenant,
-                repository.tenant_id as repository_tenant
-           from installations installation
-           join repositories repository on repository.installation_id = installation.id
-          where installation.github_installation_id = $1
-            and repository.github_repo_id = $2`,
-        [installationB, repoB],
-      );
-      assert.deepEqual(reverted.rows[0], { installation_tenant: tenantB, repository_tenant: tenantB });
-      const sourceTenant = await client.query<{ merged_into_tenant_id: string | null }>(
-        "select merged_into_tenant_id from tenants where id = $1",
-        [tenantB],
-      );
-      assert.equal(sourceTenant.rows[0].merged_into_tenant_id, null);
-      await client.query("rollback");
+      const sourceTenant = await client.query("select id from tenants where id = $1", [tenantB]);
+      assert.equal(sourceTenant.rowCount, 0, "the empty account-derived tenant shell is deleted after connection");
 
       const reviewRunId = await createReviewRun({
+        idempotencyKey: `review:${installationB}:${repoB}:1:${"a".repeat(40)}:code_review`,
         installationId: installationB,
         account: { id: seed + 2, login: "multi-org-b", type: "Organization" },
         repository: {
@@ -211,8 +150,7 @@ test(
       });
       assert.ok(reviewRunId);
 
-      // Once tenant-owned history exists, neither reconnect nor rollback may
-      // silently change the historical billing owner.
+      // A deleted source shell cannot be selected as a workspace again.
       await assert.rejects(
         connectGithubInstallationToTenant({
           tenantId: tenantB,
@@ -223,19 +161,8 @@ test(
         }),
         /target Jina tenant does not exist/,
       );
-      await client.query("begin");
-      await assert.rejects(
-        rollbackInstallationTenantMove(client, installationB, "postgres-test"),
-        /has Jina history after the move/,
-      );
-      await client.query("rollback");
     } finally {
       await client.query("rollback").catch(() => {});
-      await client
-        .query("delete from installation_tenant_moves where github_installation_id = any($1::bigint[])", [
-          [installationA, installationB],
-        ])
-        .catch(() => {});
       if (tenantA || tenantB) {
         await client
           .query("delete from tenants where id = any($1::uuid[])", [[tenantA, tenantB].filter(Boolean)])

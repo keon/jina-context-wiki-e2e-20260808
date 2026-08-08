@@ -8,15 +8,13 @@ import {
   upsertGithubUserIdentity,
 } from "./internal-user.js";
 import {
-  clerkMembershipBootstrapWithClient,
-  completeClerkMembershipBootstrapWithClient,
   syncClerkTenantMembershipsWithClient,
 } from "./store.js";
 
 const connectionString = process.env.TEST_DATABASE_URL;
 
 test(
-  "Clerk identity and membership bridge is additive, explicit, idempotent, and reversible",
+  "Clerk identity and membership projection is explicit and idempotent",
   { skip: connectionString ? false : "TEST_DATABASE_URL is not configured" },
   async () => {
     assert.ok(connectionString);
@@ -45,37 +43,6 @@ test(
          returning id`,
         [`Bridge ${seed}`, clerkOrganizationId],
       );
-      await client.query(
-        `insert into tenant_members
-           (tenant_id, github_user_id, github_login, user_id, role, source, synced_at)
-         values ($1, $2, $3, $4, 'admin', 'installer', now())`,
-        [tenant.rows[0].id, githubUserId, `bridge-${seed}`, identity.userId],
-      );
-
-      assert.deepEqual(
-        await clerkMembershipBootstrapWithClient(client, clerkUserId, identity.userId),
-        {
-          pending: true,
-          memberships: [
-            {
-              organizationId: clerkOrganizationId,
-              name: `Bridge ${seed}`,
-              role: "admin",
-            },
-          ],
-        },
-      );
-      await completeClerkMembershipBootstrapWithClient(client, clerkUserId, identity.userId);
-      assert.deepEqual(
-        await clerkMembershipBootstrapWithClient(client, clerkUserId, identity.userId),
-        { pending: false, memberships: [] },
-      );
-      await completeClerkMembershipBootstrapWithClient(client, clerkUserId, identity.userId);
-      await assert.rejects(
-        () => completeClerkMembershipBootstrapWithClient(client, `${clerkUserId}_conflict`, identity.userId),
-        /identity conflict/,
-      );
-
       assert.deepEqual(
         await linkClerkUserIdentity(client, {
           clerkUserId,
@@ -144,14 +111,6 @@ test(
         clerk_user_id: clerkUserId,
         user_id: identity.userId,
       });
-      const legacyMembership = await client.query<{ role: string; source: string }>(
-        `select role, source
-           from tenant_members
-          where tenant_id = $1 and github_user_id = $2`,
-        [tenant.rows[0].id, githubUserId],
-      );
-      assert.deepEqual(legacyMembership.rows[0], { role: "admin", source: "installer" });
-
       await syncClerkTenantMembershipsWithClient(client, {
         clerkUserId,
         githubUserId,
@@ -167,15 +126,6 @@ test(
           )
         ).rowCount,
         0,
-      );
-      assert.equal(
-        (
-          await client.query(
-            "select 1 from tenant_members where tenant_id = $1 and github_user_id = $2 and source = 'installer'",
-            [tenant.rows[0].id, githubUserId],
-          )
-        ).rowCount,
-        1,
       );
     } finally {
       await client.query("rollback").catch(() => undefined);

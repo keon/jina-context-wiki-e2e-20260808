@@ -29,7 +29,6 @@ export async function resolveProviderKeys(
     openai_api_key?: string | null;
     codex_harness_auth?: string | null;
     codex_harness_connected_at_ms?: number | null;
-    harness_owner_login?: string | null;
     // Per-model OpenAI pricing (exact decimal per-token strings) keyed by the
     // `openai/<model>` slug. Drives the capture proxy's native-route cost on managed
     // runs; null/absent means native pricing is unknown (cost recorded as missing).

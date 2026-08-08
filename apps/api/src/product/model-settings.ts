@@ -1,17 +1,12 @@
 import type { Context } from "hono";
 
-import { requireDashboardSession } from "./auth.js";
 import { HARNESS_MODELS } from "./codex-harness.js";
 import { multiplyDecimalStringByPowerOfTen } from "./billing-math.js";
-import type { AppConfig } from "./config.js";
 import { ApiError } from "./errors.js";
 import {
-  EMPTY_MODEL_SETTINGS,
-  getTenantModelSettings,
   normalizeFallbackPolicy,
   normalizeReasoningEffort,
   platformModelDefaults,
-  saveTenantModelSettings,
   type ModelSettings,
 } from "./store.js";
 
@@ -259,28 +254,6 @@ export async function validateModelSettingsSlugs(
       throw new ApiError(400, `unknown model slug: ${slug}`);
     }
   }
-}
-
-export async function getModelSettings(c: Context, config: AppConfig): Promise<Response> {
-  const session = await requireDashboardSession(c, config);
-  if (!session) {
-    return c.json({ ...EMPTY_MODEL_SETTINGS });
-  }
-  return c.json(await getTenantModelSettings(session.user.id));
-}
-
-export async function putModelSettings(c: Context, config: AppConfig): Promise<Response> {
-  const session = await requireDashboardSession(c, config);
-  if (!session) {
-    return c.json({ error: "dashboard authentication required" }, 401);
-  }
-  const body = (await c.req.json().catch(() => ({}))) as unknown;
-  const input = parseModelSettingsBody(body);
-  // Any catalog model may be picked; a model the tenant's keys can't serve is handled at run time by the
-  // whole-run managed fallback (resolveRunKeys), not disallowed here.
-  await validateModelSettingsSlugs(input);
-  await saveTenantModelSettings(session.user.id, input, session.userId);
-  return c.json(await getTenantModelSettings(session.user.id));
 }
 
 export async function getModels(c: Context): Promise<Response> {

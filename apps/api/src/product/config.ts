@@ -1,5 +1,3 @@
-import type { ReviewBoardPipelineSelection } from "./review-board-admission.js";
-
 export interface AppConfig {
   port: number;
   githubWebhookSecret: string;
@@ -7,12 +5,10 @@ export interface AppConfig {
   internalApiToken: string;
   dashboardAllowedOrigins: DashboardAllowedOrigins;
   dashboardUrl: string;
-  apiBaseUrl?: string;
   auth: AuthConfig;
   billing: BillingConfig;
   graph?: GraphConfig;
   schedulerOidc?: SchedulerOidcConfig;
-  reviewBoardPipeline: ReviewBoardPipelineSelection;
   githubWebhookInbox?: GithubWebhookInboxConfig;
 }
 
@@ -21,7 +17,6 @@ export interface GithubWebhookInboxConfig {
   readonly encryptionKeyVersion: string;
   readonly leaseMs: number;
   readonly maxBodyBytes: number;
-  readonly legacyForwardUrl?: string;
 }
 
 /**
@@ -39,9 +34,8 @@ export interface GraphConfig {
   timeoutMs: number;
   /**
    * The graph service's internal credential, used only to mint a short-lived
-   * per-tenant token. Optional: without it the client falls back to the static
-   * `accessToken`, which is what lets this ship in either order relative to the
-   * graph service that issues tokens.
+   * per-tenant token. Without it, `accessToken` is the explicitly configured
+   * tenant credential for a single-tenant deployment.
    */
   internalToken?: string;
   delegatedTokenTtlMinutes?: number;
@@ -68,12 +62,7 @@ export interface BillingConfig {
 }
 
 interface AuthConfig {
-  mode: "disabled" | "github" | "hybrid" | "clerk";
-  githubClientId?: string;
-  githubClientSecret?: string;
-  githubScopes: string;
-  sessionCookieName: string;
-  oauthStateCookieName: string;
+  mode: "disabled" | "clerk";
   cookieSecure: boolean;
   cookieSameSite: "Lax" | "Strict" | "None";
   sessionTtlSeconds: number;
@@ -84,10 +73,9 @@ interface AuthConfig {
 export function loadConfig(env = process.env): AppConfig {
   const dashboardUrl = dashboardUrlFromEnv(env);
   const dashboardAllowedOrigins = parseDashboardAllowedOrigins(env.DASHBOARD_ORIGIN, dashboardUrl);
-  const apiBaseUrl = normalizeBaseUrl(env.API_BASE_URL);
-  const githubWebhookInbox = parseGithubWebhookInboxConfig(env, apiBaseUrl);
+  const githubWebhookInbox = parseGithubWebhookInboxConfig(env);
   // Context and review workers rotate independently even though one API serves both.
-  const internalApiToken = optionalEnv(env, "JINA_PRODUCT_INTERNAL_API_TOKEN") ?? requiredEnv(env, "INTERNAL_API_TOKEN");
+  const internalApiToken = requiredEnv(env, "JINA_PRODUCT_INTERNAL_API_TOKEN");
   validateSecretsEncryptionKey(env);
   return {
     port: parsePort(env.PORT),
@@ -96,20 +84,15 @@ export function loadConfig(env = process.env): AppConfig {
     internalApiToken,
     dashboardAllowedOrigins,
     dashboardUrl,
-    apiBaseUrl,
     auth: parseAuthConfig(env),
     billing: parseBillingConfig(env, dashboardUrl),
     graph: parseGraphConfig(env),
-    reviewBoardPipeline: parseReviewBoardPipelineSelection(env),
     ...(githubWebhookInbox ? { githubWebhookInbox } : {}),
     ...(parseSchedulerOidcConfig(env) ? { schedulerOidc: parseSchedulerOidcConfig(env) } : {}),
   };
 }
 
-function parseGithubWebhookInboxConfig(
-  env: NodeJS.ProcessEnv,
-  apiBaseUrl: string | undefined,
-): GithubWebhookInboxConfig | undefined {
+function parseGithubWebhookInboxConfig(env: NodeJS.ProcessEnv): GithubWebhookInboxConfig | undefined {
   const enabled = parseOptionalStrictBoolean(env.JINA_GITHUB_WEBHOOK_INBOX_ENABLED);
   if (!enabled) return undefined;
 
@@ -134,9 +117,6 @@ function parseGithubWebhookInboxConfig(
     throw new Error("GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION must be a numeric Secret Manager version");
   }
 
-  const legacyForwardUrl = optionalEnv(env, "JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL");
-  if (legacyForwardUrl) validateLegacyForwardUrl(legacyForwardUrl, apiBaseUrl);
-
   return {
     encryptionKey,
     encryptionKeyVersion,
@@ -154,58 +134,7 @@ function parseGithubWebhookInboxConfig(
       10 * 1024 * 1024,
       "JINA_GITHUB_WEBHOOK_MAX_BODY_BYTES",
     ),
-    ...(legacyForwardUrl ? { legacyForwardUrl } : {}),
   };
-}
-
-function validateLegacyForwardUrl(value: string, apiBaseUrl: string | undefined): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new Error("JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL must be a valid HTTPS URL");
-  }
-  if (
-    parsed.protocol !== "https:" ||
-    parsed.username ||
-    parsed.password ||
-    parsed.search ||
-    parsed.hash ||
-    parsed.pathname !== "/webhooks/github" ||
-    !parsed.hostname.endsWith(".a.run.app") ||
-    !parsed.hostname.includes("---")
-  ) {
-    throw new Error(
-      "JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL must be an exact tagged Cloud Run /webhooks/github HTTPS URL",
-    );
-  }
-  if (apiBaseUrl && parsed.origin === new URL(apiBaseUrl).origin) {
-    throw new Error("JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL must not target the public API origin");
-  }
-}
-
-function parseReviewBoardPipelineSelection(
-  env: NodeJS.ProcessEnv,
-): ReviewBoardPipelineSelection {
-  const rawMode = optionalEnv(env, "JINA_REVIEW_BOARD_PIPELINE_MODE") ?? "v1";
-  if (rawMode !== "paused" && rawMode !== "v1" && rawMode !== "v2" && rawMode !== "allowlist") {
-    throw new Error("JINA_REVIEW_BOARD_PIPELINE_MODE must be paused, v1, v2, or allowlist");
-  }
-  const repositories = new Set(
-    (env.JINA_REVIEW_BOARD_V2_REPOSITORIES ?? "")
-      .split(",")
-      .map((repository) => repository.trim().toLowerCase())
-      .filter(Boolean),
-  );
-  for (const repository of repositories) {
-    if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository)) {
-      throw new Error(`JINA_REVIEW_BOARD_V2_REPOSITORIES contains invalid repository ${repository}`);
-    }
-  }
-  if (rawMode === "allowlist" && repositories.size === 0) {
-    throw new Error("JINA_REVIEW_BOARD_V2_REPOSITORIES must not be empty in allowlist mode");
-  }
-  return { mode: rawMode, v2Repositories: repositories };
 }
 
 function parseSchedulerOidcConfig(env: NodeJS.ProcessEnv): SchedulerOidcConfig | undefined {
@@ -261,12 +190,7 @@ function parseBillingEnforcement(value: string | undefined): BillingEnforcement 
   return "off";
 }
 
-/**
- * FINDING 4a: SECRETS_ENCRYPTION_KEY must not fail open in production. Unset, provider API keys and
- * GitHub tokens are stored as plaintext and the OpenRouter PKCE binding cookie is forgeable (see
- * crypto.ts / openrouter-oauth.ts). In production a missing/invalid key is a hard startup error;
- * development keeps crypto.ts's warn-and-store-plaintext fallback so local setup stays frictionless.
- */
+/** Production validates the secret key at startup; every secret operation also requires it directly. */
 function validateSecretsEncryptionKey(env: NodeJS.ProcessEnv): void {
   if (env.NODE_ENV !== "production") {
     return;
@@ -297,41 +221,21 @@ export function dashboardOriginAllowed(allowedOrigins: DashboardAllowedOrigins, 
 
 function parseAuthConfig(env: NodeJS.ProcessEnv): AuthConfig {
   const explicitMode = optionalEnv(env, "DASHBOARD_AUTH_MODE");
-  const hasGithubOAuth = Boolean(optionalEnv(env, "GITHUB_OAUTH_CLIENT_ID") && optionalEnv(env, "GITHUB_OAUTH_CLIENT_SECRET"));
   const hasClerk = Boolean(optionalEnv(env, "CLERK_PUBLISHABLE_KEY") && optionalEnv(env, "CLERK_SECRET_KEY"));
-  const mode = explicitMode === "hybrid"
-    ? "hybrid"
-    : explicitMode === "clerk" || (!explicitMode && hasClerk)
-    ? "clerk"
-    : explicitMode === "github" || (!explicitMode && hasGithubOAuth)
-      ? "github"
-      : "disabled";
+  if (explicitMode && explicitMode !== "clerk" && explicitMode !== "disabled") {
+    throw new Error("DASHBOARD_AUTH_MODE must be clerk or disabled");
+  }
+  const mode = explicitMode === "clerk" || (!explicitMode && hasClerk) ? "clerk" : "disabled";
   const dashboardUrl = dashboardUrlFromEnv(env);
 
   return {
     mode,
-    githubClientId:
-      mode === "github" || mode === "hybrid"
-        ? requiredEnv(env, "GITHUB_OAUTH_CLIENT_ID")
-        : optionalEnv(env, "GITHUB_OAUTH_CLIENT_ID"),
-    githubClientSecret:
-      mode === "github" || mode === "hybrid"
-        ? requiredEnv(env, "GITHUB_OAUTH_CLIENT_SECRET")
-        : optionalEnv(env, "GITHUB_OAUTH_CLIENT_SECRET"),
-    githubScopes: env.GITHUB_OAUTH_SCOPES?.trim() || "read:user read:org repo",
-    sessionCookieName: env.DASHBOARD_SESSION_COOKIE?.trim() || "jina_dashboard_session",
-    oauthStateCookieName: env.DASHBOARD_OAUTH_STATE_COOKIE?.trim() || "jina_github_oauth_state",
     cookieSecure: parseBoolean(env.DASHBOARD_COOKIE_SECURE, dashboardUrl.startsWith("https://")),
     cookieSameSite: parseSameSite(env.DASHBOARD_COOKIE_SAMESITE, dashboardUrl.startsWith("https://") ? "None" : "Lax"),
     sessionTtlSeconds: parsePositiveInteger(env.DASHBOARD_SESSION_TTL_SECONDS, 60 * 60 * 24 * 7),
     clerkPublishableKey:
-      mode === "clerk" || mode === "hybrid"
-        ? requiredEnv(env, "CLERK_PUBLISHABLE_KEY")
-        : optionalEnv(env, "CLERK_PUBLISHABLE_KEY"),
-    clerkSecretKey:
-      mode === "clerk" || mode === "hybrid"
-        ? requiredEnv(env, "CLERK_SECRET_KEY")
-        : optionalEnv(env, "CLERK_SECRET_KEY"),
+      mode === "clerk" ? requiredEnv(env, "CLERK_PUBLISHABLE_KEY") : optionalEnv(env, "CLERK_PUBLISHABLE_KEY"),
+    clerkSecretKey: mode === "clerk" ? requiredEnv(env, "CLERK_SECRET_KEY") : optionalEnv(env, "CLERK_SECRET_KEY"),
   };
 }
 

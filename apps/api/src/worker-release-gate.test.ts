@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { test } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createGitHubIntakeState } from "./github-intake.js";
+import { createEmptyBoardState } from "@jina/board";
 import { createApiServer, type ApiSnapshot, type ApiStateStore, type WorkerReleaseGuard } from "./server.js";
 
 const INTERNAL_TOKEN = "internal-worker-release-test";
@@ -158,7 +158,7 @@ function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStor
   lastVerification(): WorkerReleaseGuard | undefined;
 } {
   let snapshot: ApiSnapshot = {
-    intakeState: createGitHubIntakeState(),
+    intakeState: { board: createEmptyBoardState() },
     devDeliverySequence: 0
   };
   let loads = 0;

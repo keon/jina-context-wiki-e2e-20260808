@@ -2,9 +2,7 @@ import { logger } from "./logger.js";
 
 /** Thrown by the internal-API helpers on a non-2xx response. Carries the HTTP
  *  `status` so callers can branch on it (e.g. a 402 billing block) instead of
- *  treating every failure as a generic, retryable infrastructure error. The
- *  message format is unchanged from the prior plain Error for compatibility with
- *  existing message-based catch sites. */
+ *  treating every failure as a generic, retryable infrastructure error. */
 export class InternalApiError extends Error {
   readonly status: number;
   readonly response: unknown;

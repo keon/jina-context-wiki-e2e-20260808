@@ -3,7 +3,6 @@ import type {
   ReviewRun,
   ReviewRunDetailResponse,
 } from "./types";
-import { normalizeViewerTenants, type ViewerTenant } from "./tenants";
 
 const directApiBaseUrl = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL);
 
@@ -52,26 +51,11 @@ export function safeHref(url: string | undefined | null): string | undefined {
 export function reviewRunsPath(tenantId?: string | null): string {
   return tenantId
     ? `/dashboard/tenants/${encodeURIComponent(tenantId)}/review-runs`
-    : "/dashboard/review-runs";
+    : "/dashboard/local/review-runs";
 }
 
 export function reviewRunPath(reviewRunId: string, tenantId?: string | null): string {
   return `${reviewRunsPath(tenantId)}/${encodeURIComponent(reviewRunId)}`;
-}
-
-export function normalizeCreatedJinaOrganization(raw: unknown): ViewerTenant {
-  return normalizeJinaOrganization(raw, "Organization response was empty");
-}
-
-export function normalizeJinaOrganization(
-  raw: unknown,
-  emptyMessage = "Organization response was empty",
-): ViewerTenant {
-  const tenant = normalizeViewerTenants({ tenants: [raw] })[0];
-  if (!tenant) {
-    throw new Error(emptyMessage);
-  }
-  return tenant;
 }
 
 export async function getReviewRun(
@@ -93,24 +77,6 @@ export async function getReviewRun(
   }
   const payload = (await response.json()) as ReviewRunDetailResponse;
   return payload.review_run;
-}
-
-export async function getScenarioLineageRuns(
-  reviewRunId: string,
-  lineageKey: string,
-  tenantId: string | null,
-  signal?: AbortSignal,
-): Promise<ReviewRun[]> {
-  const path = `${reviewRunPath(reviewRunId, tenantId)}/scenario-lineage/${encodeURIComponent(lineageKey)}`;
-  const response = await fetch(apiUrl(path), {
-    credentials: "include",
-    signal: signal ?? null,
-  });
-  if (!response.ok) {
-    throw new Error(`Scenario lineage returned ${response.status}`);
-  }
-  const payload = (await response.json()) as { review_runs?: ReviewRun[] };
-  return payload.review_runs ?? [];
 }
 
 export function parseInstallationResult(search: string): InstallationResult | null {

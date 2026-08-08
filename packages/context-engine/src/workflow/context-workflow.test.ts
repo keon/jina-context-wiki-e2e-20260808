@@ -140,18 +140,6 @@ test("Context planner creates page jobs only for add and revise and publishes af
     2,
     "retain and retire are planner dispositions, not model jobs"
   );
-  assert.equal(
-    expanded.state.tasks.some((task) =>
-      [
-        "challenge-context-sources",
-        "evaluate-context-tasks",
-        "repair-context-gaps",
-        "certify-context-release",
-        "index-context-release"
-      ].includes(task.type)
-    ),
-    false
-  );
 });
 
 test("Context result parser enforces exact contracts, scoped artifacts, dispositions, and phase receipts", () => {

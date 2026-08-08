@@ -1,6 +1,5 @@
 import { auth } from "@clerk/nextjs/server";
 import type { NextRequest } from "next/server";
-import { dashboardAllowsLegacySession, dashboardProxyUsesClerk } from "../../../server/auth-mode.ts";
 import {
   dashboardWebAuthorization,
   isAllowedDashboardApiRequest,
@@ -49,16 +48,12 @@ async function proxy(request: NextRequest): Promise<Response> {
     if (!STRIPPED_REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
   }
   if (productApiRequest) {
-    const clerkAuth = dashboardProxyUsesClerk() ? await auth() : null;
+    const clerkAuth = await auth();
     const token = clerkAuth?.isAuthenticated ? await clerkAuth.getToken() : null;
     if (token) {
       headers.set("authorization", `Bearer ${token}`);
     }
-    if (dashboardAllowsLegacySession()) {
-      const legacySession = request.cookies.get("jina_dashboard_session");
-      if (legacySession) headers.set("cookie", `${legacySession.name}=${legacySession.value}`);
-    }
-    if (!token && !headers.has("cookie")) {
+    if (!token) {
       return Response.json({ error: "unauthenticated" }, { status: 401 });
     }
     const openRouterCookie = request.cookies.get("jina_openrouter_pkce");

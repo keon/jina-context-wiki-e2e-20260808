@@ -31,7 +31,7 @@
  * What is deliberately *not* here: anything that would drag an app's internals
  * across the boundary. The dashboard's `Toolbar` reads its dashboard provider,
  * `ExternalLink` validates through the dashboard's `safeHref`, `StatusDot` maps
- * a status with the dashboard's own rules, and `Section`/`SectionFlush` are
+ * a status with the dashboard's own rules, and `Section` is
  * entangled with `:has()` opt-outs in the reviews pages. Each stays in the app.
  * The one coupling that *was* worth carrying — routed navigation — is passed in
  * as a prop (`LinkComponent`) rather than imported, so this package has no Next

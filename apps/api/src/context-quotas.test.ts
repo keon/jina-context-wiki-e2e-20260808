@@ -383,7 +383,7 @@ test("model attempt usage is exact across charged retries and canceled pre-model
   assert.equal(canceled.monthlyModel.reservedTokens, 0);
 });
 
-test("artifact reservations account immutable bytes, expiry, idempotent commits, and erasure", async () => {
+test("artifact reservations account immutable bytes, expiry, and idempotent commits", async () => {
   const service = quotaService({
     artifactStorageBytes: 100,
     artifactReservationTtlMs: 1_000
@@ -457,30 +457,11 @@ test("artifact reservations account immutable bytes, expiry, idempotent commits,
     }),
     (error: unknown) => error instanceof ContextQuotaInvariantError && error.reason === "reservation_conflict"
   );
-  const erased = await service.deleteArtifactStorage({
-    tenantId: "tenant-a",
-    operationId: "erase-1",
-    artifactId: "artifact-1",
-    at: iso(start + 6)
-  });
-  assert.equal(erased.storage.committedBytes, 0);
-  assert.equal(
-    (
-      await service.deleteArtifactStorage({
-        tenantId: "tenant-a",
-        operationId: "erase-1",
-        artifactId: "artifact-1",
-        at: iso(start + 7)
-      })
-    ).storage.committedBytes,
-    0
-  );
-
   await service.reserveArtifactStorage({
     tenantId: "tenant-a",
     reservationId: "expiring-upload",
     artifactId: "artifact-expiring",
-    bytes: 90,
+    bytes: 40,
     at: iso(start + 100)
   });
   const expired = await service.snapshot("tenant-a", iso(start + 1_101));
@@ -490,7 +471,7 @@ test("artifact reservations account immutable bytes, expiry, idempotent commits,
       tenantId: "tenant-a",
       reservationId: "expiring-upload",
       artifactId: "artifact-expiring",
-      bytes: 90,
+      bytes: 40,
       at: iso(start + 1_102)
     }),
     (error: unknown) => error instanceof ContextQuotaInvariantError && error.reason === "reservation_not_found"

@@ -6,7 +6,6 @@ import { REVIEW_TASK_ID, isReviewTaskTriggerAllowed } from "./review-task-routin
 import { handleReviewCommand, type ReviewCommandGithub } from "./review-command.js";
 import {
   getReviewTriggerModeForInstallation,
-  recordGithubEvent,
   updateGithubInstallationLifecycle,
   type ReviewTriggerMode,
 } from "./store.js";
@@ -44,21 +43,6 @@ export async function handleGithubWebhook(input: {
 
   const payload = parsePayload(input.rawBody);
   const action = stringAt(payload, ["action"]);
-
-  // Comment bodies may contain private run-specific instructions; the review
-  // payload carries them to the worker without copying them into the generic
-  // GitHub event table.
-  if (event !== "issue_comment" && event !== "pull_request_review_comment") {
-    try {
-      await recordGithubEvent(deliveryId, event, action, payload);
-    } catch (error) {
-      console.warn("github_event_persist_failed", {
-        event,
-        deliveryId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
 
   if (event === "pull_request") {
     return handlePullRequest({

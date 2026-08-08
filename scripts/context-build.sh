@@ -156,20 +156,22 @@ if not eligibility.get("eligible"):
     blockers = eligibility.get("blockers") or []
     detail = "; ".join(str(item.get("detail", "unknown blocker")) for item in blockers if isinstance(item, dict))
     fallback = detail or "no recoverable failed leaves"
-    raise SystemExit(f"Build is not batch-retryable: {fallback}")
+    raise SystemExit(f"Build is not retryable: {fallback}")
 task_ids = eligibility.get("recoverableTaskIds")
-if not isinstance(task_ids, list) or not task_ids:
+if not isinstance(task_ids, list) or len(task_ids) != 1:
     raise SystemExit("API marked the build retryable without recoverable task ids")
 print(json.dumps({
-    "taskIds": task_ids,
+    "taskId": task_ids[0],
     "requestKey": f"operator-cli:{uuid.uuid4()}",
     "reason": reason,
 }, separators=(",", ":")))
 ' "$retry_reason"
   )" || exit 1
-  echo "Retrying $(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["taskIds"]))' <<<"$retry_body") failed Board leaf/leaves…"
-  retry_response="$(api_post "/wiki/builds/${encoded_build}/retry" "$retry_body")" || {
-    echo "Could not schedule the atomic batch retry." >&2
+  retry_task_id="$(printf '%s' "$retry_body" | python3 -c 'import json,sys; print(json.load(sys.stdin).pop("taskId"))')"
+  retry_payload="$(printf '%s' "$retry_body" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.pop("taskId"); print(json.dumps(value,separators=(",",":")))')"
+  echo "Retrying failed Board task ${retry_task_id}…"
+  retry_response="$(api_post "/wiki/builds/${encoded_build}/tasks/$(urlencode "$retry_task_id")/retry" "$retry_payload")" || {
+    echo "Could not schedule the task retry." >&2
     exit 1
   }
   python3 -c '
@@ -177,10 +179,7 @@ import json
 import sys
 
 response = json.load(sys.stdin)
-tasks = response.get("tasks") or []
-reopened = response.get("reopenedTaskIds") or []
-print(f"Batch retry accepted; {len(tasks)} explicit failure branch(es), "
-      f"{len(reopened)} total task(s) reopened.")
+print("Task retry accepted for {}.".format(response.get("taskId", "unknown task")))
 ' <<<"$retry_response"
   watch_build="$retry_failed_build"
 fi

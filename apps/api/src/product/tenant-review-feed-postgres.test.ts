@@ -23,6 +23,7 @@ test(
 
     const seed = Date.now() * 1_000 + Math.floor(Math.random() * 500);
     const tenantIds: string[] = [];
+    const installationIds: string[] = [];
     try {
       for (const suffix of ["a", "b"]) {
         const tenant = await client.query<{ id: string }>(
@@ -32,18 +33,25 @@ test(
           [seed + tenantIds.length, `tenant-review-${seed}-${suffix}`],
         );
         tenantIds.push(tenant.rows[0].id);
+        const installation = await client.query<{ id: string }>(
+          `insert into installations (tenant_id, github_installation_id)
+           values ($1, $2)
+           returning id`,
+          [tenant.rows[0].id, seed + 100 + installationIds.length],
+        );
+        installationIds.push(installation.rows[0].id);
       }
       const repositoryA = await client.query<{ id: string }>(
-        `insert into repositories (tenant_id, github_repo_id, owner, name, default_branch)
-         values ($1, $2, 'tenant-a', $3, 'main')
+        `insert into repositories (tenant_id, installation_id, github_repo_id, owner, name, default_branch)
+         values ($1, $2, $3, 'tenant-a', $4, 'main')
          returning id`,
-        [tenantIds[0], seed + 10, `repo-${seed}`],
+        [tenantIds[0], installationIds[0], seed + 10, `repo-${seed}`],
       );
       const repositoryB = await client.query<{ id: string }>(
-        `insert into repositories (tenant_id, github_repo_id, owner, name, default_branch)
-         values ($1, $2, 'tenant-b', $3, 'main')
+        `insert into repositories (tenant_id, installation_id, github_repo_id, owner, name, default_branch)
+         values ($1, $2, $3, 'tenant-b', $4, 'main')
          returning id`,
-        [tenantIds[1], seed + 11, `repo-${seed}`],
+        [tenantIds[1], installationIds[1], seed + 11, `repo-${seed}`],
       );
       const runA = await client.query<{ id: string }>(
         `insert into review_runs

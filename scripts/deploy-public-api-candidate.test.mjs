@@ -5,12 +5,9 @@ import {
   buildPublicApiDeployArgs,
   deployPublicApiCandidate,
   ensureProductionInboxSchedulerPaused,
-  isInboxFenceComplete,
   pauseProductionInboxSchedulerIfPresent,
   updatePublicApiTraffic,
   validatePublicApiAcceptanceEvidence,
-  validateInboxFenceSnapshot,
-  validateInboxRestoreSnapshot,
   validateInboxKeyCompatibility,
   validatePublicApiCandidateManifest,
   validatePublicApiCandidateState,
@@ -27,7 +24,8 @@ function rawManifest() {
     "DB_PASS",
     "GITHUB_WEBHOOK_SECRET",
     "GITHUB_APP_PRIVATE_KEY",
-    "GITHUB_OAUTH_CLIENT_SECRET",
+    "CLERK_PUBLISHABLE_KEY",
+    "CLERK_SECRET_KEY",
     "INTERNAL_API_TOKEN",
     "JINA_PRODUCT_INTERNAL_API_TOKEN",
     "SECRETS_ENCRYPTION_KEY",
@@ -74,15 +72,14 @@ function rawManifest() {
     },
     environment: {
       API_BASE_URL: "https://api.usejina.com",
-      DASHBOARD_AUTH_MODE: "github",
+      DASHBOARD_AUTH_MODE: "clerk",
       DASHBOARD_URL: "https://app.usejina.com",
-      DASHBOARD_ORIGIN: "https://app.usejina.com,https://jina-simulation-dashboard.vercel.app",
+      DASHBOARD_ORIGIN: "https://app.usejina.com",
       DASHBOARD_COOKIE_SAMESITE: "None",
       DASHBOARD_COOKIE_SECURE: "true",
       GITHUB_APP_ID: "4040260",
       GITHUB_APP_SLUG: "jina-review-bot",
       GITHUB_APP_INSTALL_URL: "https://github.com/apps/jina-review-bot/installations/new",
-      GITHUB_OAUTH_CLIENT_ID: "Ov23lix0k1McZctAzJu0",
       JINA_PRODUCT_API_ENABLED: "true",
       JINA_PRODUCT_DATABASE_MODE: "shared",
       JINA_TENANCY_MODE: "shared-db",
@@ -96,7 +93,6 @@ function rawManifest() {
       GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION: "7",
       JINA_SCHEDULER_OIDC_AUDIENCE: "https://api.usejina.com",
       JINA_SCHEDULER_OIDC_EMAIL: "jina-api-runtime@jina-463721.iam.gserviceaccount.com",
-      JINA_REVIEW_BOARD_PIPELINE_MODE: "v2",
       JINA_BILLING_ENFORCE: "on",
       JINA_GRAPH_API_URL: "https://jina-api-m56inn6iva-ue.a.run.app"
     },
@@ -434,7 +430,7 @@ function acceptanceEvidence(manifest) {
     completed_at: "2026-08-06T17:00:00.000Z",
     checks: {
       health: true,
-      github_oauth: true,
+      clerk_auth: true,
       read_only_product: true,
       encrypted_integration: true,
       internal_callback: true,
@@ -445,17 +441,6 @@ function acceptanceEvidence(manifest) {
     }
   };
 }
-
-async function fakeFenceInboxProcessor() {
-  return { previousMode: "legacy_forward", changed: true, fencedGeneration: 2 };
-}
-
-async function fakeRestoreInboxProcessor() {}
-
-const fakeInboxFenceDependencies = {
-  fenceInboxProcessor: fakeFenceInboxProcessor,
-  restoreInboxProcessor: fakeRestoreInboxProcessor
-};
 
 test("manifest requires the fixed public target, a digest, and numeric secret versions", () => {
   const raw = rawManifest();
@@ -494,30 +479,18 @@ test("manifest requires the fixed public target, a digest, and numeric secret ve
   }
 });
 
-test("Clerk production auth requires pinned Clerk key bindings while retaining GitHub rollback bindings", () => {
+test("production auth requires pinned Clerk key bindings", () => {
   const raw = rawManifest();
-  raw.environment.DASHBOARD_AUTH_MODE = "clerk";
-  raw.secrets.CLERK_PUBLISHABLE_KEY = {
-    project: "jina-463721",
-    name: "jina-clerk-publishable-key",
-    version: "1"
-  };
-  raw.secrets.CLERK_SECRET_KEY = {
-    project: "jina-463721",
-    name: "jina-clerk-secret-key",
-    version: "1"
-  };
-  raw.allowed_environment_changes = ["DASHBOARD_AUTH_MODE", "CLERK_PUBLISHABLE_KEY", "CLERK_SECRET_KEY"];
 
   const manifest = validatePublicApiCandidateManifest(raw);
   const args = buildPublicApiDeployArgs(manifest);
   const setSecrets = args.find((arg) => arg.startsWith("--set-secrets="));
-  assert.match(setSecrets, /CLERK_PUBLISHABLE_KEY=jina-clerk-publishable-key:1/);
-  assert.match(setSecrets, /CLERK_SECRET_KEY=jina-clerk-secret-key:1/);
-  assert.match(setSecrets, /GITHUB_OAUTH_CLIENT_SECRET=/);
+  assert.match(setSecrets, /CLERK_PUBLISHABLE_KEY=clerk-publishable-key:3/);
+  assert.match(setSecrets, /CLERK_SECRET_KEY=clerk-secret-key:3/);
+  assert.doesNotMatch(setSecrets, /GITHUB_OAUTH_CLIENT_SECRET/);
 
   delete raw.secrets.CLERK_SECRET_KEY;
-  assert.throws(() => validatePublicApiCandidateManifest(raw), /CLERK_SECRET_KEY is required in Clerk auth mode/);
+  assert.throws(() => validatePublicApiCandidateManifest(raw), /CLERK_SECRET_KEY is required/);
 });
 
 test("candidate validation proves the immutable inputs and production edge before deploy", async () => {
@@ -549,20 +522,6 @@ test("candidate deployment is no-traffic, keeps the old revision serving, and pr
   assert.ok(cloud.calls.slice(0, deployIndex).every((call) => !call.join(" ").includes("update-traffic")));
 });
 
-test("old rollback clone probes the legacy health route", async () => {
-  const raw = rawManifest();
-  raw.mode = "old-rollback-clone";
-  raw.image = `us-east1-docker.pkg.dev/jina-463721/jina-code-review/jina-code-review-api@sha256:${"c".repeat(64)}`;
-  const manifest = validatePublicApiCandidateManifest(raw);
-  const cloud = fakeCloud(manifest);
-  const probes = [];
-  await deployPublicApiCandidate(manifest, {
-    runner: cloud.runner,
-    probe: async (url) => probes.push(url)
-  });
-  assert.deepEqual(probes, ["https://candidate---jina-code-review-api-abc123-ue.a.run.app/v1/healthz"]);
-});
-
 test("a failed prerequisite cannot reach the Cloud Run deploy mutation", async () => {
   const manifest = validatePublicApiCandidateManifest(rawManifest());
   const cloud = fakeCloud(manifest, { omitImageReader: true });
@@ -587,7 +546,6 @@ test("promotion and rollback accept only the manifest revisions and verify 100 p
   });
   await updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
     runner: cloud.runner,
-    ...fakeInboxFenceDependencies,
     acceptanceEvidence: evidence,
     loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
     now: new Date("2026-08-06T18:00:00.000Z")
@@ -607,8 +565,7 @@ test("promotion and rollback accept only the manifest revisions and verify 100 p
   );
   cloud.setServingRevision(CANDIDATE_REVISION);
   await updatePublicApiTraffic(manifest, OLD_REVISION, {
-    runner: cloud.runner,
-    ...fakeInboxFenceDependencies
+    runner: cloud.runner
   });
   await assert.rejects(
     updatePublicApiTraffic(manifest, "jina-code-review-api-unrecorded", { runner: cloud.runner }),
@@ -641,7 +598,6 @@ test("promotion rejects active inbox rows encrypted by an unavailable key versio
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 6: 2, 7: 4 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -668,45 +624,6 @@ test("promotion permits retained terminal dead letters encrypted by an old key v
       deadLetterKeyVersions: { 6: 2 }
     }
   );
-});
-
-test("application rollback fence requires capture_only and zero current/prior-generation leases", () => {
-  assert.equal(
-    isInboxFenceComplete({
-      control: { mode: "capture_only", generation: 2 },
-      leased: 0,
-      priorGenerationLeases: 0
-    }),
-    true
-  );
-  for (const snapshot of [
-    { control: { mode: "legacy_forward", generation: 1 }, leased: 0, priorGenerationLeases: 0 },
-    { control: { mode: "capture_only", generation: 2 }, leased: 1, priorGenerationLeases: 1 }
-  ]) {
-    assert.equal(isInboxFenceComplete(snapshot), false);
-  }
-  assert.throws(
-    () =>
-      validateInboxFenceSnapshot({
-        control: { mode: "capture_only", generation: 2 },
-        leased: -1,
-        priorGenerationLeases: 0
-      }),
-    /inbox fence leased/
-  );
-});
-
-test("inbox compensation cannot overwrite a newer safety generation", () => {
-  const snapshot = {
-    control: { mode: "capture_only", generation: 3 },
-    leased: 0,
-    priorGenerationLeases: 0
-  };
-  assert.throws(
-    () => validateInboxRestoreSnapshot(snapshot, { fencedGeneration: 2 }),
-    /generation changed from 2 to 3/
-  );
-  assert.deepEqual(validateInboxRestoreSnapshot(snapshot, { fencedGeneration: 3 }), snapshot);
 });
 
 test("promotion rejects a concurrently serving inbox writer on another key version", async () => {
@@ -741,7 +658,6 @@ test("promotion rejects a concurrently serving inbox writer on another key versi
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 1 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -768,7 +684,6 @@ test("promotion rejects a serving writer whose mounted secret version differs fr
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 1 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -791,7 +706,6 @@ test("promotion rejects a serving writer on another secret resource with the sam
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 1 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -812,7 +726,6 @@ test("promotion aborts on a stale service etag when the serving writer changes a
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => {
         snapshotLoads += 1;
@@ -835,7 +748,6 @@ test("failed post-PATCH verification never overwrites a newer traffic writer dur
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -858,7 +770,6 @@ test("scheduler failure never overwrites a newer traffic writer during compensat
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -881,7 +792,6 @@ test("scheduler compensation cannot overwrite a newer etag even when the same re
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -931,7 +841,6 @@ test("scheduler activation failure restores the previously serving revision", as
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -974,7 +883,6 @@ test("an ambiguous traffic mutation failure leaves Scheduler and inbox processin
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -998,7 +906,6 @@ test("an unsuccessful authenticated scheduler execution rolls traffic back", asy
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -1019,7 +926,6 @@ test("failed scheduler fencing leaves candidate traffic in place and reports man
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: acceptanceEvidence(manifest),
       loadInboxSnapshot: async () => ({ activeKeyVersions: { 7: 0 } }),
       now: new Date("2026-08-06T18:00:00.000Z")
@@ -1074,7 +980,6 @@ test("promotion cannot mutate traffic without fresh complete acceptance evidence
   await assert.rejects(
     updatePublicApiTraffic(manifest, CANDIDATE_REVISION, {
       runner: cloud.runner,
-      ...fakeInboxFenceDependencies,
       acceptanceEvidence: stale,
       now: new Date("2026-08-06T18:00:00.000Z")
     }),

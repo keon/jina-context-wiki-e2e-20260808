@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_repository": "https://github.com/omxyz/jina",
-  "source_commit": "ec4eacd883eafc07b99181320308a006254e6aab",
+  "source_commit": "85d020469dc7e6ac507d2c6a66e7226d0b97118a",
   "source_subdirectory": "trigger",
   "deployment_scope": "review-only",
   "registered_task_ids": [
@@ -29,7 +29,7 @@
     },
     {
       "path": "trigger/src/daytona/openrouter-proxy.ts",
-      "sha256": "eff6d59b7d4b6e54f89abd23947876701a962eb0738f0ffb8f3ac27e7eb29f97"
+      "sha256": "c8da651f0cd37be33b4b0c2d89d4d8ef6b0b7ed056dfd930595caa3bccb8c427"
     },
     {
       "path": "trigger/src/daytona/review-session.test.ts",
@@ -45,7 +45,7 @@
     },
     {
       "path": "trigger/src/review/codex-review.ts",
-      "sha256": "cc7964571a7cbeb8e26cf860c2d4571d2f55e9c45098ca61c09be039bf1c5068"
+      "sha256": "dc4ad50d9920c8d30b47f237ed28580b7237ee90d05cf8f1f45e327310d95fa7"
     },
     {
       "path": "trigger/src/review/diff-anchors.test.ts",
@@ -53,7 +53,7 @@
     },
     {
       "path": "trigger/src/review/diff-anchors.ts",
-      "sha256": "e4b2b16155dda00983b23d685c5a1085e85ebb1c9d44ab985bc84a61e5997794"
+      "sha256": "2b9c4a25d1f46f78554e9d66f0e495151087b87ace25927ea9477f752650ea1a"
     },
     {
       "path": "trigger/src/review/jina-instructions.test.ts",
@@ -61,31 +61,31 @@
     },
     {
       "path": "trigger/src/review/jina-instructions.ts",
-      "sha256": "365a51f31415c89d86682802213fded61eae2f2fe01218a2eb18c930d7988129"
+      "sha256": "506ff4cf0a6c11df065a67e4bb007a4fcc2f3438d52559319f16519683538940"
     },
     {
       "path": "trigger/src/review/log.test.ts",
-      "sha256": "74cf7ffa5d391335ffbbcdda953308821bcc6f37964ad7894db37525c696332d"
+      "sha256": "1f1212d49bdad2e6f7b0cd17e538a56c9d07fab889c8c96d08cd194871d89bcc"
     },
     {
       "path": "trigger/src/review/log.ts",
-      "sha256": "44d7628414648fc968e036a07c1c789cc8a6f59a7ec4cd18a5d80a30233fc167"
+      "sha256": "b11aed7f16c009de2d8351439bfc83a831dadecd080c43405f2d638470dd2712"
     },
     {
       "path": "trigger/src/review/progress-comment.test.ts",
-      "sha256": "04bb18e43762c70f765e8f38346f6d012b1bec357de3bce3bca0a851bb09dd62"
+      "sha256": "65fa96499e8cde3e0f68d1934d962e535c9882f4b30b2a01f2aba153051786d9"
     },
     {
       "path": "trigger/src/review/progress-comment.ts",
-      "sha256": "9546fef95ad19541946e56ddff1fbb3dd847ac691202fcbd25127b4e9691cb95"
+      "sha256": "a2f9859c7c79d67e644b305bc545cbe04b8d0632a9d993d2a1a66c51580d17a2"
     },
     {
       "path": "trigger/src/review/provider-keys.test.ts",
-      "sha256": "15201abf5e9599057184adf5ee8f7ab828f659aa24f5939a7c5a43b4e331a8c1"
+      "sha256": "58493ba2703bc0ec644afbd0881a8fb46a2a6c6937da9285e9e6e5263fecb009"
     },
     {
       "path": "trigger/src/review/provider-keys.ts",
-      "sha256": "c87e6f01846a5d839b714637076bdae2b6e39d2d314ef653aa2b17ccc3b9cafc"
+      "sha256": "abc80a777249749bfe04c6d501b5dcbdf24c4105a59af71098bfb3036f706de0"
     },
     {
       "path": "trigger/src/review/runtime-stage.test.ts",
@@ -93,7 +93,7 @@
     },
     {
       "path": "trigger/src/review/runtime-stage.ts",
-      "sha256": "bc95d8bc518d44dddb43c423020d783ef2fba256023e3ec3939bd6d49e6cc797"
+      "sha256": "fc0e584da151802e150ae175230161f22e85673df9a2b4b63ad90de5e7cc3a76"
     },
     {
       "path": "trigger/src/review/summary-stage.ts",
@@ -105,51 +105,43 @@
     },
     {
       "path": "trigger/src/review/workflow.ts",
-      "sha256": "dfe2c8b78ae62963ac259b84d8b2fa1426e05e983d6b49aa7a01d9f51cafcdae"
+      "sha256": "a5c70c2e8ffd1026ed52a0095fa1d507242d9b4c815e8dd7c17fc014a9e564d8"
     },
     {
       "path": "trigger/src/runtime-review/github.test.ts",
-      "sha256": "b9e1e706c5d6e5ed96d4da7cf1e9c651511bc3b8b4864d700b40f6783a8b81a9"
+      "sha256": "2764fc332388c86266c280a3f589d218899c75c4e4a78997ccabdff592fe14f9"
     },
     {
       "path": "trigger/src/runtime-review/github.ts",
-      "sha256": "0b21a0e74c0f7f3a1e80475eab36fa6fd0967fb52cee1caad089c47214006403"
+      "sha256": "db9ab9de81429bfd97cdd0df5ab431dd991ae9227587761c62d69089d74ba75b"
     },
     {
       "path": "trigger/src/runtime-review/index.test.ts",
-      "sha256": "9a4f6f6785fce90c80d1373487e7da42e58efbbf0a4c664dcdce7620776bd19e"
+      "sha256": "a7bae16187d7d99084b55f3ce2f4e9f20ccb58ca588338982f0a19d5fd71cbd8"
     },
     {
       "path": "trigger/src/runtime-review/index.ts",
-      "sha256": "f0b4c76a704b151b414f260d5ec43466128b8420823f6378463bda02aea33f45"
+      "sha256": "aa7045824cfd48a76f1d9c31afdf842d385dab5f2af7a5eaeae5f2ed148563e3"
     },
     {
       "path": "trigger/src/shared/api.test.ts",
-      "sha256": "b3e408eb59f9e0b82294f95041318b52e4bb25516539594f22f2c3ca7ba834ef"
+      "sha256": "3d27e475ba66ba5ac20c6ca0d4d1ecd56b27dea237cdd7338f0cc428a2f439b2"
     },
     {
       "path": "trigger/src/shared/api.ts",
-      "sha256": "721502ba1dfd39823ec44776882103e0444c7b4bbf99017e16ae62b73c4cc014"
+      "sha256": "be4b23391765801197e397d13e94ab18168be7066aa9183d96bf16dd9bba6c22"
     },
     {
       "path": "trigger/src/shared/cleanup.test.ts",
       "sha256": "15031440034217662764d2d2004b960f2941dca8130914299acb7fe0a9ae8a73"
     },
     {
-      "path": "trigger/src/shared/format.test.ts",
-      "sha256": "8d39eda068d7b84d864cb0617dc806b101c47134cc6639e209cf4856609844ea"
-    },
-    {
-      "path": "trigger/src/shared/format.ts",
-      "sha256": "1805fb0ea67f149294f4034038a17b2e1df2725bf3a413a4135a447420bd9fb5"
-    },
-    {
       "path": "trigger/src/shared/github.test.ts",
-      "sha256": "51c37e709f28527a025994196529bf372db8a0373e7784555e7948f7c5be49ac"
+      "sha256": "e2f2a9bdc405a69ed76cb4581e7ef9edfa9117f7f6509c14c7dd2877bd318262"
     },
     {
       "path": "trigger/src/shared/github.ts",
-      "sha256": "9268eae335132901e7ceff3621c70ae1afe742fbc48a7d59eb9e60b078beefca"
+      "sha256": "07fa7eee02a8152070336778b2601e8895c82793f3da5eec5509b6fede62e528"
     },
     {
       "path": "trigger/src/shared/jina-graph.test.ts",
@@ -181,7 +173,7 @@
     },
     {
       "path": "trigger/src/trigger/review.test.ts",
-      "sha256": "2860d2c2daa853a2f5a60949b9c4e1939308ba56dd639228a951c3abfb504a61"
+      "sha256": "3a2510159d7feff1f606f7908dff17ea7bcc6928162284f97ab0b2be0bad5b19"
     },
     {
       "path": "trigger/src/trigger/review.ts",

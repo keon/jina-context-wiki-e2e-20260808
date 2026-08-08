@@ -39,19 +39,6 @@ import {
   startOpenTelemetry,
   withOpenTelemetrySpan
 } from "@jina/observability";
-import {
-  createInstallationAccessToken,
-  parseRepository,
-  reviewProgressUpdateForStageResults,
-  runReviewRuntimeStage,
-  runReviewSummaryStage,
-  safeUpsertReviewProgressComment,
-  type ReviewPayload,
-  type ReviewStagePayload,
-  type ReviewStageResult,
-  type ReviewSuperseded,
-  type UsageRecordsFallback
-} from "@jina/review-agent";
 import type {
   ContextArtifactKind,
   ContextArtifactRef,
@@ -63,11 +50,11 @@ import type {
 } from "@jina/context-engine";
 import {
   LocalPageIndexClient,
-  MAX_CONTEXT_REPAIR_PASS,
+  MAX_CONTEXT_PAGE_REPAIR_PASSES,
   CONTEXT_WORKFLOW_CONTRACT,
   CONTEXT_WORKFLOW_SCHEMA_REVISION,
   assertContextPriorReleaseMatches,
-  boardWorkArtifactKindForTopic as existingBoardWorkArtifactKindForTopic,
+  causalGraphBoardArtifactKindForTopic,
   contextWorkflowBoardArtifactKindForTopic,
   contextPriorReleaseCatalog,
   contextArtifactKey,
@@ -136,16 +123,7 @@ import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCate
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
 import { contextPhaseCandidateArtifact } from "./phase-checkpoint-artifact.js";
-import {
-  LEGACY_REVIEW_FINDINGS_SCHEMA,
-  LEGACY_REVIEW_SYSTEM_PROMPT,
-  legacyReviewPrompt,
-  parseLegacyReviewOutput,
-  prepareLegacyReviewDiff,
-  type LegacyReviewRequest
-} from "./legacy-review-contract.js";
 import { runtimeWorkerId } from "./worker-identity.js";
-import { GcsReviewArtifactStore, decodeReviewTaskResult, encodeReviewTaskResult } from "./review-artifacts.js";
 import {
   REVIEW_TRIGGER_EFFECT_TYPE,
   REVIEW_TRIGGER_EFFECT_VERSION,
@@ -167,10 +145,8 @@ import {
   CONTEXT_BOARD_TOPICS,
   CONTROL_BOARD_TOPICS,
   CAUSAL_GRAPH_TOPICS,
-  REVIEW_BOARD_TOPICS,
   SUPPORTED_WORKER_TOPICS,
   configuredWorkerClaimMode,
-  configuredReviewRunTopicMode,
   configuredWorkerPreferredRepository,
   configuredWorkerTopics,
   requiresBoardAgentExecutor,
@@ -179,7 +155,6 @@ import {
   type EmbeddedContextStageTopic,
   type ControlBoardWorkerTopic,
   type CausalGraphWorkerTopic,
-  type ReviewBoardWorkerTopic,
   type SupportedWorkerTopic
 } from "./worker-topics.js";
 
@@ -196,7 +171,21 @@ function boardWorkArtifactKindForTopic(
   if (CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic)) {
     return contextWorkflowBoardArtifactKindForTopic(topic as ContextWorkerTopic);
   }
-  return existingBoardWorkArtifactKindForTopic(topic as Parameters<typeof existingBoardWorkArtifactKindForTopic>[0]);
+  switch (topic) {
+    case "run-context-research-plan":
+      return "research-plan";
+    case "run-context-research":
+      return "research-report";
+    case "run-context-publication-plan":
+      return "publication-plan";
+    case "run-context-page-write":
+    case "run-context-page-repair":
+      return "context-page";
+    case "run-context-page-audit":
+      return "citation-audit";
+    default:
+      return causalGraphBoardArtifactKindForTopic(topic as CausalGraphWorkerTopic);
+  }
 }
 
 interface RepositoryContextMetadata {
@@ -240,29 +229,6 @@ interface ContextBoardWorkerMetadata extends RepositoryContextMetadata {
   readonly pageOperation?: "add" | "retain" | "revise" | "retire";
 }
 
-interface ReviewBoardDependencyResult {
-  readonly taskId: string;
-  readonly taskType: ReviewBoardWorkerTopic;
-  readonly status: string;
-  readonly resultArtifact?: Record<string, unknown>;
-  readonly resultDigest?: string;
-}
-
-interface ReviewBoardWorkerMetadata {
-  readonly tenantId: string;
-  readonly workflowId: string;
-  readonly workflowType: "pr_review";
-  readonly pipelineVersion: string;
-  readonly traceId: string;
-  readonly spanId: string;
-  readonly reviewRunId: string;
-  readonly repository: string;
-  readonly pullRequestNumber: number;
-  readonly reviewPayload: ReviewPayload;
-  readonly workflowMetadata: Record<string, unknown>;
-  readonly dependencyResults: readonly ReviewBoardDependencyResult[];
-}
-
 interface InstallationBackfillWorkerMetadata {
   readonly tenantId: string;
   readonly workflowId: string;
@@ -283,13 +249,7 @@ interface BillingRetryWorkerMetadata {
 }
 
 interface WorkMetadataByTopic {
-  readonly "run-review": LegacyReviewWorkerMetadata | RelationalReviewTaskMetadata;
-  readonly "prepare-review": ReviewBoardWorkerMetadata;
-  readonly "summary-review": ReviewBoardWorkerMetadata;
-  readonly "runtime-review": ReviewBoardWorkerMetadata;
-  readonly "finalize-review": ReviewBoardWorkerMetadata;
-  readonly "publish-review": ReviewBoardWorkerMetadata;
-  readonly "settle-review": ReviewBoardWorkerMetadata;
+  readonly "run-review": RelationalReviewTaskMetadata;
   readonly "github-installation-backfill": InstallationBackfillWorkerMetadata;
   readonly "billing-retry": BillingRetryWorkerMetadata;
   readonly "run-context-input-snapshot": ContextBoardWorkerMetadata;
@@ -341,12 +301,6 @@ interface WorkMetadataByTopic {
   readonly "run-causal-graph-history": ContextBoardWorkerMetadata;
   readonly "run-causal-graph-derive": ContextBoardWorkerMetadata;
   readonly "run-causal-graph-publication": ContextBoardWorkerMetadata;
-}
-
-interface LegacyReviewWorkerMetadata {
-  readonly tenantId: string;
-  readonly repository: string;
-  readonly pullRequestNumber: number;
 }
 
 type ExecutableWorkerTopic = SupportedWorkerTopic | EmbeddedContextStageTopic;
@@ -455,16 +409,11 @@ const port = Number(process.env.PORT ?? 8080);
 const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
 const productApiUrl = (process.env.JINA_PRODUCT_API_URL?.trim() || apiUrl).replace(/\/$/, "");
 const token = requiredEnv("INTERNAL_API_TOKEN");
-const productInternalToken = process.env.JINA_PRODUCT_INTERNAL_API_TOKEN?.trim() || token;
-const reviewRunTopicMode = configuredReviewRunTopicMode(
-  process.env.JINA_REVIEW_RUN_TOPIC_MODE,
-  process.env.JINA_LEGACY_REVIEW_PIPELINE_ENABLED === "true"
-);
-const topics = configuredWorkerTopics(process.env.WORKER_TOPICS, {
-  reviewRunTopicMode
-});
-const triggerReviewClient: TriggerReviewClient | undefined =
-  reviewRunTopicMode === "relational" && topics.includes("run-review") ? createTriggerReviewClient() : undefined;
+const productInternalToken = requiredEnv("JINA_PRODUCT_INTERNAL_API_TOKEN");
+const topics = configuredWorkerTopics(process.env.WORKER_TOPICS);
+const triggerReviewClient: TriggerReviewClient | undefined = topics.includes("run-review")
+  ? createTriggerReviewClient()
+  : undefined;
 const reviewTriggerPollMs = triggerReviewPollIntervalMs(process.env.JINA_REVIEW_TRIGGER_POLL_INTERVAL_MS);
 const claimMode = configuredWorkerClaimMode(process.env.JINA_WORKER_CLAIM_MODE);
 const preferredRepository = configuredWorkerPreferredRepository(process.env.WORKER_PREFERRED_REPOSITORY);
@@ -484,12 +433,6 @@ const completionRetryDelayMs = positiveInt(process.env.WORKER_COMPLETION_RETRY_D
 const gitCommandTimeoutMs = positiveInt(process.env.CONTEXT_GIT_COMMAND_TIMEOUT_MS, 5 * 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
-const reviewArtifactStore = process.env.JINA_REVIEW_GCS_BUCKET
-  ? new GcsReviewArtifactStore(process.env.JINA_REVIEW_GCS_BUCKET, {
-      ...(process.env.GOOGLE_CLOUD_PROJECT ? { projectId: process.env.GOOGLE_CLOUD_PROJECT } : {}),
-      ...(process.env.GOOGLE_APPLICATION_CREDENTIALS ? { keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS } : {})
-    })
-  : undefined;
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const causalGraphOpenAiApiKey = process.env.CAUSAL_GRAPH_OPENAI_API_KEY?.trim();
 const causalGraphOnlyWorker =
@@ -1020,17 +963,12 @@ function logStageOutcome(
   );
 }
 
-type TopicHandler<T extends SupportedWorkerTopic> = (work: ClaimedWork<T>) => Promise<Record<string, unknown>>;
-type TopicHandlers = { readonly [T in SupportedWorkerTopic]: TopicHandler<T> };
+type StandardWorkerTopic = Exclude<SupportedWorkerTopic, "run-review">;
+type TopicHandler<T extends StandardWorkerTopic> = (work: ClaimedWork<T>) => Promise<Record<string, unknown>>;
+type TopicHandlers = { readonly [T in StandardWorkerTopic]: TopicHandler<T> };
 
 /** Claimable queue topics and their executors, checked as one exhaustive registry. */
 const topicHandlers = {
-  "prepare-review": runPrepareReview,
-  "summary-review": runSummaryReview,
-  "runtime-review": runRuntimeReview,
-  "finalize-review": runFinalizeReview,
-  "publish-review": runPublishReview,
-  "settle-review": runSettleReview,
   "github-installation-backfill": runInstallationBackfill,
   "billing-retry": runBillingRetry,
   "run-context-input-snapshot": runContextInputSnapshot,
@@ -1039,17 +977,16 @@ const topicHandlers = {
   "run-context-publication": runContextPublication,
   "run-causal-graph-history": runCausalGraphHistory,
   "run-causal-graph-derive": runCausalGraphDerive,
-  "run-causal-graph-publication": runCausalGraphPublication,
-  "run-review": runLegacyReview
+  "run-causal-graph-publication": runCausalGraphPublication
 } satisfies TopicHandlers;
 
 async function executeTopic<T extends SupportedWorkerTopic>(work: ClaimedWork<T>): Promise<WorkResult> {
-  if (work.topic === "run-review" && reviewRunTopicMode === "relational") {
+  if (work.topic === "run-review") {
     return runRelationalReview(work);
   }
   // Indexing a mapped function registry loses the key/parameter correlation;
   // the exhaustive `satisfies` check above proves it once for every entry.
-  const handler = topicHandlers[work.topic] as unknown as TopicHandler<T>;
+  const handler = topicHandlers[work.topic] as unknown as (claimed: ClaimedWork<T>) => Promise<Record<string, unknown>>;
   return { outcome: "done", result: await handler(work) };
 }
 
@@ -1180,7 +1117,7 @@ async function runContextPageBuild(work: ClaimedWork<"run-context-page-build">):
   );
   phaseReceiptIds.push(`${pageTaskId}:audit:0`);
   let auditVerdict = requiredString(auditResult.verdict, "Context page audit verdict");
-  for (let pass = 1; auditVerdict === "unsupported" && pass <= MAX_CONTEXT_REPAIR_PASS; pass += 1) {
+  for (let pass = 1; auditVerdict === "unsupported" && pass <= MAX_CONTEXT_PAGE_REPAIR_PASSES; pass += 1) {
     const findingsArtifact = parseArtifactRef(auditResult.outputArtifact, "Context page audit outputArtifact");
     const repairResult = await runContextPageRepair(
       internalStageWork(work, "run-context-page-repair", {
@@ -2832,7 +2769,7 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
       pageRepairCoveragePrompt(plannedPage, publication.plan.pages, {
         ...(supportedCitationIds === undefined ? {} : { supportedCitationIds }),
         ...(page.repairCheckpoint ? { priorCheckpoint: page.repairCheckpoint } : {}),
-        ...(work.task.metadata.pass > MAX_CONTEXT_REPAIR_PASS
+        ...(work.task.metadata.pass > MAX_CONTEXT_PAGE_REPAIR_PASSES
           ? { operatorRemediationPass: work.task.metadata.pass }
           : {})
       })
@@ -3641,305 +3578,6 @@ async function loadProviderObservations(
   };
 }
 
-interface ReviewCompletion {
-  readonly status: "completed" | "completed_superseded" | "failed";
-  readonly error?: string;
-  readonly superseded?: ReviewSuperseded;
-}
-
-async function runPrepareReview(work: ClaimedWork<"prepare-review">): Promise<Record<string, unknown>> {
-  const payload = work.task.metadata.reviewPayload;
-  const idempotencyKey =
-    payload.review_idempotency_key ??
-    `review:${payload.github_installation_id}:${payload.repository.github_repo_id}:${payload.pull_request.number}:${payload.pull_request.head_sha}:code_review`;
-  const prepared = await productInternalJson<Record<string, unknown>>("/internal/reviews/prepare", {
-    trigger_run_id: work.task.metadata.workflowId,
-    idempotency_key: idempotencyKey,
-    workflow: "review",
-    payload
-  });
-  const reviewRunId = requiredString(prepared.review_run_id, "prepare response review_run_id");
-  if (reviewRunId !== work.task.metadata.reviewRunId) {
-    throw new Error(`prepare response review run ${reviewRunId} does not match admitted run`);
-  }
-  const modelSettings =
-    prepared.model_settings === undefined
-      ? undefined
-      : isRecord(prepared.model_settings)
-        ? (prepared.model_settings as ReviewStagePayload["model_settings"])
-        : (() => {
-            throw new Error("prepare response model_settings must be an object");
-          })();
-  const stagePayload = reviewStagePayload(work.task.metadata, modelSettings);
-  const githubToken = await createInstallationAccessToken(payload.github_installation_id);
-  if (activeLease) activeLease.githubToken = githubToken;
-  await safeUpsertReviewProgressComment({
-    token: githubToken,
-    payload: stagePayload,
-    triggerRunId: work.message.id,
-    status: "github_review_progress_in_progress",
-    update: { status: "In progress", findings: "Pending" }
-  });
-  return encodeReviewResult(work, "review-prepare", {
-    reviewRunId,
-    stagePayload: { ...stagePayload }
-  });
-}
-
-async function runSummaryReview(work: ClaimedWork<"summary-review">): Promise<Record<string, unknown>> {
-  const stagePayload = await preparedReviewStagePayload(work);
-  const stageResult = await runReviewSummaryStage(stagePayload, work.message.id);
-  return encodeReviewResult(work, "review-summary", { stageResult: { ...stageResult } });
-}
-
-async function runRuntimeReview(work: ClaimedWork<"runtime-review">): Promise<Record<string, unknown>> {
-  const stagePayload = await preparedReviewStagePayload(work);
-  const stageResult = await runReviewRuntimeStage(stagePayload, work.message.id);
-  return encodeReviewResult(work, "review-runtime", { stageResult: { ...stageResult } });
-}
-
-async function runFinalizeReview(work: ClaimedWork<"finalize-review">): Promise<Record<string, unknown>> {
-  const stageResults = await Promise.all(
-    (["summary-review", "runtime-review"] as const).map(async (taskType) => {
-      const dependency = work.task.metadata.dependencyResults.find((candidate) => candidate.taskType === taskType);
-      const stage = taskType === "summary-review" ? "summary" : "runtime";
-      if (!dependency) return failedDependencyStageResult(stage, "dependency result is missing");
-      if (dependency.status !== "succeeded" || !dependency.resultArtifact) {
-        return failedDependencyStageResult(stage, `Board task ended ${dependency.status}`);
-      }
-      const decoded = await decodeReviewTaskResult(
-        dependency.resultArtifact,
-        taskType === "summary-review" ? "review-summary" : "review-runtime",
-        reviewArtifactStore
-      );
-      return parseReviewStageResult(decoded.stageResult, stage);
-    })
-  );
-  const completion = reviewCompletionForBoardStageResults(stageResults);
-  const payload = work.task.metadata.reviewPayload;
-  const completionPayload = {
-    workflow: "review",
-    status: completion.status,
-    repository: work.task.metadata.repository,
-    pull_request_number: payload.pull_request.number,
-    head_sha: payload.pull_request.head_sha,
-    stage_results: stageResults,
-    findings: stageResults.flatMap((result) => result.findings ?? []),
-    usage_records_fallback: stageResults
-      .map((result) => result.usage_records_fallback)
-      .filter((fallback): fallback is UsageRecordsFallback => Boolean(fallback)),
-    ...(completion.error ? { error: completion.error } : {}),
-    ...(completion.superseded ? { superseded: completion.superseded } : {})
-  };
-  return encodeReviewResult(work, "review-finalize", {
-    completion: { ...completion },
-    completionPayload
-  });
-}
-
-async function runPublishReview(work: ClaimedWork<"publish-review">): Promise<Record<string, unknown>> {
-  const dependency = requiredReviewDependency(work.task.metadata, "finalize-review");
-  if (dependency.status !== "succeeded" || !dependency.resultArtifact) {
-    throw new Error(`finalize-review dependency ended ${dependency.status}`);
-  }
-  const finalized = await decodeReviewTaskResult(dependency.resultArtifact, "review-finalize", reviewArtifactStore);
-  const completionPayload = requiredRecord(finalized.completionPayload, "finalized completionPayload");
-  const stageResults = parseReviewStageResults(completionPayload.stage_results);
-  const completion = parseReviewCompletion(finalized.completion);
-  const stagePayload = reviewStagePayload(work.task.metadata);
-  const githubToken = await createInstallationAccessToken(stagePayload.installation_id);
-  if (activeLease) activeLease.githubToken = githubToken;
-  const progressUpdate = reviewProgressUpdateForStageResults({
-    reviewRunId: work.task.metadata.reviewRunId,
-    headSha: work.task.metadata.reviewPayload.pull_request.head_sha,
-    stageResults,
-    failed: completion.status === "failed",
-    superseded: completion.status === "completed_superseded"
-  });
-  const comment = await safeUpsertReviewProgressComment({
-    token: githubToken,
-    payload: stagePayload,
-    triggerRunId: work.message.id,
-    status: "github_review_progress_finalized",
-    update: {
-      ...(progressUpdate.status ? { status: progressUpdate.status } : {}),
-      ...(progressUpdate.findings ? { findings: progressUpdate.findings } : {})
-    }
-  });
-  const runtime = stageResults.find((result) => result.stage === "runtime");
-  return encodeReviewResult(work, "review-publish", {
-    finalizationEnvelope: dependency.resultArtifact,
-    completionStatus: completion.status,
-    publicationStatus: runtime?.publicationStatus ?? "not_attempted",
-    ...(runtime?.publicationReason ? { publicationReason: runtime.publicationReason } : {}),
-    ...(runtime?.githubReviewUrl ? { githubReviewUrl: runtime.githubReviewUrl } : {}),
-    ...(comment?.html_url ? { progressCommentUrl: comment.html_url } : {})
-  });
-}
-
-async function runSettleReview(work: ClaimedWork<"settle-review">): Promise<Record<string, unknown>> {
-  const publish = work.task.metadata.dependencyResults.find((candidate) => candidate.taskType === "publish-review");
-  let completionPayload: Record<string, unknown>;
-  if (publish?.status === "succeeded" && publish.resultArtifact) {
-    const published = await decodeReviewTaskResult(publish.resultArtifact, "review-publish", reviewArtifactStore);
-    const finalizationEnvelope = requiredRecord(published.finalizationEnvelope, "published finalizationEnvelope");
-    const finalized = await decodeReviewTaskResult(finalizationEnvelope, "review-finalize", reviewArtifactStore);
-    completionPayload = requiredRecord(finalized.completionPayload, "finalized completionPayload");
-  } else {
-    completionPayload = {
-      workflow: "review",
-      status: "failed",
-      repository: work.task.metadata.repository,
-      pull_request_number: work.task.metadata.pullRequestNumber,
-      head_sha: work.task.metadata.reviewPayload.pull_request.head_sha,
-      stage_results: [],
-      findings: [],
-      usage_records_fallback: [],
-      error: `review publication task ended ${publish?.status ?? "without a dependency result"}`
-    };
-  }
-  const response = await productInternalJson<Record<string, unknown>>(
-    `/internal/reviews/${encodeURIComponent(work.task.metadata.reviewRunId)}/complete`,
-    {
-      trigger_run_id: work.task.metadata.workflowId,
-      payload: completionPayload
-    }
-  );
-  return encodeReviewResult(work, "review-settle", {
-    status: requiredString(completionPayload.status, "completion status"),
-    persisted: response.updated !== false
-  });
-}
-
-function reviewStagePayload(
-  metadata: ReviewBoardWorkerMetadata,
-  modelSettings?: ReviewStagePayload["model_settings"]
-): ReviewStagePayload {
-  const payload = metadata.reviewPayload;
-  const repository = parseRepository(payload.repository.full_name);
-  return {
-    review_run_id: metadata.reviewRunId,
-    parent_trigger_run_id: metadata.workflowId,
-    repository: {
-      ...repository,
-      githubRepoId: payload.repository.github_repo_id,
-      ...(payload.repository.default_branch ? { defaultBranch: payload.repository.default_branch } : {}),
-      ...(payload.repository.private === undefined ? {} : { private: payload.repository.private })
-    },
-    pull_request_number: payload.pull_request.number,
-    ...(payload.pull_request.title ? { title: payload.pull_request.title } : {}),
-    ...(payload.pull_request.author ? { author: payload.pull_request.author } : {}),
-    base_ref: payload.pull_request.base_ref ?? payload.repository.default_branch ?? "main",
-    ...(payload.pull_request.head_ref ? { head_ref: payload.pull_request.head_ref } : {}),
-    head_sha: payload.pull_request.head_sha,
-    installation_id: payload.github_installation_id,
-    ...(payload.manual_command_tag ? { manual_command_tag: payload.manual_command_tag } : {}),
-    ...(payload.review_instructions ? { review_instructions: payload.review_instructions } : {}),
-    ...(modelSettings ? { model_settings: modelSettings } : {})
-  };
-}
-
-async function preparedReviewStagePayload(
-  work: ClaimedWork<"summary-review" | "runtime-review">
-): Promise<ReviewStagePayload> {
-  const dependency = requiredReviewDependency(work.task.metadata, "prepare-review");
-  if (dependency.status !== "succeeded" || !dependency.resultArtifact) {
-    throw new Error(`prepare-review dependency ended ${dependency.status}`);
-  }
-  const prepared = await decodeReviewTaskResult(dependency.resultArtifact, "review-prepare", reviewArtifactStore);
-  const saved = requiredRecord(prepared.stagePayload, "prepared stagePayload");
-  if (requiredString(saved.review_run_id, "prepared review_run_id") !== work.task.metadata.reviewRunId) {
-    throw new Error("prepared stage payload belongs to a different review run");
-  }
-  const modelSettings = saved.model_settings;
-  if (modelSettings !== undefined && !isRecord(modelSettings)) {
-    throw new Error("prepared model_settings must be an object");
-  }
-  return reviewStagePayload(work.task.metadata, modelSettings);
-}
-
-async function encodeReviewResult(
-  work: ClaimedWork<ReviewBoardWorkerTopic>,
-  kind: string,
-  value: Record<string, unknown>
-): Promise<Record<string, unknown>> {
-  const envelope = await encodeReviewTaskResult({
-    tenantId: work.task.metadata.tenantId,
-    workflowId: work.task.metadata.workflowId,
-    taskId: work.task.id,
-    kind,
-    value,
-    ...(reviewArtifactStore ? { store: reviewArtifactStore } : {})
-  });
-  return { ...envelope };
-}
-
-function requiredReviewDependency(
-  metadata: ReviewBoardWorkerMetadata,
-  taskType: ReviewBoardWorkerTopic
-): ReviewBoardDependencyResult {
-  const dependency = metadata.dependencyResults.find((candidate) => candidate.taskType === taskType);
-  if (!dependency) throw new Error(`${taskType} dependency result is missing`);
-  return dependency;
-}
-
-function failedDependencyStageResult(stage: "summary" | "runtime", reason: string): ReviewStageResult {
-  const now = new Date().toISOString();
-  return { stage, status: "failed", startedAt: now, completedAt: now, durationMs: 0, error: reason };
-}
-
-function reviewCompletionForBoardStageResults(stageResults: ReviewStageResult[]): ReviewCompletion {
-  const summaryCount = stageResults.filter((result) => result.stage === "summary").length;
-  const runtimeCount = stageResults.filter((result) => result.stage === "runtime").length;
-  if (stageResults.length !== 2 || summaryCount !== 1 || runtimeCount !== 1) {
-    return {
-      status: "failed",
-      error: `invalid stage results: received ${summaryCount} summary and ${runtimeCount} runtime`
-    };
-  }
-  const failed = stageResults.filter((result) => result.status === "failed");
-  if (failed.length > 0) {
-    return {
-      status: "failed",
-      error: failed.map((result) => `${result.stage}: ${result.error ?? "failed"}`).join("\n")
-    };
-  }
-  if (stageResults.some((result) => result.stage === "runtime" && result.status === "success")) {
-    return { status: "completed" };
-  }
-  const superseded = stageResults.find((result) => result.superseded)?.superseded;
-  return superseded ? { status: "completed_superseded", superseded } : { status: "completed" };
-}
-
-function parseReviewStageResults(value: unknown): ReviewStageResult[] {
-  if (!Array.isArray(value) || value.length > 2) throw new Error("review stage_results must be an array");
-  return value.map((result, index) => parseReviewStageResult(result, index === 0 ? "summary" : "runtime"));
-}
-
-function parseReviewStageResult(value: unknown, expectedStage: "summary" | "runtime"): ReviewStageResult {
-  if (!isRecord(value)) throw new Error(`${expectedStage} stage result must be an object`);
-  const stage = requiredString(value.stage, `${expectedStage} stage result stage`);
-  const status = requiredString(value.status, `${expectedStage} stage result status`);
-  if (stage !== expectedStage || !["success", "skipped", "failed"].includes(status)) {
-    throw new Error(`${expectedStage} stage result has an invalid stage or status`);
-  }
-  if (!Number.isFinite(value.durationMs) || Number(value.durationMs) < 0) {
-    throw new Error(`${expectedStage} stage result duration is invalid`);
-  }
-  requiredIsoTimestamp(value.startedAt, `${expectedStage} stage result startedAt`);
-  requiredIsoTimestamp(value.completedAt, `${expectedStage} stage result completedAt`);
-  return value as unknown as ReviewStageResult;
-}
-
-function parseReviewCompletion(value: unknown): ReviewCompletion {
-  if (!isRecord(value)) throw new Error("review completion must be an object");
-  const status = requiredString(value.status, "review completion status");
-  if (status !== "completed" && status !== "completed_superseded" && status !== "failed") {
-    throw new Error("review completion status is invalid");
-  }
-  return value as unknown as ReviewCompletion;
-}
-
 function requiredRecord(value: unknown, name: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`${name} must be an object`);
   return value;
@@ -3996,9 +3634,6 @@ async function productInternalJson<T = Record<string, unknown>>(path: string, bo
 }
 
 async function runRelationalReview(work: ClaimedWork<"run-review">): Promise<WorkResult> {
-  if (!("workflowId" in work.task.metadata)) {
-    throw new Error("legacy run-review work reached the relational Trigger bridge");
-  }
   const metadata = work.task.metadata;
   const client = triggerReviewClient;
   if (!client) throw new Error("Trigger client is not configured for relational run-review work");
@@ -4255,57 +3890,6 @@ function triggerDispatchFailure(error: unknown): { readonly ambiguous: boolean; 
   };
 }
 
-async function runLegacyReview(work: ClaimedWork<"run-review">): Promise<Record<string, unknown>> {
-  if ("workflowId" in work.task.metadata) {
-    throw new Error("relational run-review work reached the legacy review executor");
-  }
-  const { repository, pullRequestNumber } = work.task.metadata;
-  const [pullRequest, diff] = await Promise.all([
-    githubJson(`/repos/${repository}/pulls/${pullRequestNumber}`),
-    githubText(`/repos/${repository}/pulls/${pullRequestNumber}`, "application/vnd.github.v3.diff")
-  ]);
-  const reviewRequest: LegacyReviewRequest = {
-    repository,
-    pullRequestNumber,
-    title: typeof pullRequest.title === "string" ? pullRequest.title : `Pull request #${pullRequestNumber}`,
-    diff
-  };
-  const prepared = prepareLegacyReviewDiff(reviewRequest.diff);
-  const model = process.env.REVIEW_MODEL?.trim() || "gpt-5.6-sol";
-  const apiKey = requiredEnv("OPENAI_API_KEY");
-  const baseUrl = (process.env.OPENAI_API_URL?.trim() || "https://api.openai.com/v1").replace(/\/$/, "");
-  const response = await fetch(`${baseUrl}/responses`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model,
-      instructions: LEGACY_REVIEW_SYSTEM_PROMPT,
-      input: legacyReviewPrompt(reviewRequest, prepared),
-      text: {
-        format: {
-          type: "json_schema",
-          name: "review_findings",
-          schema: LEGACY_REVIEW_FINDINGS_SCHEMA,
-          strict: true
-        }
-      },
-      store: false
-    }),
-    signal: requestSignal(10 * 60 * 1000)
-  });
-  if (!response.ok) {
-    throw new Error(`OpenAI review failed with ${response.status}: ${await boundedFailureDetail(response, [apiKey])}`);
-  }
-  const parsed = parseLegacyReviewOutput(extractOutputText((await response.json()) as Record<string, unknown>));
-  return {
-    model,
-    summary: parsed.summary,
-    findingCount: parsed.findings.length,
-    findings: parsed.findings,
-    diffTruncated: prepared.truncated
-  };
-}
-
 async function renew(work: ClaimedWork): Promise<void> {
   const response = await apiRequest(
     "/internal/worker/renew",
@@ -4490,11 +4074,6 @@ async function githubOptionalPaginatedArray(
   return { values, complete: false, reason: `history limit ${maximum} reached` };
 }
 
-async function githubText(path: string, accept: string): Promise<string> {
-  const response = await githubRequest(path, accept);
-  return response.text();
-}
-
 async function githubRequest(path: string, accept: string): Promise<Response> {
   const githubToken =
     activeLease?.githubToken ?? (process.env.GITHUB_API_TOKEN ?? process.env.GITHUB_CLONE_TOKEN)?.trim();
@@ -4558,17 +4137,6 @@ function languageForPath(path: string): string | undefined {
   }[extension ?? ""];
 }
 
-function extractOutputText(payload: Record<string, unknown>): string {
-  if (typeof payload.output_text === "string" && payload.output_text.trim()) return payload.output_text;
-  for (const item of Array.isArray(payload.output) ? payload.output : []) {
-    if (!isRecord(item) || !Array.isArray(item.content)) continue;
-    for (const content of item.content) {
-      if (isRecord(content) && typeof content.text === "string" && content.text.trim()) return content.text;
-    }
-  }
-  throw new Error("OpenAI response did not contain output text");
-}
-
 function parseClaimedWork(value: unknown): ClaimedWork<SupportedWorkerTopic> {
   if (!isRecord(value) || !isRecord(value.message) || !isRecord(value.task) || !isRecord(value.task.metadata)) {
     throw new Error("claim response must include message, task, and task metadata");
@@ -4595,32 +4163,11 @@ function parseClaimedWork(value: unknown): ClaimedWork<SupportedWorkerTopic> {
   const taskId = requiredString(value.task.id, "claim task id");
   const metadata = value.task.metadata;
   if (topic === "run-review") {
-    if (reviewRunTopicMode === "relational") {
-      return {
-        topic,
-        message: { ...message, topic },
-        task: { id: taskId, metadata: parseRelationalReviewTaskMetadata(metadata) }
-      };
-    }
     return {
       topic,
       message: { ...message, topic },
-      task: {
-        id: taskId,
-        metadata: {
-          tenantId: requiredString(metadata.tenantId, "task tenantId"),
-          repository: requiredString(metadata.repository, "task repository"),
-          pullRequestNumber: requiredPositiveInteger(metadata.pullRequestNumber, "task pullRequestNumber")
-        }
-      }
+      task: { id: taskId, metadata: parseRelationalReviewTaskMetadata(metadata) }
     };
-  }
-  if (isReviewBoardTopic(topic)) {
-    return {
-      topic,
-      message: { ...message, topic },
-      task: { id: taskId, metadata: reviewBoardWorkMetadata(metadata) }
-    } as ClaimedWork<SupportedWorkerTopic>;
   }
   if (isControlBoardTopic(topic)) {
     const workflowType = requiredString(metadata.workflowType, "task workflowType");
@@ -4669,146 +4216,6 @@ function parseClaimedWork(value: unknown): ClaimedWork<SupportedWorkerTopic> {
   throw new Error("unsupported claimed topic");
 }
 
-function reviewBoardWorkMetadata(metadata: Record<string, unknown>): ReviewBoardWorkerMetadata {
-  if (!isRecord(metadata.workflowMetadata)) throw new Error("task workflowMetadata must be an object");
-  const workflowMetadata = metadata.workflowMetadata;
-  const reviewPayload = parseReviewPayload(workflowMetadata.review_payload);
-  const reviewRunId = requiredString(metadata.review_run_id, "task review_run_id");
-  if (requiredString(workflowMetadata.review_run_id, "workflow review_run_id") !== reviewRunId) {
-    throw new Error("task review run does not match workflow review run");
-  }
-  const workflowType = requiredString(metadata.workflowType, "task workflowType");
-  if (workflowType !== "pr_review") throw new Error("review task must belong to a pr_review workflow");
-  return {
-    tenantId: requiredString(metadata.tenantId, "task tenantId"),
-    workflowId: requiredString(metadata.workflowId, "task workflowId"),
-    workflowType,
-    pipelineVersion: requiredString(metadata.pipelineVersion, "task pipelineVersion"),
-    traceId: requiredString(metadata.traceId, "task traceId"),
-    spanId: requiredString(metadata.spanId, "task spanId"),
-    reviewRunId,
-    repository: reviewPayload.repository.full_name!,
-    pullRequestNumber: reviewPayload.pull_request.number,
-    reviewPayload,
-    workflowMetadata,
-    dependencyResults: parseReviewBoardDependencyResults(metadata.dependencyResults)
-  };
-}
-
-function parseReviewBoardDependencyResults(value: unknown): ReviewBoardDependencyResult[] {
-  if (!Array.isArray(value) || value.length > REVIEW_BOARD_TOPICS.length) {
-    throw new Error(`review dependencyResults must be an array with at most ${REVIEW_BOARD_TOPICS.length} entries`);
-  }
-  return value.map((entry, index) => {
-    if (!isRecord(entry)) throw new Error(`review dependencyResults[${index}] must be an object`);
-    const taskType = requiredString(entry.taskType, `review dependencyResults[${index}].taskType`);
-    if (!isReviewBoardTopic(taskType)) {
-      throw new Error(`review dependencyResults[${index}] has an unsupported task type`);
-    }
-    return {
-      taskId: requiredString(entry.taskId, `review dependencyResults[${index}].taskId`),
-      taskType,
-      status: requiredString(entry.status, `review dependencyResults[${index}].status`),
-      ...(entry.resultArtifact === undefined
-        ? {}
-        : isRecord(entry.resultArtifact)
-          ? { resultArtifact: entry.resultArtifact }
-          : (() => {
-              throw new Error(`review dependencyResults[${index}].resultArtifact must be an object`);
-            })()),
-      ...(entry.resultDigest === undefined
-        ? {}
-        : { resultDigest: requiredDigest(entry.resultDigest, `review dependencyResults[${index}].resultDigest`) })
-    };
-  });
-}
-
-function parseReviewPayload(value: unknown): ReviewPayload {
-  if (!isRecord(value)) throw new Error("workflow review_payload must be an object");
-  if (!isRecord(value.repository)) throw new Error("workflow review_payload.repository must be an object");
-  if (!isRecord(value.pull_request)) throw new Error("workflow review_payload.pull_request must be an object");
-  const sourceEvent = requiredString(value.source_event, "review payload source_event");
-  if (!["pull_request", "issue_comment", "pull_request_review_comment", "manual"].includes(sourceEvent)) {
-    throw new Error("review payload source_event is invalid");
-  }
-  const trigger = requiredString(value.trigger, "review payload trigger");
-  if (!["webhook", "manual", "scheduled", "policy"].includes(trigger)) {
-    throw new Error("review payload trigger is invalid");
-  }
-  const repository = value.repository;
-  const pullRequest = value.pull_request;
-  const fullName = requiredString(repository.full_name, "review payload repository.full_name");
-  parseRepository(fullName);
-  const optionalText = (candidate: unknown, label: string): string | undefined =>
-    candidate === undefined ? undefined : requiredString(candidate, label);
-  const optionalBoolean = (candidate: unknown, label: string): boolean | undefined => {
-    if (candidate === undefined) return undefined;
-    if (typeof candidate !== "boolean") throw new Error(`${label} must be a boolean`);
-    return candidate;
-  };
-  const optionalNumber = (candidate: unknown, label: string): number | undefined =>
-    candidate === undefined ? undefined : requiredPositiveInteger(candidate, label);
-  const reviewIdempotencyKey = optionalText(value.review_idempotency_key, "review payload review_idempotency_key");
-  const owner = optionalText(repository.owner, "review payload repository.owner");
-  const ownerId = optionalNumber(repository.owner_id, "review payload repository.owner_id");
-  const ownerType = optionalText(repository.owner_type, "review payload repository.owner_type");
-  const repositoryName = optionalText(repository.name, "review payload repository.name");
-  const defaultBranch = optionalText(repository.default_branch, "review payload repository.default_branch");
-  const repositoryPrivate = optionalBoolean(repository.private, "review payload repository.private");
-  const title = optionalText(pullRequest.title, "review payload pull_request.title");
-  const htmlUrl = optionalText(pullRequest.html_url, "review payload pull_request.html_url");
-  const draft = optionalBoolean(pullRequest.draft, "review payload pull_request.draft");
-  const baseSha = optionalText(pullRequest.base_sha, "review payload pull_request.base_sha");
-  const headRef = optionalText(pullRequest.head_ref, "review payload pull_request.head_ref");
-  const baseRef = optionalText(pullRequest.base_ref, "review payload pull_request.base_ref");
-  const author = optionalText(pullRequest.author, "review payload pull_request.author");
-  const manualCommandTag = optionalText(value.manual_command_tag, "review payload manual_command_tag");
-  const reviewInstructions = optionalText(value.review_instructions, "review payload review_instructions");
-  let requestedBy: ReviewPayload["requested_by"];
-  if (value.requested_by !== undefined) {
-    if (!isRecord(value.requested_by)) throw new Error("review payload requested_by must be an object");
-    requestedBy = {
-      login: requiredString(value.requested_by.login, "review payload requested_by.login"),
-      comment_id: requiredPositiveInteger(value.requested_by.comment_id, "review payload requested_by.comment_id")
-    };
-  }
-  return {
-    delivery_id: requiredString(value.delivery_id, "review payload delivery_id"),
-    ...(reviewIdempotencyKey ? { review_idempotency_key: reviewIdempotencyKey } : {}),
-    source_event: sourceEvent as ReviewPayload["source_event"],
-    action: requiredString(value.action, "review payload action"),
-    github_installation_id: requiredPositiveInteger(
-      value.github_installation_id,
-      "review payload github_installation_id"
-    ),
-    repository: {
-      github_repo_id: requiredPositiveInteger(repository.github_repo_id, "review payload repository.github_repo_id"),
-      ...(owner ? { owner } : {}),
-      ...(ownerId ? { owner_id: ownerId } : {}),
-      ...(ownerType ? { owner_type: ownerType } : {}),
-      ...(repositoryName ? { name: repositoryName } : {}),
-      full_name: fullName,
-      ...(defaultBranch ? { default_branch: defaultBranch } : {}),
-      ...(repositoryPrivate === undefined ? {} : { private: repositoryPrivate })
-    },
-    pull_request: {
-      number: requiredPositiveInteger(pullRequest.number, "review payload pull_request.number"),
-      ...(title ? { title } : {}),
-      ...(htmlUrl ? { html_url: htmlUrl } : {}),
-      ...(draft === undefined ? {} : { draft }),
-      head_sha: requiredString(pullRequest.head_sha, "review payload pull_request.head_sha"),
-      ...(baseSha ? { base_sha: baseSha } : {}),
-      ...(headRef ? { head_ref: headRef } : {}),
-      ...(baseRef ? { base_ref: baseRef } : {}),
-      ...(author ? { author } : {})
-    },
-    ...(requestedBy ? { requested_by: requestedBy } : {}),
-    ...(manualCommandTag ? { manual_command_tag: manualCommandTag } : {}),
-    ...(reviewInstructions ? { review_instructions: reviewInstructions } : {}),
-    trigger: trigger as ReviewPayload["trigger"]
-  };
-}
-
 function repositoryMetadata(metadata: Record<string, unknown>): RepositoryContextMetadata {
   return {
     tenantId: requiredString(metadata.tenantId, "task tenantId"),
@@ -4830,21 +4237,12 @@ function isBoardTopic(topic: string): topic is ContextWorkerTopic | CausalGraphW
   );
 }
 
-function isReviewBoardTopic(topic: string): topic is ReviewBoardWorkerTopic {
-  return REVIEW_BOARD_TOPICS.includes(topic as ReviewBoardWorkerTopic);
-}
-
 function isControlBoardTopic(topic: string): topic is ControlBoardWorkerTopic {
   return CONTROL_BOARD_TOPICS.includes(topic as ControlBoardWorkerTopic);
 }
 
 function isDurableBoardTopic(topic: string): topic is SupportedWorkerTopic {
-  return (
-    isBoardTopic(topic) ||
-    isReviewBoardTopic(topic) ||
-    isControlBoardTopic(topic) ||
-    (reviewRunTopicMode === "relational" && topic === "run-review")
-  );
+  return isBoardTopic(topic) || isControlBoardTopic(topic) || topic === "run-review";
 }
 
 function boardWorkMetadata(

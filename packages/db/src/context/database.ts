@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ContextDatabaseTelemetry } from "@jina/context-engine";
 import { MetricsRegistry } from "@jina/observability";
@@ -175,25 +174,6 @@ export class ContextDatabase {
 function normalizeDatabaseOperation(operation: string): string {
   const normalized = operation.trim().toLowerCase();
   return /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(normalized) ? normalized : "other";
-}
-
-export function contextDigest(value: unknown): string {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
-}
-
-export function contextStableId(prefix: string, value: unknown): string {
-  return `${prefix}_${contextDigest(value).slice(0, 32)}`;
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === undefined) return "null";
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  return `{${Object.entries(value as Record<string, unknown>)
-    .filter(([, entry]) => entry !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
-    .join(",")}}`;
 }
 
 export function dateString(value: Date | string): string {

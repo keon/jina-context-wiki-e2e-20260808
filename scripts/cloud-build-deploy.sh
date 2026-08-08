@@ -30,10 +30,6 @@ db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:2}"
 migration_db_user="${JINA_MIGRATION_DB_USER:-jina_app}"
 migration_db_pass_secret="${JINA_MIGRATION_DB_PASS_SECRET:-jina-primary-owner-db-password:3}"
-# Jina v1 owns the migration login's password; this is where it keeps it.
-shared_owner_secret_project="${JINA_SHARED_OWNER_SECRET_PROJECT:-jina-463721}"
-shared_owner_secret="${JINA_SHARED_OWNER_SECRET:-jina-database-url}"
-shared_owner_secret_version="${JINA_SHARED_OWNER_SECRET_VERSION:-8}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
 acceptance_repository="${JINA_ACCEPTANCE_REPOSITORY:-omxyz/jina-context-graph-e2e}"
 acceptance_github_installation_id="${JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID:-140435029}"
@@ -71,7 +67,7 @@ context_daytona_model_secret="${JINA_CONTEXT_DAYTONA_MODEL_SECRET:-}"
 context_daytona_model_secret_env="${JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV:-OPENAI_API_KEY}"
 context_daytona_model_domains="${JINA_CONTEXT_DAYTONA_MODEL_DOMAINS:-api.openai.com}"
 context_checkpoint_publication_override_build_ids="${JINA_CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS:-}"
-product_internal_token_secret="${JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET:-jina-v1-internal-api-token}"
+product_internal_token_secret="${JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET:-jina-product-internal-api-token}"
 product_api_url="${JINA_PRODUCT_API_URL:-https://api.usejina.com}"
 review_trigger_secret="${JINA_REVIEW_TRIGGER_SECRET:-jina-review-trigger-secret-key}"
 trigger_api_url="${JINA_TRIGGER_API_URL:-https://api.trigger.dev}"
@@ -89,8 +85,6 @@ trigger_acceptance_github_app_private_key_secret_version="${JINA_TRIGGER_ACCEPTA
 openai_api_key_secret_version="${JINA_OPENAI_API_KEY_SECRET_VERSION:-1}"
 github_clone_token_secret_version="${JINA_GITHUB_CLONE_TOKEN_SECRET_VERSION:-1}"
 web_auth_password_secret_version="${JINA_WEB_AUTH_PASSWORD_SECRET_VERSION:-1}"
-context_reset_mode="${JINA_CONTEXT_RESET_MODE:-disabled}"
-context_reset_confirmation="${JINA_CONFIRM_CONTEXT_RESET:-}"
 context_board_topics="run-context-input-snapshot|run-context-page-plan|run-context-page-build|run-context-publication"
 release_suffix="$(printf '%s' "${CLOUD_BUILD_ID}" | tr '[:upper:]_' '[:lower:]-')"
 short_release_id="$(printf '%s' "${release_suffix}" | tr -d '-' | cut -c1-16)"
@@ -214,7 +208,6 @@ validate_positive_integer "JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS" "${acceptance_jo
 validate_numeric_secret_ref "JINA_DB_PASS_SECRET" "${db_pass_secret}"
 validate_numeric_secret_ref "JINA_MIGRATION_DB_PASS_SECRET" "${migration_db_pass_secret}"
 for secret_version_name in \
-  shared_owner_secret_version \
   github_webhook_secret_version \
   internal_api_token_secret_version \
   context_api_token_secret_version \
@@ -371,24 +364,6 @@ if (( ${#deployment_release_credential} < 32 || ${#worker_release_credential} < 
   echo "Unable to generate independent release-control and worker-generation credentials" >&2
   exit 2
 fi
-case "${context_reset_mode}" in
-  disabled)
-    if [[ -n "${context_reset_confirmation}" ]]; then
-      echo "JINA_CONFIRM_CONTEXT_RESET must be empty when reset mode is disabled" >&2
-      exit 2
-    fi
-    ;;
-  legacy-once)
-    if [[ "${context_reset_confirmation}" != "delete-rebuildable-context" ]]; then
-      echo "JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context is required for legacy-once" >&2
-      exit 2
-    fi
-    ;;
-  *)
-    echo "JINA_CONTEXT_RESET_MODE must be disabled or legacy-once" >&2
-    exit 2
-    ;;
-esac
 deploy_candidate_args=(
   --no-traffic
   --tag="${release_tag}"
@@ -559,88 +534,6 @@ if is_public:
   fi
 }
 
-# The migration login is shared with Jina v1 (omxyz/jina-simulation), which holds
-# the same password in its own secret in another project. Nothing keeps the two
-# copies in step, and existence checks cannot see the difference, so a v1
-# rotation leaves this release authenticating with a stale password and failing
-# at the schema step after every image has already been built and pushed.
-# Compare fingerprints up front and fail before that expensive work. Only
-# fingerprints are ever printed. A release is not blocked when the upstream
-# secret is unreadable, because cross-project access is not required to deploy.
-require_migration_credential_matches_shared_owner() {
-  local upstream migration_secret migration_version
-  if ! upstream="$(gcloud secrets versions access "${shared_owner_secret_version}" \
-    --secret="${shared_owner_secret}" \
-    --project="${shared_owner_secret_project}" 2>/dev/null)" || [[ -z "${upstream}" ]]; then
-    echo "Skipping shared migration-credential check: cannot read ${shared_owner_secret} in ${shared_owner_secret_project}" >&2
-    return 0
-  fi
-  migration_secret="${migration_db_pass_secret%%:*}"
-  migration_version="${migration_db_pass_secret#*:}"
-  local migration
-  migration="$(gcloud secrets versions access "${migration_version}" \
-    --secret="${migration_secret}" \
-    --project="${GCP_PROJECT_ID}")"
-  UPSTREAM_URL="${upstream}" MIGRATION_PASSWORD="${migration}" \
-    UPSTREAM_PROJECT="${shared_owner_secret_project}" \
-    UPSTREAM_SECRET="${shared_owner_secret}" \
-    UPSTREAM_VERSION="${shared_owner_secret_version}" \
-    MIGRATION_PROJECT="${GCP_PROJECT_ID}" \
-    MIGRATION_SECRET="${migration_secret}" \
-    MIGRATION_VERSION="${migration_version}" \
-    python3 -c '
-import hashlib
-import os
-import sys
-import urllib.parse
-
-
-def fingerprint(value):
-    return hashlib.sha256(value.encode()).hexdigest()[:12]
-
-
-upstream_project = os.environ["UPSTREAM_PROJECT"]
-upstream_secret = os.environ["UPSTREAM_SECRET"]
-upstream_version = os.environ["UPSTREAM_VERSION"]
-migration_project = os.environ["MIGRATION_PROJECT"]
-migration_secret = os.environ["MIGRATION_SECRET"]
-migration_version = os.environ["MIGRATION_VERSION"]
-upstream_label = f"{upstream_project}/{upstream_secret}"
-migration_label = f"{migration_project}/{migration_secret}:{migration_version}"
-
-expected = urllib.parse.unquote(
-    urllib.parse.urlparse(os.environ["UPSTREAM_URL"].strip()).password or ""
-)
-actual = os.environ["MIGRATION_PASSWORD"].rstrip("\n")
-if not expected or not actual:
-    # Nothing to compare against, so report it and leave the release alone. The
-    # migration still fails loudly if the password it holds is wrong.
-    print(f"Skipping shared migration-credential check: {upstream_label} carries no password to compare")
-    raise SystemExit(0)
-if expected == actual:
-    print(f"Migration credential matches {upstream_label} ({fingerprint(actual)})")
-    raise SystemExit(0)
-
-sys.exit(
-    "\n".join(
-        [
-            "Migration credential is stale.",
-            f"  {upstream_label} has {fingerprint(expected)}",
-            f"  {migration_label} has {fingerprint(actual)}",
-            "Jina v1 owns this password. Copy it across rather than resetting the",
-            "role, which would break v1:",
-            f"  gcloud secrets versions access {upstream_version} --secret={upstream_secret} \\",
-            f"    --project={upstream_project} \\",
-            "    | python3 -c \"import sys,urllib.parse as p; sys.stdout.write("
-            "p.unquote(p.urlparse(sys.stdin.read().strip()).password or str()))\" \\",
-            f"    | gcloud secrets versions add {migration_secret} \\",
-            f"      --project={migration_project} --data-file=-",
-        ]
-    )
-)
-'
-}
-
 resolve_release_image() {
   local tagged_image="$1"
   local digest_image
@@ -757,7 +650,7 @@ task_worker_environment() {
     echo "Enabled task worker requires its exact candidate revision" >&2
     exit 2
   fi
-  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_PRODUCT_API_URL=${product_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~JINA_REVIEW_RUN_TOPIC_MODE=relational~TRIGGER_API_URL=${trigger_api_url}~WORKER_TOPICS=run-review~REVIEW_MODEL=gpt-5.6-sol"
+  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_PRODUCT_API_URL=${product_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~TRIGGER_API_URL=${trigger_api_url}~WORKER_TOPICS=run-review~REVIEW_MODEL=gpt-5.6-sol"
   if [[ "${claim_mode}" == "enabled" ]]; then
     environment+="~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}"
   fi
@@ -1311,7 +1204,6 @@ for secret_spec in \
   require_secret "${secret_spec}"
 done
 require_secret "jina-web-auth-password:${web_auth_password_secret_version}"
-require_migration_credential_matches_shared_owner
 for service_account in \
   "${api_service_account}" \
   "${context_worker_service_account}" \
@@ -1379,7 +1271,7 @@ for service in jina-api jina-context-worker jina-task-worker jina-dashboard jina
 done
 
 # Create independent version-scoped credentials. The release-control,
-# migration, and reset jobs mount only the deployment credential. Candidate
+# migration jobs mount only the deployment credential. Candidate
 # workers mount only the generation credential, while the release-control job
 # receives its non-secret SHA-256 digest for the durable worker gate.
 deployment_release_secret_version_name="$(
@@ -1411,7 +1303,7 @@ fi
 # The unique control job owns the durable renewable lease, generation gate,
 # schema checks, and Board fencing for this build. A second build can create its
 # own job, but release-acquire fails before that build can touch worker services.
-release_control_env="^~^CONTEXT_RESET_MODULE_PATH=/app/node_modules/@jina/db/dist/reset-context-data.js~CONTEXT_BOARD_MODULE_PATH=/app/node_modules/@jina/board/dist/index.js~CLOUD_BUILD_ID=${CLOUD_BUILD_ID}~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~JINA_WORKER_GENERATION_CREDENTIAL_SHA256=${worker_release_credential_sha256}~JINA_DEPLOYMENT_LEASE_SECONDS=1800~JINA_WORKER_DRAIN_TIMEOUT_SECONDS=${worker_drain_timeout_seconds}~JINA_CONTEXT_WORKER_REVISION=${context_candidate_revision}~JINA_TASK_WORKER_REVISION=${task_candidate_revision}~JINA_CONTEXT_RESET_MODE=${context_reset_mode}~CONTEXT_RUNTIME_DB_USER=${db_user}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}"
+release_control_env="^~^CONTEXT_DB_MODULE_PATH=/app/node_modules/@jina/db/dist/index.js~CONTEXT_BOARD_MODULE_PATH=/app/node_modules/@jina/board/dist/index.js~CLOUD_BUILD_ID=${CLOUD_BUILD_ID}~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~JINA_WORKER_GENERATION_CREDENTIAL_SHA256=${worker_release_credential_sha256}~JINA_DEPLOYMENT_LEASE_SECONDS=1800~JINA_WORKER_DRAIN_TIMEOUT_SECONDS=${worker_drain_timeout_seconds}~JINA_CONTEXT_WORKER_REVISION=${context_candidate_revision}~JINA_TASK_WORKER_REVISION=${task_candidate_revision}~CONTEXT_RUNTIME_DB_USER=${db_user}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}"
 gcloud run jobs deploy "${release_control_job}" \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -1569,31 +1461,10 @@ gcloud run jobs execute jina-context-migrate \
   --region="${GCP_REGION}" \
   --wait
 
-if [[ "${context_reset_mode}" == "legacy-once" ]]; then
-  gcloud run jobs deploy jina-context-legacy-reset \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --image="${api_image}" \
-    --service-account="${migration_service_account}" \
-    --set-cloudsql-instances="${cloud_sql_instance}" \
-    --set-env-vars="^~^CONTEXT_RESET_MODULE_PATH=/app/node_modules/@jina/db/dist/reset-context-data.js~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~JINA_CONTEXT_RESET_MODE=legacy-once~JINA_CONFIRM_CONTEXT_RESET=${context_reset_confirmation}~JINA_CONTEXT_RESET_BACKUP_ID=${context_backup_id}" \
-    --set-secrets="DB_PASS=${migration_db_pass_secret},JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${deployment_release_secret_version}" \
-    --command=node \
-    --args="${production_preflight_path},schema-reset" \
-    --tasks=1 \
-    --max-retries=0 \
-    --task-timeout=20m \
-    --quiet
-  gcloud run jobs execute jina-context-legacy-reset \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --wait
-fi
-
-# The pre-migration checks allow candidate-declared additions to be absent but
-# reject unexpected drift. Before any candidate runtime starts, require owner
-# DDL (and the one-time reset, when selected) to have produced the exact
-# candidate schema under the same lease.
+# The initial schema check allows candidate-declared additions to be absent and
+# permits the migration to remove retired Context tables. Before any candidate
+# runtime starts, require owner DDL to have produced the exact candidate schema
+# under the same lease.
 run_release_control "schema-inspect"
 
 gcloud run deploy jina-api \
@@ -1879,7 +1750,6 @@ Context worker instances: ${context_worker_min_instances}-${context_worker_max_i
 Task worker instances: 1-${task_worker_max_instances}
 Candidate tag: ${release_tag}
 Pre-deployment backup: ${context_backup_id}
-Context reset mode: ${context_reset_mode}
 Deployment acceptance mode: ${deployment_acceptance_mode}
 Production trigger acceptance job: ${trigger_acceptance_job} (${trigger_acceptance_job_status}, not executed)
 SUMMARY

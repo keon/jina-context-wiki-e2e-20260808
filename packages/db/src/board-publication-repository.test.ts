@@ -12,14 +12,12 @@ const REPOSITORY = "omxyz/jina";
 const REF = "main";
 const RELEASE_ID = "cr_current";
 
-test("current release seed lookup is exact-scoped and returns its immutable artifact binding", async () => {
+test("current release seed is derived from the latest attached release", async () => {
+  let statement = "";
   let queryValues: readonly unknown[] | undefined;
-  let queryRole: string | undefined;
-  let queryScope: unknown;
   const database = {
-    async queryAs(role: string, scope: unknown, _statement: string, values: readonly unknown[]) {
-      queryRole = role;
-      queryScope = scope;
+    async queryAs(_role: string, _scope: unknown, sql: string, values: readonly unknown[]) {
+      statement = sql;
       queryValues = values;
       return {
         rows: [
@@ -41,9 +39,10 @@ test("current release seed lookup is exact-scoped and returns its immutable arti
     ref: REF
   });
 
-  assert.equal(queryRole, "jina_context_query");
-  assert.deepEqual(queryScope, { tenantIds: [TENANT] });
   assert.deepEqual(queryValues, [TENANT, REPOSITORY, REF]);
+  assert.match(statement, /from jina_context\.context_releases/);
+  assert.match(statement, /pageindex_attached_at is not null/);
+  assert.match(statement, /order by ref_sequence desc,release_id desc/);
   assert.deepEqual(seed, {
     version: 1,
     tenantId: TENANT,
@@ -57,7 +56,7 @@ test("current release seed lookup is exact-scoped and returns its immutable arti
   });
 });
 
-test("current release seed lookup rejects an artifact outside the requested tenant scope", async () => {
+test("current release seed rejects an artifact outside the requested tenant scope", async () => {
   const database = {
     async queryAs() {
       return {
@@ -85,89 +84,29 @@ test("current release seed lookup rejects an artifact outside the requested tena
   );
 });
 
-test("current release seed lookup cold-starts across the legacy context-v2 artifact boundary", async () => {
-  const database = {
-    async queryAs() {
-      return {
-        rows: [
-          {
-            release_id: RELEASE_ID,
-            ref_sequence: "7",
-            commit_sha: "a".repeat(40),
-            public_snapshot_digest: "b".repeat(64),
-            release_artifact: releaseArtifact(TENANT, "context-v2")
-          }
-        ]
-      };
-    }
-  } as unknown as ContextDatabase;
-
-  const seed = await new PostgresBoardContextPublicationRepository(database).findCurrentReleaseSeed({
-    tenantId: TENANT,
-    repository: REPOSITORY,
-    ref: REF
-  });
-
-  assert.equal(seed, undefined);
-});
-
-test("publication may replace only an older exact-scoped legacy cold-start boundary", () => {
-  const current = {
-    refSequence: 7,
-    releaseId: RELEASE_ID,
-    releaseArtifact: releaseArtifact(TENANT, "context-v2")
-  };
+test("publication must be based on the exact current release", () => {
+  assert.equal(contextPublicationMayAdvanceCurrent({}), true);
+  assert.equal(contextPublicationMayAdvanceCurrent({ priorRelease: { releaseId: RELEASE_ID, refSequence: 7 } }), false);
+  assert.equal(contextPublicationMayAdvanceCurrent({ current: { releaseId: RELEASE_ID, refSequence: 7 } }), false);
   assert.equal(
     contextPublicationMayAdvanceCurrent({
-      tenantId: TENANT,
-      repository: REPOSITORY,
-      publicationSequence: 8,
-      current
-    }),
-    true
-  );
-  assert.equal(
-    contextPublicationMayAdvanceCurrent({
-      tenantId: TENANT,
-      repository: REPOSITORY,
-      publicationSequence: 7,
-      current
-    }),
-    false
-  );
-  assert.equal(
-    contextPublicationMayAdvanceCurrent({
-      tenantId: TENANT,
-      repository: REPOSITORY,
-      publicationSequence: 8,
-      current: { ...current, releaseArtifact: releaseArtifact(TENANT) }
-    }),
-    false
-  );
-  assert.equal(
-    contextPublicationMayAdvanceCurrent({
-      tenantId: TENANT,
-      repository: REPOSITORY,
-      publicationSequence: 8,
-      current: { ...current, releaseArtifact: releaseArtifact("other-tenant", "context-v2") }
-    }),
-    false
-  );
-  assert.equal(
-    contextPublicationMayAdvanceCurrent({
-      tenantId: TENANT,
-      repository: REPOSITORY,
-      publicationSequence: 8,
-      current: { ...current, releaseArtifact: releaseArtifact(TENANT) },
+      current: { releaseId: RELEASE_ID, refSequence: 7 },
       priorRelease: { releaseId: RELEASE_ID, refSequence: 7 }
     }),
     true
   );
+  assert.equal(
+    contextPublicationMayAdvanceCurrent({
+      current: { releaseId: RELEASE_ID, refSequence: 7 },
+      priorRelease: { releaseId: "cr_stale", refSequence: 6 }
+    }),
+    false
+  );
 });
 
-function releaseArtifact(tenantId: string, root = "context") {
+function releaseArtifact(tenantId: string) {
   const key =
-    `${root}/tenants/${tenantId}/repositories/omxyz/jina/builds/` + `task_prior/context-release/${RELEASE_ID}.json`;
+    `context/tenants/${tenantId}/repositories/omxyz/jina/builds/` + `task_prior/context-release/${RELEASE_ID}.json`;
   return {
     uri: `gs://context-artifacts/${key}`,
     key,

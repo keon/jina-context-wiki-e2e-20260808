@@ -1,10 +1,8 @@
 # Context quality benchmark
 
-Status: the quality dimensions in this document remain the target. The retained
-`context-board-quality-v2` filesystem evaluator was built for the retired multi-topic
-workflow and is not a release gate for page-oriented builds until its artifact parser is
-updated. Runtime page validation, citation audits, publication validation, and API/MCP
-acceptance remain authoritative.
+Status: the quality dimensions in this document remain the target. Runtime page
+validation, citation audits, publication validation, and API/MCP acceptance are
+authoritative.
 
 This benchmark defines what “comparable to DeepWiki and Code Wiki” means for Context. It compares the quality of the generated engineering documentation and the usefulness of the context returned to another agent. It does not require Context to copy either product's chat experience.
 
@@ -118,91 +116,6 @@ An irrelevant commit may legitimately leave document bodies unchanged, so change
 
 ### Checkpoint recovery
 
-The durable orchestration plan and each accepted document are checkpoints. An interrupted run must retain completed, citation-valid pages, record unfinished work and gaps, and resume on the same commit without discarding valid progress. Publication still requires a complete, current critic pass.
+The durable orchestration plan and each accepted document are checkpoints. An interrupted run must retain completed, citation-valid pages, record unfinished work and gaps, and resume on the same commit without discarding valid progress. Publication still requires complete, current page and citation gates.
 
 Artifact inspection can prove that plan and page checkpoints exist. It cannot by itself prove that execution reused them. Resume behavior therefore requires an end-to-end test that interrupts a run, starts it again, and observes reuse before successful publication.
-
-## Deterministic evaluator
-
-The production Board workflow is evaluated from its immutable artifact store,
-not by reconstructing a separate local run layout. Give
-the evaluator the local artifact-store root and the exact Board context-build
-ID:
-
-```bash
-pnpm evaluate:context-board-quality -- \
-  --artifact-root .jina/context-artifacts \
-  --build task_context_build_id
-```
-
-For an incremental build, name the previous build in the same artifact store:
-
-```bash
-pnpm evaluate:context-board-quality -- \
-  --artifact-root .jina/context-artifacts \
-  --build task_current \
-  --previous-build task_previous
-```
-
-The retained v2 Board evaluator resolves exactly one
-`context/.../builds/<build-id>/` subtree and never uses artifacts from a
-sibling build. It still expects retired source-challenge and task-evaluation artifacts,
-so use it only with a compatible historical artifact set. It verifies:
-
-- immutable artifact references and SHA-256 byte bindings;
-- the certified release, publication plan, evidence checkpoint, newest source
-  challenge, newest context-only task evaluation, and certification chain;
-- exact public-page bytes, material-claim citation coverage, 120-line source
-  range limit, provider bindings, context links, and reachability from
-  `architecture.md`;
-- one latest passing critic attempt per required maintenance task and use of
-  every published page by at least one passing task;
-- per-page or repaired-draft citation audits against the current source
-  snapshot;
-- complete PageIndex document representation, parent/preorder structure,
-  certified anchors, source pin, and tree/build digests;
-- provider/history coverage when the plan or source challenge makes that
-  evidence material; and
-- increasing ref sequence plus a changed commit or provider frontier when a
-  previous build is supplied.
-
-The report is JSON on stdout and any hard deficit exits nonzero. Environment
-equivalents are `CONTEXT_BOARD_ARTIFACT_ROOT`,
-`CONTEXT_BOARD_BUILD_ID`, and `CONTEXT_BOARD_PREVIOUS_BUILD_ID`.
-Run its deterministic fixture suite with:
-
-```bash
-pnpm test:context-board-quality
-```
-
-The filesystem evaluator proves retained-artifact consistency. It does not
-replace the PostgreSQL publication-transaction test, the worker lease/fencing
-tests, a real interruption/resume test, or API/MCP retrieval tests.
-
-Passing the retained evaluator on a compatible historical artifact set is not evidence
-that a page-oriented candidate is accepted. Final acceptance requires representative
-end-to-end runs, a real
-interruption/resume test, retrieval through API and MCP, and human inspection
-that the maintenance questions are material rather than trivial. Production
-acceptance samples immutable Board-owned document titles and requires exact
-title queries to retrieve every owning document.
-
-## Live retrieval coverage
-
-`pnpm evaluate:questions` sends Markdown bullet queries to a running
-`POST /wiki/search` API. Headings become report categories. Each result records
-the immutable release, selected context documents, citations, deterministic
-retrieval method, and latency; the endpoint must never return a generated answer.
-
-```sh
-JINA_API_URL=https://api.example.com \
-JINA_CONTEXT_REPOSITORY=owner/repository \
-CONTEXT_QUESTION_FILE=/absolute/path/questions.md \
-CONTEXT_API_TOKEN='<bound query token>' \
-CONTEXT_QUESTION_MIN_RETRIEVED_RATE=0.8 \
-pnpm evaluate:questions > /tmp/context-question-report.json
-```
-
-This is a retrieval-coverage screen, not an answer-quality grade. The calling
-coding or review agent remains responsible for reasoning over the returned
-context.

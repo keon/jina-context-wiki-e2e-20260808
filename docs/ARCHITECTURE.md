@@ -1,9 +1,10 @@
 # Architecture
 
-Jina combines a tenant-scoped task board with an evidence-grounded repository context
-service. GitHub events create durable workflows. Workers capture an exact repository
-snapshot, use Codex to derive cited context documents, validate those documents on the
-host, and publish immutable releases for API and MCP clients.
+Jina combines a relational review Board, a tenant-scoped snapshot Board, and an
+evidence-grounded repository Context service. GitHub events create durable workflows.
+The review path delegates one idempotent external run to Trigger.dev; Context workers
+capture an exact repository snapshot, derive cited documents, validate them on the host,
+and publish immutable releases for API and MCP clients.
 
 The public retrieval corpus contains only derived context. Raw repository files, commits,
 pull requests, and issues are evidence used to validate citations; they are never search
@@ -18,9 +19,14 @@ flowchart LR
     MCP["Coding and review agents"] --> API
     API --> PG["PostgreSQL"]
     API --> GCS["GCS context artifacts"]
-    API --> BOARD["Durable board and outbox"]
-    BOARD --> WORKER["Context worker"]
-    BOARD --> CAUSAL["Causal graph worker"]
+    API --> REVIEW_BOARD["Relational review Board"]
+    REVIEW_BOARD --> TASK["Review task worker"]
+    TASK --> TRIGGER["Pinned Trigger.dev review"]
+    TRIGGER --> DAYTONA["Daytona review sandbox"]
+    TRIGGER --> GH
+    API --> SNAPSHOT_BOARD["Context and causal snapshot Board"]
+    SNAPSHOT_BOARD --> WORKER["Context worker"]
+    SNAPSHOT_BOARD --> CAUSAL["Causal graph worker"]
     WORKER --> CODEX["Codex derivation"]
     CAUSAL --> CODEX
     WORKER --> PI["Pinned local PageIndex runtime"]
@@ -32,11 +38,36 @@ Production separates API, context worker, task worker, dashboard, admin, migrati
 acceptance identities. Runtime database roles are `NOINHERIT`; each adapter transaction
 activates one focused capability with `SET LOCAL ROLE`.
 
-## Board and execution
+## Review execution
 
-The task board is the sole production orchestrator. The active page-oriented
-Context workflow has an aggregate root, a graph-materialization latch, one input
-snapshot task, one planner task, one dispatchable task per affected page, and one
+The deployed review pipeline is `pr_review.board.v2`. After webhook verification and
+durable inbox admission, the API creates one relational `board_workflows` row, exactly
+one `run-review` task, and a product `review_runs` row bound to that workflow. The task
+is deliberately the operational envelope around the review, not a decomposition of the
+review's internal model calls.
+
+The task worker claims `run-review`, starts an idempotent `trigger.review.dispatch`
+effect receipt, dispatches the pinned Trigger.dev root task `review`, and stores the
+provider run ID. While Trigger is nonterminal, the Board task becomes
+`waiting_external`; it has no worker lease to renew. A later claim polls the same
+provider ID. The effect receipt prevents an ambiguous retry from creating a second
+review run.
+
+Trigger owns its summary and runtime children, the isolated Daytona investigation,
+progress and findings publication, and product completion calls. The Board worker
+reconciles the terminal provider state before completing the effect receipt, task, and
+workflow. `review_runs.board_workflow_id`, `review_runs.trigger_run_id`, and the effect
+receipt provide the cross-store audit chain.
+
+The former six-stage review graph and its compatibility gates have been removed. The
+review worker is deployed with `WORKER_TOPICS=run-review`; all environments admit the
+same current relational workflow.
+
+## Context Board and execution
+
+The generic snapshot Board is the Context and causal-graph orchestrator. The active
+page-oriented Context workflow has an aggregate root, a graph-materialization latch, one
+input snapshot task, one planner task, one dispatchable task per affected page, and one
 publication task. Every required dynamic child blocks the root automatically.
 
 The planner durably checkpoints its research plan, bounded subject research, and
@@ -91,9 +122,9 @@ Context worker generation.
 
 Commit messages and parent SHAs are the derivation boundary; repository file bodies are
 not inputs. Every issue and causality must bind to an exact observed commit-message
-excerpt. The graph is one bounded immutable artifact. PostgreSQL stores only constant
-release metadata plus one mutable current pointer, so graph cardinality does not create
-high-volume relational writes or degrade query indexes during publication.
+excerpt. The graph is one bounded immutable artifact. PostgreSQL stores only one row per
+release and derives current from the highest sequence, so graph cardinality does not
+create high-volume relational writes or degrade query indexes during publication.
 
 ## Trigger and ref policy
 
@@ -124,7 +155,7 @@ Ingestion is intentionally thin. It records:
 
 Ingestion does not build a source-code search corpus, symbol graph, import graph, or
 embeddings. Structural parsing remains outside the active pipeline. Evidence is immutable
-and may be read only by derivation, validation, erasure, and audit paths.
+and may be read only by derivation, validation, and audit paths.
 
 ## Agentic derivation
 
@@ -264,7 +295,7 @@ Indexing reads citation-valid revisions for one checkpoint and materializes:
 - a heading/document hierarchy.
 
 Raw blobs and provider observations are not projected into any public retriever.
-Structural relations and dense retrieval are disabled.
+Structural relations are disabled.
 
 The worker hierarchy adapter sends only authorized derived documents to its local Python bridge
 over the open-source PageIndex Markdown implementation pinned to commit
@@ -307,8 +338,8 @@ GET  /wiki/builds/:id/page
 POST /mcp
 ```
 
-Administrative build, rebuild, invalidation, erasure, token, metrics, and worker routes
-remain separate from retrieval.
+Administrative build, rebuild, token, metrics, and worker routes remain separate
+from retrieval.
 
 An internal administrator can cancel one exact build with
 `POST /internal/context/builds/:id/cancel`. Cancellation is idempotent, fences every
@@ -347,17 +378,16 @@ repository access. ACL filtering happens before candidate creation and again dur
 hydration. Tenant administrators may inspect tenant-wide context but cannot use an
 ordinary reader token to mutate build or governance state.
 
-## Persistence and reset policy
+## Persistence and migration policy
 
-Canonical registrations, repository mappings, ACL observations and their source
-observations, token hashes, erasure filters, audits, and GitHub delivery identity are
-preserved. Board build state, evidence snapshots, derivation runs, progress, revisions,
-releases, projections, outbox work, retrieval telemetry, and quota ledgers are rebuildable.
+The Board validates Context artifacts before persistence. PostgreSQL stores one catalog
+document per Context release, its PageIndex attachment, immutable causal releases,
+direct repository access, checkpoints, quotas, and token hashes. Current releases are
+derived by sequence; no mutable pointer or projector pipeline remains.
 
-`pnpm --filter @jina/db reset-context` reports exact deletable row counts when database
-configuration is present and otherwise lists the static targets. Execution requires both
-`--execute` and the exact confirmation
-`JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context`.
+Migration `0037_collapse_context_schema.sql` removes the pre-Board Context schema and
+unused roles. It is applied through the same ordered migration path in staging and main.
+There is no reset CLI, cutover database, or mixed-schema compatibility mode.
 
 ## Code boundaries
 
@@ -367,9 +397,9 @@ apps/worker/               Git checkout, ingestion, local/Daytona derivation
 apps/dashboard/            only customer dashboard application
 apps/admin/                tenant-wide release and citation health
 apps/docs/                 customer documentation application
-packages/context-engine/   evidence, derivation, validation, release, retrieval
+packages/context-engine/   validation, release catalogs, and Context contracts
 packages/daytona/          isolated Codex executors
-packages/db/               PostgreSQL stores, roles, GCS artifacts, reset
+packages/db/               PostgreSQL stores, roles, and GCS artifacts
 packages/github/           signed webhook parsing and trigger policy
 services/pageindex-worker/ pinned self-hosted PageIndex Markdown bridge
 packages/review-agent/    portable Daytona review runtime used by Board workers

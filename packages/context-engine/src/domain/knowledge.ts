@@ -1,5 +1,5 @@
 import type { EvidenceAnchor } from "./evidence.js";
-import { canonicalJson, fingerprint, normalizeIsoTime, normalizeRepository, stableId } from "./fingerprint.js";
+import { fingerprint, normalizeIsoTime, normalizeRepository, stableId } from "./fingerprint.js";
 
 export const knowledgeDocumentKinds = [
   "architecture",
@@ -69,41 +69,11 @@ export interface KnowledgeDocumentRevision {
   createdAt: string;
 }
 
-export function sameImmutableKnowledgeRevision(
-  left: KnowledgeDocumentRevision,
-  right: KnowledgeDocumentRevision
-): boolean {
-  const { createdAt: _leftCreatedAt, ...leftImmutable } = left;
-  const { createdAt: _rightCreatedAt, ...rightImmutable } = right;
-  return canonicalJson(leftImmutable) === canonicalJson(rightImmutable);
-}
-
-export function sameImmutableKnowledgeCitation(
-  left: KnowledgeEvidenceCitation,
-  right: KnowledgeEvidenceCitation
-): boolean {
-  const canonicalCitation = (citation: KnowledgeEvidenceCitation): KnowledgeEvidenceCitation => ({
-    ...citation,
-    anchor: {
-      ...citation.anchor,
-      ...(citation.anchor.observedAt ? { observedAt: normalizeIsoTime(citation.anchor.observedAt) } : {})
-    }
-  });
-  return canonicalJson(canonicalCitation(left)) === canonicalJson(canonicalCitation(right));
-}
-
-export type KnowledgeRevisionEventType =
-  "reviewed" | "rejected" | "invalidated" | "superseded" | "redacted" | "retained";
-
-export interface KnowledgeRevisionEvent {
-  id: string;
-  revisionId: string;
-  sequence: number;
-  type: KnowledgeRevisionEventType;
-  actorId: string;
-  reason: string;
-  replacementRevisionId?: string;
-  createdAt: string;
+/** Validated knowledge bundled into a Board release publication. */
+export interface KnowledgeCommit {
+  run: DerivationRun;
+  revisions: KnowledgeDocumentRevision[];
+  citations: KnowledgeEvidenceCitation[];
 }
 
 export interface KnowledgeDocumentDraftCitation {
@@ -280,8 +250,4 @@ export function createKnowledgeCitation(
       : {}),
     anchor
   };
-}
-
-export function requiresKnowledgeReview(kind: KnowledgeDocumentKind): boolean {
-  return kind === "incident" || kind === "ownership";
 }

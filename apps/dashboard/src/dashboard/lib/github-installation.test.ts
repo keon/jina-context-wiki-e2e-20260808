@@ -17,6 +17,14 @@ test("GitHub installation URL carries the selected writable Jina tenant", () => 
     }),
     "https://github.com/apps/jina/installations/new?foo=bar&state=tenant-123",
   );
+  assert.equal(
+    githubInstallationUrl(
+      "https://github.com/apps/jina/installations/new",
+      { tenantId: "tenant-123", login: "Acme", type: "Organization", role: "admin" },
+      "onboarding",
+    ),
+    "https://github.com/apps/jina/installations/new?state=jina%3Av1%3Aonboarding%3Atenant-123",
+  );
 });
 
 test("GitHub installation URL does not target a tenant a member cannot administer", () => {
@@ -38,6 +46,14 @@ test("GitHub setup callback parser requires an installation and tenant", () => {
   );
   assert.equal(parseGithubInstallationCallback("?installation_id=nope&state=tenant-123"), undefined);
   assert.equal(parseGithubInstallationCallback("?installation_id=42"), undefined);
+  assert.deepEqual(
+    parseGithubInstallationCallback("?installation_id=42&state=jina%3Av1%3Aonboarding%3Atenant-123"),
+    { installationId: 42, tenantId: "tenant-123", returnTo: "onboarding" },
+  );
+  assert.equal(
+    parseGithubInstallationCallback("?installation_id=42&state=jina%3Av1%3Aonboarding%3A"),
+    undefined,
+  );
 });
 
 test("normalizeGithubConnections validates and maps the API projection", () => {

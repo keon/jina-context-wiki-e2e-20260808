@@ -1,66 +1,61 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CONTEXT_ROLES_SQL } from "./context/roles.js";
+import { CONTEXT_ROLES_SQL, CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
 import { CONTEXT_SCHEMA_SQL } from "./context/schema.js";
 
-test("legacy pipeline and derivation checkpoint tables are absent", () => {
-  for (const table of [
-    "pipeline_builds",
-    "pipeline_stages",
-    "derivation_progress",
-    "derivation_orchestration",
-    "derivation_private_checkpoints"
-  ]) {
-    assert.doesNotMatch(CONTEXT_SCHEMA_SQL, new RegExp(`create table if not exists jina_context\\.${table}\\b`));
-    assert.doesNotMatch(CONTEXT_ROLES_SQL, new RegExp(`jina_context\\.${table}\\b`));
-  }
+const currentTables = [
+  "context_phase_checkpoints",
+  "context_quota_ledgers",
+  "context_releases",
+  "issue_graph_releases",
+  "repositories",
+  "repository_access"
+] as const;
+
+test("Context schema has only the six current happy-path tables", () => {
+  const declared = [...CONTEXT_SCHEMA_SQL.matchAll(/create table if not exists jina_context\.([a-z_]+)/g)].map(
+    (match) => match[1]
+  );
+  assert.deepEqual(declared.sort(), [...currentTables].sort());
 });
 
-test("board publication rows and current pointers enforce tenant RLS", () => {
-  for (const table of ["context_board_publications", "current_context_board_releases"]) {
+test("every current Context table is tenant scoped", () => {
+  for (const table of currentTables) {
     assert.match(CONTEXT_ROLES_SQL, new RegExp(`alter table jina_context\\.${table} enable row level security`));
-    assert.match(
-      CONTEXT_ROLES_SQL,
-      new RegExp(`create policy context_tenant_scope on jina_context\\.${table}\\s+using`)
-    );
+    assert.match(CONTEXT_ROLES_SQL, new RegExp(`create policy context_tenant_scope on jina_context\\.${table}`));
   }
-  assert.match(
-    CONTEXT_ROLES_SQL,
-    /grant select on\s+[\s\S]*?jina_context\.context_board_publications,jina_context\.current_context_board_releases,[\s\S]*?\nto jina_context_query;/
-  );
 });
 
-test("quota ledgers have a tenant-scoped least-privilege runtime role", () => {
-  assert.match(CONTEXT_ROLES_SQL, /'jina_context_quota'/);
-  assert.match(
-    CONTEXT_ROLES_SQL,
-    /grant select,insert,update on jina_context\.context_quota_ledgers\s+to jina_context_quota;/
-  );
-  assert.doesNotMatch(CONTEXT_ROLES_SQL, /grant [^;]*delete[^;]*context_quota_ledgers[^;]*jina_context_quota/i);
-  assert.match(CONTEXT_ROLES_SQL, /alter table jina_context\.context_quota_ledgers enable row level security;/);
-  assert.match(CONTEXT_ROLES_SQL, /create policy context_tenant_scope on jina_context\.context_quota_ledgers\s+using/);
+test("promoted api_tokens keeps its Context security model in public", () => {
+  assert.match(CONTEXT_SCHEMA_SQL, /create table if not exists public\.api_tokens/);
+  assert.match(CONTEXT_ROLES_SQL, /alter table public\.api_tokens enable row level security/);
+  assert.match(CONTEXT_ROLES_SQL, /create policy context_api_tokens_verify on public\.api_tokens/);
+  assert.match(CONTEXT_ROLES_SQL, /create policy context_tenant_scope on public\.api_tokens/);
+  assert.match(CONTEXT_ROLES_SQL, /grant select,insert on public\.api_tokens to jina_context_tokens/);
 });
 
-test("phase checkpoints are immutable tenant rows indexed by build", () => {
-  assert.match(
-    CONTEXT_SCHEMA_SQL,
-    /create table if not exists jina_context\.context_phase_checkpoints \([\s\S]*primary key \(tenant_id,task_id,phase,checkpoint_key\)/
-  );
-  assert.match(
-    CONTEXT_SCHEMA_SQL,
-    /create index if not exists context_phase_checkpoints_build[\s\S]*\(tenant_id,build_id,recorded_at,task_id,phase\)/
-  );
-  assert.match(CONTEXT_ROLES_SQL, /alter table jina_context\.context_phase_checkpoints enable row level security;/);
-  assert.match(CONTEXT_ROLES_SQL, /create policy context_tenant_scope on jina_context\.context_phase_checkpoints/);
+test("release tables are immutable except the one-time Context attachment", () => {
+  assert.match(CONTEXT_SCHEMA_SQL, /create trigger context_releases_immutable/);
+  assert.match(CONTEXT_SCHEMA_SQL, /immutable outside its one-time attachment/);
+  assert.match(CONTEXT_SCHEMA_SQL, /create trigger issue_graph_releases_immutable/);
+  assert.match(CONTEXT_SCHEMA_SQL, /reject_immutable_change/);
 });
 
-test("query role can hydrate projector status only inside its tenant scope", () => {
-  const policy =
-    /create policy context_generation_projectors_query on jina_context\.generation_projectors[\s\S]*?\n {2}\);/.exec(
-      CONTEXT_ROLES_SQL
-    )?.[0];
-  assert.ok(policy);
-  assert.match(policy, /for select to jina_context_query/);
-  assert.match(policy, /generation\.tenant_id=any\(string_to_array/);
-  assert.doesNotMatch(policy, /current_user='jina_context_admin'/);
+test("runtime roles expose only current-path capabilities", () => {
+  assert.deepEqual(CONTEXT_RUNTIME_ROLES, [
+    "jina_context_query",
+    "jina_context_quota",
+    "jina_context_tokens",
+    "jina_context_issue_publish",
+    "jina_context_tenant_admin"
+  ]);
+  assert.match(CONTEXT_ROLES_SQL, /grant select on[\s\S]*jina_context\.context_releases/);
+  assert.match(CONTEXT_ROLES_SQL, /grant select,insert,update on jina_context\.context_quota_ledgers/);
+  assert.doesNotMatch(CONTEXT_ROLES_SQL, /evidence|knowledge|projector|outbox|manifest|dense|identity/);
+});
+
+test("direct repository access replaces the observation and ACL projection pipeline", () => {
+  assert.match(CONTEXT_SCHEMA_SQL, /create table if not exists jina_context\.repository_access/);
+  assert.match(CONTEXT_SCHEMA_SQL, /permission in \('read','write','admin','denied'\)/);
+  assert.doesNotMatch(CONTEXT_SCHEMA_SQL, /observations|repository_acl_observations|repository_acl_projection/);
 });

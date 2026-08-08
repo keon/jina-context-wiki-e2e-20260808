@@ -1,10 +1,19 @@
 "use client";
 
-import { ClerkProvider, SignIn, useClerk, useAuth, useUser } from "@clerk/nextjs";
+import { ClerkProvider, SignIn, useClerk, useAuth, useOrganization, useUser } from "@clerk/nextjs";
 import { isClerkAPIResponseError } from "@clerk/nextjs/errors";
 import { themeTokens } from "@jina/theme/tokens";
 import { apiUrl, loginUrl } from "../../dashboard/lib/api.ts";
+import {
+  createOnboardingProgress,
+  parseOnboardingProgress,
+  type OnboardingIntent,
+  type OnboardingProgress,
+  type OnboardingStep
+} from "../../dashboard/lib/onboarding.ts";
 import type { ViewerResponse } from "../../dashboard/lib/types.ts";
+import type { ViewerTenant } from "../../dashboard/lib/tenants.ts";
+import type { StagingClerkAuthOptions } from "../../server/staging-auth-origin.ts";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 interface DeveloperModeContextValue {
@@ -27,8 +36,42 @@ interface AppAuthContextValue {
     readonly displayName: string;
     readonly email?: string;
     readonly imageUrl?: string;
+    readonly githubConnected: boolean;
+    readonly openSettings: () => void | Promise<void>;
     readonly signOut: () => void | Promise<void>;
   };
+  readonly onboarding: AppOnboardingState;
+  readonly organizationSetup: AppOrganizationSetup;
+}
+
+type OnboardingPatch = Partial<{
+  status: OnboardingProgress["status"];
+  step: OnboardingStep;
+  selectedTenantId: string;
+  intent: OnboardingIntent;
+}>;
+
+interface AppOnboardingState {
+  readonly progress: OnboardingProgress | null;
+  readonly saving: boolean;
+  readonly error: string | null;
+  readonly begin: () => Promise<OnboardingProgress>;
+  readonly update: (patch: OnboardingPatch) => Promise<OnboardingProgress>;
+  readonly complete: () => Promise<OnboardingProgress>;
+  readonly restart: () => Promise<OnboardingProgress>;
+  readonly clearError: () => void;
+}
+
+interface AppOrganizationSetup {
+  readonly mode: "clerk" | "github";
+  readonly supported: boolean;
+  readonly activeOrganization?: { readonly id: string; readonly name: string };
+  readonly create: (name: string) => Promise<{
+    readonly id: string;
+    readonly name: string;
+    readonly tenant?: ViewerTenant;
+  }>;
+  readonly activate: (organizationId: string) => Promise<void>;
 }
 
 const AppAuthContext = createContext<AppAuthContextValue | null>(null);
@@ -40,10 +83,16 @@ const AppAuthContext = createContext<AppAuthContextValue | null>(null);
  * keeps vendor routing, appearance, and session semantics in one replaceable
  * adapter while the visible application remains made from Jina components.
  */
-export function AppAuthProvider({ children }: { readonly children: ReactNode }) {
+export function AppAuthProvider({
+  children,
+  clerkOptions
+}: {
+  readonly children: ReactNode;
+  readonly clerkOptions?: StagingClerkAuthOptions;
+}) {
   if (dashboardUsesGithubAuth) return <GithubAuthAdapter>{children}</GithubAuthAdapter>;
   return (
-    <ClerkProvider>
+    <ClerkProvider {...clerkOptions}>
       {dashboardUsesHybridAuth ? (
         <HybridAuthAdapter>{children}</HybridAuthAdapter>
       ) : (
@@ -59,95 +108,77 @@ export function AppAuthProvider({ children }: { readonly children: ReactNode }) 
  * a fleet-wide logout while users link their Clerk accounts naturally.
  */
 function HybridAuthAdapter({ children }: { readonly children: ReactNode }) {
-  const { user, isLoaded } = useUser();
-  const { isSignedIn } = useAuth();
-  const { signOut } = useClerk();
-  const [legacyViewer, setLegacyViewer] = useState<ViewerResponse | null>(null);
-  const [legacyReady, setLegacyReady] = useState(false);
-
-  useEffect(() => {
-    if (!isLoaded || isSignedIn) {
-      setLegacyReady(isLoaded);
-      if (isSignedIn) setLegacyViewer(null);
-      return;
-    }
-    const controller = new AbortController();
-    setLegacyReady(false);
-    void fetch(apiUrl("/dashboard/me"), {
-      credentials: "include",
-      cache: "no-store",
-      signal: controller.signal
-    })
-      .then(async (response) => (response.ok ? ((await response.json()) as ViewerResponse) : null))
-      .then((viewer) => {
-        if (!controller.signal.aborted) setLegacyViewer(viewer);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!controller.signal.aborted) setLegacyReady(true);
-      });
-    return () => controller.abort();
-  }, [isLoaded, isSignedIn]);
-
-  const clerkEmail = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses[0]?.emailAddress;
-  const legacyUser = legacyViewer?.user;
-  const auth = useMemo<AppAuthContextValue>(
-    () => ({
-      ready: isLoaded && (Boolean(isSignedIn) || legacyReady),
-      signedIn: Boolean(isSignedIn) || legacyViewer?.authenticated === true,
-      account: {
-        displayName: isSignedIn
-          ? (user?.fullName ?? user?.username ?? clerkEmail ?? "Account")
-          : legacyUser?.name?.trim() || legacyUser?.login || "Account",
-        ...(isSignedIn && clerkEmail
-          ? { email: clerkEmail }
-          : legacyUser?.login
-            ? { email: `@${legacyUser.login}` }
-            : {}),
-        ...(isSignedIn && user?.imageUrl
-          ? { imageUrl: user.imageUrl }
-          : legacyUser?.avatar_url
-            ? { imageUrl: legacyUser.avatar_url }
-            : {}),
-        signOut: async () => {
-          await fetch(apiUrl("/auth/logout"), {
-            method: "POST",
-            credentials: "include"
-          }).catch(() => undefined);
-          if (isSignedIn) {
-            await signOut({ redirectUrl: "/signin" });
-          } else {
-            window.location.assign("/signin");
-          }
-        }
-      }
-    }),
-    [clerkEmail, isLoaded, isSignedIn, legacyReady, legacyUser, legacyViewer?.authenticated, signOut, user]
-  );
-
-  return (
-    <AppAuthContext.Provider value={auth}>
-      <DeveloperModeProvider
-        ready={auth.ready}
-        userEnabled={user?.unsafeMetadata.developerMode === true}
-        {...(user
-          ? {
-              userKey: user.id,
-              persistUser: (enabled: boolean) => user.updateMetadata({ unsafeMetadata: { developerMode: enabled } })
-            }
-          : {})}
-      >
-        {children}
-      </DeveloperModeProvider>
-    </AppAuthContext.Provider>
-  );
+  const { isSignedIn, isLoaded } = useAuth();
+  if (isLoaded && !isSignedIn) return <GithubAuthAdapter>{children}</GithubAuthAdapter>;
+  return <ClerkAuthAdapter clearLegacySession>{children}</ClerkAuthAdapter>;
 }
 
-function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
+function ClerkAuthAdapter({
+  children,
+  clearLegacySession = false
+}: {
+  readonly children: ReactNode;
+  readonly clearLegacySession?: boolean;
+}) {
   const { user, isLoaded } = useUser();
   const { isSignedIn } = useAuth();
-  const { signOut } = useClerk();
+  const { organization } = useOrganization();
+  const clerk = useClerk();
+  const { signOut } = clerk;
+  const persistedProgress = parseOnboardingProgress(user?.unsafeMetadata.jinaOnboarding);
+  const [optimisticProgress, setOptimisticProgress] = useState<{
+    readonly userId: string;
+    readonly progress: OnboardingProgress;
+  } | null>(null);
+  const [onboardingSaving, setOnboardingSaving] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const email = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses[0]?.emailAddress;
+
+  const saveOnboarding = useCallback(
+    async (next: OnboardingProgress) => {
+      if (!user) throw new Error("Sign in before saving onboarding progress.");
+      setOptimisticProgress({ userId: user.id, progress: next });
+      setOnboardingSaving(true);
+      setOnboardingError(null);
+      try {
+        await user.updateMetadata({
+          unsafeMetadata: { ...user.unsafeMetadata, jinaOnboarding: next }
+        });
+        await user.reload();
+        return next;
+      } catch (cause) {
+        setOptimisticProgress(null);
+        const message = cause instanceof Error ? cause.message : "Onboarding progress could not be saved.";
+        setOnboardingError(message);
+        throw cause;
+      } finally {
+        setOnboardingSaving(false);
+      }
+    },
+    [user]
+  );
+
+  const optimisticForUser = optimisticProgress && optimisticProgress.userId === user?.id ? optimisticProgress : null;
+  const currentProgress = optimisticForUser?.progress ?? persistedProgress;
+  const begin = useCallback(
+    () => saveOnboarding(currentProgress?.status === "in_progress" ? currentProgress : createOnboardingProgress()),
+    [currentProgress, saveOnboarding]
+  );
+  const update = useCallback(
+    (patch: OnboardingPatch) => {
+      const base = currentProgress ?? createOnboardingProgress();
+      return saveOnboarding({ ...base, ...patch, updatedAt: new Date().toISOString() });
+    },
+    [currentProgress, saveOnboarding]
+  );
+  const complete = useCallback(() => {
+    const now = new Date().toISOString();
+    const base = currentProgress ?? createOnboardingProgress(now);
+    return saveOnboarding({ ...base, status: "complete", step: "finish", updatedAt: now, completedAt: now });
+  }, [currentProgress, saveOnboarding]);
+  const restart = useCallback(() => saveOnboarding(createOnboardingProgress()), [saveOnboarding]);
+  const clearOnboardingError = useCallback(() => setOnboardingError(null), []);
+
   const auth = useMemo<AppAuthContextValue>(
     () => ({
       ready: isLoaded,
@@ -156,10 +187,65 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
         displayName: user?.fullName ?? user?.username ?? email ?? "Account",
         ...(email ? { email } : {}),
         ...(user?.imageUrl ? { imageUrl: user.imageUrl } : {}),
-        signOut: () => signOut({ redirectUrl: "/signin" })
+        githubConnected: Boolean(user?.externalAccounts.some((account) => account.provider === "github")),
+        openSettings: () => clerk.openUserProfile(),
+        signOut: async () => {
+          // In hybrid mode a surviving legacy GitHub session would sign the
+          // browser straight back in, so clear it before Clerk signs out.
+          if (clearLegacySession) {
+            await fetch(apiUrl("/auth/logout"), {
+              method: "POST",
+              credentials: "include"
+            }).catch(() => undefined);
+          }
+          return signOut({ redirectUrl: "/signin" });
+        }
+      },
+      onboarding: {
+        progress: currentProgress,
+        saving: onboardingSaving,
+        error: onboardingError,
+        begin,
+        update,
+        complete,
+        restart,
+        clearError: clearOnboardingError
+      },
+      organizationSetup: {
+        mode: "clerk",
+        supported: true,
+        ...(organization ? { activeOrganization: { id: organization.id, name: organization.name } } : {}),
+        create: async (name: string) => {
+          const organization = await clerk.createOrganization({ name });
+          await clerk.setActive({ organization: organization.id });
+          return { id: organization.id, name: organization.name };
+        },
+        activate: async (organizationId: string) => {
+          await clerk.setActive({ organization: organizationId });
+        }
       }
     }),
-    [email, isLoaded, isSignedIn, signOut, user?.fullName, user?.imageUrl, user?.username]
+    [
+      begin,
+      clearLegacySession,
+      clerk,
+      clearOnboardingError,
+      complete,
+      currentProgress,
+      email,
+      isLoaded,
+      isSignedIn,
+      onboardingError,
+      onboardingSaving,
+      organization,
+      restart,
+      signOut,
+      update,
+      user?.externalAccounts,
+      user?.fullName,
+      user?.imageUrl,
+      user?.username
+    ]
   );
   return (
     <AppAuthContext.Provider value={auth}>
@@ -169,7 +255,8 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
         {...(user
           ? {
               userKey: user.id,
-              persistUser: (enabled: boolean) => user.updateMetadata({ unsafeMetadata: { developerMode: enabled } })
+              persistUser: (enabled: boolean) =>
+                user.updateMetadata({ unsafeMetadata: { ...user.unsafeMetadata, developerMode: enabled } })
             }
           : {})}
       >
@@ -182,6 +269,9 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
 function GithubAuthAdapter({ children }: { readonly children: ReactNode }) {
   const [viewer, setViewer] = useState<ViewerResponse | null>(null);
   const [ready, setReady] = useState(false);
+  const [progress, setProgress] = useState<OnboardingProgress | null>(null);
+  const [progressReady, setProgressReady] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     void fetch(apiUrl("/dashboard/me"), {
@@ -202,15 +292,60 @@ function GithubAuthAdapter({ children }: { readonly children: ReactNode }) {
       });
     return () => controller.abort();
   }, []);
+  const storageKey = viewer?.user?.id ? `jina.onboarding.${viewer.user.id}` : null;
+  useEffect(() => {
+    if (!storageKey) {
+      setProgressReady(true);
+      return;
+    }
+    setProgressReady(false);
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      setProgress(parseOnboardingProgress(stored ? JSON.parse(stored) : null));
+    } catch {
+      setProgress(null);
+    } finally {
+      setProgressReady(true);
+    }
+  }, [storageKey]);
+
+  const persistProgress = useCallback(
+    async (next: OnboardingProgress) => {
+      if (!storageKey) throw new Error("Sign in before saving onboarding progress.");
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(next));
+        setProgress(next);
+        setOnboardingError(null);
+        return next;
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "Onboarding progress could not be saved.";
+        setOnboardingError(message);
+        throw cause;
+      }
+    },
+    [storageKey]
+  );
   const auth = useMemo<AppAuthContextValue>(() => {
     const user = viewer?.user;
+    const begin = () => persistProgress(progress?.status === "in_progress" ? progress : createOnboardingProgress());
+    const update = (patch: OnboardingPatch) => {
+      const base = progress ?? createOnboardingProgress();
+      return persistProgress({ ...base, ...patch, updatedAt: new Date().toISOString() });
+    };
+    const complete = () => {
+      const now = new Date().toISOString();
+      const base = progress ?? createOnboardingProgress(now);
+      return persistProgress({ ...base, status: "complete", step: "finish", updatedAt: now, completedAt: now });
+    };
     return {
-      ready,
+      ready: ready && progressReady,
       signedIn: viewer?.authenticated === true,
       account: {
         displayName: user?.name?.trim() || user?.login || "Account",
         ...(user?.login ? { email: `@${user.login}` } : {}),
         ...(user?.avatar_url ? { imageUrl: user.avatar_url } : {}),
+        githubConnected: viewer?.authenticated === true,
+        openSettings: () => window.location.assign(loginUrl()),
         signOut: async () => {
           await fetch(apiUrl("/auth/logout"), {
             method: "POST",
@@ -218,9 +353,40 @@ function GithubAuthAdapter({ children }: { readonly children: ReactNode }) {
           }).catch(() => undefined);
           window.location.assign("/signin");
         }
+      },
+      onboarding: {
+        progress,
+        saving: false,
+        error: onboardingError,
+        begin,
+        update,
+        complete,
+        restart: () => persistProgress(createOnboardingProgress()),
+        clearError: () => setOnboardingError(null)
+      },
+      organizationSetup: {
+        mode: "github",
+        supported: true,
+        create: async (name: string) => {
+          const response = await fetch(apiUrl("/dashboard/tenants"), {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name })
+          });
+          const payload = (await response.json().catch(() => ({}))) as {
+            readonly tenant?: ViewerTenant;
+            readonly error?: string;
+          };
+          if (!response.ok || !payload.tenant) {
+            throw new Error(payload.error ?? `Organization creation returned ${response.status}.`);
+          }
+          return { id: payload.tenant.tenant_id, name: payload.tenant.login, tenant: payload.tenant };
+        },
+        activate: async () => undefined
       }
     };
-  }, [ready, viewer]);
+  }, [onboardingError, persistProgress, progress, progressReady, ready, viewer]);
   return (
     <AppAuthContext.Provider value={auth}>
       <DeveloperModeProvider ready={ready}>{children}</DeveloperModeProvider>
@@ -308,7 +474,7 @@ export function AppSignIn() {
     <SignIn
       routing="hash"
       fallbackRedirectUrl="/reviews"
-      signUpFallbackRedirectUrl="/reviews"
+      signUpFallbackRedirectUrl="/onboarding"
       appearance={{
         // Clerk derives hover and disabled shades from these, so it needs real
         // values rather than var() references it cannot compute against. They
@@ -347,6 +513,18 @@ export function useAppAccount() {
     ready: context.ready,
     ...context.account
   };
+}
+
+export function useAppOnboarding(): AppOnboardingState & { readonly ready: boolean } {
+  const context = useContext(AppAuthContext);
+  if (!context) throw new Error("useAppOnboarding must be used within AppAuthProvider");
+  return { ready: context.ready, ...context.onboarding };
+}
+
+export function useAppOrganizationSetup(): AppOrganizationSetup {
+  const context = useContext(AppAuthContext);
+  if (!context) throw new Error("useAppOrganizationSetup must be used within AppAuthProvider");
+  return context.organizationSetup;
 }
 
 export function useDeveloperMode(): DeveloperModeContextValue {

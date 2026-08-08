@@ -239,7 +239,7 @@ export async function runContextSecurityLoadAcceptance(options, dependencies = {
     const stages = requiredArray(progress.stages, "progress.stages").map((value) =>
       requiredObject(value, "progress stage")
     );
-    for (const type of ["publish-context-release", "index-context-release"]) {
+    for (const type of ["publish-context-release"]) {
       const stage = stages.find((value) => value.type === type);
       if (!stage || stage.status !== "done") throw new Error(`required completed build is missing successful ${type}`);
     }

@@ -6,11 +6,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { callbackUrlFor, cookieSecurity, requireDashboardSession } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import { decryptSecret, encryptSecret, isEncryptedEnvelope } from "./crypto.js";
-import {
-  ensurePersonalTenantId,
-  getTenantMembershipRole,
-  saveTenantOpenRouterIntegration,
-} from "./store.js";
+import { getTenantMembershipRole, saveTenantOpenRouterIntegration } from "./store.js";
 
 // The PKCE verifier is held in a short-lived HttpOnly cookie between /start and
 // /callback, scoped to the OAuth route so it is not sent with other requests.
@@ -37,13 +33,13 @@ export function deriveCodeChallenge(verifier: string): string {
  * so github_user_id cannot be forged. The callback compares the bound id to the active session.
  */
 // tenant_id is the tenant the resolved key will be saved to (the caller validated the viewer is an
-// admin of it, or omitted it to default to the personal tenant). It is carried INSIDE the encrypted
+// admin of it). It is carried INSIDE the encrypted
 // binding so the callback cannot be pointed at a different tenant than the one authorized at start.
 export interface VerifierBinding {
   code_verifier: string;
   github_user_id: number;
   nonce: string;
-  tenant_id?: string;
+  tenant_id: string;
 }
 
 export function encodeVerifierBinding(binding: VerifierBinding): string {
@@ -64,11 +60,7 @@ export function callbackFlowMatchesBinding(queryFlow: string | undefined, bindin
 }
 
 export function decodeVerifierBinding(raw: string | undefined): VerifierBinding | undefined {
-  // FINDING 4b: the binding MUST be an authenticated encryption envelope. decryptSecret has a legacy
-  // plaintext passthrough (it returns non-envelope values as-is), so accepting a plaintext cookie would
-  // let anyone forge { github_user_id: <victim> } and attach a key across users. Reject any value that
-  // is not an envelope outright — even in dev — so the binding is never forgeable. (In production
-  // SECRETS_ENCRYPTION_KEY is required, per config.ts, so encode always yields an envelope.)
+  // The binding must be an authenticated encryption envelope so callers cannot forge its user or tenant.
   if (!raw || !isEncryptedEnvelope(raw)) {
     return undefined;
   }
@@ -79,7 +71,8 @@ export function decodeVerifierBinding(raw: string | undefined): VerifierBinding 
       typeof parsed === "object" &&
       typeof (parsed as VerifierBinding).code_verifier === "string" &&
       typeof (parsed as VerifierBinding).github_user_id === "number" &&
-      (( parsed as VerifierBinding).tenant_id === undefined || typeof (parsed as VerifierBinding).tenant_id === "string")
+      typeof (parsed as VerifierBinding).tenant_id === "string" &&
+      (parsed as VerifierBinding).tenant_id.length > 0
     ) {
       return parsed as VerifierBinding;
     }
@@ -96,18 +89,12 @@ export async function startOpenRouterOAuth(c: Context, config: AppConfig): Promi
     return c.json({ error: "dashboard authentication required" }, 401);
   }
 
-  // Optional target tenant. When provided the viewer must be an ADMIN of it; when omitted the flow
-  // targets the viewer's personal tenant (ensured here so the callback always has a concrete tenant id).
-  let tenantId: string | undefined;
-  const requestedTenantId = c.req.query("tenant_id")?.trim();
-  if (requestedTenantId) {
-    const role = await getTenantMembershipRole(session.user.id, requestedTenantId, session.userId);
-    if (role !== "admin") {
-      return c.json({ error: "tenant admin access required" }, 403);
-    }
-    tenantId = requestedTenantId;
-  } else {
-    tenantId = await ensurePersonalTenantId(session.user.id);
+  const tenantId = c.req.query("tenant_id")?.trim();
+  if (!tenantId) {
+    return c.json({ error: "tenant_id is required" }, 400);
+  }
+  if ((await getTenantMembershipRole(session.userId, tenantId)) !== "admin") {
+    return c.json({ error: "tenant admin access required" }, 403);
   }
 
   const verifier = generateCodeVerifier();
@@ -133,7 +120,7 @@ export async function startOpenRouterOAuth(c: Context, config: AppConfig): Promi
   // Fence the callback to THIS flow: stamp the binding's nonce onto the callback URL. OpenRouter echoes
   // the callback_url untouched (appending ?code=...), so the nonce survives the round trip and lets the
   // callback reject a cookie left by a later /oauth/start (see callbackFlowMatchesBinding).
-  const callbackUrl = new URL(callbackUrlFor(c, config, CALLBACK_PATH));
+  const callbackUrl = new URL(callbackUrlFor(config, CALLBACK_PATH));
   callbackUrl.searchParams.set("flow", nonce);
 
   const url = new URL("https://openrouter.ai/auth");
@@ -183,16 +170,11 @@ export async function openRouterOAuthCallback(c: Context, config: AppConfig): Pr
     if (!code) {
       throw new Error("missing authorization code");
     }
-    // Resolve the target tenant from the binding (authorized at start). Older bindings without a
-    // tenant_id (or a session whose personal tenant was created since) fall back to the personal tenant.
-    const tenantId = binding.tenant_id ?? (await ensurePersonalTenantId(session.user.id));
-    if (!tenantId) {
-      throw new Error("no target tenant for openrouter key");
-    }
+    const tenantId = binding.tenant_id;
     const key = await exchangeCodeForKey(code, binding.code_verifier);
     // The flow can outlive the membership that authorized it. Re-check immediately before the write;
-    // personal tenants resolve through the same implicit-admin membership helper.
-    if ((await getTenantMembershipRole(session.user.id, tenantId, session.userId)) !== "admin") {
+    // personal tenants resolve through the same current membership helper.
+    if ((await getTenantMembershipRole(session.userId, tenantId)) !== "admin") {
       return c.redirect(errorRedirect, 302);
     }
     await saveTenantOpenRouterIntegration(tenantId, {

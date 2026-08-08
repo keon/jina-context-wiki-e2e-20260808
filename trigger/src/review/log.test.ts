@@ -34,7 +34,7 @@ function finding(index: number): TestFinding {
     root_cause: "root cause ".repeat(50),
     suggested_fix: "fix ".repeat(80),
     evidence_files: [`src/file-${index}.ts`],
-    token: "secret-token-value",
+    token: "secret-token-value"
   };
 }
 
@@ -43,7 +43,7 @@ test("summarizeFindingsForLog caps findings, truncates previews, and omits arbit
   const summary = summarizeFindingsForLog(findings, {
     publishableFindings: [findings[0]],
     unanchoredFindings: [findings[1]],
-    lowConfidenceFindings: [findings[1]],
+    lowConfidenceFindings: [findings[1]]
   });
 
   assert.equal(summary.total_count, 21);
@@ -71,31 +71,33 @@ test("runtime review logs expose config, merge readiness, severities, and bounde
       schemaVersion: 2,
       areas: [{ id: "area-1", title: "API", priority: "high", round: 1 }],
       scopeDecision: "investigate",
-      intentSummary: "Change the API.",
+      intentSummary: "Change the API."
     },
-    areas: [{
-      areaId: "area-1",
-      title: "API",
-      status: "completed",
-      summary: "Exercised the changed route.",
-      tasks: [{ id: "task-1" }],
-      issues: [{}],
-      nonIssues: [],
-      blocked: [],
-      toolCalls: [{ tool: "exec" }],
-    }],
+    areas: [
+      {
+        areaId: "area-1",
+        title: "API",
+        status: "completed",
+        summary: "Exercised the changed route.",
+        tasks: [{ id: "task-1" }],
+        issues: [{}],
+        nonIssues: [],
+        blocked: [],
+      }
+    ],
     findings: [],
     readiness: { score: 3, recommendation: "Merge after fixes", rationale: "One P1 remains." },
-    finalReviewSummary: "Verified and deduplicated the investigation.",
     publication: {
       areaSummaries: [{ areaId: "area-1", title: "API", summary: "Checked the API." }],
-      issues: [{
-        title: "Route returns the wrong status",
-        body: "The new error path returns 200.",
-        severity: "P1",
-        severityDescription: "Should fix before merging",
-        sourceFingerprints: ["finding-1"],
-      }],
+      issues: [
+        {
+          title: "Route returns the wrong status",
+          body: "The new error path returns 200.",
+          severity: "P1",
+          severityDescription: "Should fix before merging",
+          sourceFingerprints: ["finding-1"]
+        }
+      ]
     },
     jinaConfiguration: {
       appliedConfig: { depth: 2 },
@@ -110,8 +112,8 @@ test("runtime review logs expose config, merge readiness, severities, and bounde
         changedKeys: ["depth"],
         proposedConfig: { depth: 4, source: ".jina/config.json" },
         proposedWarnings: [],
-        appliesToCurrentReview: false,
-      },
+        appliesToCurrentReview: false
+      }
     },
     model_call_summary: {
       attempted: 4,
@@ -120,8 +122,8 @@ test("runtime review logs expose config, merge readiness, severities, and bounde
       contextGraphStagesObserved: 4,
       contextGraphQueriesAttempted: 5,
       contextGraphQueriesSucceeded: 4,
-      contextGraphQueriesFailed: 1,
-    },
+      contextGraphQueriesFailed: 1
+    }
   } as unknown as RuntimeReviewResult;
 
   const summary = runtimeReviewLogSummary(result);

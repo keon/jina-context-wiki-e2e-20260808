@@ -24,11 +24,8 @@ import { tenantQueryKey } from "../lib/query-keys";
 import { useTenant, useTenantFence, useTenantQueryScope } from "../providers";
 import { isTenantWritable, type SelectedTenant } from "../lib/tenants";
 
-/** Billing endpoints for the active tenant, or the legacy viewer-scoped routes. */
-function billingUrl(selected: SelectedTenant | null, suffix = ""): string {
-  return selected
-    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/billing${suffix}`)
-    : apiUrl(`/dashboard/billing${suffix}`);
+function billingUrl(selected: SelectedTenant, suffix = ""): string {
+  return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/billing${suffix}`);
 }
 
 export default function BillingPage() {
@@ -44,11 +41,20 @@ export default function BillingPage() {
   // 200 body of status:"not_configured", so this never rejects and never retries.
   const { data: billing, refetch } = useQuery<Billing>({
     queryKey: tenantQueryKey("billing", scope),
-    queryFn: () => loadBilling(() => fetch(billingUrl(selected), { credentials: "include" })),
+    queryFn: () => loadBilling(() => fetch(billingUrl(selected!), { credentials: "include" })),
+    enabled: Boolean(selected),
     staleTime: CONFIG_STALE_TIME_MS,
     retry: false,
   });
   const reload = useCallback(() => void refetch(), [refetch]);
+
+  if (!selected) {
+    return (
+      <BillingFrame selected={null}>
+        <BillingState title="No workspace selected" detail="Select a workspace to view billing." />
+      </BillingFrame>
+    );
+  }
 
   // undefined = loading; otherwise a normalized Billing (not_configured on any failure/absence).
   if (billing === undefined) {
@@ -147,7 +153,7 @@ function PlanHero({
     setBusyPlan(planId);
     setError(null);
     try {
-      const response = await fetch(billingUrl(selected, "/subscribe"), {
+      const response = await fetch(billingUrl(selected!, "/subscribe"), {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -338,7 +344,7 @@ function AutoReviewLimit({
     setBusy(true);
     setStatus(null);
     try {
-      const response = await fetch(billingUrl(selected, "/limits"), {
+      const response = await fetch(billingUrl(selected!, "/limits"), {
         method: "PUT",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -467,7 +473,7 @@ function AutoReload({
     setBusy(true);
     setMessage(null);
     try {
-      const response = await fetch(billingUrl(selected, "/topup"), {
+      const response = await fetch(billingUrl(selected!, "/topup"), {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },

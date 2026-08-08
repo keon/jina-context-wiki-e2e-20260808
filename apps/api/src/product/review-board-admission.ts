@@ -11,21 +11,16 @@ import { canonicalReviewTriggerRequest } from "@jina/shared-kernel";
 import type pg from "pg";
 
 import { withTransaction } from "./db.js";
-import { markFirstV2GithubWebhookWorkflowWithClient } from "./github-webhook-inbox-store.js";
 import {
-  bindReviewRunToBoardWithClient,
-  createReviewRunWithClient,
   lockReviewRequestKeyWithClient,
   resolveReviewScopeWithClient,
   type CreateReviewRunInput,
 } from "./store.js";
 import type { DispatchOptions } from "./board-admission-contract.js";
 
-export const REVIEW_BOARD_PIPELINE_VERSION = "pr_review.board.v1";
-export const REVIEW_BOARD_V2_PIPELINE_VERSION = "pr_review.board.v2";
+export const REVIEW_BOARD_PIPELINE_VERSION = "pr_review.board.v2";
 
 export interface BoardReviewAdmissionResult extends BoardAdmissionResult {
-  readonly reviewRunId: string;
   readonly tenantId: string;
 }
 
@@ -35,22 +30,10 @@ export interface ReviewBoardArrival {
   readonly triggerOptions: Readonly<DispatchOptions>;
 }
 
-export interface BoardReviewV2AdmissionResult extends BoardAdmissionResult {
-  readonly tenantId: string;
-}
-
-type ReviewBoardPipelineMode = "paused" | "v1" | "v2" | "allowlist";
-
-export interface ReviewBoardPipelineSelection {
-  readonly mode: ReviewBoardPipelineMode;
-  readonly v2Repositories: ReadonlySet<string>;
-}
-
-export async function admitConfiguredBoardReview(
+export async function admitBoardReview(
   arrival: ReviewBoardArrival,
-  selection: ReviewBoardPipelineSelection,
   repository = new RelationalBoardRepository(),
-): Promise<BoardReviewAdmissionResult | BoardReviewV2AdmissionResult> {
+): Promise<BoardReviewAdmissionResult> {
   return withTransaction(async (client) => {
     const scope = await resolveReviewScopeWithClient(client, arrival.input);
     await lockReviewRequestKeyWithClient(client, scope.tenantId, scope.idempotencyKey);
@@ -64,14 +47,7 @@ export async function admitConfiguredBoardReview(
       );
     }
     if (existing) return replayExistingReviewAdmission(client, scope, existing);
-    const pipeline = selectedReviewPipeline(arrival, selection);
-    if (pipeline === REVIEW_BOARD_PIPELINE_VERSION) {
-      return admitBoardReviewV1WithClient(client, arrival.input, repository);
-    }
-    if (pipeline === REVIEW_BOARD_V2_PIPELINE_VERSION) {
-      return admitBoardReviewV2WithClient(client, arrival, scope, repository);
-    }
-    throw new Error("review request selected an unsupported pipeline");
+    return admitBoardReviewWithClient(client, arrival, scope, repository);
   });
 }
 
@@ -79,11 +55,8 @@ async function replayExistingReviewAdmission(
   client: pg.PoolClient,
   scope: Awaited<ReturnType<typeof resolveReviewScopeWithClient>>,
   existing: ExistingBoardAdmission,
-): Promise<BoardReviewAdmissionResult | BoardReviewV2AdmissionResult> {
-  if (
-    existing.pipelineVersion !== REVIEW_BOARD_PIPELINE_VERSION &&
-    existing.pipelineVersion !== REVIEW_BOARD_V2_PIPELINE_VERSION
-  ) {
+): Promise<BoardReviewAdmissionResult> {
+  if (existing.pipelineVersion !== REVIEW_BOARD_PIPELINE_VERSION) {
     throw new Error(`review request uses unsupported pipeline ${existing.pipelineVersion}`);
   }
   const reviews = await client.query<{
@@ -108,30 +81,15 @@ async function replayExistingReviewAdmission(
     taskIds: existing.taskIds,
     tenantId: scope.tenantId,
   };
-  if (existing.pipelineVersion === REVIEW_BOARD_PIPELINE_VERSION) {
-    if (!review) throw new Error(`v1 Board workflow ${existing.workflowId} is missing its review run`);
-    return { ...replay, reviewRunId: review.id };
-  }
   return replay;
 }
 
-export async function admitBoardReviewV2(
-  arrival: ReviewBoardArrival,
-  repository = new RelationalBoardRepository(),
-): Promise<BoardReviewV2AdmissionResult> {
-  return withTransaction(async (client) => {
-    const scope = await resolveReviewScopeWithClient(client, arrival.input);
-    await lockReviewRequestKeyWithClient(client, scope.tenantId, scope.idempotencyKey);
-    return admitBoardReviewV2WithClient(client, arrival, scope, repository);
-  });
-}
-
-async function admitBoardReviewV2WithClient(
+async function admitBoardReviewWithClient(
   client: pg.PoolClient,
   arrival: ReviewBoardArrival,
   scope: Awaited<ReturnType<typeof resolveReviewScopeWithClient>>,
   repository: RelationalBoardRepository,
-): Promise<BoardReviewV2AdmissionResult> {
+): Promise<BoardReviewAdmissionResult> {
   const existingReview = (
       await client.query<{
         id: string;
@@ -149,7 +107,7 @@ async function admitBoardReviewV2WithClient(
     throw new ReviewOrchestratorOwnershipError(existingReview.id, existingReview.orchestrator);
   }
 
-  const workflowInput = buildReviewBoardV2Admission({
+  const workflowInput = buildReviewBoardAdmission({
     arrival,
     tenantId: scope.tenantId,
     ...(existingReview?.board_workflow_id
@@ -157,7 +115,6 @@ async function admitBoardReviewV2WithClient(
       : {}),
   });
   const workflow = await repository.admitWorkflow(client, workflowInput);
-  await markFirstV2GithubWebhookWorkflowWithClient(client, workflow.workflowId);
   if (
     existingReview?.board_workflow_id &&
     existingReview.board_workflow_id !== workflow.workflowId
@@ -168,149 +125,7 @@ async function admitBoardReviewV2WithClient(
   }
   return { ...workflow, tenantId: scope.tenantId };
 }
-
-export async function admitBoardReview(
-  input: CreateReviewRunInput,
-  repository = new RelationalBoardRepository(),
-): Promise<BoardReviewAdmissionResult> {
-  return withTransaction(async (client) => {
-    return admitBoardReviewV1WithClient(client, input, repository);
-  });
-}
-
-async function admitBoardReviewV1WithClient(
-  client: pg.PoolClient,
-  input: CreateReviewRunInput,
-  repository: RelationalBoardRepository,
-): Promise<BoardReviewAdmissionResult> {
-  const review = await createReviewRunWithClient(client, input);
-    if (!review.created && review.orchestrator !== "board") {
-      throw new ReviewOrchestratorOwnershipError(review.id, review.orchestrator);
-    }
-
-    const workflowInput = buildReviewBoardAdmission({
-      input,
-      reviewRunId: review.id,
-      tenantId: review.tenantId,
-      workflowId: review.boardWorkflowId,
-    });
-    const workflow = await repository.admitWorkflow(client, workflowInput);
-    if (review.created && workflow.replayed) {
-      throw new Error(
-        `new review run ${review.id} collided with existing Board workflow ${workflow.workflowId}`,
-      );
-    }
-    if (review.boardWorkflowId && review.boardWorkflowId !== workflow.workflowId) {
-      throw new Error(
-        `review run ${review.id} is bound to ${review.boardWorkflowId}, not ${workflow.workflowId}`,
-      );
-    }
-
-    await bindReviewRunToBoardWithClient(client, {
-      reviewRunId: review.id,
-      tenantId: review.tenantId,
-      workflowId: workflow.workflowId,
-    });
-  return {
-    ...workflow,
-    reviewRunId: review.id,
-    tenantId: review.tenantId,
-  };
-}
-
-function selectedReviewPipeline(
-  arrival: ReviewBoardArrival,
-  selection: ReviewBoardPipelineSelection,
-): typeof REVIEW_BOARD_PIPELINE_VERSION | typeof REVIEW_BOARD_V2_PIPELINE_VERSION {
-  if (selection.mode === "paused") throw new ReviewAdmissionPausedError();
-  if (selection.mode === "v1") return REVIEW_BOARD_PIPELINE_VERSION;
-  if (selection.mode === "v2") return REVIEW_BOARD_V2_PIPELINE_VERSION;
-  const repository = requiredText(arrival.input.repository.fullName, "repository.fullName").toLowerCase();
-  return selection.v2Repositories.has(repository)
-    ? REVIEW_BOARD_V2_PIPELINE_VERSION
-    : REVIEW_BOARD_PIPELINE_VERSION;
-}
-
-export class ReviewAdmissionPausedError extends Error {
-  constructor() {
-    super("review Board admission is paused for the run-review semantic cutover");
-    this.name = "ReviewAdmissionPausedError";
-  }
-}
-
 export function buildReviewBoardAdmission(input: {
-  readonly input: CreateReviewRunInput;
-  readonly reviewRunId: string;
-  readonly tenantId: string;
-  readonly workflowId?: string;
-}): AdmitBoardWorkflowInput {
-  const installationId = requiredNumber(input.input.installationId, "installationId");
-  const repositoryId = requiredNumber(input.input.repository.githubRepoId, "repository.githubRepoId");
-  const pullRequestNumber = requiredNumber(input.input.pullRequest.number, "pullRequest.number");
-  const headSha = requiredText(input.input.pullRequest.headSha, "pullRequest.headSha");
-  const reviewPayload = requiredRecord(input.input.orchestrationPayload, "orchestrationPayload");
-  const idempotencyKey =
-    input.input.idempotencyKey ??
-    `review:${installationId}:${repositoryId}:${pullRequestNumber}:${headSha}:code_review`;
-  const workflowId = input.workflowId ?? stableUuid(`review-workflow:${idempotencyKey}`);
-  const prepare = stableUuid(`${workflowId}:prepare-review`);
-  const summary = stableUuid(`${workflowId}:summary-review`);
-  const runtime = stableUuid(`${workflowId}:runtime-review`);
-  const finalize = stableUuid(`${workflowId}:finalize-review`);
-  const publish = stableUuid(`${workflowId}:publish-review`);
-  const settle = stableUuid(`${workflowId}:settle-review`);
-  const admissionTraceparent = activeTraceparent();
-  const admissionTrace = admissionTraceparent ? parseTraceparent(admissionTraceparent) : undefined;
-
-  return {
-    workflowId,
-    tenantId: input.tenantId,
-    workflowType: "pr_review",
-    pipelineVersion: REVIEW_BOARD_PIPELINE_VERSION,
-    subjectType: "github_pull_request",
-    subjectId: `${repositoryId}:${pullRequestNumber}:${headSha}`,
-    dedupeKey: idempotencyKey,
-    concurrencyKey: idempotencyKey,
-    triggerType: input.input.triggerSource ?? "webhook",
-    ...(admissionTrace ? { traceId: admissionTrace.traceId } : {}),
-    ...(admissionTraceparent ? { admissionTraceparent } : {}),
-    metadata: {
-      schema_version: 1,
-      review_run_id: input.reviewRunId,
-      delivery_id: input.input.deliveryId,
-      source_event: input.input.sourceEvent,
-      installation_id: installationId,
-      repository_id: repositoryId,
-      repository: input.input.repository.fullName,
-      pull_request_number: pullRequestNumber,
-      head_sha: headSha,
-      review_payload: reviewPayload,
-    },
-    tasks: [
-      reviewTask(prepare, "prepare-review", "queued", input.reviewRunId, 3),
-      reviewTask(summary, "summary-review", "blocked", input.reviewRunId, 3, prepare),
-      reviewTask(runtime, "runtime-review", "blocked", input.reviewRunId, 3, prepare),
-      reviewTask(finalize, "finalize-review", "blocked", input.reviewRunId, 3),
-      reviewTask(publish, "publish-review", "blocked", input.reviewRunId, 5),
-      {
-        ...reviewTask(settle, "settle-review", "blocked", input.reviewRunId, 5),
-        cleanupTask: true,
-      },
-    ],
-    dependencies: [
-      dependency(summary, prepare, "success", "prepared-summary-input"),
-      dependency(runtime, prepare, "success", "prepared-runtime-input"),
-      dependency(finalize, summary, "terminal", "summary-outcome"),
-      dependency(finalize, runtime, "terminal", "runtime-outcome"),
-      dependency(publish, finalize, "success", "final-review"),
-      dependency(settle, publish, "terminal", "publication-outcome"),
-    ],
-    actorType: "github",
-    actorId: input.input.deliveryId ?? "manual-review",
-  };
-}
-
-export function buildReviewBoardV2Admission(input: {
   readonly arrival: ReviewBoardArrival;
   readonly tenantId: string;
   readonly workflowId?: string;
@@ -355,7 +170,7 @@ export function buildReviewBoardV2Admission(input: {
     workflowId,
     tenantId: input.tenantId,
     workflowType: "pr_review",
-    pipelineVersion: REVIEW_BOARD_V2_PIPELINE_VERSION,
+    pipelineVersion: REVIEW_BOARD_PIPELINE_VERSION,
     subjectType: "github_pull_request",
     subjectId: requestIdentity,
     dedupeKey: idempotencyKey,
@@ -407,34 +222,6 @@ class ReviewOrchestratorOwnershipError extends Error {
   }
 }
 
-function reviewTask(
-  id: string,
-  taskType: string,
-  status: "blocked" | "queued",
-  reviewRunId: string,
-  maxAttempts: number,
-  parentTaskId?: string,
-) {
-  return {
-    id,
-    ...(parentTaskId ? { parentTaskId } : {}),
-    taskType,
-    topic: taskType,
-    status,
-    maxAttempts,
-    metadata: { schema_version: 1, review_run_id: reviewRunId },
-  } as const;
-}
-
-function dependency(
-  taskId: string,
-  dependsOnTaskId: string,
-  condition: "success" | "terminal",
-  relationship: string,
-) {
-  return { taskId, dependsOnTaskId, condition, relationship } as const;
-}
-
 function requiredNumber(value: number | undefined, label: string): number {
   if (!Number.isSafeInteger(value) || (value ?? 0) < 1) {
     throw new Error(`${label} must be a positive safe integer`);
@@ -446,13 +233,6 @@ function requiredText(value: string | undefined, label: string): string {
   const normalized = value?.trim();
   if (!normalized) throw new Error(`${label} must not be empty`);
   return normalized;
-}
-
-function requiredRecord(value: unknown, label: string): Readonly<Record<string, unknown>> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  return value as Readonly<Record<string, unknown>>;
 }
 
 function requestedCommentId(payload: Readonly<Record<string, unknown>>): number | undefined {

@@ -1,17 +1,11 @@
 import { severityTone } from "./issues";
-import { runResult } from "./run-result";
-import { scenariosFromResult } from "./historical-scenarios";
 import type { ReviewEvent, ReviewRun, Tone } from "./types";
-
-type ReviewWorkSource = "static" | "runtime";
 
 export interface ReviewWork {
   changeSummary: ReviewWorkChangeSummary;
-  staticReview?: StaticReviewWork | undefined;
   runtimeReview?: RuntimeReviewWork | undefined;
   findings: ReviewWorkFinding[];
   notices: ReviewWorkNotice[];
-  hasScenarioHistory: boolean;
 }
 
 interface ReviewWorkChangeSummary {
@@ -24,11 +18,9 @@ interface ReviewWorkChangeSummary {
   commit?: string | undefined;
   changedFiles: string[];
   diffStat?: string | undefined;
-  codegraphContext?: string | undefined;
 }
 
 interface ReviewWorkNotice {
-  source?: ReviewWorkSource | undefined;
   status: string;
   tone: Tone;
   title: string;
@@ -37,7 +29,6 @@ interface ReviewWorkNotice {
 }
 
 interface ReviewWorkReview {
-  source: ReviewWorkSource;
   status?: string | undefined;
   summary?: string | undefined;
   commit?: string | undefined;
@@ -56,25 +47,17 @@ interface ReviewWorkReview {
   error?: string | undefined;
 }
 
-type StaticReviewWork = ReviewWorkReview & {
-  source: "static";
-  findings: ReviewWorkFinding[];
-};
-
 export type RuntimeReviewWork = ReviewWorkReview & {
-  source: "runtime";
   publishAcceptedLowConfidence: boolean;
   intentMarkdown?: string | undefined;
   readinessScore?: number | undefined;
   readinessRationale?: string | undefined;
-  finalReviewSummary?: string | undefined;
+  reviewSummary?: string | undefined;
   areasCount: number;
   tasksCount: number;
-  blockedCount: number;
   nonIssuesCount: number;
   areas: ReviewWorkArea[];
   tasks: ReviewWorkTask[];
-  blocked: ReviewWorkBlocked[];
   nonIssues: ReviewWorkNonIssue[];
   findings: ReviewWorkFinding[];
 };
@@ -86,7 +69,6 @@ interface ReviewWorkArea {
   summary?: string | undefined;
   tasks: ReviewWorkTask[];
   findings: ReviewWorkFinding[];
-  blocked: ReviewWorkBlocked[];
   nonIssues: ReviewWorkNonIssue[];
 }
 
@@ -114,14 +96,6 @@ export interface ReviewWorkAuditEntry {
   evidence: string[];
 }
 
-interface ReviewWorkBlocked {
-  areaId?: string | undefined;
-  areaTitle?: string | undefined;
-  task?: string | undefined;
-  reason?: string | undefined;
-  fallbackUsed?: string | undefined;
-}
-
 interface ReviewWorkNonIssue {
   areaId?: string | undefined;
   areaTitle?: string | undefined;
@@ -131,7 +105,6 @@ interface ReviewWorkNonIssue {
 }
 
 export interface ReviewWorkFinding {
-  source: ReviewWorkSource;
   fingerprint?: string | undefined;
   title: string;
   description: string;
@@ -150,7 +123,6 @@ export interface ReviewWorkFinding {
   reproductionCommand?: string | undefined;
   observedOutput?: string | undefined;
   suggestedFix?: string | undefined;
-  suggestedCodeChange?: string | undefined;
   evidence: string[];
   auditTrail: ReviewWorkAuditEntry[];
   validationMethod?: string | undefined;
@@ -160,57 +132,26 @@ export interface ReviewWorkFinding {
 type JsonRecord = Record<string, unknown>;
 
 export function buildReviewWork(run: ReviewRun): ReviewWork {
-  const result = objectPayload(runResult(run)) ?? {};
-  const staticEvent = latestEvent(run.events, (event) => event.status === "static_review_completed");
   const runtimeEvent = latestEvent(run.events, (event) => event.status === "runtime_review_completed");
-  const staticPublishEvent = latestEvent(run.events, (event) => event.status.startsWith("github_static_review_publish"));
   const runtimePublishEvent = latestEvent(run.events, (event) => event.status.startsWith("github_runtime_review_publish"));
 
-  const staticReview = normalizeStaticReview(staticEvent, result, staticPublishEvent);
-  const runtimeReview = normalizeRuntimeReview(runtimeEvent, result, runtimePublishEvent);
-  const findings = dedupeFindings([
-    ...(staticReview?.findings ?? []),
-    ...(runtimeReview?.findings ?? []),
-  ]);
+  const runtimeReview = normalizeRuntimeReview(runtimeEvent, runtimePublishEvent);
+  const findings = runtimeReview?.findings ?? [];
 
   return {
-    changeSummary: normalizeChangeSummary(run, result, staticReview, runtimeReview),
-    staticReview,
+    changeSummary: normalizeChangeSummary(run, runtimeReview),
     runtimeReview,
     findings,
-    notices: reviewNotices(run.events, staticReview, runtimeReview),
-    hasScenarioHistory: hasScenarioReviewWork(run),
+    notices: reviewNotices(run.events, runtimeReview),
   };
 }
 
-export function hasScenarioReviewWork(run: ReviewRun): boolean {
-  const result = runResult(run);
-  const resultRecord = objectPayload(result);
-  if (!resultRecord) {
-    return false;
-  }
-  if (scenariosFromResult(result).length > 0) {
-    return true;
-  }
-  const simulation = objectPayload(resultRecord.simulation);
-  if (Array.isArray(simulation?.scenarios) && simulation.scenarios.length > 0) {
-    return true;
-  }
-  return Boolean(objectPayload(resultRecord.final_review));
-}
-
 export function reviewWorkStatusSummary(work: ReviewWork): string | undefined {
-  const parts = [
-    reviewSummaryPart(work.staticReview),
-    runtimeSummaryPart(work.runtimeReview),
-  ].filter((part): part is string => Boolean(part));
-  return parts.length > 0 ? parts.join(" · ") : undefined;
+  return runtimeSummaryPart(work.runtimeReview);
 }
 
 function normalizeChangeSummary(
   run: ReviewRun,
-  result: JsonRecord,
-  staticReview: StaticReviewWork | undefined,
   runtimeReview: RuntimeReviewWork | undefined,
 ): ReviewWorkChangeSummary {
   return {
@@ -220,134 +161,63 @@ function normalizeChangeSummary(
     headRef: run.pull_request.head_ref,
     baseRef: run.pull_request.base_ref,
     headSha: run.pull_request.head_sha,
-    commit: stringField(result, "commit", "head_sha") ?? staticReview?.commit ?? runtimeReview?.commit ?? run.pull_request.head_sha,
-    changedFiles: firstStringList(result.changed_files, staticReview?.changedFiles, runtimeReview?.changedFiles),
-    diffStat: stringField(result, "diff_stat") ?? staticReview?.diffStat ?? runtimeReview?.diffStat,
-    codegraphContext: stringField(result, "codegraph_context"),
-  };
-}
-
-function normalizeStaticReview(
-  event: ReviewEvent | undefined,
-  result: JsonRecord,
-  publishEvent: ReviewEvent | undefined,
-): StaticReviewWork | undefined {
-  const payload = objectPayload(event?.payload);
-  const resultReview = objectPayload(result.static_review);
-  const review = objectPayload(payload?.static_review) ?? resultReview;
-  const source = review ?? payload;
-  if (!source) {
-    return undefined;
-  }
-
-  const rawFindings = arrayField(review, "findings");
-  const fallbackFindings = rawFindings.length > 0 ? [] : arrayField(payload, "findings");
-  const findings = rawFindings.length > 0
-    ? rawFindings.map(normalizeStaticFinding).filter(isFinding)
-    : fallbackFindings.map((finding) => normalizeGenericFinding(finding, "static")).filter(isFinding);
-  const publish = publishInfo(publishEvent);
-
-  return {
-    source: "static",
-    status: stringField(source, "status"),
-    summary: stringField(source, "summary"),
-    commit: stringField(source, "commit") ?? stringField(payload, "head_sha") ?? stringField(result, "head_sha"),
-    changedFiles: firstStringList(source.changedFiles, payload?.changed_files, result.changed_files),
-    diffStat: stringField(source, "diffStat") ?? stringField(payload, "diff_stat") ?? stringField(result, "diff_stat"),
-    findings,
-    findingsCount: numberField(source, "findingsCount", "findings_count") ?? findings.length,
-    publishableFindingsCount: numberField(source, "publishableFindingsCount", "publishable_findings_count"),
-    inlineCommentCount: numberField(source, "inlineCommentCount", "inline_comment_count"),
-    fileCommentCount: numberField(source, "fileCommentCount", "file_comment_count"),
-    unanchoredFindingsCount: numberField(source, "unanchoredFindingsCount", "unanchored_findings_count"),
-    lowConfidenceFindingsHeldBack: numberField(source, "lowConfidenceFindingsHeldBack", "low_confidence_findings_held_back"),
-    detailsAvailable: Boolean(review && Array.isArray(review.findings)),
-    publishState: publish.state,
-    publishMessage: publish.message,
-    githubReviewUrl: publish.githubReviewUrl ?? stringField(source, "githubReviewUrl", "github_review_url"),
-    error: stringField(source, "error") ?? stringField(payload, "error"),
+    commit: runtimeReview?.commit ?? run.pull_request.head_sha,
+    changedFiles: runtimeReview?.changedFiles ?? [],
+    diffStat: runtimeReview?.diffStat,
   };
 }
 
 function normalizeRuntimeReview(
   event: ReviewEvent | undefined,
-  result: JsonRecord,
   publishEvent: ReviewEvent | undefined,
 ): RuntimeReviewWork | undefined {
   const payload = objectPayload(event?.payload);
-  const resultReview = objectPayload(result.runtime_review);
-  const review = objectPayload(payload?.runtime_review) ?? resultReview;
-  const source = review ?? payload;
-  if (!source) {
+  const review = objectPayload(payload?.runtime_review);
+  if (!payload || !review) {
     return undefined;
   }
 
-  const finalReview = objectPayload(review?.finalReview ?? review?.final_review);
-  // Nothing is held back from the PR any more: every issue the investigation finds is
-  // published. Runs made under the old adjudicating reviewer always persisted this flag
-  // explicitly, so its ABSENCE identifies a new run and means "publish everything";
-  // when it is present we honor it so historical runs still render as they were made.
-  const publishAcceptedLowConfidence =
-    booleanField(review, "publishAcceptedLowConfidence", "publish_accepted_low_confidence") ??
-    booleanField(finalReview, "publishAcceptedLowConfidence", "publish_accepted_low_confidence") ??
-    true;
-  const context = objectPayload(review?.context);
+  const publishAcceptedLowConfidence = true;
   const rawFindings = arrayField(review, "findings");
-  const finalAcceptedFindings = arrayField(finalReview, "acceptedIssues", "accepted_issues", "findings");
-  const fallbackFindings = rawFindings.length > 0 ? [] : arrayField(payload, "findings");
-  const findings = rawFindings.length > 0
-    ? rawFindings.map((finding) => normalizeRuntimeFinding(finding, publishAcceptedLowConfidence)).filter(isFinding)
-    : finalAcceptedFindings.length > 0
-      ? finalAcceptedFindings.map((finding) => normalizeRuntimeFinding(finding, publishAcceptedLowConfidence)).filter(isFinding)
-    : fallbackFindings.map((finding) => normalizeGenericFinding(finding, "runtime")).filter(isFinding);
-  const rawAreas = arrayField(review, "investigations").length > 0 ? arrayField(review, "investigations") : arrayField(review, "areas");
+  const findings = rawFindings
+    .map((finding) => normalizeRuntimeFinding(finding, publishAcceptedLowConfidence))
+    .filter(isFinding);
+  const rawAreas = arrayField(review, "areas");
   const areas = rawAreas
     .map((area) => normalizeRuntimeArea(area, findings, publishAcceptedLowConfidence))
     .filter(isArea);
-  const effectiveFindings = findings.length > 0 ? findings : dedupeFindings(areas.flatMap((area) => area.findings));
-  const tasksFromAreas = areas.flatMap((area) => area.tasks);
-  const tasks = tasksFromAreas.length > 0
-    ? tasksFromAreas
-    : arrayField(review, "tasks").map((task) => normalizeRuntimeTask(task)).filter(isTask);
-  const blocked = areas.length > 0
-    ? areas.flatMap((area) => area.blocked)
-    : arrayField(review, "blocked").map((item) => normalizeBlocked(item)).filter(isBlocked);
-  const nonIssues = areas.length > 0
-    ? areas.flatMap((area) => area.nonIssues)
-    : arrayField(review, "nonIssues", "non_issues").map((item) => normalizeNonIssue(item)).filter(isNonIssue);
+  const tasks = areas.flatMap((area) => area.tasks);
+  const nonIssues = areas.flatMap((area) => area.nonIssues);
   const publish = publishInfo(publishEvent);
 
   return {
-    source: "runtime",
     publishAcceptedLowConfidence,
-    status: stringField(source, "status"),
-    summary: stringField(source, "summary"),
-    commit: stringField(source, "commit") ?? stringField(context, "commit") ?? stringField(payload, "head_sha") ?? stringField(result, "head_sha"),
-    changedFiles: firstStringList(source.changedFiles, context?.changedFiles, context?.changed_files, payload?.changed_files, result.changed_files),
-    diffStat: stringField(source, "diffStat") ?? stringField(context, "diffStat", "diff_stat") ?? stringField(payload, "diff_stat") ?? stringField(result, "diff_stat"),
-    findings: effectiveFindings,
-    findingsCount: numberField(source, "findingsCount", "findings_count") ?? effectiveFindings.length,
-    publishableFindingsCount: numberField(source, "publishableFindingsCount", "publishable_findings_count"),
-    inlineCommentCount: numberField(source, "inlineCommentCount", "inline_comment_count"),
-    fileCommentCount: numberField(source, "fileCommentCount", "file_comment_count"),
-    unanchoredFindingsCount: numberField(source, "unanchoredFindingsCount", "unanchored_findings_count"),
-    lowConfidenceFindingsHeldBack: numberField(source, "lowConfidenceFindingsHeldBack", "low_confidence_findings_held_back"),
-    detailsAvailable: Boolean(review && (Array.isArray(review.areas) || Array.isArray(review.investigations) || Array.isArray(review.findings) || finalAcceptedFindings.length > 0)),
+    status: stringField(review, "status"),
+    summary: stringField(review, "summary"),
+    commit: stringField(review, "commit"),
+    changedFiles: stringList(review.changedFiles),
+    diffStat: stringField(review, "diffStat"),
+    findings,
+    findingsCount: numberField(review, "findingsCount") ?? findings.length,
+    publishableFindingsCount: numberField(review, "publishableFindingsCount"),
+    inlineCommentCount: numberField(review, "inlineCommentCount"),
+    fileCommentCount: numberField(review, "fileCommentCount"),
+    unanchoredFindingsCount: numberField(review, "unanchoredFindingsCount"),
+    lowConfidenceFindingsHeldBack: numberField(review, "lowConfidenceFindingsHeldBack"),
+    detailsAvailable: true,
     publishState: publish.state,
     publishMessage: publish.message,
-    githubReviewUrl: publish.githubReviewUrl ?? stringField(source, "githubReviewUrl", "github_review_url"),
-    error: stringField(source, "error") ?? stringField(payload, "error"),
-    areasCount: numberField(source, "areasCount", "areas_count") ?? areas.length,
-    tasksCount: numberField(source, "tasksCount", "tasks_count") ?? tasks.length,
-    blockedCount: numberField(source, "blockedCount", "blocked_count") ?? blocked.length,
-    nonIssuesCount: numberField(source, "nonIssuesCount", "non_issues_count") ?? nonIssues.length,
+    githubReviewUrl: publish.githubReviewUrl,
+    error: stringField(review, "error") ?? stringField(payload, "error"),
+    areasCount: numberField(review, "areasCount") ?? areas.length,
+    tasksCount: numberField(review, "tasksCount") ?? tasks.length,
+    nonIssuesCount: numberField(review, "nonIssuesCount") ?? nonIssues.length,
     intentMarkdown: runtimeIntentMarkdown(review),
-    readinessScore: numberField(objectPayload(finalReview?.readiness), "score"),
-    readinessRationale: stringField(objectPayload(finalReview?.readiness), "rationale"),
-    finalReviewSummary: stringField(finalReview, "summary"),
+    readinessScore: numberField(objectPayload(review?.readiness), "score"),
+    readinessRationale: stringField(objectPayload(review?.readiness), "rationale"),
+    reviewSummary: stringField(review, "summary"),
     areas,
     tasks,
-    blocked,
     nonIssues,
   };
 }
@@ -361,9 +231,9 @@ function normalizeRuntimeArea(
   if (!record) {
     return undefined;
   }
-  const areaId = stringField(record, "areaId", "area_id");
+  const areaId = stringField(record, "areaId");
   const title = stringField(record, "title") ?? areaId ?? "Runtime area";
-  const areaFindings = arrayField(record, "issues", "findings")
+  const areaFindings = arrayField(record, "issues")
     .map((finding) => normalizeRuntimeFinding(finding, publishAcceptedLowConfidence))
     .filter(isFinding);
   const findings = areaFindings.length > 0
@@ -379,14 +249,12 @@ function normalizeRuntimeArea(
     summary: stringField(record, "summary"),
     tasks,
     findings,
-    blocked: arrayField(record, "blocked").map((item) => normalizeBlocked(item, areaId, title)).filter(isBlocked),
-    nonIssues: arrayField(record, "nonIssues", "non_issues").map((item) => normalizeNonIssue(item, areaId, title)).filter(isNonIssue),
+    nonIssues: arrayField(record, "nonIssues").map((item) => normalizeNonIssue(item, areaId, title)).filter(isNonIssue),
   };
 }
 
 function runtimeIntentMarkdown(review: JsonRecord | undefined): string | undefined {
-  const intent = objectPayload(review?.intent);
-  return stringField(intent, "markdown") ?? stringField(review, "intentMarkdown", "intent_markdown");
+  return stringField(objectPayload(review?.plan), "intentSummary");
 }
 
 function normalizeRuntimeTask(
@@ -399,37 +267,23 @@ function normalizeRuntimeTask(
   if (!record) {
     return undefined;
   }
-  const title = stringField(record, "title", "name") ?? "Runtime task";
+  const title = stringField(record, "title") ?? "Runtime task";
   return {
     id: stringField(record, "id"),
-    areaId: areaId ?? stringField(record, "areaId", "area_id"),
-    areaTitle: areaTitle ?? stringField(record, "areaTitle", "area_title"),
+    areaId: areaId ?? stringField(record, "areaId"),
+    areaTitle: areaTitle ?? stringField(record, "areaTitle"),
     title,
-    goal: stringField(record, "goal", "taskGoal", "task_goal"),
+    goal: stringField(record, "goal"),
     hypothesis: stringField(record, "hypothesis"),
-    whyChosen: stringField(record, "whyChosen", "why_chosen"),
-    purpose: stringField(record, "purpose", "hypothesis"),
+    whyChosen: stringField(record, "whyChosen"),
+    purpose: stringField(record, "purpose"),
     method: stringField(record, "method"),
-    actionsTaken: stringList(record.actionsTaken ?? record.actions_taken),
-    whatWasLearned: stringField(record, "whatWasLearned", "what_was_learned"),
+    actionsTaken: stringList(record.actionsTaken),
+    whatWasLearned: stringField(record, "whatWasLearned"),
     verdict: stringField(record, "verdict"),
     confidence: stringField(record, "confidence"),
-    auditTrail: arrayField(record, "auditTrail", "audit_trail").map(normalizeAuditEntry).filter(isAuditEntry),
-    issuesFound: numberField(record, "issuesFound", "issues_found") ?? (stringField(record, "verdict") === "issue_found" ? Math.max(1, areaIssuesFound) : 0),
-  };
-}
-
-function normalizeBlocked(value: unknown, areaId?: string, areaTitle?: string): ReviewWorkBlocked | undefined {
-  const record = objectPayload(value);
-  if (!record) {
-    return undefined;
-  }
-  return {
-    areaId: areaId ?? stringField(record, "areaId", "area_id"),
-    areaTitle: areaTitle ?? stringField(record, "areaTitle", "area_title"),
-    task: stringField(record, "task"),
-    reason: stringField(record, "reason"),
-    fallbackUsed: stringField(record, "fallbackUsed", "fallback_used"),
+    auditTrail: arrayField(record, "auditTrail").map(normalizeAuditEntry).filter(isAuditEntry),
+    issuesFound: numberField(record, "issuesFound") ?? (stringField(record, "verdict") === "issue_found" ? Math.max(1, areaIssuesFound) : 0),
   };
 }
 
@@ -439,48 +293,15 @@ function normalizeNonIssue(value: unknown, areaId?: string, areaTitle?: string):
     return undefined;
   }
   return {
-    areaId: areaId ?? stringField(record, "areaId", "area_id"),
-    areaTitle: areaTitle ?? stringField(record, "areaTitle", "area_title"),
+    areaId: areaId ?? stringField(record, "areaId"),
+    areaTitle: areaTitle ?? stringField(record, "areaTitle"),
     hypothesis: stringField(record, "hypothesis"),
-    whyDismissed: stringField(record, "whyDismissed", "why_dismissed"),
+    whyDismissed: stringField(record, "whyDismissed"),
     evidence: stringList(record.evidence),
   };
 }
 
-function normalizeStaticFinding(value: unknown): ReviewWorkFinding | undefined {
-  const record = objectPayload(value);
-  if (!record) {
-    return undefined;
-  }
-  const title = stringField(record, "title") ?? titleFromBody(stringField(record, "body") ?? "");
-  const confidence = stringField(record, "confidence");
-  const severity = stringField(record, "severity") ?? stringField(record, "risk") ?? "medium";
-  return {
-    source: "static",
-    fingerprint: stringField(record, "fingerprint"),
-    title,
-    description: stringField(record, "body") ?? title,
-    risk: stringField(record, "risk"),
-    severity,
-    confidence,
-    likelihood: stringField(record, "likelihood"),
-    category: stringField(record, "category"),
-    filePath: stringField(record, "file_path", "filePath"),
-    lineNumber: numberField(record, "line_number", "lineNumber"),
-    rootCause: stringField(record, "root_cause", "rootCause"),
-    impact: stringField(record, "why_it_matters", "impact"),
-    reproductionOrTrace: stringField(record, "reproduction_or_trace", "reproductionOrTrace"),
-    suggestedFix: stringField(record, "suggested_fix", "suggestedFix"),
-    suggestedCodeChange: stringField(record, "suggested_change", "suggestedCodeChange"),
-    evidence: [...stringList(record.evidence_files), ...stringList(record.evidence_symbols)],
-    auditTrail: [],
-    heldBack: confidence === "low",
-  };
-}
-
-/** Runtime findings are every issue the investigation agents found; no stage filters
- *  them, so nothing is held back from the PR any more. `publishAcceptedLowConfidence`
- *  is only still read so older persisted runs render as they did when they were made. */
+/** Runtime findings are every issue the investigation agents found. */
 function normalizeRuntimeFinding(
   value: unknown,
   publishAcceptedLowConfidence = true,
@@ -493,7 +314,6 @@ function normalizeRuntimeFinding(
   const confidence = stringField(record, "confidence");
   const severity = stringField(record, "severity") ?? stringField(record, "risk") ?? "medium";
   return {
-    source: "runtime",
     fingerprint: stringField(record, "fingerprint"),
     title,
     description: stringField(record, "body") ?? title,
@@ -502,60 +322,28 @@ function normalizeRuntimeFinding(
     confidence,
     likelihood: stringField(record, "likelihood"),
     category: stringField(record, "category"),
-    filePath: stringField(record, "file_path", "filePath"),
-    lineNumber: numberField(record, "line_number", "lineNumber"),
-    rootCause: stringField(record, "root_cause", "rootCause"),
-    impact: stringField(record, "why_it_matters", "impact"),
-    reproductionOrTrace: stringField(record, "reproduction_or_trace", "reproductionOrTrace"),
-    failureScenario: stringField(record, "failure_scenario", "failureScenario"),
-    reproductionCommand: stringField(record, "reproduction_command", "reproductionCommand"),
-    observedOutput: stringField(record, "observed_output", "observedOutput"),
-    suggestedFix: stringField(record, "suggested_fix", "suggestedFix"),
-    suggestedCodeChange: stringField(record, "suggested_change", "suggestedCodeChange"),
+    filePath: stringField(record, "file_path"),
+    lineNumber: numberField(record, "line_number"),
+    rootCause: stringField(record, "root_cause"),
+    impact: stringField(record, "why_it_matters"),
+    reproductionOrTrace: stringField(record, "reproduction_or_trace"),
+    failureScenario: stringField(record, "failure_scenario"),
+    reproductionCommand: stringField(record, "reproduction_command"),
+    observedOutput: stringField(record, "observed_output"),
+    suggestedFix: stringField(record, "suggested_fix"),
     evidence: stringList(record.evidence),
     auditTrail: stringList(record.audit_trail).map((detail) => ({ detail, evidence: [] })),
-    validationMethod: stringField(record, "validation_method", "validationMethod"),
+    validationMethod: stringField(record, "validation_method"),
     heldBack: confidence === "low" && !publishAcceptedLowConfidence,
   };
 }
 
-function normalizeGenericFinding(value: unknown, source: ReviewWorkSource): ReviewWorkFinding | undefined {
-  const record = objectPayload(value);
-  if (!record) {
-    return undefined;
-  }
-  const body = stringField(record, "body") ?? "";
-  if (!body) {
-    return undefined;
-  }
-  const severity = stringField(record, "severity") ?? "medium";
-  return {
-    source,
-    fingerprint: stringField(record, "fingerprint"),
-    title: titleFromBody(body),
-    description: body,
-    risk: stringField(record, "risk"),
-    severity,
-    confidence: stringField(record, "confidence"),
-    likelihood: stringField(record, "likelihood"),
-    category: stringField(record, "category"),
-    filePath: stringField(record, "file_path", "filePath"),
-    lineNumber: numberField(record, "line_number", "lineNumber"),
-    evidence: [],
-    auditTrail: [],
-    heldBack: severity.toLowerCase() === "info",
-  };
-}
-
 function normalizeAuditEntry(value: unknown): ReviewWorkAuditEntry | undefined {
-  if (typeof value === "string" && value.trim()) {
-    return { detail: value.trim(), evidence: [] };
-  }
   const record = objectPayload(value);
   if (!record) {
     return undefined;
   }
-  const detail = stringField(record, "detail", "message", "text");
+  const detail = stringField(record, "detail");
   if (!detail) {
     return undefined;
   }
@@ -566,22 +354,14 @@ function normalizeAuditEntry(value: unknown): ReviewWorkAuditEntry | undefined {
   };
 }
 
-function reviewNotices(
-  events: ReviewEvent[],
-  staticReview: StaticReviewWork | undefined,
-  runtimeReview: RuntimeReviewWork | undefined,
-): ReviewWorkNotice[] {
+function reviewNotices(events: ReviewEvent[], runtimeReview: RuntimeReviewWork | undefined): ReviewWorkNotice[] {
   const notices: ReviewWorkNotice[] = [];
-  for (const review of [staticReview, runtimeReview]) {
-    if (!review?.publishState || review.publishState === "published") {
-      continue;
-    }
+  if (runtimeReview?.publishState && runtimeReview.publishState !== "published") {
     notices.push({
-      source: review.source,
-      status: review.publishState,
-      tone: review.publishState === "failed" ? "bad" : "warn",
-      title: `${labelForSource(review.source)} publish ${review.publishState}`,
-      message: review.publishMessage,
+      status: runtimeReview.publishState,
+      tone: runtimeReview.publishState === "failed" ? "bad" : "warn",
+      title: `Runtime review publish ${runtimeReview.publishState}`,
+      message: runtimeReview.publishMessage,
     });
   }
 
@@ -589,12 +369,11 @@ function reviewNotices(
     if (!isFailureLikeEvent(event.status)) {
       continue;
     }
-    if (event.status.startsWith("github_static_review_publish") || event.status.startsWith("github_runtime_review_publish")) {
+    if (event.status.startsWith("github_runtime_review_publish")) {
       continue;
     }
     const payload = objectPayload(event.payload);
     notices.push({
-      source: event.status.includes("runtime") ? "runtime" : event.status.includes("static") ? "static" : undefined,
       status: event.status,
       tone: event.status.includes("warning") || event.status.includes("unavailable") ? "warn" : "bad",
       title: event.status.replaceAll("_", " "),
@@ -624,7 +403,7 @@ function publishInfo(event: ReviewEvent | undefined): {
   return {
     state,
     message: stringField(payload, "reason", "error"),
-    githubReviewUrl: stringField(payload, "github_review_url", "githubReviewUrl"),
+    githubReviewUrl: stringField(payload, "github_review_url"),
   };
 }
 
@@ -650,44 +429,16 @@ function eventTime(event: ReviewEvent): number {
   return Number.isFinite(time) ? time : 0;
 }
 
-function dedupeFindings(findings: ReviewWorkFinding[]): ReviewWorkFinding[] {
-  const seen = new Set<string>();
-  const output: ReviewWorkFinding[] = [];
-  for (const finding of findings) {
-    const key = [
-      finding.source,
-      finding.fingerprint,
-      finding.filePath,
-      finding.lineNumber,
-      finding.title,
-    ].filter(Boolean).join(":");
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    output.push(finding);
-  }
-  return output;
-}
-
 function dedupeNotices(notices: ReviewWorkNotice[]): ReviewWorkNotice[] {
   const seen = new Set<string>();
   return notices.filter((notice) => {
-    const key = [notice.source, notice.status, notice.message].filter(Boolean).join(":");
+    const key = [notice.status, notice.message].filter(Boolean).join(":");
     if (seen.has(key)) {
       return false;
     }
     seen.add(key);
     return true;
   });
-}
-
-function reviewSummaryPart(review: ReviewWorkReview | undefined): string | undefined {
-  if (!review) {
-    return undefined;
-  }
-  const issueCount = review.publishableFindingsCount ?? review.findingsCount;
-  return `${labelForSource(review.source).toLowerCase()} ${review.status ?? "unknown"} (${issueCount} issue${issueCount === 1 ? "" : "s"})`;
 }
 
 function runtimeSummaryPart(review: RuntimeReviewWork | undefined): string | undefined {
@@ -698,10 +449,6 @@ function runtimeSummaryPart(review: RuntimeReviewWork | undefined): string | und
   return `runtime ${review.status ?? "unknown"} (${review.tasksCount} task${review.tasksCount === 1 ? "" : "s"}, ${issueCount} issue${issueCount === 1 ? "" : "s"})`;
 }
 
-function labelForSource(source: ReviewWorkSource): string {
-  return source === "static" ? "Static review" : "Runtime review";
-}
-
 function titleFromBody(body: string): string {
   const firstLine = body.split("\n").map((line) => line.trim()).find(Boolean) ?? "";
   const cleaned = firstLine.replace(/^#+\s*/, "");
@@ -709,16 +456,6 @@ function titleFromBody(body: string): string {
     return "Untitled issue";
   }
   return cleaned.length > 120 ? `${cleaned.slice(0, 117)}...` : cleaned;
-}
-
-function firstStringList(...values: unknown[]): string[] {
-  for (const value of values) {
-    const list = stringList(value);
-    if (list.length > 0) {
-      return list;
-    }
-  }
-  return [];
 }
 
 function stringList(value: unknown): string[] {
@@ -767,19 +504,6 @@ function numberField(record: JsonRecord | undefined, ...keys: string[]): number 
   return undefined;
 }
 
-function booleanField(record: JsonRecord | undefined, ...keys: string[]): boolean | undefined {
-  if (!record) {
-    return undefined;
-  }
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "boolean") {
-      return value;
-    }
-  }
-  return undefined;
-}
-
 function objectPayload(value: unknown): JsonRecord | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -796,10 +520,6 @@ function isArea(value: ReviewWorkArea | undefined): value is ReviewWorkArea {
 }
 
 function isTask(value: ReviewWorkTask | undefined): value is ReviewWorkTask {
-  return value !== undefined;
-}
-
-function isBlocked(value: ReviewWorkBlocked | undefined): value is ReviewWorkBlocked {
   return value !== undefined;
 }
 

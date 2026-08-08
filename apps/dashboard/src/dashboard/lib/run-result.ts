@@ -4,8 +4,8 @@ export function runResult(run: ReviewRun): ReviewRun["result"] {
   const merged: Record<string, unknown> = {};
 
   // Apply oldest -> newest events, then the stored result last so it wins on
-  // top-level keys. Use mergeField so a partial/older payload can't clobber a
-  // more complete nested object (e.g. `simulation`) already present.
+  // top-level keys. Use mergeField so a partial event payload cannot clobber a
+  // more complete nested work object already present.
   for (const event of run.events) {
     const payload = objectPayload(event.payload);
     if (payload) {
@@ -30,8 +30,7 @@ function mergeInto(target: Record<string, unknown>, source: Record<string, unkno
 /**
  * Decide which value to keep when a key already exists. The incoming value wins
  * by default (call order encodes precedence), but a more complete nested object
- * is never replaced by a sparser one — this stops a partial `simulation` event
- * from blowing away a fuller one.
+ * is never replaced by a sparser one.
  */
 function mergeField(existing: unknown, incoming: unknown): unknown {
   if (incoming === undefined || incoming === null) {

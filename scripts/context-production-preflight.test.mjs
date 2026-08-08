@@ -69,7 +69,7 @@ test("Board drain pauses the worker generation after reaching zero leases", asyn
         cwd: process.cwd(),
         env: {
           ...process.env,
-          CONTEXT_RESET_MODULE_PATH: fixture.resetPath,
+          CONTEXT_DB_MODULE_PATH: fixture.dbPath,
           DATABASE_URL: "postgresql://fake.invalid/jina",
           CONTEXT_RUNTIME_DB_USER: "jina_v2_app",
           JINA_WORKER_RELEASE_ID: "release-under-test",
@@ -169,11 +169,11 @@ async function fakeDaytonaFixture() {
 
 async function fakeDatabaseFixture() {
   const directory = await mkdtemp(join(tmpdir(), "jina-production-database-test-"));
-  const resetPath = join(directory, "reset.mjs");
+  const dbPath = join(directory, "db.mjs");
   const pgDirectory = join(directory, "node_modules", "pg");
   const capturePath = join(directory, "queries.json");
   await mkdir(pgDirectory, { recursive: true });
-  await writeFile(resetPath, "export {};\n", "utf8");
+  await writeFile(dbPath, "export {};\n", "utf8");
   await writeFile(
     join(pgDirectory, "index.js"),
     `
@@ -220,7 +220,7 @@ async function fakeDatabaseFixture() {
     "utf8"
   );
   return {
-    resetPath,
+    dbPath,
     capturePath,
     cleanup: () => rm(directory, { recursive: true, force: true })
   };

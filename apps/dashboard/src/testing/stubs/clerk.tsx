@@ -15,17 +15,22 @@ interface StubUser {
   readonly imageUrl: string;
   readonly primaryEmailAddress: { readonly emailAddress: string } | null;
   readonly emailAddresses: readonly { readonly emailAddress: string }[];
-  readonly unsafeMetadata: { readonly developerMode?: boolean };
-  readonly updateMetadata: (metadata: {
-    readonly unsafeMetadata: { readonly developerMode: boolean };
-  }) => Promise<unknown>;
+  readonly unsafeMetadata?: Record<string, unknown>;
+  readonly externalAccounts?: readonly { readonly provider: string }[];
+  readonly updateMetadata?: (input: { readonly unsafeMetadata: Record<string, unknown> }) => Promise<unknown>;
+  readonly reload?: () => Promise<unknown>;
 }
 
 let user: StubUser | null = null;
+let organization: { readonly id: string; readonly name: string } | null = null;
 let signOutCalls = 0;
 
 export function setClerkUser(next: StubUser | null): void {
   user = next;
+}
+
+export function setClerkOrganization(next: { readonly id: string; readonly name: string } | null): void {
+  organization = next;
 }
 
 export function clerkSignOutCallCount(): number {
@@ -34,10 +39,11 @@ export function clerkSignOutCallCount(): number {
 
 export function resetClerkStub(): void {
   user = null;
+  organization = null;
   signOutCalls = 0;
 }
 
-export function ClerkProvider({ children }: { readonly children: ReactNode }) {
+export function ClerkProvider({ children }: { readonly children: ReactNode; readonly [key: string]: unknown }) {
   return <>{children}</>;
 }
 
@@ -50,7 +56,23 @@ export function useAuth() {
 }
 
 export function useUser() {
-  return { isLoaded: true, isSignedIn: user !== null, user };
+  return {
+    isLoaded: true,
+    isSignedIn: user !== null,
+    user: user
+      ? {
+          ...user,
+          unsafeMetadata: user.unsafeMetadata ?? {},
+          externalAccounts: user.externalAccounts ?? [],
+          updateMetadata: user.updateMetadata ?? (() => Promise.resolve()),
+          reload: user.reload ?? (() => Promise.resolve())
+        }
+      : null
+  };
+}
+
+export function useOrganization() {
+  return { isLoaded: true, organization };
 }
 
 export function useClerk() {
@@ -60,6 +82,8 @@ export function useClerk() {
       signOutCalls += 1;
       return Promise.resolve();
     },
-    getOrganization: () => Promise.resolve(null)
+    getOrganization: () => Promise.resolve(null),
+    createOrganization: ({ name }: { readonly name: string }) => Promise.resolve({ id: "org_test", name }),
+    setActive: () => Promise.resolve()
   };
 }

@@ -252,7 +252,7 @@ test("botStatusFor treats superseded and cancelled statuses as terminal", () => 
 test("botStatusFor preserves existing running and failed behavior", () => {
   assert.equal(botStatusFor("summary_review_started"), "running");
   assert.equal(botStatusFor("failed"), "failed");
-  assert.equal(botStatusFor("static_review_failed"), "failed");
+  assert.equal(botStatusFor("runtime_review_failed"), "failed");
 });
 
 test("Trigger terminal failures map narrowly to product failure statuses", () => {
@@ -271,7 +271,6 @@ test("botStatusFor keeps best-effort progress comment failures non-fatal", () =>
 
 test("botStatusFor keeps best-effort publish failures non-fatal", () => {
   assert.equal(botStatusFor("github_runtime_review_publish_failed"), "running");
-  assert.equal(botStatusFor("github_static_review_publish_failed"), "running");
 });
 
 /* ------------------------------------------------ arrival settlement (FINDING 2) --- */

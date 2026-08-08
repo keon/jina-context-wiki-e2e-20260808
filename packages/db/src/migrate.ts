@@ -3,7 +3,7 @@ import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { applySchema } from "./apply-schema.js";
 import { hardenContextRuntimeRole } from "./context/runtime-role.js";
 import { CONTEXT_ROLES_SQL, CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
-import { CONTEXT_PGVECTOR_SCHEMA_SQL, CONTEXT_SCHEMA_SQL } from "./context/schema.js";
+import { CONTEXT_SCHEMA_SQL } from "./context/schema.js";
 import { JINA_RUNTIME_SCHEMA_SQL } from "./postgres-json-state-store.js";
 import { applyRuntimeMigrations } from "./runtime-migrations.js";
 
@@ -32,9 +32,6 @@ try {
   await applySchema(pool, "jina_runtime.schema", JINA_RUNTIME_SCHEMA_SQL);
   await applyRuntimeMigrations(pool);
   await applySchema(pool, "jina_context.schema", CONTEXT_SCHEMA_SQL);
-  if (process.argv.includes("--install-pgvector")) {
-    await applySchema(pool, "jina_context.pgvector", CONTEXT_PGVECTOR_SCHEMA_SQL);
-  }
   if (process.argv.includes("--install-roles")) {
     await applySchema(pool, "jina_context.roles", CONTEXT_ROLES_SQL);
     const runtimeUser = requiredRuntimeRoleName(process.env.CONTEXT_RUNTIME_DB_USER);

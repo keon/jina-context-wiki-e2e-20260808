@@ -2,9 +2,7 @@ import { logger } from "@trigger.dev/sdk";
 
 /** Thrown by the internal-API helpers on a non-2xx response. Carries the HTTP
  *  `status` so callers can branch on it (e.g. a 402 billing block) instead of
- *  treating every failure as a generic, retryable infrastructure error. The
- *  message format is unchanged from the prior plain Error for compatibility with
- *  existing message-based catch sites. */
+ *  treating every failure as a generic, retryable infrastructure error. */
 export class InternalApiError extends Error {
   readonly status: number;
   readonly response: unknown;
@@ -60,52 +58,6 @@ export async function postInternal<TResponse = JsonValue>(
       throw error;
     }
     logger.warn("internal_api_post_failed", internalApiLogPayload({
-      path,
-      durationMs: Date.now() - startedAt,
-      error,
-    }));
-    throw error;
-  }
-}
-
-export async function getInternal<TResponse = JsonValue>(path: string): Promise<TResponse> {
-  const apiBaseUrl = requiredEnv("API_BASE_URL").replace(/\/$/, "");
-  const internalToken = requiredEnv("INTERNAL_API_TOKEN");
-  const startedAt = Date.now();
-
-  try {
-    const response = await fetch(`${apiBaseUrl}${path}`, {
-      method: "GET",
-      headers: {
-        "authorization": `Bearer ${internalToken}`,
-      },
-    });
-
-    const text = await response.text();
-    const durationMs = Date.now() - startedAt;
-    const parsed = parseJsonOrText(text);
-    if (!response.ok) {
-      logger.warn("internal_api_get_failed", internalApiLogPayload({
-        path,
-        status: response.status,
-        durationMs,
-        response: parsed,
-      }));
-      throw new InternalApiError(path, response.status, safeLogPreview(parsed), parsed);
-    }
-
-    logger.info("internal_api_get_completed", internalApiLogPayload({
-      path,
-      status: response.status,
-      durationMs,
-      response: parsed,
-    }));
-    return parsed as TResponse;
-  } catch (error) {
-    if (error instanceof InternalApiError) {
-      throw error;
-    }
-    logger.warn("internal_api_get_failed", internalApiLogPayload({
       path,
       durationMs: Date.now() - startedAt,
       error,

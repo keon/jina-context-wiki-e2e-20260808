@@ -41,6 +41,7 @@ type CodegraphContext = {
 
 type ReusableCheckoutInput = PullRequestReviewInput & { repoDir?: string };
 
+/** @public Dynamically imported by the Daytona worker assembled in review-session.ts. */
 export async function runReviewContext(input: ReusableCheckoutInput): Promise<CodegraphReviewContextResult> {
   if (input.repoDir) {
     await ensurePullRequestCheckout({

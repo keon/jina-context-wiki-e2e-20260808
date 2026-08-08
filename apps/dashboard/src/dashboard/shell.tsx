@@ -3,18 +3,27 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { dashboardUsesGithubAuth, useAppAccount, useAppAuth, useDeveloperMode } from "../components/auth/app-auth";
+import {
+  dashboardUsesGithubAuth,
+  useAppAccount,
+  useAppAuth,
+  useAppOnboarding,
+  useDeveloperMode,
+} from "../components/auth/app-auth";
 import { useCodexHarness, useDashboard, useTenant } from "./providers";
 import { parseInstallationResult } from "./lib/api";
 import { clerkAuthRedirect } from "./lib/auth-navigation";
 import { useSelectedClerkOrganization } from "./lib/clerk-organization";
 import { WORKSPACE_NAV_ITEMS, type WorkspaceNavKey } from "./lib/navigation";
+import { onboardingRedirect } from "./lib/onboarding";
 import type { InstallationResult, ViewerResponse } from "./lib/types";
 
 type NavKey =
   | WorkspaceNavKey
   | "models"
   | "integrations"
+  | "tokens"
+  | "mcp"
   | "organization-settings"
   | "organization"
   | "billing"
@@ -47,7 +56,9 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     label: "Configure",
     items: [
       { key: "integrations", label: "Integrations", href: "/integrations", icon: IntegrationsIcon },
-      { key: "models", label: "Models", href: "/models", icon: ModelsIcon }
+      { key: "models", label: "Models", href: "/models", icon: ModelsIcon },
+      { key: "tokens", label: "API Tokens", href: "/tokens", icon: TokensIcon },
+      { key: "mcp", label: "MCP", href: "/mcp", icon: McpIcon }
     ]
   }
 ];
@@ -83,6 +94,8 @@ const SECTION_TITLE: Record<NavKey, string> = {
   "causal-graph": "Causal Graph",
   models: "Models",
   integrations: "Integrations",
+  tokens: "API Tokens",
+  mcp: "MCP",
   "organization-settings": "Org Settings",
   organization: "Members & Access",
   usage: "Usage",
@@ -102,6 +115,8 @@ function sectionForPath(pathname: string | null): NavKey {
   }
   if (path.startsWith("/models")) return "models";
   if (path.startsWith("/integrations")) return "integrations";
+  if (path.startsWith("/tokens")) return "tokens";
+  if (path.startsWith("/mcp")) return "mcp";
   if (path.startsWith("/organization/settings")) return "organization-settings";
   if (path.startsWith("/organization")) return "organization";
   if (path.startsWith("/usage")) return "usage";
@@ -116,11 +131,13 @@ export function Shell({ children }: { children: ReactNode }) {
   const { viewer, authLoading, sessionError, reloadViewer } = useDashboard();
   const { accessError: workspaceAccessError, retryDiscovery } = useTenant();
   const { ready: authReady, signedIn } = useAppAuth();
+  const onboarding = useAppOnboarding();
   const developerMode = useDeveloperMode();
   const pathname = usePathname();
   const router = useRouter();
   const section = sectionForPath(pathname);
   const isSignin = pathname === "/signin";
+  const isOnboarding = pathname === "/onboarding";
   const [installationResult] = useState<InstallationResult | null>(() =>
     typeof window === "undefined" ? null : parseInstallationResult(window.location.search)
   );
@@ -169,6 +186,17 @@ export function Shell({ children }: { children: ReactNode }) {
     });
     if (destination) router.replace(destination);
   }, [appAuthEnabled, authLoading, authReady, signedIn, isSignin, router]);
+
+  useEffect(() => {
+    if (authLoading || !authReady || !signedIn || !onboarding.ready || !pathname) return;
+    const destination = onboardingRedirect({
+      pathname,
+      restartRequested:
+        typeof window !== "undefined" && new URLSearchParams(window.location.search).get("restart") === "1",
+      progress: onboarding.progress,
+    });
+    if (destination) router.replace(destination);
+  }, [authLoading, authReady, signedIn, onboarding.ready, onboarding.progress, pathname, router]);
 
   useEffect(() => {
     if (developerRouteBlocked) {
@@ -221,6 +249,11 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="auth-loading">Loading…</div>
       </div>
     );
+  }
+
+  // Onboarding owns the entire viewport, including its stable header and footer.
+  if (isOnboarding) {
+    return <div className="onboarding-shell">{children}</div>;
   }
 
   return (
@@ -572,6 +605,20 @@ function AccountMenu({
               </Link>
             </div>
           ) : null}
+          <div className="user-menu__section">
+            <Link
+              className="user-menu__action"
+              href="/onboarding?restart=1"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onNavigate();
+              }}
+            >
+              <JinaGuideIcon />
+              <span>Setup guide</span>
+            </Link>
+          </div>
           {developerMode.enabled ? (
             <div className="user-menu__section">
               {DEVELOPER_NAV_ITEMS.map((item) => {
@@ -922,6 +969,35 @@ function IntegrationsIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function TokensIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="6" cy="6.5" r="3.25" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M8.4 8.9 13 13.5m-2.5-1 1.5-1.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function McpIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M8 2.75v2.5m0 5.5v2.5M2.75 8h2.5m5.5 0h2.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.3" />
     </svg>
   );
 }

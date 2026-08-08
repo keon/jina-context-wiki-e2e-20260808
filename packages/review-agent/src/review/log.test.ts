@@ -82,13 +82,11 @@ test("runtime review logs expose config, merge readiness, severities, and bounde
         tasks: [{ id: "task-1" }],
         issues: [{}],
         nonIssues: [],
-        blocked: [],
-        toolCalls: [{ tool: "exec" }]
+        blocked: []
       }
     ],
     findings: [],
     readiness: { score: 3, recommendation: "Merge after fixes", rationale: "One P1 remains." },
-    finalReviewSummary: "Verified and deduplicated the investigation.",
     publication: {
       areaSummaries: [{ areaId: "area-1", title: "API", summary: "Checked the API." }],
       issues: [

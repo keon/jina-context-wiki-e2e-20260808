@@ -74,7 +74,6 @@ export interface ContextTenantQuotaLedger {
   readonly artifactReservations: Readonly<Record<string, ContextQuotaArtifactReservation>>;
   readonly artifacts: Readonly<Record<string, { readonly bytes: number; readonly committedAt: string }>>;
   readonly artifactBytes: number;
-  readonly artifactDeletionOperations: Readonly<Record<string, { readonly artifactId: string }>>;
   readonly modelMonth: ContextQuotaModelMonthLedger;
   readonly denials: Readonly<Partial<Record<ContextQuotaResource, ContextQuotaDenialLedger>>>;
   readonly updatedAt: string;

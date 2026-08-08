@@ -12,8 +12,8 @@ import {
   type ContextArtifactStore,
   type ContextArtifactWrite
 } from "@jina/context-engine";
+import { createEmptyBoardState } from "@jina/board";
 import type { ContextQuotaService } from "./context-quotas.js";
-import { createGitHubIntakeState } from "./github-intake.js";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const TENANT = "tenant-issue-graph";
@@ -91,7 +91,7 @@ class AdmissionRaceStateStore implements ApiStateStore {
   async close(): Promise<void> {}
 }
 
-test("causal graph API authorizes through the current pointer and serves cached artifact reads", async () => {
+test("causal graph API authorizes the highest-sequence release and serves cached artifact reads", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-issue-graph-api-"));
   const artifacts = new CountingArtifactStore(new FileContextArtifactStore(root));
   const store = new MemoryContextEngineStore();
@@ -267,7 +267,7 @@ test("causal graph API authorizes through the current pointer and serves cached 
 
 test("causal graph admission returns the committed build when a concurrent reload replaces the local snapshot", async () => {
   const store = new AdmissionRaceStateStore({
-    intakeState: createGitHubIntakeState(),
+    intakeState: { board: createEmptyBoardState() },
     devDeliverySequence: 0
   });
   const server = createApiServer({

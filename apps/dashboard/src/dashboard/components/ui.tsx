@@ -20,17 +20,17 @@ import { statusTone } from "../lib/presentation";
  * of thing are left here:
  *
  *   - Re-exports, so the pages that import from this module did not have to
- *     change: `Badge`, `DetailHeader`, `EmptyState`, `List`, `Panel`.
+ *     change: `Badge`, `EmptyState`, `List`, `Panel`.
  *   - Thin bindings that supply the coupling the package deliberately does not
  *     import — `next/link` for `Row` and `BackLink`, this app's `statusTone` for
  *     `StatusDot`.
  *   - Components that are genuinely this app's: `Toolbar` reads the dashboard
  *     provider, `ExternalLink` validates through this app's `safeHref`, and
- *     `Section`/`SectionFlush` are entangled with the `:has()` opt-outs the
+ *     `Section` is entangled with the `:has()` opt-outs the
  *     reviews pages rely on.
  */
 
-export { Badge, DetailHeader, EmptyState, List, Panel, PanelCount } from "@jina/ui";
+export { Badge, EmptyState, List, Panel, PanelCount } from "@jina/ui";
 
 /* ---------- Routed primitives ---------- */
 
@@ -142,7 +142,7 @@ export function Toolbar() {
 /* ---------- Detail-page primitives ---------- */
 
 /**
- * `Section` and `SectionFlush` stay in the app. Their appearance is not
+ * `Section` stays in the app. Its appearance is not
  * self-contained: `styles.css` reflows a `.section` that has no `.section__body`
  * child, and `.review-detail-surface` opts back out of that — rules that reach
  * across the reviews pages' own markup. Moving the markup without those rules
@@ -153,19 +153,6 @@ export function Section({ title, children }: { title: string; children: ReactNod
     <section className="section">
       <div className="section__title">{title}</div>
       <div className="section__body">{children}</div>
-    </section>
-  );
-}
-
-/** Section whose body is a flush list/table with no padding. */
-export function SectionFlush({ title, count, children }: { title: string; count?: number | undefined; children: ReactNode }) {
-  return (
-    <section className="section">
-      <div className="section__title section__title--row">
-        <span>{title}</span>
-        {count !== undefined ? <span className="section__count">{count}</span> : null}
-      </div>
-      {children}
     </section>
   );
 }

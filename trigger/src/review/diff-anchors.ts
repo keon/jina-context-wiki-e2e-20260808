@@ -1,4 +1,4 @@
-export type DiffAnchor = {
+type DiffAnchor = {
   path: string;
   line: number;
   side: "RIGHT" | "LEFT";

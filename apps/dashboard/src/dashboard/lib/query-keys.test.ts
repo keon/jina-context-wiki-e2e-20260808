@@ -23,9 +23,9 @@ test("every part of the fence changes the key it addresses", () => {
   // Authorization loss bumps the fence version, so even a request that resolves
   // to the same tenant afterwards cannot read what was cached before it.
   const afterRevocation = tenantQueryKey("dashboard-review-runs", { ...SCOPE, fenceVersion: 3 }, "", "");
-  const legacyViewerWide = tenantQueryKey("dashboard-review-runs", { ...SCOPE, tenantId: null }, "", "");
+  const viewerWide = tenantQueryKey("dashboard-review-runs", { ...SCOPE, tenantId: null }, "", "");
 
-  for (const other of [otherTenant, otherViewer, afterRevocation, legacyViewerWide]) {
+  for (const other of [otherTenant, otherViewer, afterRevocation, viewerWide]) {
     assert.notDeepEqual(base, other);
   }
 });

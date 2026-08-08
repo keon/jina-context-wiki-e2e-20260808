@@ -189,7 +189,6 @@ export interface AccessDecision {
  *  - "not_configured": Autumn secret unset, or the viewer has no tenant/customer.
  *  - "unavailable":    Autumn is configured but errored (balance fields are null).
  *  - "ok":             live data present.
- * `configured` stays true only for "ok" (backward compatibility).
  */
 type BillingStatus = "ok" | "unavailable" | "not_configured";
 
@@ -208,7 +207,6 @@ interface BillingCycle {
 const EMPTY_CYCLE: BillingCycle = { granted: null, remaining: null, used: null, next_reset_at: null };
 
 export interface BillingOverview {
-  configured: boolean;
   status: BillingStatus;
   plan_id: string | null;
   credits_balance: number | null;
@@ -271,12 +269,7 @@ export function autoReviewLimitReached(
   return used >= policy.auto_review_limit_credits;
 }
 
-/**
- * Retry-drain outcome counts. NON-BLOCKING ADOPTED (c): the original {usage_billed, runs_settled,
- * infra_billed} are kept for compatibility (usage_billed/infra_billed still INCLUDE stale rebills), and
- * *_failed + stale_*_rebilled breakdowns are added so a failed drain is distinguishable from an empty
- * backlog (both previously reported all-zero billed counts).
- */
+/** Retry-drain outcome counts. Fresh claims and stale-claim replays are disjoint. */
 export interface RetryBillingCounts {
   usage_billed: number;
   usage_failed: number;
@@ -698,8 +691,7 @@ export class BillingService {
     // Compute each row's credits, then either claim-and-track it ("on") or finalize it 'shadow_computed'.
     for (const row of rows) {
       // Bill from the BYOK-aware basis (is_byok ? upstream+cost : cost), computed exactly at persist.
-      // Pre-0014 rows have a null billable_cost — fall back to openrouter_cost (== the non-BYOK basis).
-      const aiCredits = creditsForCost(row.billable_cost ?? row.openrouter_cost, share);
+      const aiCredits = creditsForCost(row.billable_cost, share);
       if (shadow) {
         await this.store.setUsageShadowComputed(row.id, share, aiCredits);
         console.info("billing_usage_shadow_computed", {
@@ -959,7 +951,6 @@ export class BillingService {
       }
       for (const row of rows) {
         if (await this.rebillStaleUsageRow(row, staleBefore)) {
-          counts.usage_billed += 1;
           counts.stale_usage_rebilled += 1;
         }
       }
@@ -986,7 +977,6 @@ export class BillingService {
     // managed_ai_access recheck. Only the AI-usage replay (a2) gates on entitlement.
     for (const run of await this.store.listStaleTrackingInfra(RETRY_BATCH_LIMIT, staleBefore)) {
       if (await this.rebillStaleInfra(run, staleBefore)) {
-        counts.infra_billed += 1;
         counts.stale_infra_rebilled += 1;
       }
     }
@@ -1019,7 +1009,7 @@ export class BillingService {
 
   /**
    * Dashboard billing overview. status distinguishes not_configured (no secret / no tenant) from
-   * unavailable (Autumn set but errored) from ok (live data). configured stays true only for ok.
+   * unavailable (Autumn set but errored) from ok (live data).
    */
   async overview(
     tenantId: string | undefined,
@@ -1028,7 +1018,6 @@ export class BillingService {
   ): Promise<BillingOverview> {
     if (!this.autumn || !tenantId) {
       return {
-        configured: false,
         status: "not_configured",
         plan_id: null,
         credits_balance: null,
@@ -1053,7 +1042,6 @@ export class BillingService {
         client.getCustomer(tenantId, { expandInvoices: true }),
       ]);
       return {
-        configured: true,
         status: "ok",
         plan_id: customer.planId,
         credits_balance: credits.balance ?? null,
@@ -1073,7 +1061,6 @@ export class BillingService {
       // it at error level via the same helper the gate uses (no-op for retryable outages).
       logBillingConfigError(error, { phase: "overview", tenant_id: tenantId });
       return {
-        configured: false,
         status: "unavailable",
         plan_id: null,
         credits_balance: null,

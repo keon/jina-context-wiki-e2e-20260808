@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  HARNESS_MODEL_OPTIONS,
   TENANT_STORAGE_KEY,
   type ViewerTenant,
   isResponseForCurrentTenant,
@@ -77,12 +76,12 @@ test("resolveSelectedTenant honors a stored id, else defaults to the first tenan
   assert.equal(resolveSelectedTenant(sorted, "ghost")?.tenant_id, "user-1");
   // No stored id -> first tenant.
   assert.equal(resolveSelectedTenant(sorted, null)?.tenant_id, "user-1");
-  // No tenants -> null (legacy personal).
+  // No tenants -> no selection.
   assert.equal(resolveSelectedTenant([], "org-a"), null);
 });
 
-test("isTenantWritable gates org members but allows personal, admins, and legacy", () => {
-  assert.equal(isTenantWritable(null), true); // legacy personal
+test("isTenantWritable gates org members and allows local mode, personal tenants, and admins", () => {
+  assert.equal(isTenantWritable(null), true);
   assert.equal(isTenantWritable({ tenantId: "u", login: "me", type: "User", role: "member" }), true);
   assert.equal(isTenantWritable({ tenantId: "o", login: "org", type: "Organization", role: "admin" }), true);
   assert.equal(isTenantWritable({ tenantId: "o", login: "org", type: "Organization", role: "member" }), false);
@@ -92,7 +91,7 @@ test("tenantStorageKey namespaces the persisted selection by viewer id so accoun
   // A different signed-in user reads a different key, so a stale selection can't leak across accounts.
   assert.equal(tenantStorageKey(42), `${TENANT_STORAGE_KEY}.42`);
   assert.notEqual(tenantStorageKey(42), tenantStorageKey(43));
-  // No viewer id (auth disabled) falls back to the bare legacy key.
+  // No viewer id (auth disabled) uses the local-mode key.
   assert.equal(tenantStorageKey(null), TENANT_STORAGE_KEY);
   assert.equal(tenantStorageKey(undefined), TENANT_STORAGE_KEY);
 });
@@ -102,21 +101,13 @@ test("isResponseForCurrentTenant fences a response to the still-selected tenant"
   const viewerB = {};
   // Same tenant at request start and resolution -> apply.
   assert.equal(isResponseForCurrentTenant("t-1", "t-1", viewerA, viewerA), true);
-  // Legacy viewer-scoped route (null on both sides) -> apply.
+  // Local viewer-scoped route (null on both sides) -> apply.
   assert.equal(isResponseForCurrentTenant(null, null, viewerA, viewerA), true);
   // A null-to-null transition between accounts still rejects the prior viewer's response.
   assert.equal(isResponseForCurrentTenant(null, null, viewerA, viewerB), false);
   // Switched from A to B before the response resolved -> drop.
   assert.equal(isResponseForCurrentTenant("t-1", "t-2", viewerA, viewerA), false);
-  // Switched from a tenant to the legacy route (or vice versa) -> drop.
+  // Switched from a tenant to the local route (or vice versa) -> drop.
   assert.equal(isResponseForCurrentTenant("t-1", null), false);
   assert.equal(isResponseForCurrentTenant(null, "t-1"), false);
-});
-
-test("HARNESS_MODEL_OPTIONS stays in sync with api HARNESS_MODELS (drives the Codex picker set)", () => {
-  assert.deepEqual(
-    HARNESS_MODEL_OPTIONS.map((option) => option.value).filter((value) => value !== null),
-    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
-  );
-  assert.equal(HARNESS_MODEL_OPTIONS[0]!.value, null);
 });

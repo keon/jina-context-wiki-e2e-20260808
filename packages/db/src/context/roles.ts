@@ -1,16 +1,4 @@
 const CONTEXT_ROLES = [
-  "jina_context_coordinator",
-  "jina_context_ingest",
-  "jina_context_derive",
-  "jina_context_manifest",
-  "jina_context_knowledge_current",
-  "jina_context_lexical",
-  "jina_context_dense",
-  "jina_context_hierarchy",
-  "jina_context_structural",
-  "jina_context_identity",
-  "jina_context_acl",
-  "jina_context_retention",
   "jina_context_query",
   "jina_context_quota",
   "jina_context_tokens",
@@ -20,18 +8,6 @@ const CONTEXT_ROLES = [
 ] as const;
 
 export const CONTEXT_RUNTIME_ROLES = CONTEXT_ROLES.filter((role) => role !== "jina_context_admin");
-
-const CONTEXT_CONSUMER_ROLES = [
-  ["manifest", "jina_context_manifest"],
-  ["knowledge-current", "jina_context_knowledge_current"],
-  ["lexical", "jina_context_lexical"],
-  ["dense", "jina_context_dense"],
-  ["hierarchy", "jina_context_hierarchy"],
-  ["structural", "jina_context_structural"],
-  ["identity", "jina_context_identity"],
-  ["acl", "jina_context_acl"],
-  ["retention", "jina_context_retention"]
-] as const;
 
 export type ContextDatabaseRole = (typeof CONTEXT_ROLES)[number];
 
@@ -44,59 +20,13 @@ const tenantScopeSql = (column = "tenant_id", allowAdminSystemScope = true) =>
 
 const tenantScopedTables = [
   "repositories",
-  "observations",
-  "evidence_records",
-  "evidence_checkpoints",
-  "projection_input_events",
-  "evidence_checkpoint_records",
-  "evidence_checkpoint_manifest",
-  "refs",
-  "commits",
-  "commit_parents",
-  "trees",
-  "blobs",
-  "tree_entries",
-  "commit_changes",
-  "blob_analyses",
-  "symbols",
-  "imports",
-  "structural_facts",
-  "evidence_checkpoint_structural_facts",
-  "entities",
-  "identities",
-  "derivation_runs",
-  "knowledge_documents",
-  "knowledge_document_revisions",
-  "knowledge_revision_evidence",
-  "knowledge_revision_events",
-  "repository_acl_observations",
-  "erasure_filters",
-  "audit_events",
-  "index_generations",
-  "context_board_publications",
-  "current_context_board_releases",
+  "repository_access",
+  "context_releases",
   "issue_graph_releases",
-  "current_issue_graph_releases",
-  "ref_manifest",
-  "current_knowledge_revisions",
-  "context_documents",
-  "context_fragments",
-  "context_embeddings",
-  "hierarchy_nodes",
-  "structural_relations",
-  "identity_projection",
-  "repository_acl_projection",
-  "query_runs",
-  "retrieval_metrics",
   "context_phase_checkpoints",
-  "context_quota_ledgers",
-  "api_tokens"
+  "context_quota_ledgers"
 ] as const;
 
-/**
- * Grants are intentionally explicit. In particular, runtime roles receive no
- * UPDATE or DELETE privileges on canonical evidence or immutable knowledge.
- */
 export const CONTEXT_ROLES_SQL = `
 do $roles$
 declare role_name text;
@@ -115,180 +45,27 @@ revoke all on all sequences in schema jina_context from public;
 revoke execute on all functions in schema jina_context from public;
 
 grant usage on schema jina_context to ${CONTEXT_ROLES.join(",")};
-
-grant select,insert,update on jina_context.repositories to jina_context_coordinator;
-grant select,insert,update on
-  jina_context.index_generations,jina_context.generation_projectors,
-  jina_context.projection_checkpoints
-to jina_context_coordinator;
-grant select on
-  jina_context.evidence_checkpoints,jina_context.repository_acl_observations,
-  jina_context.projection_input_events
-to jina_context_coordinator;
-grant select on
-  jina_context.evidence_checkpoints,jina_context.knowledge_document_revisions,
-  jina_context.repository_acl_observations,jina_context.repository_acl_projection
-to
-  jina_context_manifest,jina_context_knowledge_current,jina_context_lexical,
-  jina_context_dense,jina_context_hierarchy,jina_context_structural,
-  jina_context_identity,jina_context_acl,jina_context_retention;
-
-grant select,insert,update on jina_context.repositories to jina_context_ingest;
-grant select,insert on
-  jina_context.observations,jina_context.evidence_records,jina_context.evidence_checkpoints,
-  jina_context.evidence_checkpoint_records,jina_context.evidence_checkpoint_manifest,
-  jina_context.evidence_checkpoint_structural_facts,jina_context.refs,jina_context.commits,
-  jina_context.commit_parents,jina_context.trees,jina_context.tree_entries,
-  jina_context.blobs,jina_context.commit_changes,jina_context.blob_analyses,
-  jina_context.symbols,jina_context.imports,jina_context.structural_facts,
-  jina_context.entities,jina_context.identities,jina_context.repository_acl_observations,
-  jina_context.erasure_filters,jina_context.audit_events,jina_context.projection_input_events
-to jina_context_ingest;
-grant select,insert,update on jina_context.outbox to jina_context_ingest;
+-- api_tokens lives in public (promoted by product migration 0038). The token
+-- capability must not depend on the default PUBLIC usage grant, which hardened
+-- databases (and test databases that recreate the schema) revoke.
+grant usage on schema public to jina_context_tokens;
 
 grant select on
-  jina_context.repositories,jina_context.observations,jina_context.evidence_records,
-  jina_context.evidence_checkpoints,jina_context.evidence_checkpoint_records,
-  jina_context.evidence_checkpoint_manifest,jina_context.evidence_checkpoint_structural_facts,
-  jina_context.refs,
-  jina_context.commits,jina_context.commit_parents,jina_context.trees,
-  jina_context.tree_entries,jina_context.blobs,jina_context.commit_changes,
-  jina_context.blob_analyses,jina_context.symbols,jina_context.imports,
-  jina_context.structural_facts,jina_context.entities,jina_context.identities,
-  jina_context.repository_acl_observations,jina_context.erasure_filters
-to jina_context_derive;
-grant insert,select on
-  jina_context.derivation_runs,jina_context.knowledge_documents,
-  jina_context.knowledge_document_revisions,jina_context.knowledge_revision_evidence,
-  jina_context.knowledge_revision_events,jina_context.audit_events,
-  jina_context.projection_input_events
-to jina_context_derive;
-grant select,insert,update on jina_context.outbox to jina_context_derive;
-grant select on
-  jina_context.knowledge_documents,jina_context.knowledge_document_revisions,
-  jina_context.knowledge_revision_events,jina_context.index_generations,
-  jina_context.generation_projectors
-to jina_context_knowledge_current;
-grant select,insert,update,delete on jina_context.current_knowledge_revisions
-to jina_context_knowledge_current;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_knowledge_current;
-
-grant select on
-  jina_context.repositories,jina_context.refs,jina_context.commits,
-  jina_context.trees,jina_context.tree_entries,jina_context.blobs,
-  jina_context.erasure_filters,jina_context.index_generations,
-  jina_context.generation_projectors
-to jina_context_manifest;
-grant select,insert,update,delete on jina_context.ref_manifest to jina_context_manifest;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_manifest;
-
-grant select on
-  jina_context.observations,jina_context.blobs,jina_context.ref_manifest,
-  jina_context.knowledge_document_revisions,jina_context.knowledge_revision_evidence,
-  jina_context.current_knowledge_revisions,jina_context.erasure_filters,
-  jina_context.index_generations,jina_context.generation_projectors
-to jina_context_lexical;
-grant select,insert,update,delete on
-  jina_context.context_documents,jina_context.context_fragments,jina_context.exact_index
-to jina_context_lexical;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_lexical;
-
-grant select on
-  jina_context.context_documents,jina_context.context_fragments,jina_context.index_generations,
-  jina_context.generation_projectors
-to jina_context_dense;
-grant select,insert,update,delete on jina_context.context_embeddings to jina_context_dense;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_dense;
-
-grant select on
-  jina_context.context_documents,jina_context.context_fragments,
-  jina_context.index_generations,jina_context.generation_projectors
-to jina_context_hierarchy;
-grant select,insert,update,delete on jina_context.hierarchy_nodes to jina_context_hierarchy;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_hierarchy;
-
-grant select on
-  jina_context.structural_facts,jina_context.ref_manifest,
-  jina_context.index_generations,jina_context.generation_projectors
-to jina_context_structural;
-grant select,insert,update,delete on jina_context.structural_relations to jina_context_structural;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_structural;
-
-grant select on
-  jina_context.entities,jina_context.identities,jina_context.index_generations,
-  jina_context.generation_projectors
-to jina_context_identity;
-grant select,insert,update,delete on jina_context.identity_projection to jina_context_identity;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_identity;
-
-grant select on
-  jina_context.repository_acl_observations,jina_context.index_generations,
-  jina_context.generation_projectors
-to jina_context_acl;
-grant select,insert,update,delete on jina_context.repository_acl_projection to jina_context_acl;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_acl;
-
-grant select on
-  jina_context.erasure_filters,jina_context.index_generations,
-  jina_context.generation_projectors,jina_context.projection_checkpoints
-to jina_context_retention;
-grant delete on
-  jina_context.ref_manifest,jina_context.current_knowledge_revisions,
-  jina_context.context_documents,jina_context.context_fragments,jina_context.exact_index,
-  jina_context.context_embeddings,jina_context.hierarchy_nodes,
-  jina_context.structural_relations,jina_context.identity_projection,
-  jina_context.repository_acl_projection
-to jina_context_retention;
-grant select,insert,update on
-  jina_context.projection_checkpoints,jina_context.generation_projectors,jina_context.outbox
-to jina_context_retention;
-grant select,update,delete on jina_context.index_generations to jina_context_retention;
-
-grant select on
-  jina_context.current_repository_acl,jina_context.index_generations,jina_context.generation_projectors,
-  jina_context.context_board_publications,jina_context.current_context_board_releases,
-  jina_context.repository_acl_projection,jina_context.published_context_documents,
-  jina_context.published_context_fragments,
-  jina_context.published_structural_relations,jina_context.published_hierarchy_nodes,
-  jina_context.context_embeddings,jina_context.exact_index,jina_context.knowledge_documents,
-  jina_context.knowledge_document_revisions,jina_context.knowledge_revision_evidence,
-  jina_context.issue_graph_releases,jina_context.current_issue_graph_releases
-to jina_context_query;
-grant select,insert,update on jina_context.query_runs to jina_context_query;
-grant select,insert on
-  jina_context.retrieval_candidates,jina_context.answer_citations,
-  jina_context.retrieval_metrics
+  jina_context.repositories,jina_context.repository_access,
+  jina_context.context_releases,jina_context.issue_graph_releases
 to jina_context_query;
 
 grant select,insert,update on jina_context.context_quota_ledgers
   to jina_context_quota;
 
-grant select,insert on jina_context.api_tokens to jina_context_tokens;
-grant update (last_used_at,revoked_at,revoked_by) on jina_context.api_tokens
+grant select,insert on public.api_tokens to jina_context_tokens;
+grant update (last_used_at,revoked_at,revoked_by) on public.api_tokens
   to jina_context_tokens;
 
-grant select on jina_context.repositories,jina_context.current_repository_acl,
-                jina_context.issue_graph_releases,jina_context.current_issue_graph_releases
+grant select on jina_context.repositories,jina_context.issue_graph_releases
   to jina_context_issue_publish;
-grant insert on jina_context.repositories to jina_context_issue_publish;
-grant insert on jina_context.issue_graph_releases to jina_context_issue_publish;
-grant insert,update on jina_context.current_issue_graph_releases to jina_context_issue_publish;
+grant insert on jina_context.repositories,jina_context.issue_graph_releases
+  to jina_context_issue_publish;
 
 grant all privileges on all tables in schema jina_context to
   jina_context_tenant_admin,jina_context_admin;
@@ -297,200 +74,19 @@ grant all privileges on all sequences in schema jina_context to
 grant execute on all functions in schema jina_context to
   jina_context_tenant_admin,jina_context_admin;
 
-revoke update on jina_context.outbox from
-  jina_context_ingest,jina_context_derive,
-  ${CONTEXT_CONSUMER_ROLES.map(([, role]) => role).join(",")};
-grant update (available_at,attempt,lease_id,lease_owner,lease_expires_at,processed_at,last_error)
-  on jina_context.outbox
-  to ${CONTEXT_CONSUMER_ROLES.map(([, role]) => role).join(",")};
-
-revoke insert,update on jina_context.generation_projectors from
-  ${CONTEXT_CONSUMER_ROLES.map(([, role]) => role).join(",")};
-grant update (
-  status,output_fingerprint,processed_through,lease_id,lease_owner,
-  lease_expires_at,started_at,completed_at,failure
-) on jina_context.generation_projectors
-  to ${CONTEXT_CONSUMER_ROLES.map(([, role]) => role).join(",")};
-
-revoke update on jina_context.projection_checkpoints from
-  ${CONTEXT_CONSUMER_ROLES.map(([, role]) => role).join(",")};
-grant update (
-  projector_version,processed_through,output_fingerprint,lease_id,
-  lease_owner,lease_expires_at,updated_at
-) on jina_context.projection_checkpoints
-  to ${CONTEXT_CONSUMER_ROLES.map(([, role]) => role).join(",")};
-
-alter table jina_context.outbox enable row level security;
-alter table jina_context.generation_projectors enable row level security;
-alter table jina_context.projection_checkpoints enable row level security;
-
-drop policy if exists context_outbox_producer on jina_context.outbox;
-create policy context_outbox_producer on jina_context.outbox
-  for insert to jina_context_ingest,jina_context_derive
-  with check (${tenantScopeSql("tenant_id", false)});
-drop policy if exists context_outbox_producer_read on jina_context.outbox;
-create policy context_outbox_producer_read on jina_context.outbox
-  for select to jina_context_ingest,jina_context_derive
-  using (${tenantScopeSql("tenant_id", false)});
-drop policy if exists context_outbox_admin on jina_context.outbox;
-create policy context_outbox_admin on jina_context.outbox
-  to jina_context_tenant_admin,jina_context_admin
-  using (${tenantScopeSql()}) with check (${tenantScopeSql()});
-drop policy if exists context_generation_projectors_admin on jina_context.generation_projectors;
-create policy context_generation_projectors_admin on jina_context.generation_projectors
-  to jina_context_tenant_admin,jina_context_admin
-  using (
-    exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=generation_id
-        and ${tenantScopeSql("generation.tenant_id")}
-    )
-  )
-  with check (
-    exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=generation_id
-        and ${tenantScopeSql("generation.tenant_id")}
-    )
-  );
-drop policy if exists context_generation_projectors_coordinator on jina_context.generation_projectors;
-create policy context_generation_projectors_coordinator on jina_context.generation_projectors
-  to jina_context_coordinator
-  using (
-    exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=generation_id
-        and ${tenantScopeSql("generation.tenant_id", false)}
-    )
-  )
-  with check (
-    exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=generation_id
-        and ${tenantScopeSql("generation.tenant_id", false)}
-    )
-  );
-drop policy if exists context_generation_projectors_query on jina_context.generation_projectors;
-create policy context_generation_projectors_query on jina_context.generation_projectors
-  for select to jina_context_query
-  using (
-    exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=generation_id
-        and ${tenantScopeSql("generation.tenant_id", false)}
-    )
-  );
-drop policy if exists context_projection_checkpoints_admin on jina_context.projection_checkpoints;
-create policy context_projection_checkpoints_admin on jina_context.projection_checkpoints
-  to jina_context_tenant_admin,jina_context_admin
-  using (${tenantScopeSql()}) with check (${tenantScopeSql()});
-drop policy if exists context_projection_checkpoints_coordinator on jina_context.projection_checkpoints;
-create policy context_projection_checkpoints_coordinator on jina_context.projection_checkpoints
-  to jina_context_coordinator
-  using (${tenantScopeSql("tenant_id", false)}) with check (${tenantScopeSql("tenant_id", false)});
-
-${CONTEXT_CONSUMER_ROLES.map(
-  ([consumer, role]) => `
-drop policy if exists context_outbox_${role} on jina_context.outbox;
-create policy context_outbox_${role} on jina_context.outbox
-  to ${role}
-  using (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)})
-  with check (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)});
-drop policy if exists context_generation_projectors_${role} on jina_context.generation_projectors;
-create policy context_generation_projectors_${role} on jina_context.generation_projectors
-  to ${role}
-  using (
-    consumer='${consumer}'
-    and exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=generation_id
-        and ${tenantScopeSql("generation.tenant_id", false)}
-    )
-  )
-  with check (
-    consumer='${consumer}'
-    and exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=generation_id
-        and ${tenantScopeSql("generation.tenant_id", false)}
-    )
-  );
-drop policy if exists context_projection_checkpoints_${role} on jina_context.projection_checkpoints;
-create policy context_projection_checkpoints_${role} on jina_context.projection_checkpoints
-  to ${role}
-  using (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)})
-  with check (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)});`
-).join("\n")}
-
-alter table jina_context.exact_index enable row level security;
-drop policy if exists context_exact_index_tenant_scope on jina_context.exact_index;
-create policy context_exact_index_tenant_scope on jina_context.exact_index
-  using (
-    exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=exact_index.generation_id
-        and ${tenantScopeSql("generation.tenant_id")}
-    )
-  )
-  with check (
-    exists (
-      select 1 from jina_context.index_generations generation
-      where generation.id=exact_index.generation_id
-        and ${tenantScopeSql("generation.tenant_id")}
-    )
-  );
-
-alter table jina_context.retrieval_candidates enable row level security;
-drop policy if exists context_retrieval_candidates_tenant_scope on jina_context.retrieval_candidates;
-create policy context_retrieval_candidates_tenant_scope on jina_context.retrieval_candidates
-  using (
-    exists (
-      select 1 from jina_context.query_runs run
-      where run.id=retrieval_candidates.query_run_id
-        and ${tenantScopeSql("run.tenant_id")}
-    )
-  )
-  with check (
-    exists (
-      select 1 from jina_context.query_runs run
-      where run.id=retrieval_candidates.query_run_id
-        and ${tenantScopeSql("run.tenant_id")}
-    )
-  );
-
-alter table jina_context.answer_citations enable row level security;
-drop policy if exists context_answer_citations_tenant_scope on jina_context.answer_citations;
-create policy context_answer_citations_tenant_scope on jina_context.answer_citations
-  using (
-    exists (
-      select 1 from jina_context.query_runs run
-      where run.id=answer_citations.query_run_id
-        and ${tenantScopeSql("run.tenant_id")}
-    )
-  )
-  with check (
-    exists (
-      select 1 from jina_context.query_runs run
-      where run.id=answer_citations.query_run_id
-        and ${tenantScopeSql("run.tenant_id")}
-    )
-  );
-
--- Verification resolves a token before any tenant is known, so it cannot run at
--- tenant scope and the standard policy below cannot serve it: that policy's only
--- cross-tenant escape names jina_context_admin, which the runtime login does not
--- hold. This permissive policy adds exactly that one read. The '*' guard keeps it
--- from widening reads at tenant scope, where the standard policy governs, and the
--- liveness predicate makes a revoked or expired token invisible rather than
--- merely rejected, so a bug in the verify path cannot resurrect one.
-drop policy if exists context_api_tokens_verify on jina_context.api_tokens;
-create policy context_api_tokens_verify on jina_context.api_tokens
+alter table public.api_tokens enable row level security;
+drop policy if exists context_api_tokens_verify on public.api_tokens;
+create policy context_api_tokens_verify on public.api_tokens
   for select to jina_context_tokens
   using (
     current_setting('jina.tenant_id',true)='*'
     and revoked_at is null
     and expires_at > now()
   );
+drop policy if exists context_tenant_scope on public.api_tokens;
+create policy context_tenant_scope on public.api_tokens
+  using (${tenantScopeSql()})
+  with check (${tenantScopeSql()});
 
 ${tenantScopedTables
   .map(

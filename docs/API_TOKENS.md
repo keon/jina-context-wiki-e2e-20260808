@@ -2,9 +2,12 @@
 
 Status: token authentication is implemented. Exact Board build-model accounting and
 model-free query-rate accounting are implemented at the tenant quota boundary.
-Per-principal/per-token usage reporting, dashboard self-service issuance, and retirement of
-the static context credential are not implemented. This document separates those facts
-from the remaining product roadmap; executable source and tests remain authoritative.
+Dashboard self-service issuance is implemented: the API Tokens page mints, lists, and
+revokes tenant tokens through `/dashboard/tenants/:tenantId/tokens`, and the MCP page
+provides ready-to-paste client configuration. Per-principal/per-token usage reporting and
+retirement of the static context credential are not implemented. This document separates
+those facts from the remaining product roadmap; executable source and tests remain
+authoritative.
 
 ## Why the static credentials are not the end-state
 
@@ -126,7 +129,7 @@ This is production quota accounting, not yet per-person billing:
 
 - the ledger is tenant scoped rather than keyed by API token;
 - token records track `lastUsedAt`, not consumption by operation;
-- query telemetry records a non-resolvable principal fingerprint rather than a token ID;
+- search activity is not written as per-token usage accounting;
 - build-model invocations that never emit valid completed usage cannot be recorded as exact
   token usage and therefore cancel their reservation; and
 - there is no self-service usage API.
@@ -187,7 +190,11 @@ Issuance and revocation are recorded with their actor.
    query-rate usage are persisted idempotently and exposed in administrator quota metrics.
 3. Add usage records keyed by `tokenId`, covering builds, deterministic search, and MCP.
    Expose `GET /wiki/usage` through the unified API.
-4. Add dashboard issuance and per-token usage on the existing Usage page.
+4. **Issuance done.** The dashboard API Tokens page mints (name, scopes, expiry; the
+   tenant principal comes from the session-checked membership, never the request body),
+   shows the secret once with a copy control, lists name/scopes/created/last-use/expiry,
+   and revokes. Dashboard-issued tokens never carry `context:admin`. Per-token usage on
+   the Usage page still follows step 3.
 5. Retire the static context token after every remaining service caller uses delegated,
    repository-scoped, or per-principal tokens.
 

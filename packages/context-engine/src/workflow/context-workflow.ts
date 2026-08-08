@@ -23,6 +23,7 @@ import {
 
 export const CONTEXT_WORKFLOW_CONTRACT = "page-oriented" as const;
 export const CONTEXT_WORKFLOW_SCHEMA_REVISION = 1 as const;
+export const MAX_CONTEXT_PAGE_REPAIR_PASSES = 1;
 
 export const contextWorkflowBoardTaskTypes = {
   build: "build-context",
@@ -275,6 +276,26 @@ export function createContextWorkflowBoardBuild(
     metadata
   });
   return { state: reduceBoard(next, now), buildTaskId, graphTaskId, snapshotTaskId };
+}
+
+export function nextContextWorkflowBoardRefSequence(
+  state: BoardState,
+  input: { readonly tenantId: string; readonly repository: string; readonly ref: string }
+): number {
+  const repository = normalizeRepository(input.repository);
+  const sequences = state.tasks
+    .filter(
+      (task) =>
+        task.type === contextWorkflowBoardTaskTypes.build &&
+        task.metadata.tenantId === input.tenantId &&
+        task.metadata.repository === repository &&
+        task.metadata.ref === input.ref
+    )
+    .map((task) => task.metadata.refSequence)
+    .filter((value): value is number => Number.isSafeInteger(value) && Number(value) > 0);
+  const next = Math.max(0, ...sequences) + 1;
+  if (!Number.isSafeInteger(next)) throw new Error("Context ref sequence exceeds the supported range");
+  return next;
 }
 
 export function bindContextWorkflowBoardBuildCommit(

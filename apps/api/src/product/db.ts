@@ -23,18 +23,12 @@ export function configureProductDatabasePool(sharedPool: pg.Pool): void {
 }
 
 export function productDatabaseConnectionString(environment: NodeJS.ProcessEnv = process.env): string | undefined {
-  const productUrl = environment.JINA_PRODUCT_DATABASE_URL?.trim();
-  if (productUrl) {
-    return productUrl;
-  }
-  const legacyUrl = environment.DATABASE_URL?.trim();
-  return legacyUrl || undefined;
+  return environment.DATABASE_URL?.trim() || undefined;
 }
 
 /**
- * Product data now shares the v2 database connection used by Context in staging.
- * `url` remains the default so production can adopt the cutover independently;
- * setting `JINA_PRODUCT_DATABASE_MODE=shared` is the explicit, fail-closed switch.
+ * Product data shares the same database as Context. Deployments use socket
+ * credentials; local migration and integration-test processes may use DATABASE_URL.
  */
 export function productDatabaseConfig(environment: NodeJS.ProcessEnv = process.env): PoolConfig | undefined {
   const mode = environment.JINA_PRODUCT_DATABASE_MODE?.trim() || "url";
@@ -72,7 +66,7 @@ export function getPool(): pg.Pool {
     const config = productDatabaseConfig();
     if (!config) {
       throw new Error(
-        "Product database is not configured: set the shared DB_* values or JINA_PRODUCT_DATABASE_URL",
+        "Product database is not configured: set the shared DB_* values or DATABASE_URL",
       );
     }
     pool = new Pool({ ...config, max: 5, idleTimeoutMillis: 30_000 });

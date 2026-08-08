@@ -18,9 +18,9 @@ function listedRun(data: DashboardResponse | null, reviewRunId: string): ReviewR
 
 export function useReviewRunDetail(reviewRunId: string) {
   const { data: dashboardData } = useDashboard();
-  const { ready, legacyReviewMode } = useTenant();
+  const { ready, localReviewMode } = useTenant();
   const scope = useTenantQueryScope();
-  const requestReady = ready && (scope.tenantId !== null || legacyReviewMode);
+  const requestReady = ready && (scope.tenantId !== null || localReviewMode);
 
   const query = useQuery<ReviewRun | null>({
     queryKey: tenantQueryKey("review-run-detail", scope, reviewRunId),

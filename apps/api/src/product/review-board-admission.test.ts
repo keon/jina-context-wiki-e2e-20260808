@@ -3,62 +3,10 @@ import { test } from "node:test";
 
 import {
   buildReviewBoardAdmission,
-  buildReviewBoardV2Admission,
   REVIEW_BOARD_PIPELINE_VERSION,
-  REVIEW_BOARD_V2_PIPELINE_VERSION,
 } from "./review-board-admission.js";
 
-test("review Board planner creates the full versioned fan-out, join, publication, and settlement graph", () => {
-  const admission = buildReviewBoardAdmission({
-    reviewRunId: "00000000-0000-4000-8000-000000000001",
-    tenantId: "00000000-0000-4000-8000-000000000002",
-    input: {
-      idempotencyKey: "review:456:123:42:head-sha-1:code_review",
-      deliveryId: "delivery-1",
-      sourceEvent: "pull_request",
-      triggerSource: "webhook",
-      installationId: 456,
-      repository: { githubRepoId: 123, fullName: "acme/example" },
-      pullRequest: { number: 42, headSha: "head-sha-1" },
-      orchestrationPayload: { action: "opened", delivery_id: "delivery-1" },
-    },
-  });
-
-  assert.equal(admission.pipelineVersion, REVIEW_BOARD_PIPELINE_VERSION);
-  assert.equal(admission.dedupeKey, "review:456:123:42:head-sha-1:code_review");
-  assert.deepEqual(
-    admission.tasks.map((task) => [task.taskType, task.status, task.maxAttempts]),
-    [
-      ["prepare-review", "queued", 3],
-      ["summary-review", "blocked", 3],
-      ["runtime-review", "blocked", 3],
-      ["finalize-review", "blocked", 3],
-      ["publish-review", "blocked", 5],
-      ["settle-review", "blocked", 5],
-    ],
-  );
-  assert.equal(admission.dependencies?.length, 6);
-  assert.equal(admission.dependencies?.filter((dependency) => dependency.condition === "terminal").length, 3);
-  assert.equal(admission.tasks.at(-1)?.cleanupTask, true);
-});
-
-test("review Board planner refuses an admission that cannot be executed by a worker", () => {
-  assert.throws(
-    () =>
-      buildReviewBoardAdmission({
-        reviewRunId: "00000000-0000-4000-8000-000000000001",
-        tenantId: "00000000-0000-4000-8000-000000000002",
-        input: {
-          installationId: 456,
-          repository: { githubRepoId: 123, fullName: "acme/example" },
-          pullRequest: { number: 42, headSha: "head-sha-1" },
-        },
-      }),
-    /orchestrationPayload must be an object/,
-  );
-});
-
-test("review Board v2 planner creates one high-level review task with exact Trigger dispatch", () => {
+test("review Board planner creates one high-level review task with exact Trigger dispatch", () => {
   const triggerPayload = {
     delivery_id: "delivery-v2",
     review_idempotency_key: "review:456:123:42:head-sha-v2:code_review",
@@ -74,7 +22,7 @@ test("review Board v2 planner creates one high-level review task with exact Trig
     tags: ["installation:456", "repo:123", "pr:42", "bot:code_review"],
     ttl: "30m",
   } as const;
-  const admission = buildReviewBoardV2Admission({
+  const admission = buildReviewBoardAdmission({
     tenantId: "00000000-0000-4000-8000-000000000002",
     arrival: {
       input: {
@@ -92,7 +40,7 @@ test("review Board v2 planner creates one high-level review task with exact Trig
     },
   });
 
-  assert.equal(admission.pipelineVersion, REVIEW_BOARD_V2_PIPELINE_VERSION);
+  assert.equal(admission.pipelineVersion, REVIEW_BOARD_PIPELINE_VERSION);
   assert.equal(admission.workflowType, "pr_review");
   assert.equal(admission.subjectId, "123:42:head-sha-v2");
   assert.equal(admission.concurrencyKey, triggerOptions.idempotencyKey);
@@ -125,7 +73,7 @@ test("review Board v2 requires the Trigger idempotency key used for ambiguous di
   } as const;
   assert.throws(
     () =>
-      buildReviewBoardV2Admission({
+      buildReviewBoardAdmission({
         tenantId: "00000000-0000-4000-8000-000000000002",
         arrival,
       }),
@@ -140,7 +88,7 @@ test("manual v2 Board identity stays comment-stable while Trigger concurrency re
     concurrencyKey: "review:456:123:42:new-head-sha",
     tags: ["manual-command:1:issue_comment:9001"],
   } as const;
-  const admission = buildReviewBoardV2Admission({
+  const admission = buildReviewBoardAdmission({
     tenantId: "00000000-0000-4000-8000-000000000002",
     arrival: {
       input: {

@@ -9,7 +9,7 @@ type ReviewFindingsStatus = "Pending" | "Issues found" | "No issues found" | "Un
 type ReviewProgressNotice = {
   kind: "provider_failure";
   category: "quota" | "authentication" | "model" | "availability";
-  provider: "codex" | "byok" | "unknown";
+  provider: "codex" | "byok";
   quotaReason?: "exhausted" | "rate_limit";
 };
 
@@ -30,9 +30,9 @@ export type ReviewProgressUpdate = {
   notice?: ReviewProgressNotice;
 };
 
-const SUMMARY_MARKER_PREFIX = "jina-simulation:review-summary";
-const PROGRESS_STATE_MARKER = "jina-simulation:review-progress";
-const PROGRESS_STATE_RE = /<!--\s*jina-simulation:review-progress\s+({[\s\S]*?})\s*-->/;
+const SUMMARY_MARKER_PREFIX = "jina:review-summary";
+const PROGRESS_STATE_MARKER = "jina:review-progress";
+const PROGRESS_STATE_RE = /<!--\s*jina:review-progress\s+({[\s\S]*?})\s*-->/;
 
 export function reviewProgressCommentMarker(headSha: string, reviewRunId: string): string {
   return `<!-- ${SUMMARY_MARKER_PREFIX}:${headSha}:${reviewRunId} -->`;
@@ -359,13 +359,15 @@ function reviewProgressNotice(value: unknown): ReviewProgressNotice | undefined 
   ) {
     return undefined;
   }
-  const provider = notice.provider === "codex" || notice.provider === "byok" ? notice.provider : "unknown";
+  if (notice.provider !== "codex" && notice.provider !== "byok") {
+    return undefined;
+  }
   const quotaReason =
     notice.quotaReason === "exhausted" || notice.quotaReason === "rate_limit" ? notice.quotaReason : undefined;
   return {
     kind: notice.kind,
     category: notice.category,
-    provider,
+    provider: notice.provider,
     ...(quotaReason ? { quotaReason } : {})
   };
 }
@@ -391,7 +393,7 @@ function providerFailureNotice(notice: ReviewProgressNotice): string[] {
         ? "Wait for the limit to reset, choose another provider, or enable managed fallback."
         : notice.provider === "byok"
           ? "Add credits, raise the provider limit, or wait for its rate limit to reset, then retry."
-          : "Check the provider's credits and limits or wait for its rate limit to reset, then retry.",
+          : "Add credits, raise the provider limit, or wait for its rate limit to reset, then retry.",
     authentication:
       notice.provider === "codex" ? "Reconnect Codex, then retry." : "Update the provider API key, then retry.",
     model: "Choose a supported model, then retry.",

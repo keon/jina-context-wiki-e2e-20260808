@@ -101,7 +101,6 @@ steps:
         docker build \
           --file=apps/dashboard/Dockerfile \
           --build-arg=NEXT_PUBLIC_API_BASE_URL=${_JINA_PUBLIC_API_BASE_URL} \
-          --build-arg=NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE=${_JINA_DASHBOARD_AUTH_MODE} \
           --label=org.opencontainers.image.revision=$COMMIT_SHA \
           --label=org.opencontainers.image.source=https://github.com/omxyz/jina \
           --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID \
@@ -184,7 +183,6 @@ steps:
       - JINA_DB_PASS_SECRET=${_JINA_DB_PASS_SECRET}
       - JINA_MIGRATION_DB_USER=${_JINA_MIGRATION_DB_USER}
       - JINA_MIGRATION_DB_PASS_SECRET=${_JINA_MIGRATION_DB_PASS_SECRET}
-      - JINA_SHARED_OWNER_SECRET_VERSION=${_JINA_SHARED_OWNER_SECRET_VERSION}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
       - JINA_ACCEPTANCE_REPOSITORY=${_JINA_ACCEPTANCE_REPOSITORY}
       - JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID=${_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID}
@@ -231,8 +229,6 @@ steps:
       - JINA_ACCEPTANCE_TIMEOUT_MS=${_JINA_ACCEPTANCE_TIMEOUT_MS}
       - JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS=${_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS}
       - JINA_DEPLOYMENT_ACCEPTANCE_MODE=${_JINA_DEPLOYMENT_ACCEPTANCE_MODE}
-      - JINA_CONTEXT_RESET_MODE=${_JINA_CONTEXT_RESET_MODE}
-      - JINA_CONFIRM_CONTEXT_RESET=${_JINA_CONFIRM_CONTEXT_RESET}
     timeout: 16200s
 
 substitutions:
@@ -247,7 +243,6 @@ substitutions:
   _JINA_DB_PASS_SECRET: jina-shared-db-password:1
   _JINA_MIGRATION_DB_USER: jina_app
   _JINA_MIGRATION_DB_PASS_SECRET: jina-primary-owner-db-password:3
-  _JINA_SHARED_OWNER_SECRET_VERSION: "8"
   _JINA_FIXED_TENANT_ID: omlabs
   _JINA_ACCEPTANCE_REPOSITORY: omxyz/jina-context-graph-e2e
   _JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029"
@@ -281,7 +276,7 @@ substitutions:
   _JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV: OPENAI_API_KEY
   _JINA_CONTEXT_DAYTONA_MODEL_DOMAINS: api.openai.com
   _JINA_CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS: ""
-  _JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET: jina-v1-internal-api-token
+  _JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET: jina-product-internal-api-token
   _JINA_PRODUCT_API_URL: https://api.usejina.com
   _JINA_REVIEW_TRIGGER_SECRET: jina-review-trigger-secret-key
   _JINA_TRIGGER_API_URL: https://api.trigger.dev
@@ -301,10 +296,7 @@ substitutions:
   _JINA_OPENAI_API_KEY_SECRET_VERSION: "1"
   _JINA_GITHUB_CLONE_TOKEN_SECRET_VERSION: "1"
   _JINA_WEB_AUTH_PASSWORD_SECRET_VERSION: "1"
-  # Production keeps the established GitHub session contract. Staging's Vercel
-  # project remains Clerk-backed and does not consume these image build args.
   _JINA_PUBLIC_API_BASE_URL: https://api.usejina.com
-  _JINA_DASHBOARD_AUTH_MODE: github
   _JINA_WORKER_RELEASE_SECRET: jina-worker-release-credential
   # A measured full Board run takes about 2.5 hours. The acceptance poll gets
   # three hours, with a further fifteen-minute Cloud Run job envelope.
@@ -322,14 +314,6 @@ substitutions:
   # images and requires their source labels to match this build's COMMIT_SHA.
   _JINA_EXISTING_IMAGE_TAG: ""
   _JINA_REUSE_EXISTING_IMAGE_TAG: "false"
-  # Normal releases accept only the current schema. The first Context
-  # production transition must override both values explicitly:
-  #   _JINA_CONTEXT_RESET_MODE=legacy-once
-  #   _JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context
-  # The transition removes its legacy-table marker, so replay fails closed.
-  _JINA_CONTEXT_RESET_MODE: disabled
-  _JINA_CONFIRM_CONTEXT_RESET: ""
-
 timeout: 21600s
 serviceAccount: projects/jina-v2/serviceAccounts/jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com
 options:

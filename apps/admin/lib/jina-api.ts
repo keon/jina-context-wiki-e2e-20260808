@@ -142,25 +142,10 @@ export interface AdminContextBuildProgress {
  * `0` in this type therefore always means the API measured zero.
  */
 export interface AdminContextMetrics {
-  readonly outboxDepthByConsumer?: Readonly<Record<string, number>>;
   readonly publishedGenerationCount?: number;
   readonly documentCount?: number;
   readonly fragmentCount?: number;
   readonly hierarchyNodeCount?: number;
-  readonly embeddingCount?: number;
-  readonly query?: {
-    readonly count?: number;
-    readonly p95Ms?: number;
-    readonly citationFailureCount?: number;
-    readonly conflictCount?: number;
-  };
-  readonly projectors?: readonly {
-    readonly name: string;
-    readonly status: string;
-    readonly checkpoint: string;
-    readonly backlog?: number;
-    readonly version: string;
-  }[];
   readonly quotas?: {
     readonly active?: {
       readonly builds?: number;
@@ -472,39 +457,6 @@ function parseCatalogDocument(value: unknown): CatalogDocument | undefined {
 }
 
 /**
- * A row without a usable name is skipped, as everywhere else. A row that is
- * otherwise valid keeps its absent backlog absent: a fabricated `0` beside a
- * healthy status is how projector lag goes unnoticed.
- */
-function parseProjectors(value: unknown): AdminContextMetrics["projectors"] {
-  if (!Array.isArray(value)) return undefined;
-  return value.flatMap((projector) => {
-    if (!isRecord(projector)) return [];
-    const name = requiredString(projector.name);
-    if (!name) return [];
-    return [
-      {
-        name,
-        status: optionalString(projector.status) ?? "unknown",
-        checkpoint: optionalString(projector.checkpoint) ?? "unknown",
-        version: optionalString(projector.version) ?? "unknown",
-        ...definedOnly({ backlog: optionalNumber(projector.backlog) })
-      }
-    ];
-  });
-}
-
-/** `undefined` when the API sent no map at all; `{}` when it measured none. */
-function parseOutboxDepth(value: unknown): Record<string, number> | undefined {
-  if (!isRecord(value)) return undefined;
-  const depths: Record<string, number> = {};
-  for (const [consumer, depth] of Object.entries(value)) {
-    if (typeof depth === "number" && Number.isFinite(depth)) depths[consumer] = depth;
-  }
-  return depths;
-}
-
-/**
  * Partial quota telemetry stays partial. Reporting an omitted counter as zero
  * active usage would hide capacity pressure behind a reading that looks idle.
  */
@@ -539,9 +491,8 @@ export async function listAllReleases(): Promise<readonly AdminContextRelease[]>
   if (!isRecord(body) || !Array.isArray(body.releases)) {
     throw new JinaApiError("Jina API response for /wiki/releases omitted releases");
   }
-  // The API places each authoritative current pointer before historical
-  // releases. Re-sorting by timestamp would silently select history after an
-  // operator rollback to an older certified release.
+  // The API places the highest sequence for each ref before its history.
+  // Re-sorting by timestamp could silently select an older release.
   return collectValid(body.releases, "context release", parseRelease);
 }
 
@@ -702,25 +653,13 @@ function parseBuildProgress(value: unknown): AdminContextBuildProgress | undefin
 export async function getContextMetrics(): Promise<AdminContextMetrics> {
   const body = await apiGet("/wiki/metrics");
   if (!isRecord(body)) throw new JinaApiError("Jina API response for /wiki/metrics was not an object");
-  const query = isRecord(body.query)
-    ? definedOnly({
-        count: optionalNumber(body.query.count),
-        p95Ms: optionalNumber(body.query.p95Ms),
-        citationFailureCount: optionalNumber(body.query.citationFailureCount),
-        conflictCount: optionalNumber(body.query.conflictCount)
-      })
-    : undefined;
   // Omitted counters are dropped, not zeroed: the page renders an absent
   // counter as "—" so unavailable telemetry cannot be read as an empty system.
   return definedOnly({
-    outboxDepthByConsumer: parseOutboxDepth(body.outboxDepthByConsumer),
     publishedGenerationCount: optionalNumber(body.publishedGenerationCount),
     documentCount: optionalNumber(body.documentCount),
     fragmentCount: optionalNumber(body.fragmentCount),
     hierarchyNodeCount: optionalNumber(body.hierarchyNodeCount),
-    embeddingCount: optionalNumber(body.embeddingCount),
-    query,
-    projectors: parseProjectors(body.projectors),
     quotas: parseQuotas(body.quotas)
   });
 }

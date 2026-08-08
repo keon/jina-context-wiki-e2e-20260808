@@ -177,6 +177,7 @@ test("board snapshot worker captures evidence, uploads it, and completes with on
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       GITHUB_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-input-snapshot",
       WORKER_POLL_INTERVAL_MS: "10",
       WORKER_API_TIMEOUT_MS: "5000",

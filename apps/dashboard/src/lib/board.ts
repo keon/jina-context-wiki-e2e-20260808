@@ -55,19 +55,9 @@ const contextTaskTypes = new Set([
   "build-context",
   "context-build-graph",
   "snapshot-context-input",
-  "plan-context-research",
-  "research-context-subject",
-  "plan-context-publication",
-  "context-page",
-  "write-context-page",
-  "audit-context-page",
-  "repair-context-page",
-  "challenge-context-sources",
-  "evaluate-context-tasks",
-  "repair-context-gaps",
-  "certify-context-release",
+  "plan-context-pages",
+  "build-context-page",
   "publish-context-release",
-  "index-context-release",
   ...causalGraphTaskTypes
 ]);
 

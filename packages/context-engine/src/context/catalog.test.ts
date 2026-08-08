@@ -22,38 +22,13 @@ function generation(id: string, commitSha: string, createdAt: string): IndexGene
     id,
     tenantId: "tenant-1",
     repository: "acme/widget",
-    repositoryAccessFingerprint: "access",
-    projectionInputFingerprint: "inputs",
     ref: "main",
     commitSha,
     checkpointId: `checkpoint-${id}`,
     status: "published",
-    projectorVersions: {
-      manifest: "v1",
-      "knowledge-current": "v1",
-      lexical: "v1",
-      dense: "v1",
-      hierarchy: "v1",
-      structural: "v1",
-      identity: "v1",
-      acl: "v1",
-      retention: "v1"
-    },
-    projectorStatuses: {
-      manifest: "ready",
-      "knowledge-current": "ready",
-      lexical: "ready",
-      dense: "disabled",
-      hierarchy: "ready",
-      structural: "skipped",
-      identity: "ready",
-      acl: "ready",
-      retention: "ready"
-    },
     capabilities: {
       sourceCompleteness: "complete",
       derivedKnowledge: "available",
-      dense: "disabled",
       hierarchy: "available"
     },
     fingerprint: `fingerprint-${id}`,
@@ -91,10 +66,7 @@ function document(input: {
       input.sourceKind === "knowledge" || input.sourceKind === undefined ? "generated_interpretation" : "code",
     effectiveAclFingerprint: "acl",
     sourceFingerprint: input.fingerprint ?? input.revisionId ?? input.id,
-    anchors: [anchor],
-    projectorName: "test",
-    projectorVersion: "v1",
-    projectedAt: "2026-07-29T00:00:00.000Z"
+    anchors: [anchor]
   };
 }
 
@@ -287,7 +259,7 @@ test("prepared releases are hidden from current and explicit release access", as
   );
 });
 
-test("release listing preserves the store's authoritative current-before-history order", async () => {
+test("release listing preserves the store's highest-sequence-before-history order", async () => {
   const current = generation("release-current", "2222222222222222222222222222222222222222", "2026-07-29T00:00:00.000Z");
   const historical = generation(
     "release-historical",

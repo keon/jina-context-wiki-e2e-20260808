@@ -8,9 +8,7 @@ import { GithubWebhookInboxService } from "./github-webhook-inbox.js";
 import type {
   GithubWebhookInboxCapture,
   GithubWebhookInboxCaptureResult,
-  GithubWebhookInboxControl,
   GithubWebhookInboxLease,
-  GithubWebhookInboxMode,
   GithubWebhookInboxRepository,
   GithubWebhookInboxSnapshot,
 } from "./github-webhook-inbox-store.js";
@@ -58,27 +56,8 @@ test("capture rejects non-UTF-8 JSON bytes before durable acknowledgement", asyn
   assert.equal(repository.captured, undefined);
 });
 
-test("capture_only acknowledges durable capture without running the handler", async () => {
+test("processing decrypts, authenticates, and completes one workflow identity", async () => {
   const repository = new FakeInboxRepository();
-  repository.mode = "capture_only";
-  const service = inboxService(repository);
-  const rawBody = Buffer.from(JSON.stringify(payload()));
-  await service.capture(signedHeaders(rawBody), rawBody);
-  let processed = false;
-
-  const result = await service.processOne("delivery-1", async () => {
-    processed = true;
-    return { accepted: true, event: "issue_comment" };
-  });
-
-  assert.equal(result.disposition, "not_claimed");
-  assert.equal(processed, false);
-  assert.equal(repository.completed.length, 0);
-});
-
-test("capture_and_process decrypts, authenticates, and completes one workflow identity", async () => {
-  const repository = new FakeInboxRepository();
-  repository.mode = "capture_and_process";
   const service = inboxService(repository);
   const rawBody = Buffer.from(JSON.stringify(payload()));
   await service.capture(signedHeaders(rawBody), rawBody);
@@ -105,7 +84,6 @@ test("capture_and_process decrypts, authenticates, and completes one workflow id
 
 test("a handler failure leaves the captured delivery retryable without logging its body", async () => {
   const repository = new FakeInboxRepository();
-  repository.mode = "capture_and_process";
   const service = inboxService(repository);
   const rawBody = Buffer.from(JSON.stringify(payload({ body: "do not log me" })));
   await service.capture(signedHeaders(rawBody), rawBody);
@@ -121,7 +99,6 @@ test("a handler failure leaves the captured delivery retryable without logging i
 
 test("a deterministic handler rejection dead-letters the delivery and unblocks its ordering key", async () => {
   const repository = new FakeInboxRepository();
-  repository.mode = "capture_and_process";
   const service = inboxService(repository);
   const rawBody = Buffer.from(JSON.stringify(payload()));
   await service.capture(signedHeaders(rawBody), rawBody);
@@ -137,7 +114,6 @@ test("a deterministic handler rejection dead-letters the delivery and unblocks i
 
 test("an AES-GCM failure remains retryable so a misbound deployment key can be rolled back", async () => {
   const repository = new FakeInboxRepository();
-  repository.mode = "capture_and_process";
   const service = inboxService(repository);
   const rawBody = Buffer.from(JSON.stringify(payload()));
   await service.capture(signedHeaders(rawBody), rawBody);
@@ -157,7 +133,6 @@ test("an AES-GCM failure remains retryable so a misbound deployment key can be r
 
 test("unknown processing failures are dead-lettered after a bounded number of attempts", async () => {
   const repository = new FakeInboxRepository();
-  repository.mode = "capture_and_process";
   repository.attemptCount = 25;
   const service = inboxService(repository);
   const rawBody = Buffer.from(JSON.stringify(payload()));
@@ -171,44 +146,11 @@ test("unknown processing failures are dead-lettered after a bounded number of at
   assert.deepEqual(repository.deadLettered, ["error"]);
 });
 
-test("legacy_forward recomputes HMAC and refuses redirects through fetch policy", async () => {
-  const repository = new FakeInboxRepository();
-  repository.mode = "legacy_forward";
-  const rawBody = Buffer.from(JSON.stringify(payload()));
-  let request: { url: string; init?: RequestInit } | undefined;
-  const service = inboxService(repository, async (url, init) => {
-    request = { url: String(url), init };
-    return new Response(JSON.stringify({
-      accepted: true,
-      event: "issue_comment",
-      run_id: "legacy-run-1",
-    }), { status: 200, headers: { "content-type": "application/json" } });
-  });
-  await service.capture(signedHeaders(rawBody), rawBody);
-
-  const result = await service.processOne("delivery-1", async () => {
-    throw new Error("local processor must not run in legacy_forward");
-  });
-
-  assert.equal(result.disposition, "completed");
-  assert.equal(request?.url, inboxConfig().legacyForwardUrl);
-  assert.equal(request?.init?.redirect, "error");
-  assert.equal(new Headers(request?.init?.headers).get("x-hub-signature-256"), signature(rawBody));
-  assert.deepEqual(repository.completed, ["legacy-run-1"]);
-});
-
-function inboxService(
-  repository: FakeInboxRepository,
-  fetchImpl: typeof fetch = fetch,
-): GithubWebhookInboxService {
+function inboxService(repository: FakeInboxRepository): GithubWebhookInboxService {
   return new GithubWebhookInboxService(
-    {
-      githubWebhookSecret: "test-secret",
-      reviewBoardPipeline: { mode: "v2", v2Repositories: new Set(["omxyz/private-repo"]) },
-    },
+    { githubWebhookSecret: "test-secret" },
     inboxConfig(),
     repository,
-    fetchImpl,
   );
 }
 
@@ -218,8 +160,6 @@ function inboxConfig(): GithubWebhookInboxConfig {
     encryptionKeyVersion: "7",
     leaseMs: 120_000,
     maxBodyBytes: 1024 * 1024,
-    legacyForwardUrl:
-      "https://rollback---jina-code-review-api-hash-ue.a.run.app/webhooks/github",
   };
 }
 
@@ -246,8 +186,6 @@ function signature(rawBody: Buffer): string {
 }
 
 class FakeInboxRepository implements GithubWebhookInboxRepository {
-  mode: GithubWebhookInboxMode = "capture_only";
-  generation = 1;
   captured?: GithubWebhookInboxCapture;
   completed: (string | undefined)[] = [];
   retried: string[] = [];
@@ -269,20 +207,13 @@ class FakeInboxRepository implements GithubWebhookInboxRepository {
 
   async recordRedeliveryResult(): Promise<void> {}
 
-  async claim(input: {
+  async claim(_input: {
     deliveryId?: string;
     leaseMs: number;
-    canaryRepositories: ReadonlySet<string>;
   }): Promise<GithubWebhookInboxLease | undefined> {
-    if (this.mode === "capture_only" || !this.captured) return undefined;
-    if (
-      this.mode === "canary_only" &&
-      !input.canaryRepositories.has(this.captured.repositoryFullName?.toLowerCase() ?? "")
-    ) return undefined;
+    if (!this.captured) return undefined;
     return {
       leaseId: randomUUID(),
-      leaseGeneration: this.generation,
-      mode: this.mode,
       deliveryId: this.captured.deliveryId,
       event: this.captured.event,
       ...(this.captured.action ? { action: this.captured.action } : {}),
@@ -320,20 +251,8 @@ class FakeInboxRepository implements GithubWebhookInboxRepository {
     this.captured = undefined;
   }
 
-  async transitionMode(input: {
-    expectedGeneration: number;
-    mode: GithubWebhookInboxMode;
-    updatedBy: string;
-  }): Promise<GithubWebhookInboxControl> {
-    assert.equal(input.expectedGeneration, this.generation);
-    this.generation += 1;
-    this.mode = input.mode;
-    return { mode: this.mode, generation: this.generation };
-  }
-
   async snapshot(): Promise<GithubWebhookInboxSnapshot> {
     return {
-      control: { mode: this.mode, generation: this.generation },
       pending: this.captured ? 1 : 0,
       leased: 0,
       retryWait: 0,
@@ -341,7 +260,6 @@ class FakeInboxRepository implements GithubWebhookInboxRepository {
       deadLetter: 0,
       deadLetterByErrorCode: {},
       recentDeadLetters: [],
-      priorGenerationLeases: 0,
       activeKeyVersions: this.captured ? { [this.captured.encryptionKeyVersion]: 1 } : {},
       deadLetterKeyVersions: {},
     };

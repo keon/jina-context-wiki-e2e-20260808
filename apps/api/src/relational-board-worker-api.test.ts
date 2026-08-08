@@ -21,7 +21,7 @@ test("internal worker tenancy accepts only exact reserved control scopes", () =>
   assert.equal(normalizedTenantId("system:billing:other"), undefined);
 });
 
-test("worker HTTP protocol delegates versioned review topics to the relational Board", async () => {
+test("worker HTTP protocol delegates the current review topic to the relational Board", async () => {
   const calls: string[] = [];
   const store: Pick<
     PostgresRelationalBoardWorkerStore,
@@ -40,7 +40,6 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
       calls.push(
         `claim:${input.topics.join(",")}:${input.tenantId}:${input.workerService}:${input.workerRelease}:${input.workerRevision}`
       );
-      const runReview = input.topics.includes("run-review");
       const triggerPayload = {
         action: "opened",
         repository: { full_name: "omxyz/jina" },
@@ -57,10 +56,10 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
         tenantId,
         workflowId,
         workflowType: "pr_review",
-        pipelineVersion: runReview ? "pr_review.board.v2" : "pr_review.board.v1",
+        pipelineVersion: "pr_review.board.v2",
         taskId,
-        taskType: runReview ? "run-review" : "prepare-review",
-        topic: runReview ? "run-review" : "prepare-review",
+        taskType: "run-review",
+        topic: "run-review",
         attempt: 1,
         maxAttempts: 3,
         claim: 1,
@@ -71,15 +70,13 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
         leaseExpiresAt: "2026-08-04T12:00:00.000Z",
         traceId: "a".repeat(32),
         spanId: "b".repeat(16),
-        metadata: runReview
-          ? {
-              schema_version: 2,
-              request_digest: requestDigest,
-              trigger_task_id: "review",
-              trigger_payload: triggerPayload,
-              trigger_options: triggerOptions
-            }
-          : { review_run_id: "52d68f74-8f64-45ee-8fef-9d0e58ae75ab" },
+        metadata: {
+          schema_version: 2,
+          request_digest: requestDigest,
+          trigger_task_id: "review",
+          trigger_payload: triggerPayload,
+          trigger_options: triggerOptions
+        },
         workflowMetadata: { review_payload: { action: "opened" } },
         dependencyResults: [],
         effectReceipts: []
@@ -138,8 +135,7 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
     tenantId,
     internalApiToken: "relational-worker-test-token",
     trustDevIdentityHeaders: false,
-    relationalBoardWorkerStore: store,
-    relationalReviewTopicEnabled: true
+    relationalBoardWorkerStore: store
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -155,40 +151,27 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
 
   try {
     const claimed = await request("/internal/worker/claim", {
-      workerId: "review-worker-1",
-      topics: ["prepare-review", "runtime-review"],
+      workerId: "review-worker",
+      topics: ["run-review"],
       workerRuntimeService: "jina-task-worker",
       workerRuntimeRevision: "jina-task-worker-staging-00012-p9b"
     });
     assert.equal(claimed.status, 200);
     const claimBody = (await claimed.json()) as Record<string, Record<string, unknown>>;
-    assert.equal(claimBody.message?.id, deliveryId);
-    assert.equal(claimBody.message?.topic, "prepare-review");
+    assert.equal(claimBody.message?.topic, "run-review");
     assert.equal(claimBody.task?.id, taskId);
-    assert.equal((claimBody.task?.metadata as Record<string, unknown>).tenantId, tenantId);
-
-    const v2Claim = await request("/internal/worker/claim", {
-      workerId: "review-worker-v2",
-      topics: ["run-review"],
-      workerRuntimeService: "jina-task-worker",
-      workerRuntimeRevision: "jina-task-worker-staging-00012-p9b"
-    });
-    assert.equal(v2Claim.status, 200);
-    const v2ClaimBody = (await v2Claim.json()) as Record<string, Record<string, unknown>>;
-    assert.equal(v2ClaimBody.message?.topic, "run-review");
-    assert.equal(v2ClaimBody.task?.id, taskId);
-    const v2Metadata = v2ClaimBody.task?.metadata as Record<string, unknown>;
-    assert.equal(v2Metadata.tenantId, tenantId);
-    assert.equal(v2Metadata.workflowId, workflowId);
-    assert.equal(v2Metadata.workflowType, "pr_review");
-    assert.equal(v2Metadata.pipelineVersion, "pr_review.board.v2");
-    assert.equal(v2Metadata.schema_version, 2);
-    assert.equal(v2Metadata.trigger_task_id, "review");
-    assert.equal(typeof v2Metadata.trigger_payload, "object");
-    assert.equal(typeof v2Metadata.trigger_options, "object");
-    assert.match(String(v2Metadata.request_digest), /^[0-9a-f]{64}$/);
-    assert.deepEqual(v2Metadata.workflowMetadata, { review_payload: { action: "opened" } });
-    assert.deepEqual(v2Metadata.effectReceipts, []);
+    const metadata = claimBody.task?.metadata as Record<string, unknown>;
+    assert.equal(metadata.tenantId, tenantId);
+    assert.equal(metadata.workflowId, workflowId);
+    assert.equal(metadata.workflowType, "pr_review");
+    assert.equal(metadata.pipelineVersion, "pr_review.board.v2");
+    assert.equal(metadata.schema_version, 2);
+    assert.equal(metadata.trigger_task_id, "review");
+    assert.equal(typeof metadata.trigger_payload, "object");
+    assert.equal(typeof metadata.trigger_options, "object");
+    assert.match(String(metadata.request_digest), /^[0-9a-f]{64}$/);
+    assert.deepEqual(metadata.workflowMetadata, { review_payload: { action: "opened" } });
+    assert.deepEqual(metadata.effectReceipts, []);
 
     const fence = {
       messageId: deliveryId,
@@ -253,53 +236,13 @@ test("worker HTTP protocol delegates versioned review topics to the relational B
     assert.equal(completed.status, 200);
     assert.equal(((await completed.json()) as Record<string, unknown>).terminal, true);
 
-    assert.equal(
-      calls[0],
-      `claim:prepare-review,runtime-review:${tenantId}:jina-task-worker:ungated:jina-task-worker-staging-00012-p9b`
-    );
-    assert.equal(calls[1], `claim:run-review:${tenantId}:jina-task-worker:ungated:jina-task-worker-staging-00012-p9b`);
-    assert.equal(calls[2], `renew:${deliveryId}`);
-    assert.equal(calls[3], `effect-start:${deliveryId}:trigger.review.dispatch`);
-    assert.equal(calls[4], `wait-external:${deliveryId}:run_test_12345678`);
-    assert.equal(calls[5], `reschedule-external:${deliveryId}:run_test_12345678`);
-    assert.equal(calls[6], `effect-retry:${deliveryId}:ambiguous`);
-    assert.match(calls[7] ?? "", new RegExp(`^complete:${deliveryId}:[0-9a-f]{64}$`));
-  } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  }
-});
-
-test("relational review claims cannot mix scheduler authorities", async () => {
-  const server = createApiServer({
-    tenantId,
-    internalApiToken: "relational-worker-test-token",
-    trustDevIdentityHeaders: false,
-    relationalBoardWorkerStore: {
-      claim: async () => undefined,
-      renew: async () => ({ accepted: false, replayed: false }),
-      release: async () => ({ accepted: false, replayed: false }),
-      beginEffect: async () => ({ accepted: false, replayed: false }),
-      waitExternal: async () => ({ accepted: false, replayed: false }),
-      rescheduleExternal: async () => ({ accepted: false, replayed: false }),
-      retryEffect: async () => ({ accepted: false, replayed: false }),
-      complete: async () => ({ accepted: false, replayed: false }),
-      retry: async () => ({ accepted: false, replayed: false }),
-      fail: async () => ({ accepted: false, replayed: false })
-    }
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  try {
-    const response = await fetch(`${baseUrl}/internal/worker/claim`, {
-      method: "POST",
-      headers: {
-        authorization: "Bearer relational-worker-test-token",
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ workerId: "worker", topics: ["prepare-review", "run-review"] })
-    });
-    assert.equal(response.status, 400);
-    assert.match(await response.text(), /cannot be mixed/);
+    assert.equal(calls[0], `claim:run-review:${tenantId}:jina-task-worker:ungated:jina-task-worker-staging-00012-p9b`);
+    assert.equal(calls[1], `renew:${deliveryId}`);
+    assert.equal(calls[2], `effect-start:${deliveryId}:trigger.review.dispatch`);
+    assert.equal(calls[3], `wait-external:${deliveryId}:run_test_12345678`);
+    assert.equal(calls[4], `reschedule-external:${deliveryId}:run_test_12345678`);
+    assert.equal(calls[5], `effect-retry:${deliveryId}:ambiguous`);
+    assert.match(calls[6] ?? "", new RegExp(`^complete:${deliveryId}:[0-9a-f]{64}$`));
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }

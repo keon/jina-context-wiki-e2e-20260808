@@ -11,11 +11,12 @@ function baseEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     GITHUB_WEBHOOK_SECRET: "github-webhook-secret",
     INTERNAL_API_TOKEN: "internal-token",
+    JINA_PRODUCT_INTERNAL_API_TOKEN: "product-token",
     ...overrides,
   };
 }
 
-test("uses the dedicated product token when Context and review workers have separate credentials", () => {
+test("requires the dedicated product token", () => {
   const config = loadConfig(baseEnv({
     NODE_ENV: "development",
     INTERNAL_API_TOKEN: "v2-token",
@@ -23,43 +24,9 @@ test("uses the dedicated product token when Context and review workers have sepa
   }));
 
   assert.equal(config.internalApiToken, "product-token");
-});
-
-test("review Board pipeline selection defaults v1 and validates canary configuration", () => {
-  assert.deepEqual(loadConfig(baseEnv()).reviewBoardPipeline, {
-    mode: "v1",
-    v2Repositories: new Set(),
-  });
-  assert.deepEqual(
-    loadConfig(
-      baseEnv({
-        JINA_REVIEW_BOARD_PIPELINE_MODE: "allowlist",
-        JINA_REVIEW_BOARD_V2_REPOSITORIES: "Acme/Example, omxyz/jina",
-      }),
-    ).reviewBoardPipeline,
-    { mode: "allowlist", v2Repositories: new Set(["acme/example", "omxyz/jina"]) },
-  );
-  assert.equal(
-    loadConfig(baseEnv({ JINA_REVIEW_BOARD_PIPELINE_MODE: "v2" })).reviewBoardPipeline.mode,
-    "v2",
-  );
   assert.throws(
-    () => loadConfig(baseEnv({ JINA_REVIEW_BOARD_PIPELINE_MODE: "unknown" })),
-    /must be paused, v1, v2, or allowlist/,
-  );
-  assert.throws(
-    () => loadConfig(baseEnv({ JINA_REVIEW_BOARD_PIPELINE_MODE: "allowlist" })),
-    /must not be empty/,
-  );
-  assert.throws(
-    () =>
-      loadConfig(
-        baseEnv({
-          JINA_REVIEW_BOARD_PIPELINE_MODE: "allowlist",
-          JINA_REVIEW_BOARD_V2_REPOSITORIES: "not-a-repository",
-        }),
-      ),
-    /invalid repository/,
+    () => loadConfig(baseEnv({ JINA_PRODUCT_INTERNAL_API_TOKEN: "" })),
+    /Missing required environment variable JINA_PRODUCT_INTERNAL_API_TOKEN/,
   );
 });
 
@@ -91,36 +58,6 @@ test("GitHub webhook inbox is opt-in and requires a versioned dedicated key", ()
   assert.equal(inbox?.encryptionKey.equals(Buffer.alloc(32, 7)), true);
   assert.equal(inbox?.leaseMs, 120_000);
   assert.equal(inbox?.maxBodyBytes, 2 * 1024 * 1024);
-});
-
-test("GitHub legacy forwarding accepts only an exact tagged Cloud Run webhook URL", () => {
-  const enabled = {
-    JINA_GITHUB_WEBHOOK_INBOX_ENABLED: "true",
-    GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY: WEBHOOK_INBOX_KEY,
-    GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION: "9",
-    API_BASE_URL: "https://api.usejina.com",
-  };
-  for (const legacyForwardUrl of [
-    "https://api.usejina.com/webhooks/github",
-    "https://jina-code-review-api-hash-ue.a.run.app/webhooks/github",
-    "https://rollback---jina-code-review-api-hash-ue.a.run.app/other",
-    "http://rollback---jina-code-review-api-hash-ue.a.run.app/webhooks/github",
-  ]) {
-    assert.throws(
-      () => loadConfig(baseEnv({
-        ...enabled,
-        JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL: legacyForwardUrl,
-      })),
-      /tagged Cloud Run|must not target/,
-      legacyForwardUrl,
-    );
-  }
-
-  const url = "https://rollback---jina-code-review-api-hash-ue.a.run.app/webhooks/github";
-  assert.equal(loadConfig(baseEnv({
-    ...enabled,
-    JINA_GITHUB_WEBHOOK_LEGACY_FORWARD_URL: url,
-  })).githubWebhookInbox?.legacyForwardUrl, url);
 });
 
 test("uses DASHBOARD_URL as the default credentialed dashboard origin", () => {
@@ -174,28 +111,15 @@ test("Clerk auth requires both server and browser keys", () => {
   );
 });
 
-test("hybrid auth requires both Clerk and rollback-capable GitHub credentials", () => {
-  const config = loadConfig(baseEnv({
-    NODE_ENV: "development",
-    DASHBOARD_AUTH_MODE: "hybrid",
-    GITHUB_OAUTH_CLIENT_ID: "github-client",
-    GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
-    CLERK_PUBLISHABLE_KEY: "pk_test_example",
-    CLERK_SECRET_KEY: "sk_test_example",
-  }));
-  assert.equal(config.auth.mode, "hybrid");
-  assert.equal(config.auth.githubClientId, "github-client");
-  assert.equal(config.auth.clerkPublishableKey, "pk_test_example");
-
+test("rejects retired dashboard authentication modes", () => {
   assert.throws(
     () => loadConfig(baseEnv({
       NODE_ENV: "development",
       DASHBOARD_AUTH_MODE: "hybrid",
-      CLERK_PUBLISHABLE_KEY: "pk_test_example",
-      CLERK_SECRET_KEY: "sk_test_example",
     })),
-    /Missing required environment variable GITHUB_OAUTH_CLIENT_ID/,
+    /DASHBOARD_AUTH_MODE must be clerk or disabled/,
   );
+  assert.throws(() => loadConfig(baseEnv({ DASHBOARD_AUTH_MODE: "github" })), /DASHBOARD_AUTH_MODE must be clerk or disabled/);
 });
 
 /* ----------------------------------------- SECRETS_ENCRYPTION_KEY (FINDING 4a) --- */
@@ -224,7 +148,7 @@ test("accepts a valid base64 32-byte SECRETS_ENCRYPTION_KEY in production", () =
   assert.equal(config.auth.mode, "disabled");
 });
 
-test("does not require SECRETS_ENCRYPTION_KEY outside production (dev keeps plaintext fallback)", () => {
+test("does not require SECRETS_ENCRYPTION_KEY until a secret operation outside production", () => {
   assert.doesNotThrow(() => loadConfig(baseEnv({ NODE_ENV: "development" })));
 });
 

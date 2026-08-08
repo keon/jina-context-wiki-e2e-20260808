@@ -356,38 +356,17 @@ test("admin keeps an unreported metrics counter absent and a measured zero at ze
     Response.json({
       // A measured zero and an absent counter must not arrive at the page
       // looking the same: only one of them says the system is idle.
-      documentCount: 0,
-      outboxDepthByConsumer: { projection: 0 }
+      documentCount: 0
     })
   );
 
   const metrics = await getContextMetrics();
   assert.equal(metrics.documentCount, 0);
-  assert.deepEqual(metrics.outboxDepthByConsumer, { projection: 0 });
   assert.equal(metrics.fragmentCount, undefined);
   assert.equal(metrics.hierarchyNodeCount, undefined);
-  assert.equal(metrics.embeddingCount, undefined);
   assert.equal(metrics.publishedGenerationCount, undefined);
   // Absent, not present-and-undefined: the key is never written at all.
   assert.equal("fragmentCount" in metrics, false);
-  assert.equal("query" in metrics, false);
-});
-
-test("admin keeps an unreported outbox map absent rather than reporting an empty backlog", async (context) => {
-  context.mock.method(globalThis, "fetch", async () => Response.json({ documentCount: 4 }));
-
-  const metrics = await getContextMetrics();
-  assert.equal(metrics.outboxDepthByConsumer, undefined);
-});
-
-test("admin keeps unreported query counters absent while preserving measured ones", async (context) => {
-  context.mock.method(globalThis, "fetch", async () => Response.json({ query: { count: 0, p95Ms: 42 } }));
-
-  const metrics = await getContextMetrics();
-  assert.equal(metrics.query?.count, 0);
-  assert.equal(metrics.query?.p95Ms, 42);
-  assert.equal(metrics.query?.citationFailureCount, undefined);
-  assert.equal(metrics.query?.conflictCount, undefined);
 });
 
 test("admin does not report an unrecognised build status as a completed build", async (context) => {
@@ -427,31 +406,6 @@ test("admin does not report an unrecognised build status as a completed build", 
   assert.equal(statusless && "status" in statusless, false);
 });
 
-test("admin keeps a projector backlog absent when the row reported none", async (context) => {
-  context.mock.method(console, "warn", () => {});
-  context.mock.method(globalThis, "fetch", async () =>
-    Response.json({
-      projectors: [
-        { name: "fragments", status: "healthy", checkpoint: "generation-1", version: "3" },
-        { name: "hierarchy", status: "healthy", checkpoint: "generation-1", backlog: 0, version: "3" },
-        { name: "", status: "healthy", backlog: 7 },
-        null
-      ]
-    })
-  );
-
-  const metrics = await getContextMetrics();
-  // An unmeasured backlog must not sit beside a healthy status as a zero.
-  assert.equal(metrics.projectors?.[0]?.backlog, undefined);
-  assert.equal(metrics.projectors?.[0] && "backlog" in metrics.projectors[0], false);
-  assert.equal(metrics.projectors?.[1]?.backlog, 0);
-  // Rows that are malformed as rows are still skipped.
-  assert.deepEqual(
-    metrics.projectors?.map((projector) => projector.name),
-    ["fragments", "hierarchy"]
-  );
-});
-
 test("admin does not fabricate zero active usage from partial quota telemetry", async (context) => {
   context.mock.method(globalThis, "fetch", async () =>
     Response.json({ quotas: { active: { builds: 0 }, monthlyModel: { requests: 12 } } })
@@ -473,5 +427,4 @@ test("admin reports quotas the API omitted entirely as unavailable", async (cont
 
   const metrics = await getContextMetrics();
   assert.equal(metrics.quotas, undefined);
-  assert.equal(metrics.projectors, undefined);
 });

@@ -157,17 +157,15 @@ class FakeStore implements BillingStorePort {
     }
   }
 
-  // `cost` seeds openrouter_cost (the raw OpenRouter fee/charge). `billableCost` seeds the BYOK-aware
-  // basis the credit math bills from; omit it to leave billable_cost null and exercise the legacy
-  // pre-0014 fallback (creditsForCost then reads openrouter_cost).
+  // `cost` seeds the raw provider charge. `billableCost` seeds the BYOK-aware basis the credit math
+  // bills from; omit it when the provider did not report a billable cost.
   seedUsage(row: { id: string; reviewRunId: string; cost: string | null; billableCost?: string | null; status?: string; aiCredits?: number }): void {
     this.usage.push({
       id: row.id,
       review_run_id: row.reviewRunId,
       tenant_id: `tenant-${row.reviewRunId}`,
       dedupe_key: `dk-${row.id}`,
-      billable_cost: row.billableCost ?? null,
-      openrouter_cost: row.cost,
+      billable_cost: Object.hasOwn(row, "billableCost") ? row.billableCost ?? null : row.cost,
       ai_credits_charged: row.aiCredits ?? null,
       billing_status: row.status ?? "pending_outcome",
     });
@@ -850,15 +848,15 @@ test("settlement of a non-BYOK row is unchanged: billable_cost mirrors the OpenR
   assert.equal(autumn.tracks.find((t) => t.idempotencyKey.startsWith("ai:"))?.value, 35);
 });
 
-test("settlement of a legacy pre-0014 row (null billable_cost) falls back to openrouter_cost", async () => {
+test("settlement treats a missing current billable cost as zero", async () => {
   const autumn = new FakeAutumn({ creditsBalance: 1000 });
   const store = new FakeStore();
   store.seedRun("run-1", { rateMode: "included" });
-  store.seedUsage({ id: "u1", reviewRunId: "run-1", cost: "0.50" }); // billableCost omitted -> null
+  store.seedUsage({ id: "u1", reviewRunId: "run-1", cost: "0.50", billableCost: null });
 
   await service("on", autumn, store).settleReviewOutcome("run-1", "completed");
 
-  assert.equal(autumn.tracks.find((t) => t.idempotencyKey.startsWith("ai:"))?.value, 35);
+  assert.equal(autumn.tracks.some((t) => t.idempotencyKey.startsWith("ai:")), false);
 });
 
 // DEGRADED-RUN INFRA WAIVER: when every model call failed, the runtime stage reports 'failed' (with a
@@ -1044,7 +1042,8 @@ test("crash after a successful track but before the persist leaves the row 'trac
   }
 
   assert.equal(u1.billing_status, "billed");
-  assert.equal(counts.usage_billed, 1);
+  assert.equal(counts.usage_billed, 0);
+  assert.equal(counts.stale_usage_rebilled, 1);
   assert.equal(store.runBillings.get("run-1")?.ai_credits_charged_total, 35, "total incremented exactly once");
   assert.equal(
     autumn.tracks.filter((t) => t.idempotencyKey === "ai:run-1:dk-u1").length,
@@ -1185,7 +1184,7 @@ test("stale usage replay re-tracks once with the same event id when still entitl
   }
 
   assert.equal(counts.stale_usage_rebilled, 1);
-  assert.equal(counts.usage_billed, 1, "usage_billed still includes stale rebills (compat)");
+  assert.equal(counts.usage_billed, 0);
   assert.equal(row.billing_status, "billed");
   assert.equal(autumn.tracks.filter((t) => t.idempotencyKey === "ai:run-1:dk-u1").length, 1, "re-tracked once, same event id");
   assert.equal(store.runBillings.get("run-1")?.ai_credits_charged_total, 35);
@@ -1207,7 +1206,7 @@ test("stale usage replay RE-TRACKS the tracking row even when managed_ai_access 
 
   // Managed AI is always metered: the stale 'tracking' row is re-tracked/billed, not waived.
   assert.equal(counts.stale_usage_rebilled, 1);
-  assert.equal(counts.usage_billed, 1);
+  assert.equal(counts.usage_billed, 0);
   assert.equal(row.billing_status, "billed");
   assert.equal(autumn.tracks.filter((t) => t.idempotencyKey.startsWith("ai:")).length, 1, "re-tracked once");
   assert.ok(!warnings.entries.some((w) => w[0] === "billing_entitlement_mismatch"), "no entitlement waive");
@@ -1293,7 +1292,6 @@ test("overview reports status 'ok' with balances when Autumn responds", async ()
   const overview = await service("on", autumn, new FakeStore()).overview("tenant-1", "acme");
 
   assert.equal(overview.status, "ok");
-  assert.equal(overview.configured, true);
   assert.equal(overview.credits_balance, 500);
   assert.equal(overview.managed_ai_access, true);
   assert.equal(overview.plan_id, "startup");
@@ -1370,12 +1368,11 @@ test("overview returns an empty cycle + no billing_activity when Autumn is unava
   assert.deepEqual(overview.billing_activity, []);
 });
 
-test("overview reports status 'unavailable' (configured=false) when Autumn errors", async () => {
+test("overview reports status 'unavailable' when Autumn errors", async () => {
   const autumn = new FakeAutumn({ failCheck: true });
   const overview = await service("on", autumn, new FakeStore()).overview("tenant-1");
 
   assert.equal(overview.status, "unavailable");
-  assert.equal(overview.configured, false);
   assert.equal(overview.credits_balance, null);
   assert.equal(overview.managed_ai_access, null);
 });
@@ -1387,7 +1384,6 @@ test("overview reports 'unavailable' when the plan lookup (getCustomer) fails", 
   const overview = await service("on", autumn, new FakeStore()).overview("tenant-1", "acme");
 
   assert.equal(overview.status, "unavailable");
-  assert.equal(overview.configured, false);
   assert.equal(overview.plan_id, null);
   assert.equal(overview.credits_balance, null);
 });

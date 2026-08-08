@@ -1,10 +1,18 @@
 import { clerkMiddleware } from "@clerk/nextjs/server";
-import { NextResponse } from "next/server";
+import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
 import { dashboardProxyUsesClerk } from "./server/auth-mode";
+import { stagingClerkAuthOptions } from "./server/staging-auth-origin";
 
-const dashboardProxy = dashboardProxyUsesClerk() ? clerkMiddleware() : () => NextResponse.next();
+const dashboardProxy = dashboardProxyUsesClerk()
+  ? clerkMiddleware(
+      () => NextResponse.next(),
+      (request) => stagingClerkAuthOptions(request.nextUrl.hostname) ?? {}
+    )
+  : () => NextResponse.next();
 
-export default dashboardProxy;
+export default function proxy(request: NextRequest, event: NextFetchEvent) {
+  return dashboardProxy(request, event);
+}
 
 export const config = {
   matcher: [

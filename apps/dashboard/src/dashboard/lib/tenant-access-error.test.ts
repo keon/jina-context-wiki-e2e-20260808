@@ -37,5 +37,5 @@ test("a Clerk/API 401 becomes a recoverable session error instead of permanent l
   assert.match(message ?? "", /Clerk sign-in is active/);
   assert.match(message ?? "", /could not validate the matching API session/);
   assert.match(message ?? "", /sign out and back in/);
-  assert.equal(tenantAuthorizationErrorMessage(401, "github"), null);
+  assert.equal(tenantAuthorizationErrorMessage(401, "disabled"), null);
 });

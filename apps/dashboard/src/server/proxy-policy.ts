@@ -29,12 +29,7 @@ export function isAllowedDashboardApiRequest(
 /** Routes that authenticate with the signed-in Clerk user, not the Context service token. */
 export function isProductDashboardApiRequest(method: string | undefined, pathname: string): boolean {
   if (!method || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return false;
-  return (
-    pathname.startsWith("/api/dashboard/") ||
-    pathname === "/api/auth/github/login" ||
-    pathname === "/api/auth/github/callback" ||
-    pathname === "/api/auth/logout"
-  );
+  return pathname.startsWith("/api/dashboard/");
 }
 
 export interface DashboardPrincipalInput {

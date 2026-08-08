@@ -20,11 +20,8 @@ Set `JINA_PRODUCT_API_ENABLED=true` plus the product credentials to exercise the
 review, integration, and billing routes locally. Apply their schema with
 `pnpm --filter @jina/api build && pnpm --filter @jina/api migrate:product`.
 Development uses in-memory stores unless PostgreSQL configuration is supplied. Production
-requires PostgreSQL, `INTERNAL_API_TOKEN`, `CONTEXT_API_TOKEN`, and either fixed or
-shared-database tenancy configuration.
-
-Review quality experiments use the same `@jina/review-agent` runtime as deployed
-workers; see [`evals/review/README.md`](evals/review/README.md).
+requires PostgreSQL, `INTERNAL_API_TOKEN`, `JINA_PRODUCT_INTERNAL_API_TOKEN`,
+`CONTEXT_API_TOKEN`, and either fixed or shared-database tenancy configuration.
 
 ## Runtime
 
@@ -128,7 +125,6 @@ apps/dashboard/       single customer dashboard, operations, and Context workspa
 apps/docs/            customer documentation application
 apps/worker/          review, Context, control, and causal-graph workers
 packages/review-agent/   portable Daytona review runtime used by Board workers
-evals/review/         review evaluation datasets and tools
 packages/board/       generic tasks, dependencies, commands, reducer
 packages/context-engine/ evidence, derived context, releases, retrieval
 packages/db/          PostgreSQL stores, context adapters, migrations
@@ -140,16 +136,27 @@ packages/shared-kernel/ shared IDs, timestamps, and queue-topic wire contracts
 
 ## Documentation
 
+Design and reference:
+
 - [Architecture](docs/ARCHITECTURE.md)
-- [Architecture simplification and cutover gates](docs/ARCHITECTURE_SIMPLIFICATION.md)
-- [Agentic context derivation](docs/AGENTIC_DERIVATION.md)
-- [Context quality benchmark](docs/CONTEXT_QUALITY_BENCHMARK.md)
-- [Daytona Board-stage acceptance](docs/CONTEXT_DAYTONA_BOARD_STAGE_ACCEPTANCE.md)
-- [Retired multi-topic Context remediation](docs/CONTEXT_PAGE_REMEDIATION.md)
-- [Data models](docs/DATA_MODELS.md)
+- [Data models and entity relationships](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
-- [Deployment](docs/DEPLOYMENT.md)
+- [Agentic context derivation](docs/AGENTIC_DERIVATION.md)
 - [API tokens and authentication](docs/API_TOKENS.md)
 - [GitHub App setup](docs/GITHUB_APP.md)
-- [Observability](docs/OBSERVABILITY.md)
+- [Capy-inspired onboarding plan](docs/ONBOARDING_PLAN.md)
 - [Billing and credits](docs/BILLING.md)
+- [Observability](docs/OBSERVABILITY.md)
+
+Operations and quality:
+
+- [Deployment](docs/DEPLOYMENT.md)
+- [Staging pull-request acceptance](docs/STAGING_PR_E2E.md)
+- [Context quality benchmark](docs/CONTEXT_QUALITY_BENCHMARK.md)
+- [Daytona Board-stage acceptance](docs/CONTEXT_DAYTONA_BOARD_STAGE_ACCEPTANCE.md)
+- [Context trigger admission acceptance](docs/CONTEXT_TRIGGER_ADMISSION_ACCEPTANCE.md)
+- [Context production trigger acceptance](docs/CONTEXT_PRODUCTION_TRIGGER_ACCEPTANCE.md)
+- [Context security and load acceptance](docs/CONTEXT_SECURITY_LOAD_ACCEPTANCE.md)
+
+Customer-facing guides are maintained in `apps/docs` and served by the documentation
+application.

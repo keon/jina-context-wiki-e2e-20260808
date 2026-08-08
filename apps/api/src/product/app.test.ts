@@ -5,18 +5,14 @@ import { test } from "node:test";
 import {
   createApp,
   DEFAULT_GRAPH_HISTORY_LIMIT,
-  githubAdminRevalidationRequired,
   MAX_GRAPH_HISTORY_LIMIT,
   parseGraphHistoryLimit,
-  parseJinaOrganizationName,
   parseReviewGraphAvailabilityBody,
   parseReviewGraphMcpAccessBody,
   tenantAccessDenial,
 } from "./app.js";
-import type { DashboardSession } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import type { GithubWebhookInboxRepository } from "./github-webhook-inbox-store.js";
-import { deleteSession, getSession, saveSession } from "./store.js";
 
 /**
  * Minimal AppConfig for route-glue tests. Auth is "disabled" so requireDashboardSession returns
@@ -26,7 +22,6 @@ import { deleteSession, getSession, saveSession } from "./store.js";
 function testConfig(overrides: {
   dashboardAllowedOrigins?: AppConfig["dashboardAllowedOrigins"];
   githubWebhookInbox?: AppConfig["githubWebhookInbox"];
-  reviewBoardPipeline?: AppConfig["reviewBoardPipeline"];
 } = {}): AppConfig {
   return {
     port: 8080,
@@ -36,9 +31,6 @@ function testConfig(overrides: {
     dashboardUrl: "https://dash.example",
     auth: {
       mode: "disabled",
-      githubScopes: "read:user",
-      sessionCookieName: "jina_dashboard_session",
-      oauthStateCookieName: "jina_github_oauth_state",
       cookieSecure: true,
       cookieSameSite: "None",
       sessionTtlSeconds: 3600,
@@ -49,7 +41,6 @@ function testConfig(overrides: {
       managedAiFeatureId: "managed_ai_access",
       enforce: "off",
     },
-    reviewBoardPipeline: overrides.reviewBoardPipeline ?? { mode: "v1", v2Repositories: new Set() },
     ...(overrides.githubWebhookInbox
       ? { githubWebhookInbox: overrides.githubWebhookInbox }
       : {}),
@@ -74,7 +65,7 @@ test("GitHub inbox capture failure returns 503 and never acknowledges the delive
   assert.deepEqual(await response.json(), { error: "GitHub webhook inbox is unavailable" });
 });
 
-test("capture_only returns 202 after durable insert without reaching paused Board admission", async () => {
+test("durable capture returns 202 when another worker already owns processing", async () => {
   let captured = 0;
   const repository = {
     async capture() {
@@ -113,7 +104,6 @@ test("capture_only returns 202 after durable insert without reaching paused Boar
 
 function inboxAppConfig(): AppConfig {
   return testConfig({
-    reviewBoardPipeline: { mode: "paused", v2Repositories: new Set() },
     githubWebhookInbox: {
       encryptionKey: Buffer.alloc(32, 5),
       encryptionKeyVersion: "4",
@@ -136,7 +126,7 @@ function githubHeaders(body: string): Record<string, string> {
 
 test("POST topup rejects a present Origin not in the dashboard allowlist with 403", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/dashboard/billing/topup", {
+  const res = await app.request("/dashboard/tenants/tenant-1/billing/topup", {
     method: "POST",
     headers: { origin: "https://evil.example" },
   });
@@ -146,24 +136,24 @@ test("POST topup rejects a present Origin not in the dashboard allowlist with 40
 
 test("POST topup allows an absent Origin header (non-browser clients)", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/dashboard/billing/topup", { method: "POST" });
-  // Passes the origin guard; falls through to the not-configured branch (no session / no Autumn secret).
-  assert.equal(res.status, 409);
+  const res = await app.request("/dashboard/tenants/tenant-1/billing/topup", { method: "POST" });
+  // Passes the origin guard; falls through to current tenant authentication.
+  assert.equal(res.status, 401);
 });
 
 test("POST topup allows an Origin in the dashboard allowlist", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/dashboard/billing/topup", {
+  const res = await app.request("/dashboard/tenants/tenant-1/billing/topup", {
     method: "POST",
     headers: { origin: "https://dash.example" },
   });
   assert.notEqual(res.status, 403);
-  assert.equal(res.status, 409);
+  assert.equal(res.status, 401);
 });
 
 test("POST topup does not reject any Origin under a wildcard allowlist (dev/non-credentialed mode)", async () => {
   const app = createApp(testConfig({ dashboardAllowedOrigins: "*" }));
-  const res = await app.request("/dashboard/billing/topup", {
+  const res = await app.request("/dashboard/tenants/tenant-1/billing/topup", {
     method: "POST",
     headers: { origin: "https://anything.example" },
   });
@@ -379,14 +369,13 @@ test("GET integrations returns the codex_harness status object alongside openrou
     openai: { configured: false },
     anthropic: { configured: false },
     codex_harness: { configured: false },
-    codex_harness_model: null,
   });
 });
 
-// PUT /dashboard/model-settings — writes per-tenant model selection. Origin + JSON content-type guards.
+// Tenant model settings writes carry the shared Origin + JSON content-type guards.
 test("PUT model-settings rejects a present Origin not in the allowlist with 403", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/dashboard/model-settings", {
+  const res = await app.request("/dashboard/tenants/tenant-1/model-settings", {
     method: "PUT",
     headers: { origin: "https://evil.example", ...JSON_HEADERS },
     body: "{}",
@@ -396,7 +385,7 @@ test("PUT model-settings rejects a present Origin not in the allowlist with 403"
 
 test("PUT model-settings allows an allowlisted Origin (falls through to the auth-required response)", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/dashboard/model-settings", {
+  const res = await app.request("/dashboard/tenants/tenant-1/model-settings", {
     method: "PUT",
     headers: { origin: "https://dash.example", ...JSON_HEADERS },
     body: "{}",
@@ -407,14 +396,14 @@ test("PUT model-settings allows an allowlisted Origin (falls through to the auth
 
 test("PUT model-settings allows an absent Origin header", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/dashboard/model-settings", { method: "PUT", headers: JSON_HEADERS, body: "{}" });
+  const res = await app.request("/dashboard/tenants/tenant-1/model-settings", { method: "PUT", headers: JSON_HEADERS, body: "{}" });
   assert.notEqual(res.status, 403);
   assert.notEqual(res.status, 415);
 });
 
 test("PUT model-settings rejects a non-JSON content type with 415", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/dashboard/model-settings", {
+  const res = await app.request("/dashboard/tenants/tenant-1/model-settings", {
     method: "PUT",
     headers: { origin: "https://dash.example", "content-type": "text/plain" },
     body: "{}",
@@ -463,79 +452,6 @@ test("POST session refresh allows the dashboard Origin without requiring a reque
     headers: { origin: "https://dash.example" },
   });
   assert.equal(res.status, 200);
-});
-
-test("an in-flight access refresh cannot recreate a session after logout", async () => {
-  const base = testConfig();
-  const config: AppConfig = {
-    ...base,
-    auth: {
-      ...base.auth,
-      mode: "github",
-      githubClientId: "client",
-      githubClientSecret: "secret",
-    },
-  };
-  const app = createApp(config);
-  const session: DashboardSession = {
-    id: "logout-refresh-race",
-    accessToken: "github-token",
-    user: { id: 7, login: "octocat" },
-    organizations: [],
-    projects: [],
-    teams: [],
-    expiresAt: Date.now() + 60_000,
-    createdAt: new Date(Date.now() - 600_000).toISOString(),
-    updatedAt: new Date(Date.now() - 600_000).toISOString(),
-  };
-  const cookie = `${config.auth.sessionCookieName}=${session.id}`;
-  let releaseUser!: () => void;
-  let markUserStarted!: () => void;
-  const userStarted = new Promise<void>((resolve) => {
-    markUserStarted = resolve;
-  });
-  const userGate = new Promise<void>((resolve) => {
-    releaseUser = resolve;
-  });
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url === "https://api.github.com/user") {
-      markUserStarted();
-      await userGate;
-      return Response.json({ id: 7, login: "octocat" });
-    }
-    if (url.startsWith("https://api.github.com/user/")) {
-      return Response.json([]);
-    }
-    throw new Error(`unexpected request: ${url}`);
-  });
-  await saveSession(session);
-  try {
-    const refresh = app.request("/dashboard/session/refresh", {
-      method: "POST",
-      headers: { origin: "https://dash.example", cookie },
-    });
-    await userStarted;
-    const logoutResponse = await app.request("/auth/logout", {
-      method: "POST",
-      headers: { cookie },
-    });
-    assert.equal(logoutResponse.status, 200);
-    releaseUser();
-    const refreshResponse = await refresh;
-    assert.equal(refreshResponse.status, 200);
-    assert.equal((await refreshResponse.json()).authenticated, false);
-    assert.equal(await getSession(session.id), undefined);
-    const meResponse = await app.request("/dashboard/me", {
-      headers: { cookie },
-    });
-    assert.equal((await meResponse.json()).authenticated, false);
-  } finally {
-    releaseUser();
-    globalThis.fetch = originalFetch;
-    await deleteSession(session.id);
-  }
 });
 
 test("POST graph query applies dashboard origin and JSON guards before authentication", async () => {
@@ -612,63 +528,6 @@ test("POST causal graph builds apply dashboard origin and JSON guards before aut
   assert.equal(noSession.status, 401);
 });
 
-test("POST tenant creation applies dashboard origin and JSON guards before authentication", async () => {
-  const app = createApp(testConfig());
-  const crossOrigin = await app.request("/dashboard/tenants", {
-    method: "POST",
-    headers: { origin: "https://evil.example", ...JSON_HEADERS },
-    body: JSON.stringify({ name: "Acme" }),
-  });
-  assert.equal(crossOrigin.status, 403);
-
-  const wrongContentType = await app.request("/dashboard/tenants", {
-    method: "POST",
-    headers: { origin: "https://dash.example", "content-type": "text/plain" },
-    body: "{}",
-  });
-  assert.equal(wrongContentType.status, 415);
-
-  const noSession = await app.request("/dashboard/tenants", {
-    method: "POST",
-    headers: { origin: "https://dash.example", ...JSON_HEADERS },
-    body: JSON.stringify({ name: "Acme" }),
-  });
-  assert.equal(noSession.status, 401);
-});
-
-test("PATCH organization settings applies dashboard origin and JSON guards before authentication", async () => {
-  const app = createApp(testConfig());
-  const path = "/dashboard/tenants/00000000-0000-4000-8000-000000000001";
-  const crossOrigin = await app.request(path, {
-    method: "PATCH",
-    headers: { origin: "https://evil.example", ...JSON_HEADERS },
-    body: JSON.stringify({ name: "Acme" }),
-  });
-  assert.equal(crossOrigin.status, 403);
-
-  const wrongContentType = await app.request(path, {
-    method: "PATCH",
-    headers: { origin: "https://dash.example", "content-type": "text/plain" },
-    body: "{}",
-  });
-  assert.equal(wrongContentType.status, 415);
-
-  const noSession = await app.request(path, {
-    method: "PATCH",
-    headers: { origin: "https://dash.example", ...JSON_HEADERS },
-    body: JSON.stringify({ name: "Acme" }),
-  });
-  assert.equal(noSession.status, 401);
-});
-
-test("organization names are normalized and bounded", () => {
-  assert.equal(parseJinaOrganizationName("  Acme   Research  "), "Acme Research");
-  assert.throws(() => parseJinaOrganizationName(undefined), /name is required/);
-  assert.throws(() => parseJinaOrganizationName(" \t "), /name is required/);
-  assert.throws(() => parseJinaOrganizationName("Acme\nResearch"), /control characters/);
-  assert.throws(() => parseJinaOrganizationName("a".repeat(81)), /80 characters/);
-});
-
 test("graph indexing defaults to 500 commits and cannot exceed 10,000", () => {
   assert.equal(parseGraphHistoryLimit(undefined), DEFAULT_GRAPH_HISTORY_LIMIT);
   assert.equal(DEFAULT_GRAPH_HISTORY_LIMIT, 500);
@@ -696,13 +555,6 @@ test("tenantAccessDenial: an admin may read and write", () => {
   assert.equal(tenantAccessDenial("admin", true), undefined);
 });
 
-test("Clerk-authoritative admins do not fall back to legacy GitHub admin revalidation", () => {
-  assert.equal(githubAdminRevalidationRequired("clerk"), false);
-  assert.equal(githubAdminRevalidationRequired("hybrid"), true);
-  assert.equal(githubAdminRevalidationRequired("legacy"), true);
-  assert.equal(githubAdminRevalidationRequired(undefined), true);
-});
-
 test("tenant-scoped review routes require an authenticated tenant member", async () => {
   const app = createApp(testConfig());
   const tenantId = "00000000-0000-4000-8000-000000000001";
@@ -710,58 +562,12 @@ test("tenant-scoped review routes require an authenticated tenant member", async
   const paths = [
     `/dashboard/tenants/${tenantId}/review-runs`,
     `/dashboard/tenants/${tenantId}/review-runs/${runId}`,
-    `/dashboard/tenants/${tenantId}/review-runs/${runId}/scenario-lineage/scenario-1`,
     `/dashboard/tenants/${tenantId}/wiki/repositories`,
   ];
   for (const path of paths) {
     const response = await app.request(path);
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { error: "dashboard authentication required" });
-  }
-});
-
-test("authenticated legacy review routes fail closed without a personal Jina tenant", async () => {
-  const base = testConfig();
-  const config: AppConfig = {
-    ...base,
-    auth: {
-      ...base.auth,
-      mode: "github",
-      githubClientId: "client",
-      githubClientSecret: "secret",
-    },
-  };
-  const app = createApp(config);
-  const session: DashboardSession = {
-    id: "legacy-review-without-tenant",
-    user: { id: 17, login: "octocat" },
-    organizations: [],
-    projects: [{ id: "other/repo", full_name: "other/repo", owner: "other", name: "repo", source: "github" }],
-    teams: [],
-    expiresAt: Date.now() + 60_000,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  const cookie = `${config.auth.sessionCookieName}=${session.id}`;
-  await saveSession(session);
-  try {
-    const list = await app.request("/dashboard/review-runs", { headers: { cookie } });
-    assert.equal(list.status, 200);
-    assert.deepEqual((await list.json()).review_runs, []);
-
-    const detail = await app.request("/dashboard/review-runs/run-from-another-tenant", {
-      headers: { cookie },
-    });
-    assert.equal(detail.status, 404);
-
-    const lineage = await app.request(
-      "/dashboard/review-runs/run-from-another-tenant/scenario-lineage/scenario-1",
-      { headers: { cookie } },
-    );
-    assert.equal(lineage.status, 200);
-    assert.deepEqual(await lineage.json(), { review_runs: [] });
-  } finally {
-    await deleteSession(session.id);
   }
 });
 
@@ -852,8 +658,8 @@ test("POST tenant GitHub installation requires JSON before authentication", asyn
 
 /* -------------------------- dashboard ETag revalidation --------------------------------------- */
 // apps/dashboard/src/lib/poll.ts re-fetches these routes every 2.5-15s. Tagging the responses lets an
-// unchanged poll come back as a bodyless 304 instead of a full payload, matching the legacy server's
-// jsonCacheable semantics (strong ETag over the exact body + cache-control: no-cache).
+// unchanged poll come back as a bodyless 304 instead of a full payload (strong ETag over the exact
+// body + cache-control: no-cache).
 
 test("GET dashboard responses carry a strong ETag and cache-control: no-cache", async () => {
   const app = createApp(testConfig());
@@ -894,7 +700,6 @@ test("a stale if-none-match returns the full 200 payload", async () => {
     openai: { configured: false },
     anthropic: { configured: false },
     codex_harness: { configured: false },
-    codex_harness_model: null,
   });
 });
 
@@ -944,10 +749,61 @@ test("a 304 keeps the credentialed CORS headers the 200 would have carried", asy
 
 test("mutating routes are not tagged and are never revalidated away", async () => {
   const app = createApp(testConfig());
-  const res = await app.request("/dashboard/billing/topup", {
+  const res = await app.request("/dashboard/tenants/tenant-1/billing/topup", {
     method: "POST",
     headers: { "if-none-match": "*" },
   });
-  assert.equal(res.status, 409, "if-none-match must not short-circuit a POST");
+  assert.equal(res.status, 401, "if-none-match must not short-circuit a POST");
   assert.equal(res.headers.get("etag"), null);
+});
+
+// Tenant API token routes: the same origin/content-type/session guard chain as
+// the other credentialed tenant writes, applied before any graph call.
+test("POST tokens rejects a non-allowlisted Origin with 403", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/tenants/tenant-1/tokens", {
+    method: "POST",
+    headers: { origin: "https://evil.example", ...JSON_HEADERS },
+    body: "{}",
+  });
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "origin not allowed" });
+});
+
+test("POST tokens rejects a non-JSON content type with 415", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/tenants/tenant-1/tokens", {
+    method: "POST",
+    headers: { origin: "https://dash.example", "content-type": "text/plain" },
+    body: "{}",
+  });
+  assert.equal(res.status, 415);
+});
+
+test("token routes require a dashboard session", async () => {
+  const app = createApp(testConfig());
+  const list = await app.request("/dashboard/tenants/tenant-1/tokens");
+  assert.equal(list.status, 401);
+  const mint = await app.request("/dashboard/tenants/tenant-1/tokens", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ name: "t", scopes: ["context:read"], expiresInMinutes: 60 }),
+  });
+  assert.equal(mint.status, 401);
+  const revoke = await app.request("/dashboard/tenants/tenant-1/tokens/tok_1/revoke", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: "{}",
+  });
+  assert.equal(revoke.status, 401);
+});
+
+test("POST token revoke rejects a non-JSON content type with 415", async () => {
+  const app = createApp(testConfig());
+  const res = await app.request("/dashboard/tenants/tenant-1/tokens/tok_1/revoke", {
+    method: "POST",
+    headers: { origin: "https://dash.example", "content-type": "text/plain" },
+    body: "{}",
+  });
+  assert.equal(res.status, 415);
 });

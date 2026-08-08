@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Badge } from "../components/ui";
 import { apiUrl } from "../lib/api";
 import {
+  connectGithubInstallation,
   githubInstallationUrl,
   normalizeGithubConnections,
   parseGithubInstallationCallback,
@@ -76,34 +77,17 @@ function mergeIntegrations(data: unknown): Integrations {
   };
 }
 
-function integrationsUrl(selected: SelectedTenant | null): string {
-  return selected
-    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`)
-    : apiUrl("/dashboard/integrations");
+function integrationsUrl(selected: SelectedTenant): string {
+  return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`);
 }
 
 function githubConnectionsUrl(selected: SelectedTenant): string {
   return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/github/installations`);
 }
 
-async function connectGithubInstallation(tenantId: string, installationId: number): Promise<Response> {
-  const url = apiUrl(`/dashboard/tenants/${encodeURIComponent(tenantId)}/github/installations`);
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const response = await fetch(url, {
-      method: "POST",
-      credentials: "include",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ installation_id: installationId }),
-    });
-    if (response.status !== 409 || attempt === 3) return response;
-    await new Promise((resolve) => window.setTimeout(resolve, 500 * 2 ** attempt));
-  }
-  throw new Error("Could not connect the GitHub installation");
-}
-
 export default function IntegrationsPage() {
   const { viewer } = useDashboard();
-  const { selected, tenants, selectTenant } = useTenant();
+  const { selected, tenants, selectTenant, ready: tenantsReady } = useTenant();
   const scope = useTenantQueryScope();
   const queryClient = useQueryClient();
   const [pageMessage, setPageMessage] = useState<string | null>(null);
@@ -120,16 +104,19 @@ export default function IntegrationsPage() {
   const providersQuery = useQuery<Integrations>({
     queryKey: providersKey,
     queryFn: async ({ signal }) => {
-      const response = await fetch(integrationsUrl(selected), { credentials: "include", signal });
+      const response = await fetch(integrationsUrl(selected!), { credentials: "include", signal });
       if (!response.ok) {
         throw new DashboardRequestError(response.status, `Integrations returned ${response.status}`);
       }
       return mergeIntegrations(await response.json());
     },
+    enabled: Boolean(selected),
     staleTime: CONFIG_STALE_TIME_MS,
   });
   const providers = providersQuery.data ?? EMPTY_INTEGRATIONS;
-  const providerState: LoadState = providersQuery.isError
+  const providerState: LoadState = !selected
+    ? "loaded"
+    : providersQuery.isError
     ? "unavailable"
     : providersQuery.data === undefined
       ? "loading"
@@ -184,8 +171,13 @@ export default function IntegrationsPage() {
     if (!viewer || typeof window === "undefined") return;
     const callback = parseGithubInstallationCallback(window.location.search);
     if (!callback) return;
+    if (!tenantsReady) return;
     const target = tenants.find((tenant) => tenant.tenant_id === callback.tenantId);
-    if (!target || target.role !== "admin") return;
+    if (!target || target.role !== "admin") {
+      setPageMessage("That GitHub installation could not be assigned to an administrable workspace.");
+      stripGithubCallbackParams();
+      return;
+    }
     const completionKey = `${callback.tenantId}:${callback.installationId}`;
     if (completingInstallation.current === completionKey) return;
     completingInstallation.current = completionKey;
@@ -204,18 +196,17 @@ export default function IntegrationsPage() {
         // Invalidate by resource rather than refetching this render's key: the
         // selection above moves the page to the tenant that was just connected.
         void queryClient.invalidateQueries({ queryKey: ["github-installations"] });
+        if (callback.returnTo === "onboarding") {
+          window.location.assign("/onboarding?github=connected");
+        }
       })
       .catch((error: unknown) => {
         setPageMessage(error instanceof Error ? error.message : "Could not connect the GitHub installation");
       })
       .finally(() => {
-        const nextUrl = new URL(window.location.href);
-        nextUrl.searchParams.delete("installation_id");
-        nextUrl.searchParams.delete("setup_action");
-        nextUrl.searchParams.delete("state");
-        window.history.replaceState({}, "", nextUrl.pathname + nextUrl.search + nextUrl.hash);
+        stripGithubCallbackParams();
       });
-  }, [viewer, tenants, selectTenant, queryClient]);
+  }, [viewer, tenants, tenantsReady, selectTenant, queryClient]);
 
   return (
     <div className="integrations-v2">
@@ -241,7 +232,9 @@ export default function IntegrationsPage() {
       </IntegrationGroup>
 
       <IntegrationGroup title="Model providers">
-        {providerState === "loading" ? (
+        {!selected ? (
+          <CompactState title="Select a workspace to manage model providers" />
+        ) : providerState === "loading" ? (
           <CompactState title="Loading providers" />
         ) : providerState === "unavailable" ? (
           <CompactState
@@ -267,6 +260,14 @@ export default function IntegrationsPage() {
       </IntegrationGroup>
     </div>
   );
+}
+
+function stripGithubCallbackParams(): void {
+  const nextUrl = new URL(window.location.href);
+  nextUrl.searchParams.delete("installation_id");
+  nextUrl.searchParams.delete("setup_action");
+  nextUrl.searchParams.delete("state");
+  window.history.replaceState({}, "", nextUrl.pathname + nextUrl.search + nextUrl.hash);
 }
 
 function IntegrationGroup({
@@ -398,6 +399,7 @@ function ProviderRow({
   }, [selected?.tenantId]);
 
   const saveKey = async (key: string, mode: "save" | "disconnect") => {
+    if (!selected) return;
     const requestTenantId = selected?.tenantId ?? null;
     setBusy(mode);
     setMessage(null);
@@ -427,16 +429,15 @@ function ProviderRow({
   };
 
   const connectOAuth = async () => {
+    if (!selected) return;
     const requestTenantId = selected?.tenantId ?? null;
     setBusy("oauth");
     setMessage(null);
     try {
-      const startUrl = selected
-        ? apiUrl(
-            "/dashboard/integrations/openrouter/oauth/start",
-            new URLSearchParams({ tenant_id: selected.tenantId }),
-          )
-        : apiUrl("/dashboard/integrations/openrouter/oauth/start");
+      const startUrl = apiUrl(
+        "/dashboard/integrations/openrouter/oauth/start",
+        new URLSearchParams({ tenant_id: selected.tenantId }),
+      );
       const response = await fetch(startUrl, { method: "POST", credentials: "include" });
       if (response.status === 403) throw new Error("Only workspace admins can change this connection.");
       if (!response.ok) throw new Error("OpenRouter could not be opened.");

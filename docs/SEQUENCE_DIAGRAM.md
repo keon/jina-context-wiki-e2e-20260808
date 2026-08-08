@@ -21,6 +21,50 @@ sequenceDiagram
     end
 ```
 
+## Pull-request review
+
+```mermaid
+sequenceDiagram
+    participant GH as GitHub
+    participant API as Jina API
+    participant PG as Product database
+    participant B as Relational Board
+    participant W as Review task worker
+    participant T as Trigger.dev
+    participant D as Daytona
+
+    GH->>API: Signed pull-request delivery
+    API->>PG: Persist inbox event and review identity
+    API->>B: Admit pr_review.board.v2 workflow
+    API->>B: Create exactly one run-review task
+    API->>PG: Bind review run to Board workflow
+    B->>W: Lease run-review
+    W->>B: Start idempotent trigger.review.dispatch receipt
+    W->>T: Dispatch pinned review root task
+    T-->>W: Stable Trigger run ID
+    W->>B: Persist provider ID and enter waiting_external
+    par External review
+        T->>API: Prepare exact tenant, repository, PR, and run
+        T->>D: Run summary and execution-first investigation
+        D-->>T: Findings and runtime evidence
+        T->>GH: Publish progress, findings, and completion
+        T->>API: Record terminal product result
+        API->>PG: Persist events, findings, usage, and billing
+    and Durable polling
+        loop Until the same Trigger run is terminal
+            B->>W: Reclaim waiting task without an old lease
+            W->>T: Poll stored provider run ID
+            W->>B: Continue waiting or reconcile terminal state
+        end
+    end
+    W->>B: Complete effect receipt, task, and workflow
+```
+
+The worker releases its database lease while Trigger is running. The effect receipt's
+idempotency key and unique provider identity prevent a retry from dispatching a duplicate
+review. Trigger's summary and runtime children are external execution evidence, not
+additional Board tasks.
+
 ## Context build and resumable publication
 
 ```mermaid
@@ -182,26 +226,20 @@ sequenceDiagram
     API-->>A: Scoped context or uniform refusal
 ```
 
-## Invalidation, erasure, and rebuild
+## Successor release
 
 ```mermaid
 sequenceDiagram
     participant O as Tenant owner
     participant API as Jina API
+    participant B as Board
     participant PG as PostgreSQL
 
-    alt Reject or invalidate a context revision
-        O->>API: Append governance event
-        API->>PG: Record immutable event
-        API->>PG: Invalidate affected releases
-    else Erase source evidence
-        O->>API: Create erasure filter
-        API->>PG: Record audit and projection-input event
-        API->>PG: Invalidate affected releases
-    else Rebuild
-        O->>API: Rebuild latest checkpoint
-        API->>PG: Materialize a new derived-only release
-    end
+    O->>API: Start build for repository and ref
+    API->>B: Admit next ref sequence
+    B->>B: Snapshot, plan, build pages, publish
+    B->>PG: Insert immutable successor release
+    PG-->>API: Highest attached sequence is current
 ```
 
 ## Production acceptance
@@ -215,11 +253,10 @@ sequenceDiagram
 
     CI->>API: Merge fixture repository into reader ACL
     CI->>API: Start context build as tenant administrator
-    API->>W: Execute ingest, derive, and index
+    API->>W: Execute snapshot, planning, page builds, and publication
     CI->>API: Wait for all required stages
     CI->>API: List releases and context documents
     CI->>API: Search with bound non-admin token
     CI->>MCP: Verify exact four tools and call search_context
-    CI->>API: Require zero projection backlog
     CI-->>CI: Pass release
 ```

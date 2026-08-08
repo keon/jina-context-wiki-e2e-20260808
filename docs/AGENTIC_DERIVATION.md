@@ -22,11 +22,6 @@ the planner materializes page tasks. The planner and publication depend on the s
 each generated page depends on the planner; publication depends on every page
 disposition.
 
-The old research, write, audit, repair, challenge, evaluation, certification, and
-PageIndex queue topics are not claimable. A locked production preflight rejects a
-nonterminal old-graph build or a pending/leased old Context outbox message before a
-candidate release can cut over.
-
 ## Checkpointed phases inside durable tasks
 
 The four-topic graph does not collapse all model work into one opaque call. Expensive
@@ -58,9 +53,7 @@ The page result has an explicit disposition:
 - during publication, an unsupported revision retains the prior validated page instead
   of silently deleting established Context.
 
-There is no active operator path that appends old multi-topic global gap-repair or
-certification work. See [Retired multi-topic remediation](CONTEXT_PAGE_REMEDIATION.md)
-for the migration boundary.
+Operator recovery retries one failed current task and retains its immutable phase checkpoints.
 
 ## Input boundary
 
@@ -75,7 +68,7 @@ The immutable snapshot contains:
 | Prior release                   | Latest eligible derived Context for the same ref                    |
 | ACL and frontier state          | Authorization fingerprint and evidence completeness                 |
 
-The snapshot is evidence, not a public search corpus. It does not build embeddings, a
+The snapshot is evidence, not a public search corpus. It does not build a
 symbol graph, an import graph, or a raw-source index.
 
 ## Local and production executors
@@ -133,10 +126,11 @@ The publication task rereads the publication plan and every page disposition. It
 6. builds the pinned self-hosted PageIndex tree; and
 7. calls the fenced internal publication transaction.
 
-One PostgreSQL transaction creates the immutable release and advances the current pointer
-only when its admitted `refSequence` is still current. Replay of identical input is
-idempotent; a stale sequence or changed bytes under the same identity is rejected. The
-previous complete release remains queryable until the successor commits.
+One PostgreSQL transaction creates the immutable release only when its admitted
+`refSequence` is still current. The highest attached sequence is current; no pointer row
+is maintained. Replay of identical input is idempotent, while a stale sequence or changed
+bytes under the same identity is rejected. The previous complete release remains
+queryable until the successor commits.
 
 PageIndex receives only validated derived Markdown. It never receives repository
 credentials, raw evidence, or release authority. `search_context`, `list_context`,

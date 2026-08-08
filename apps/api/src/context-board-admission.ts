@@ -2,19 +2,33 @@ import { applyCommand, isTerminalTaskStatus, reduceBoard, type BoardState, type 
 import {
   CONTEXT_WORKFLOW_CONTRACT,
   CONTEXT_WORKFLOW_SCHEMA_REVISION,
-  contextBoardTaskTypes,
+  contextWorkflowBoardTaskTypes,
   createContextWorkflowBoardBuild,
   fingerprint,
   isDerivationDetail,
-  nextContextBoardRefSequence,
+  nextContextWorkflowBoardRefSequence,
   normalizeRepository,
-  type ContextBuildScope,
   type ContextPriorReleaseSeed,
   type ContextWorkflowBoardBuild,
   type DerivationDetail
 } from "@jina/context-engine";
 import { isContextTrigger, type GitHubWebhookEvent } from "@jina/github";
 import { contextBuildHasOperatorRecovery } from "./context-board-recovery.js";
+
+interface ContextBuildScope {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly ref: string;
+  readonly refSequence: number;
+  readonly requestKey: string;
+  readonly commitSha?: string;
+  readonly githubInstallationId?: number;
+  readonly derivationDetail?: DerivationDetail;
+  readonly derivationBudgetSeconds?: number;
+  readonly derivationTokenBudget?: number;
+  readonly trigger?: "push" | "pull_request" | "issue" | "manual";
+  readonly priorRelease?: ContextPriorReleaseSeed;
+}
 
 interface ResolvedContextBuildScope {
   readonly tenantId: string;
@@ -213,7 +227,7 @@ export function admitContextBoardBuild(
     };
   }
 
-  const refSequence = nextContextBoardRefSequence(state, {
+  const refSequence = nextContextWorkflowBoardRefSequence(state, {
     tenantId,
     repository: scopeWithoutSequence.repository,
     ref: scopeWithoutSequence.ref
@@ -269,14 +283,16 @@ function createWorkflowBuild(state: BoardState, scope: ContextBuildScope, now: s
  * blocked so an operator can resume their durable checkpoints.
  */
 export function latestContextBoardFollowup(state: BoardState, buildTaskId: TaskId): ContextBoardFollowup | undefined {
-  const build = state.tasks.find((task) => task.id === buildTaskId && task.type === contextBoardTaskTypes.build);
+  const build = state.tasks.find(
+    (task) => task.id === buildTaskId && task.type === contextWorkflowBoardTaskTypes.build
+  );
   if (!build || !isTerminalTaskStatus(build.status)) return undefined;
   const tenantId = requiredText(build.metadata.tenantId, "tenantId");
   const repository = normalizeRepository(requiredText(build.metadata.repository, "repository"));
   if (
     state.tasks.some(
       (task) =>
-        task.type === contextBoardTaskTypes.build &&
+        task.type === contextWorkflowBoardTaskTypes.build &&
         !isTerminalTaskStatus(task.status) &&
         task.metadata.tenantId === tenantId &&
         task.metadata.repository === repository
@@ -314,7 +330,7 @@ function supersedeOlderRefBuilds(
 ): { readonly state: BoardState; readonly buildTaskIds: readonly TaskId[] } {
   const candidates = state.tasks.filter(
     (task) =>
-      task.type === contextBoardTaskTypes.build &&
+      task.type === contextWorkflowBoardTaskTypes.build &&
       task.metadata.tenantId === scope.tenantId &&
       task.metadata.repository === scope.repository &&
       task.metadata.ref === scope.ref &&
@@ -428,7 +444,7 @@ function oldestActiveRepositoryBuild(state: BoardState, scope: Pick<ContextBuild
   return state.tasks
     .filter(
       (task) =>
-        task.type === contextBoardTaskTypes.build &&
+        task.type === contextWorkflowBoardTaskTypes.build &&
         task.metadata.tenantId === scope.tenantId &&
         task.metadata.repository === scope.repository &&
         !isTerminalTaskStatus(task.status)
@@ -444,14 +460,14 @@ function newestRecoverableRepositoryBuild(
   return state.tasks
     .filter(
       (task) =>
-        task.type === contextBoardTaskTypes.build &&
+        task.type === contextWorkflowBoardTaskTypes.build &&
         task.status === "failed" &&
         task.metadata.tenantId === scope.tenantId &&
         task.metadata.repository === scope.repository &&
         task.metadata.ref === scope.ref &&
         !state.tasks.some(
           (candidate) =>
-            candidate.type === contextBoardTaskTypes.build &&
+            candidate.type === contextWorkflowBoardTaskTypes.build &&
             candidate.status === "done" &&
             candidate.metadata.tenantId === scope.tenantId &&
             candidate.metadata.repository === scope.repository &&
@@ -479,7 +495,7 @@ function queuedRepositoryAnchor(state: BoardState, scope: Pick<ContextBuildScope
     )
     .sort((left, right) => left.event.at.localeCompare(right.event.at) || left.event.seq - right.event.seq)[0];
   return pending?.event.taskId
-    ? state.tasks.find((task) => task.id === pending.event.taskId && task.type === contextBoardTaskTypes.build)
+    ? state.tasks.find((task) => task.id === pending.event.taskId && task.type === contextWorkflowBoardTaskTypes.build)
     : undefined;
 }
 
@@ -565,7 +581,7 @@ function optionalPositiveInteger(value: unknown, label: string): number | undefi
 function existingRequestBuilds(state: BoardState, tenantId: string, requestKey: string) {
   return state.tasks.filter(
     (task) =>
-      task.type === contextBoardTaskTypes.build &&
+      task.type === contextWorkflowBoardTaskTypes.build &&
       task.metadata.tenantId === tenantId &&
       task.metadata.requestKey === requestKey
   );

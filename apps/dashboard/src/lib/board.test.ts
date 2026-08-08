@@ -30,12 +30,12 @@ test("partitionBoardTasks keeps only the latest context build request per scope"
     }),
     task({
       id: "old-stage",
-      type: "research-context-subject",
+      type: "plan-context-pages",
       metadata: { ...scope, requestKey: "old" }
     }),
     task({
       id: "new-stage",
-      type: "write-context-page",
+      type: "build-context-page",
       metadata: { ...scope, requestKey: "new" }
     }),
     task({ id: "plain" }),
@@ -83,7 +83,7 @@ test("a stage whose build task is not on the page stays on the board while it ru
   const tasks = [
     task({
       id: "orphan-stage",
-      type: "write-context-page",
+      type: "build-context-page",
       status: "in_progress",
       metadata: { tenantId: "t", repository: "o/r", ref: "main", requestKey: "req-1" }
     })
@@ -100,7 +100,7 @@ test("an orphaned stage still falls to history once it is superseded", () => {
   const tasks = [
     task({
       id: "orphan-stage",
-      type: "write-context-page",
+      type: "build-context-page",
       status: "superseded",
       metadata: { tenantId: "t", repository: "o/r", ref: "main", requestKey: "req-1" }
     })
@@ -123,7 +123,7 @@ test("a build task missing tenantId does not hide its own stages", () => {
     }),
     task({
       id: "stage",
-      type: "write-context-page",
+      type: "build-context-page",
       status: "in_progress",
       metadata: { tenantId: "t", repository: "o/r", ref: "main", requestKey: "req-1" }
     })

@@ -121,7 +121,7 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
        end if;
 
        foreach relation_name in array array[
-         'repositories','tenants','installations','tenant_members'
+         'repositories','tenants','installations'
        ] loop
          if to_regclass(format('public.%I', relation_name)) is not null then
            execute format(

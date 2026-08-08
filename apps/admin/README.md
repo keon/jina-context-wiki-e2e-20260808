@@ -41,8 +41,8 @@ time, source completeness, and context availability.
 The agent-derived context section reports document counts by kind and shows each current
 document's repository, logical ID, commit, citation count, and immutable release.
 The build section shows recent Board build state, retry counts, and private checkpoint
-validity without exposing worker inputs or artifact layout. The index section reports the
-latest immutable projector checkpoint, version, status, and backlog.
+validity without exposing worker inputs or artifact layout. The context section reports
+the immutable release catalog's document, fragment, and hierarchy totals.
 
 Because this is a monitoring page, a read that fails is never rendered as a healthy zero:
 a failed section shows an alert naming the heading, counts it could not measure show `—`

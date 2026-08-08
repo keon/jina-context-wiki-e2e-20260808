@@ -124,9 +124,7 @@ test("harnessModelForStageSlug rejects non-subscription models (non-OpenAI or un
   assert.equal(harnessModelForStageSlug(undefined), undefined);
 });
 
-test("harnessStageModel: the harness FOLLOWS the per-stage model (the deprecated pin is ignored)", () => {
-  // Model selection lives in one place (per-stage Review defaults); the old JINA_HARNESS_MODEL pin is no
-  // longer consulted, so a legacy pin can no longer override the per-stage model.
+test("harnessStageModel follows the per-stage model", () => {
   assert.equal(harnessStageModel("openai/gpt-5.6-sol"), "gpt-5.6-sol");
   // A per-stage model the subscription can't run -> undefined (Codex omits --model, subscription default).
   assert.equal(harnessStageModel("anthropic/claude-4"), undefined);
@@ -279,7 +277,6 @@ test("deriveRuntimeReviewOutcome does not report a clean 5/5 pass when no invest
   const empty = deriveRuntimeReviewOutcome({
     investigationCount: 0,
     publishableCount: 0,
-    blockedCount: 0,
     failedCount: 0,
     warnedCount: 0,
     finalReadiness: cleanFive
@@ -289,24 +286,10 @@ test("deriveRuntimeReviewOutcome does not report a clean 5/5 pass when no invest
   assert.notEqual(empty.readiness.score, 5);
   assert.match(empty.readiness.rationale, /no investigation areas/i);
 
-  // Every planned area was blocked -> validated nothing -> not a confident 5/5.
-  const blocked = deriveRuntimeReviewOutcome({
-    investigationCount: 2,
-    publishableCount: 0,
-    blockedCount: 2,
-    failedCount: 0,
-    warnedCount: 0,
-    finalReadiness: cleanFive
-  });
-  assert.equal(blocked.status, "blocked");
-  assert.equal(blocked.fullyBlocked, true);
-  assert.notEqual(blocked.readiness.score, 5);
-
   // Healthy path: investigations ran and completed with no issues -> genuine 5/5 pass preserved.
   const passed = deriveRuntimeReviewOutcome({
     investigationCount: 3,
     publishableCount: 0,
-    blockedCount: 0,
     failedCount: 0,
     warnedCount: 0,
     finalReadiness: cleanFive
@@ -318,7 +301,6 @@ test("deriveRuntimeReviewOutcome does not report a clean 5/5 pass when no invest
   const issues = deriveRuntimeReviewOutcome({
     investigationCount: 3,
     publishableCount: 1,
-    blockedCount: 0,
     failedCount: 0,
     warnedCount: 0,
     finalReadiness: {
@@ -333,7 +315,6 @@ test("deriveRuntimeReviewOutcome does not report a clean 5/5 pass when no invest
   const intentionallySkipped = deriveRuntimeReviewOutcome({
     investigationCount: 0,
     publishableCount: 0,
-    blockedCount: 0,
     failedCount: 0,
     warnedCount: 0,
     finalReadiness: {
@@ -348,23 +329,23 @@ test("deriveRuntimeReviewOutcome does not report a clean 5/5 pass when no invest
   assert.equal(intentionallySkipped.readiness.score, 4);
 });
 
-test("normalizeFinding maps local prototype names to production fields", () => {
+test("normalizeFinding accepts the current investigation finding contract", () => {
   const finding = normalizeFinding({
-    id: "json-throw",
+    fingerprint: "json-throw",
     title: "Invalid JSON throws",
     risk: "high",
     confidence: "medium",
     likelihood: "high",
     category: "correctness",
-    file: "src/app.ts",
-    line: 7,
-    description: "The handler throws on invalid JSON.",
-    rootCause: "No parse error guard.",
-    whyItMatters: "Malformed requests return 500.",
+    file_path: "src/app.ts",
+    line_number: 7,
+    body: "The handler throws on invalid JSON.",
+    root_cause: "No parse error guard.",
+    why_it_matters: "Malformed requests return 500.",
     evidence: ["probe failed before response"],
-    reproductionOrTrace: "pnpm exec tsx probe.ts",
-    suggestedFix: "catch parse errors",
-    validationMethod: "execution"
+    reproduction_or_trace: "pnpm exec tsx probe.ts",
+    suggested_fix: "catch parse errors",
+    validation_method: "execution"
   });
 
   assert.ok(finding);
@@ -396,12 +377,6 @@ test("normalizeFinding caps confidence at medium unless the finding is execution
   assert.ok(sourceTrace);
   assert.equal(sourceTrace.validation_method, "source_trace");
   assert.equal(sourceTrace.confidence, "medium");
-
-  // Legacy "mental_trace" findings normalize to source_trace and get the same cap.
-  const legacy = normalizeFinding({ ...base, validation_method: "mental_trace" });
-  assert.ok(legacy);
-  assert.equal(legacy.validation_method, "source_trace");
-  assert.equal(legacy.confidence, "medium");
 
   // Execution-grounded findings keep high confidence and the new evidence fields.
   const executed = normalizeFinding({
@@ -980,8 +955,6 @@ test("runRuntimeReview walks planning, two investigation rounds with a replanner
     assert.doesNotMatch(result.context.diffPatch, /PR HEAD MALICIOUS INSTRUCTION/);
     assert.match(result.context.diffPatch, /PR-head \.jina\/instruction\.md content redacted/);
     assert.match(result.diffPatch, /PR HEAD MALICIOUS INSTRUCTION/);
-    // The intent stage is retired; the planner absorbs intent inference.
-    assert.equal(result.intent, undefined);
     assert.match(result.plan.intentSummary ?? "", /parse request JSON/);
     assert.equal(result.changedFiles.length, 1);
     assert.equal(result.changedFiles[0], "src/app.ts");
@@ -994,7 +967,6 @@ test("runRuntimeReview walks planning, two investigation rounds with a replanner
     ]);
     assert.deepEqual(result.plan.areas[0].executionPlan, ["Run a probe that POSTs malformed JSON to the handler."]);
     // Round 1 area + the replanner's deepen follow-up both ran.
-    assert.equal(result.investigations?.length, 2);
     assert.equal(result.areas.length, 2);
     assert.equal(result.areas[0].tasks.length, 1);
     assert.equal(result.areas[0].tasks[0].goal, "Prove malformed JSON escapes as a 500.");
@@ -1013,7 +985,6 @@ test("runRuntimeReview walks planning, two investigation rounds with a replanner
     assert.equal(result.areas[0].nonIssues.length, 1);
     assert.equal(result.areas[0].nonIssues[0].whyDismissed, "The probe confirmed valid JSON still succeeds.");
     assert.equal(result.areas[0].issues.length, 2);
-    assert.equal(result.areas[0].toolCalls.length, 0);
     // The deepen follow-up reported inconclusive work without issues.
     assert.equal(result.areas[1].areaId, "invalid_json_returns_400_r2");
     assert.equal(result.areas[1].tasks[0]?.verdict, "inconclusive");
@@ -1031,10 +1002,6 @@ test("runRuntimeReview walks planning, two investigation rounds with a replanner
     assert.equal(result.findings[0].observed_output, "500 Internal Server Error");
     assert.equal(result.findings[1].title, "Add invalid JSON regression coverage");
     assert.equal(result.findings[1].confidence, "low");
-    assert.equal(result.finalReview?.acceptedIssues.length, 2);
-    // No stage produces review comments any more.
-    assert.equal(result.commentsCount, 0);
-    assert.deepEqual(result.comments, []);
     // The summarizer's summary and merge score ride on top of the investigation output.
     assert.match(result.summary, /Merge readiness 2\/5/);
     assert.match(result.summary, /must be addressed before merge/);
@@ -1072,7 +1039,6 @@ test("runRuntimeReview in harness mode omits --model on every Codex invocation",
     "CODEX_REVIEW_TIMEOUT_MS",
     "JINA_FAKE_CODEX_LOG",
     "JINA_HARNESS_MODE",
-    "JINA_HARNESS_MODEL",
     "JINA_GRAPH_MCP_ENABLED",
     "RUNTIME_PLANNER_MODEL",
     "RUNTIME_AGENT_MODEL",
@@ -1091,12 +1057,10 @@ test("runRuntimeReview in harness mode omits --model on every Codex invocation",
     process.env.CODEGRAPH_BIN = fakeCodegraphPath;
     process.env.CODEX_REVIEW_TIMEOUT_MS = "30000";
     process.env.JINA_FAKE_CODEX_LOG = codexLogPath;
-    // Native Codex runs on the author's subscription: per-stage tenant model
-    // settings must NOT be forwarded as --model. With no JINA_HARNESS_MODEL set,
-    // --model is omitted entirely and the subscription picks its own model.
+    // Native Codex runs on the author's subscription. Unsupported per-stage
+    // settings are not forwarded, so the subscription picks its own model.
     process.env.JINA_HARNESS_MODE = "1";
     process.env.JINA_GRAPH_MCP_ENABLED = "1";
-    delete process.env.JINA_HARNESS_MODEL;
     process.env.RUNTIME_PLANNER_MODEL = "mock-planner";
     process.env.RUNTIME_AGENT_MODEL = "mock-agent";
     process.env.REVIEW_CODEX_MODEL = "mock-review";
@@ -1150,7 +1114,6 @@ test("runRuntimeReview in harness mode passes the resolved model on every Codex 
     "CODEX_REVIEW_TIMEOUT_MS",
     "JINA_FAKE_CODEX_LOG",
     "JINA_HARNESS_MODE",
-    "JINA_HARNESS_MODEL",
     "JINA_GRAPH_MCP_ENABLED",
     "RUNTIME_PLANNER_MODEL",
     "RUNTIME_AGENT_MODEL",
@@ -1171,10 +1134,8 @@ test("runRuntimeReview in harness mode passes the resolved model on every Codex 
     process.env.JINA_FAKE_CODEX_LOG = codexLogPath;
     process.env.JINA_HARNESS_MODE = "1";
     process.env.JINA_GRAPH_MCP_ENABLED = "1";
-    // The harness FOLLOWS the per-stage models (the JINA_HARNESS_MODEL pin is deprecated/ignored). Every
-    // stage is set to the same subscription-compatible model here, so every Codex invocation passes
-    // gpt-5.4-mini — via the per-stage model, not a pin.
-    delete process.env.JINA_HARNESS_MODEL;
+    // Every stage uses the same subscription-compatible model, so each Codex
+    // invocation passes gpt-5.4-mini.
     process.env.RUNTIME_PLANNER_MODEL = "openai/gpt-5.4-mini";
     process.env.RUNTIME_AGENT_MODEL = "openai/gpt-5.4-mini";
     process.env.REVIEW_CODEX_MODEL = "openai/gpt-5.4-mini";
@@ -1537,12 +1498,12 @@ function fakeCodexScript(): string {
     "      title: 'Malformed JSON probe',",
     "      goal: 'Prove malformed JSON escapes as a 500.',",
     "      hypothesis: 'Malformed JSON rejects before the handler creates a controlled response.',",
-    "      why_chosen: 'The area identifies malformed JSON as the highest-signal failure mode.',",
+    "      whyChosen: 'The area identifies malformed JSON as the highest-signal failure mode.',",
     "      purpose: 'Validate invalid JSON error behavior.',",
     "      method: 'execution',",
-    "      actions_taken: ['Wrote and ran a malformed JSON probe against the handler.'],",
-    "      what_was_learned: 'req.json() rejects and the handler returns a 500.',",
-    "      audit_trail: [{",
+    "      actionsTaken: ['Wrote and ran a malformed JSON probe against the handler.'],",
+    "      whatWasLearned: 'req.json() rejects and the handler returns a 500.',",
+    "      auditTrail: [{",
     "        type: 'command',",
     "        detail: 'node .jina/runtime-review/probes/invalid_json_returns_400/probe.mjs',",
     "        evidence: ['500 Internal Server Error']",
@@ -1587,7 +1548,7 @@ function fakeCodexScript(): string {
     "      validation_method: 'source_trace',",
     "      audit_trail: ['Searched test files.']",
     "    }],",
-    "    non_issues: [{ hypothesis: 'Valid JSON still succeeds', why_dismissed: 'The probe confirmed valid JSON still succeeds.', evidence: ['Probe with valid JSON returned 200'] }]",
+    "    nonIssues: [{ hypothesis: 'Valid JSON still succeeds', whyDismissed: 'The probe confirmed valid JSON still succeeds.', evidence: ['Probe with valid JSON returned 200'] }]",
     "  };",
     '} else if (prompt.includes("Jina\'s runtime investigation replanner")) {',
     "  stage = 'replanner';",
@@ -1635,14 +1596,14 @@ function fakeCodexScript(): string {
     "      title: 'Error-path logging check',",
     "      purpose: 'Verify JSON parse failures are logged.',",
     "      method: 'execution',",
-    "      actions_taken: ['Reran the malformed JSON probe with stderr captured.'],",
-    "      what_was_learned: 'No log output was captured in this environment; source read shows no logger call on the parse path.',",
-    "      audit_trail: [{ type: 'command', detail: 'node probe.mjs 2>logs/err.log', evidence: ['empty err.log'] }],",
+    "      actionsTaken: ['Reran the malformed JSON probe with stderr captured.'],",
+    "      whatWasLearned: 'No log output was captured in this environment; source read shows no logger call on the parse path.',",
+    "      auditTrail: [{ type: 'command', detail: 'node probe.mjs 2>logs/err.log', evidence: ['empty err.log'] }],",
     "      verdict: 'inconclusive',",
     "      confidence: 'low'",
     "    }],",
     "    issues: [],",
-    "    non_issues: []",
+    "    nonIssues: []",
     "  };",
     "} else if (prompt.includes('CTO-level engineer reviewing the investigation findings')) {",
     "  stage = 'summarizer';",

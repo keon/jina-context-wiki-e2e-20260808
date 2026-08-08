@@ -195,6 +195,18 @@ interface RequestContext {
   repositories: readonly GraphRepositoryAccess[];
 }
 
+/** Public token shape returned by the graph service; never carries the secret. */
+export interface TenantApiToken {
+  id: string;
+  name: string;
+  principalId: string;
+  scopes: string[];
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+}
+
 export interface DashboardGraphBuildInput {
   repository: string;
   ref?: string;
@@ -303,15 +315,7 @@ export class GraphApiClient {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /**
-   * The bearer to present for this tenant, and whether it was delegated.
-   *
-   * Falls back to the static credential whenever a delegated token cannot be
-   * obtained — no internal credential configured, or a graph service that does
-   * not issue tokens yet. That fallback is what makes this deployable in either
-   * order: behaviour is unchanged until both sides are in place, and no request
-   * fails because minting is unavailable.
-   */
+  /** The bearer to present for this tenant, and whether it was delegated. */
   private async authorization(
     tenantId: string,
   ): Promise<{ secret: string; delegated: boolean }> {
@@ -321,7 +325,10 @@ export class GraphApiClient {
     if (cached && this.now() < cached.renewAt)
       return { secret: cached.secret, delegated: true };
     const minted = await this.mintDelegatedToken(tenantId, cached);
-    return minted ? { secret: minted.secret, delegated: true } : staticToken;
+    if (!minted) {
+      throw new ApiError(503, "Context tenant access token is unavailable");
+    }
+    return { secret: minted.secret, delegated: true };
   }
 
   /**
@@ -397,6 +404,76 @@ export class GraphApiClient {
       accessToken: result.secret,
       expiresAt: result.token.expiresAt,
     };
+  }
+
+  /** The public MCP endpoint issued tokens authenticate against. */
+  mcpEndpoint(): string | undefined {
+    if (!this.config) return undefined;
+    return new URL("/mcp", `${this.config.apiUrl}/`).toString();
+  }
+
+  /**
+   * Tenant-facing API tokens, managed for the dashboard. These are minted as
+   * the tenant principal — the same shape as this client's own delegated
+   * reader — so a token works across every repository the tenant owns without
+   * per-repository access rows. Scope still gates each route.
+   */
+  async listTenantApiTokens(tenantId: string): Promise<TenantApiToken[]> {
+    if (!this.config?.internalToken) {
+      throw new ApiError(503, "API token management is not configured");
+    }
+    const result = await this.request<{ tokens: TenantApiToken[] }>(
+      "/internal/context/tokens",
+      { tenantId, repositories: [] },
+      { internalCredential: true },
+    );
+    return result.tokens;
+  }
+
+  async mintTenantApiToken(
+    tenantId: string,
+    input: { name: string; scopes: readonly string[]; expiresInMinutes: number },
+  ): Promise<{ secret: string; token: TenantApiToken }> {
+    if (!this.config?.internalToken) {
+      throw new ApiError(503, "API token management is not configured");
+    }
+    return this.request<{ secret: string; token: TenantApiToken }>(
+      "/internal/context/tokens",
+      { tenantId, repositories: [] },
+      {
+        method: "POST",
+        internalCredential: true,
+        body: {
+          principalId: tenantPrincipal(tenantId),
+          name: input.name,
+          scopes: [...input.scopes],
+          expiresInMinutes: input.expiresInMinutes,
+          administrator: true,
+        },
+      },
+    );
+  }
+
+  async revokeTenantApiToken(
+    tenantId: string,
+    tokenId: string,
+  ): Promise<TenantApiToken> {
+    if (!this.config?.internalToken) {
+      throw new ApiError(503, "API token management is not configured");
+    }
+    try {
+      const result = await this.request<{ token: TenantApiToken }>(
+        `/internal/context/tokens/${encodeURIComponent(tokenId)}/revoke`,
+        { tenantId, repositories: [] },
+        { method: "POST", internalCredential: true },
+      );
+      return result.token;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        throw new ApiError(404, "API token not found");
+      }
+      throw error;
+    }
   }
 
   /**
@@ -499,7 +576,6 @@ export class GraphApiClient {
           Math.max(ttlMinutes * 60_000 - delegatedTokenRenewalMarginMs, 30_000),
       };
     } catch {
-      // Never fatal. The caller falls back to the static credential.
       return undefined;
     } finally {
       clearTimeout(timeout);
@@ -1097,7 +1173,7 @@ export class GraphApiClient {
     try {
       // Acquiring the credential happens before any request deadline starts, so
       // a slow mint cannot leave the request itself with no time left. Minting
-      // carries its own timeout and falls back to the static credential.
+      // carries its own timeout.
       const send = async (): Promise<Response> => {
         const secret = input.internalCredential
           ? this.internalAuthorization()

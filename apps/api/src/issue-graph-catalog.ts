@@ -16,9 +16,9 @@ export interface CurrentIssueGraph {
 }
 
 /**
- * Resolves one small relational pointer and keeps graph reads off Postgres.
+ * Resolves the highest-sequence release row and keeps graph reads off Postgres.
  * Artifacts are immutable, so a digest-keyed process cache needs no invalidation:
- * publishing only changes the current pointer and naturally selects a new key.
+ * publishing a release naturally selects a new key.
  */
 export class IssueGraphCatalogService {
   readonly #store: ContextEngineStore;

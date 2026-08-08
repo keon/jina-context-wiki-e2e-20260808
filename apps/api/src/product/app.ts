@@ -6,15 +6,9 @@ import { cors } from "hono/cors";
 import { etag, RETAINED_304_HEADERS } from "hono/etag";
 
 import {
-  githubCallback,
-  githubLogin,
-  logout,
   me,
   refreshMe,
   requireDashboardSession,
-  sessionAccessibleNames,
-  teamAllowsProject,
-  visibleProjects,
   type DashboardProject,
   type DashboardSession,
   type DashboardTeam,
@@ -27,15 +21,12 @@ import {
   type DashboardWorkOverview,
 } from "./board-dashboard.js";
 import { parseCodexConnectTelemetry } from "./codex-connect-telemetry.js";
-import { normalizeCodexHarnessAuthInput, normalizeHarnessModelInput } from "./codex-harness.js";
+import { normalizeCodexHarnessAuthInput } from "./codex-harness.js";
 import { dashboardOriginAllowed, type AppConfig } from "./config.js";
 import { ApiError, jsonError } from "./errors.js";
 import { GithubWebhookInboxService } from "./github-webhook-inbox.js";
 import { GithubWebhookRedeliveryReconciler } from "./github-webhook-redelivery-reconciler.js";
 import {
-  GithubWebhookInboxEpochError,
-  GithubWebhookInboxGenerationConflictError,
-  type GithubWebhookInboxMode,
   type GithubWebhookInboxRepository,
   PostgresGithubWebhookInboxRepository,
 } from "./github-webhook-inbox-store.js";
@@ -59,29 +50,18 @@ import {
   resolveContextExecutionProfile,
   retryBilling,
 } from "./internal.js";
-import {
-  getModels,
-  getModelSettings,
-  parseModelSettingsBody,
-  putModelSettings,
-  validateModelSettingsSlugs,
-} from "./model-settings.js";
+import { getModels, parseModelSettingsBody, validateModelSettingsSlugs } from "./model-settings.js";
 import { openRouterOAuthCallback, startOpenRouterOAuth } from "./openrouter-oauth.js";
 import { buildDashboard } from "./records.js";
 import { ProductBoardWorkflowAdmitter } from "./product-board-workflow-admitter.js";
 import {
   connectGithubInstallationToTenant,
-  createJinaOrganization,
-  ensurePersonalTenantId,
   getReviewFindingRecords,
   getReviewGraphTarget,
   getReviewRunRecord,
   getReviewRunRecords,
-  getScenarioLineageReviewRunRecords,
-  getGithubTenantAdminRefreshRequirement,
   getTenantBillingPolicy,
   getTenantBillingIdentity,
-  getTenantIdForUser,
   getTenantMemberStats,
   getTenantMembershipRole,
   getTenantIntegrations,
@@ -100,7 +80,6 @@ import {
   listViewerTenants,
   normalizeModelProvider,
   normalizeReviewTriggerMode,
-  refreshGithubTenantAdminMembership,
   saveTenantAutoReviewLimit,
   saveTenantModelProvider,
   saveTenantModelSettingsById,
@@ -109,11 +88,17 @@ import {
   saveTenantReviewTriggerMode,
   saveUserHarnessIntegration,
   type TenantRole,
-  updateJinaOrganizationName,
 } from "./store.js";
 import type { DashboardSession as Session } from "./auth.js";
 
 const FLOW_ID_LOG_VALUE = /^[a-zA-Z0-9_-]{8,80}$/;
+
+// Dashboard-issued tokens never carry context:admin; administrative Context
+// routes stay behind internally minted credentials. Bounds mirror the graph
+// service's own mint limits.
+const DASHBOARD_TOKEN_SCOPES = ["context:query", "context:read", "context:build"];
+const MIN_TOKEN_MINUTES = 5;
+const MAX_TOKEN_MINUTES = 525_600;
 
 export interface ProductAppDependencies {
   readonly githubWebhookInboxRepository?: GithubWebhookInboxRepository;
@@ -122,18 +107,17 @@ export interface ProductAppDependencies {
 }
 
 export function createApp(config: AppConfig, dependencies: ProductAppDependencies = {}): Hono {
-  const boardWorkflowAdmitter = new ProductBoardWorkflowAdmitter({ pipeline: config.reviewBoardPipeline });
+  const boardWorkflowAdmitter = new ProductBoardWorkflowAdmitter();
   const billing = createBillingService(config);
   const graphs = new GraphApiClient(config.graph);
   const githubWebhookInboxRepository = config.githubWebhookInbox
     ? dependencies.githubWebhookInboxRepository ?? new PostgresGithubWebhookInboxRepository()
     : undefined;
   const githubWebhookInbox = config.githubWebhookInbox && githubWebhookInboxRepository
-    ? new GithubWebhookInboxService(
+      ? new GithubWebhookInboxService(
         config,
         config.githubWebhookInbox,
         githubWebhookInboxRepository,
-        dependencies.fetch,
       )
     : undefined;
   const githubWebhookRedelivery = githubWebhookInboxRepository
@@ -152,14 +136,14 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
   const dashboardCors = hasExplicitAllowlist
     ? cors({
         origin: (origin) => (dashboardOriginAllowed(config.dashboardAllowedOrigins, origin) ? origin : ""),
-        allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
+        allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allowHeaders: ["content-type"],
         exposeHeaders: ["server-timing"],
         credentials: true,
       })
     : cors({
         origin: "*",
-        allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
+        allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allowHeaders: ["content-type"],
         exposeHeaders: ["server-timing"],
         credentials: false,
@@ -167,14 +151,12 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
 
   app.onError((error, c) => jsonError(c, error));
   app.use("/dashboard/*", dashboardCors);
-  app.use("/auth/*", dashboardCors);
 
   // The dashboard re-fetches these GET routes on a 2.5-15s timer (apps/dashboard/src/lib/poll.ts),
   // and most polls observe no change. Tagging the response lets the browser HTTP cache turn an
   // unchanged poll into a bodyless 304 revalidation instead of a full payload transfer.
   //
-  // Semantics match the legacy server's `jsonCacheable` (apps/api/src/server.ts): a strong ETag
-  // derived from the exact serialized body, plus `cache-control: no-cache` so the browser always
+  // Use a strong ETag derived from the exact serialized body plus `cache-control: no-cache` so the browser always
   // revalidates rather than serving a stale body out of cache.
   //
   // Hono's default 304 header allowlist keeps only the caching headers, which would drop the
@@ -236,47 +218,22 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     return next();
   };
 
-  app.get("/auth/github/login", (c) => githubLogin(c, config));
-  app.get("/auth/github/callback", (c) => githubCallback(c, config));
-  app.post("/auth/logout", (c) => logout(c, config));
-
   app.get("/dashboard/me", (c) => me(c, config));
   app.post("/dashboard/session/refresh", requireDashboardOrigin, (c) => refreshMe(c, config));
-  app.get("/dashboard/review-runs", async (c) => {
-    const session = await requireDashboardSession(c, config);
-    const tenantId = session ? await getTenantIdForUser(session.user.id, session.userId) : undefined;
-    const project = c.req.query("project")?.trim();
-    const teamId = c.req.query("team")?.trim();
-    const limit = numberQuery(c.req.query("limit"));
-    if (session && !tenantId) {
-      return c.json({
-        ...buildDashboard([], [], { limit: limit ?? 50 }),
-        projects: [],
-        teams: [],
-        filters: {
-          project: project || undefined,
-        },
-      });
+  app.get("/dashboard/local/review-runs", async (c) => {
+    if (config.auth.mode !== "disabled") {
+      return c.json({ error: "not found" }, 404);
     }
-
-    const projects = tenantId ? await tenantDashboardProjects(tenantId) : await visibleProjects(session);
-    const teams = tenantId ? tenantDashboardTeams(session, projects) : (session?.teams ?? []);
-    const team = teamId ? teams.find((item) => item.id === teamId) : undefined;
-    const allowedFullNames = tenantId
-      ? (team?.project_full_names.map((name) => name.toLowerCase()) ?? null)
-      : allowedDashboardProjectNames(session, team);
+    const project = c.req.query("project")?.trim();
+    const limit = numberQuery(c.req.query("limit"));
 
     const page = await getReviewRunRecords({
-      tenantId,
-      allowedFullNames,
       project: project || undefined,
       limit,
       cursor: c.req.query("cursor")?.trim() || undefined,
     });
 
     const findings = await getReviewFindingRecords({
-      tenantId,
-      allowedFullNames,
       project: project || undefined,
     });
 
@@ -285,41 +242,20 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
         limit: page.limit,
         next_cursor: page.nextCursor,
       }),
-      projects,
-      teams,
+      projects: [],
+      teams: [],
       filters: {
         project: project || undefined,
-        team: team?.id,
       },
     });
   });
 
-  app.get("/dashboard/review-runs/:reviewRunId/scenario-lineage/:lineageKey", async (c) => {
-    const session = await requireDashboardSession(c, config);
-    const tenantId = session ? await getTenantIdForUser(session.user.id, session.userId) : undefined;
-    if (session && !tenantId) {
-      return c.json({ review_runs: [] });
-    }
-    const records = await getScenarioLineageReviewRunRecords({
-      reviewRunId: c.req.param("reviewRunId"),
-      lineageKey: c.req.param("lineageKey"),
-      tenantId,
-      allowedFullNames: tenantId ? undefined : sessionAccessibleNames(session),
-      limit: numberQuery(c.req.query("limit")),
-    });
-    return c.json({ review_runs: records });
-  });
-
-  app.get("/dashboard/review-runs/:reviewRunId", async (c) => {
-    const session = await requireDashboardSession(c, config);
-    const tenantId = session ? await getTenantIdForUser(session.user.id, session.userId) : undefined;
-    if (session && !tenantId) {
-      return c.json({ error: "review run not found" }, 404);
+  app.get("/dashboard/local/review-runs/:reviewRunId", async (c) => {
+    if (config.auth.mode !== "disabled") {
+      return c.json({ error: "not found" }, 404);
     }
     const record = await getReviewRunRecord({
       reviewRunId: c.req.param("reviewRunId"),
-      tenantId,
-      allowedFullNames: tenantId ? undefined : sessionAccessibleNames(session),
     });
     if (!record) {
       return c.json({ error: "review run not found" }, 404);
@@ -328,8 +264,8 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
   });
 
   // Tenant-scoped review endpoints use the selected Jina organization as the
-  // workspace boundary. The viewer-scoped forms above serve personal accounts
-  // and local fixtures only.
+  // workspace boundary. The unscoped local endpoints above exist only when
+  // authentication is explicitly disabled.
   app.get("/dashboard/tenants/:tenantId/review-runs", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
@@ -368,19 +304,6 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     });
   });
 
-  app.get("/dashboard/tenants/:tenantId/review-runs/:reviewRunId/scenario-lineage/:lineageKey", async (c) => {
-    const session = await requireDashboardSession(c, config);
-    const tenantId = tenantIdParam(c);
-    await requireTenantMembership(session, tenantId, { requireAdmin: false });
-    const records = await getScenarioLineageReviewRunRecords({
-      reviewRunId: c.req.param("reviewRunId"),
-      lineageKey: c.req.param("lineageKey"),
-      tenantId,
-      limit: numberQuery(c.req.query("limit")),
-    });
-    return c.json({ review_runs: records });
-  });
-
   app.get("/dashboard/tenants/:tenantId/review-runs/:reviewRunId", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
@@ -400,7 +323,6 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     openai: { configured: false },
     anthropic: { configured: false },
     codex_harness: { configured: false },
-    codex_harness_model: null,
   };
 
   app.get("/dashboard/integrations", async (c) => {
@@ -435,16 +357,11 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
       return c.json(emptyIntegrations);
     }
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    // Legacy viewer-scoped save, kept for deploy skew. openrouter_api_key now writes the viewer's
-    // PERSONAL tenant's tenant_integrations; the Codex harness fields (auth blob + model preference)
-    // stay INDIVIDUAL on user_integrations. Any legacy provider-key fields are ignored. Both harness
-    // fields are validated (throws 400) BEFORE anything is persisted; the submitted blob is never echoed.
+    // The Codex harness belongs to the individual author. Tenant provider keys are only accepted by
+    // the tenant-scoped integrations endpoint below.
     const codexHarnessAuth = normalizeCodexHarnessAuthInput(body.codex_harness_auth);
-    const harnessModel = normalizeHarnessModelInput(body.codex_harness_model, "codex_harness_model" in body);
     await saveUserHarnessIntegration(session.user.id, {
       codexHarnessAuth,
-      codexHarnessModel: harnessModel.model,
-      codexHarnessModelProvided: harnessModel.provided,
       // Stamp the current login on every save so run-time author-login resolution can find this harness.
       githubLogin: session.user.login,
     });
@@ -458,39 +375,6 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
             : undefined,
       });
     }
-    // A provided openrouter_api_key / openai_api_key / anthropic_api_key writes the personal tenant's key;
-    // an explicit empty string disconnects it, and an omitted field leaves the stored key untouched. Only
-    // ensure the personal tenant once, and only if at least one tenant-scoped key field was provided.
-    const wantsOpenRouter = typeof body.openrouter_api_key === "string";
-    const wantsOpenAi = typeof body.openai_api_key === "string";
-    const wantsAnthropic = typeof body.anthropic_api_key === "string";
-    if (wantsOpenRouter || wantsOpenAi || wantsAnthropic) {
-      const tenantId = await ensurePersonalTenantId(session.user.id, session.user.login);
-      if (tenantId) {
-        if (wantsOpenRouter) {
-          await saveTenantOpenRouterIntegration(tenantId, {
-            openrouter: body.openrouter_api_key as string,
-            openrouterSource: "manual",
-            configuredByUserId: session.user.id,
-            configuredByLogin: session.user.login,
-          });
-        }
-        if (wantsOpenAi) {
-          await saveTenantProviderKey(tenantId, "openai", {
-            key: body.openai_api_key as string,
-            configuredByUserId: session.user.id,
-            configuredByLogin: session.user.login,
-          });
-        }
-        if (wantsAnthropic) {
-          await saveTenantProviderKey(tenantId, "anthropic", {
-            key: body.anthropic_api_key as string,
-            configuredByUserId: session.user.id,
-            configuredByLogin: session.user.login,
-          });
-        }
-      }
-    }
     return c.json(await getUserIntegrations(session.user.id));
   });
 
@@ -499,96 +383,11 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
   );
   app.get("/dashboard/integrations/openrouter/oauth/callback", (c) => openRouterOAuthCallback(c, config));
 
-  app.get("/dashboard/model-settings", (c) => getModelSettings(c, config));
-  app.put("/dashboard/model-settings", requireDashboardOrigin, requireJsonContentType, (c) =>
-    putModelSettings(c, config),
-  );
   app.get("/dashboard/models", (c) => getModels(c));
 
-  const unconfiguredBilling = {
-    configured: false,
-    status: "not_configured" as const,
-    plan_id: null,
-    credits_balance: null,
-    managed_ai_access: null,
-  };
-
-  // NON-BLOCKING ADOPTED (a): a tenant-lookup EXCEPTION is an outage, not a missing account, so it must
-  // read as 'unavailable' rather than 'not_configured'. Same null-field shape, distinct status.
-  const unavailableBilling = { ...unconfiguredBilling, status: "unavailable" as const };
-
-  // Billing overview: 'not_configured' when Autumn is unset or the viewer genuinely has no tenant;
-  // 'unavailable' when the tenant lookup itself fails (outage) or Autumn errors; 'ok' with live data.
-  app.get("/dashboard/billing", async (c) => {
-    const session = await requireDashboardSession(c, config);
-    if (!session) {
-      return c.json(unconfiguredBilling);
-    }
-    // Distinguish a lookup FAILURE (exception -> outage -> unavailable) from a successful lookup that
-    // returns no tenant (undefined -> not_configured, handled inside billing.overview).
-    let tenantId: string | undefined;
-    try {
-      tenantId = await getTenantIdForUser(session.user.id, session.userId);
-    } catch (error) {
-      console.warn("billing_tenant_lookup_failed", {
-        user: session.user.login,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return c.json(unavailableBilling);
-    }
-    // Name the Autumn customer from the TENANT identity (login + org/personal), never the person who
-    // happens to open the page — a person-named customer is indistinguishable from their org's.
-    const overviewIdentity = tenantId ? await tenantAutumnIdentity(tenantId) : {};
-    return c.json(await billing.overview(tenantId, overviewIdentity.name, overviewIdentity.metadata));
-  });
-
-  // Overage-credit top-up checkout. 200 { url } or 409 { error } when billing is not configured.
-  // The shared requireDashboardOrigin guard (FINDING 1) fronts this credentialed POST; it takes no
-  // body, so no content-type guard is needed.
-  app.post("/dashboard/billing/topup", requireDashboardOrigin, async (c) => {
-    const session = await requireDashboardSession(c, config);
-    if (!session || !billing.billingConfigured()) {
-      return c.json({ error: "billing is not configured" }, 409);
-    }
-    // NON-BLOCKING ADOPTED (b): mirror the overview route's round-4 distinction — a tenant-lookup
-    // EXCEPTION is an outage (502/unavailable), NOT a missing account. Only a successful lookup that
-    // returns no tenant is "billing not configured for this account" (409).
-    let tenantId: string | undefined;
-    try {
-      tenantId = await getTenantIdForUser(session.user.id, session.userId);
-    } catch (error) {
-      console.warn("billing_topup_tenant_lookup_failed", {
-        user: session.user.login,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return c.json({ error: "billing is temporarily unavailable" }, 502);
-    }
-    if (!tenantId) {
-      return c.json({ error: "billing is not configured for this account" }, 409);
-    }
-    try {
-      // Optional { credits } body: the user's chosen top-up amount (validated/clamped). A missing or
-      // invalid amount falls back to the default pack. Parsed leniently — the route has no content-type
-      // guard (it historically took no body), and the origin guard already fronts CSRF.
-      const credits = normalizeTopupCredits(((await c.req.json().catch(() => ({}))) as Record<string, unknown>).credits);
-      const identity = await tenantAutumnIdentity(tenantId);
-      const url = await billing.topupUrl(tenantId, identity.name, credits, identity.metadata);
-      if (!url) {
-        return c.json({ error: "billing is not configured" }, 409);
-      }
-      return c.json({ url });
-    } catch (error) {
-      console.warn("billing_topup_failed", {
-        user: session.user.login,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return c.json({ error: "could not create checkout session" }, 502);
-    }
-  });
-
   /* ----------------------------------------------- tenant-scoped surfaces --- */
-  // These make org tenants first-class. Access is gated by tenant_members: any member may READ, only
-  // an 'admin' may WRITE. State-changing routes additionally carry the shared CSRF guards.
+  // Access is gated by current Clerk membership: any member may READ, only an 'admin' may WRITE.
+  // State-changing routes additionally carry the shared CSRF guards.
 
   // The set of tenants the viewer belongs to (personal first), for the tenant switcher.
   app.get("/dashboard/tenants", async (c) => {
@@ -597,59 +396,9 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
       return c.json({ tenants: [] });
     }
     return c.json({
-      tenants: await listViewerTenants(
-        session.user.id,
-        session.userId,
-        session.membershipAuthority ?? "legacy",
-      ),
+      tenants: await listViewerTenants(session.userId),
     });
   });
-
-  app.post(
-    "/dashboard/tenants",
-    requireDashboardOrigin,
-    requireJsonContentType,
-    async (c) => {
-      if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
-        throw new ApiError(409, "Organizations are managed through Clerk");
-      }
-      const session = await requireDashboardSession(c, config);
-      if (!session) {
-        throw new ApiError(401, "dashboard authentication required");
-      }
-      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-      const tenant = await createJinaOrganization({
-        name: parseJinaOrganizationName(body.name),
-        creatorGithubUserId: session.user.id,
-        creatorGithubLogin: session.user.login,
-        creatorUserId: session.userId,
-      });
-      return c.json({ tenant }, 201);
-    },
-  );
-
-  app.patch(
-    "/dashboard/tenants/:tenantId",
-    requireDashboardOrigin,
-    requireJsonContentType,
-    async (c) => {
-      if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
-        throw new ApiError(409, "Organizations are managed through Clerk");
-      }
-      const session = await requireDashboardSession(c, config);
-      const tenantId = tenantIdParam(c);
-      await requireTenantMembership(session, tenantId, { requireAdmin: true });
-      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-      const tenant = await updateJinaOrganizationName(
-        tenantId,
-        parseJinaOrganizationName(body.name),
-      );
-      if (!tenant) {
-        throw new ApiError(404, "organization not found");
-      }
-      return c.json({ tenant });
-    },
-  );
 
   app.get("/dashboard/tenants/:tenantId/graphs", async (c) => {
     const session = await requireDashboardSession(c, config);
@@ -903,9 +652,9 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     const tenantId = tenantIdParam(c);
     await requireTenantMembership(session, tenantId, { requireAdmin: false });
     const context = await tenantGraphContext(tenantId);
-    const [legacy, relational] = await Promise.all([
+    const [contextBoard, relational] = await Promise.all([
       graphs.getWorkOverview(context).catch((error): DashboardWorkOverview => {
-        console.warn("legacy_board_overview_unavailable", {
+        console.warn("context_board_overview_unavailable", {
           tenant_id: tenantId,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -913,7 +662,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
       }),
       getRelationalBoardDashboardOverview(tenantId),
     ]);
-    return c.json(mergeDashboardWorkOverviews(legacy, relational));
+    return c.json(mergeDashboardWorkOverviews(contextBoard, relational));
   });
 
   app.get("/dashboard/tenants/:tenantId/operations/task-types", async (c) => {
@@ -1054,7 +803,76 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     },
   );
 
-  // Tenant OpenRouter integration: member read, admin write. Same shape/validation as the legacy route.
+  // Tenant API tokens for external use (MCP, wiki, causal graph): member
+  // read, admin mint/revoke. Tokens are minted by the graph service; the
+  // tenant and principal come from the authenticated session and membership
+  // check, never from the request body. The secret appears once in the mint
+  // response and is never retrievable afterwards.
+  app.get("/dashboard/tenants/:tenantId/tokens", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    return c.json({
+      tokens: await graphs.listTenantApiTokens(tenantId),
+      mcp_endpoint: graphs.mcpEndpoint() ?? null,
+    });
+  });
+
+  app.post(
+    "/dashboard/tenants/:tenantId/tokens",
+    requireDashboardOrigin,
+    requireJsonContentType,
+    async (c) => {
+      const session = await requireDashboardSession(c, config);
+      const tenantId = tenantIdParam(c);
+      await requireTenantMembership(session, tenantId, { requireAdmin: true });
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      const name = typeof body.name === "string" ? body.name.trim() : "";
+      if (!name || name.length > 200) {
+        throw new ApiError(400, "token name is required and must be at most 200 characters");
+      }
+      const scopes = Array.isArray(body.scopes)
+        ? [...new Set(body.scopes.filter((scope): scope is string => typeof scope === "string"))]
+        : [];
+      if (scopes.length === 0 || !scopes.every((scope) => DASHBOARD_TOKEN_SCOPES.includes(scope))) {
+        throw new ApiError(400, `scopes must be a non-empty subset of: ${DASHBOARD_TOKEN_SCOPES.join(", ")}`);
+      }
+      const expiresInMinutes = body.expiresInMinutes;
+      if (
+        typeof expiresInMinutes !== "number" ||
+        !Number.isInteger(expiresInMinutes) ||
+        expiresInMinutes < MIN_TOKEN_MINUTES ||
+        expiresInMinutes > MAX_TOKEN_MINUTES
+      ) {
+        throw new ApiError(
+          400,
+          `expiresInMinutes must be an integer between ${MIN_TOKEN_MINUTES} and ${MAX_TOKEN_MINUTES}`,
+        );
+      }
+      const minted = await graphs.mintTenantApiToken(tenantId, { name, scopes, expiresInMinutes });
+      c.header("cache-control", "no-store");
+      return c.json(
+        { secret: minted.secret, token: minted.token, mcp_endpoint: graphs.mcpEndpoint() ?? null },
+        201,
+      );
+    },
+  );
+
+  app.post(
+    "/dashboard/tenants/:tenantId/tokens/:tokenId/revoke",
+    requireDashboardOrigin,
+    requireJsonContentType,
+    async (c) => {
+      const session = await requireDashboardSession(c, config);
+      const tenantId = tenantIdParam(c);
+      await requireTenantMembership(session, tenantId, { requireAdmin: true });
+      const tokenId = c.req.param("tokenId")?.trim();
+      if (!tokenId) throw new ApiError(400, "token id is required");
+      return c.json({ token: await graphs.revokeTenantApiToken(tenantId, tokenId) });
+    },
+  );
+
+  // Tenant OpenRouter integration: member read, admin write.
   app.get("/dashboard/tenants/:tenantId/integrations", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
@@ -1124,7 +942,6 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
             defaultBranch: repository.defaultBranch,
             private: repository.private,
           })),
-          movedByUserId: session.userId,
           movedByGithubUserId: session.user.id,
         });
         return c.json({
@@ -1153,7 +970,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
       await requireTenantMembership(session, tenantId, { requireAdmin: true });
       const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
       // The tenant-scoped gateway/BYOK keys live here (OpenRouter + native OpenAI/Anthropic); harness
-      // fields stay on the legacy personal route (harness is individual). For each, a provided key saves
+      // fields stay on the individual author route. For each, a provided key saves
       // and an empty string disconnects; an omitted field leaves the stored key untouched.
       if (typeof body.openrouter_api_key === "string") {
         await saveTenantOpenRouterIntegration(tenantId, {
@@ -1365,165 +1182,6 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     },
   );
 
-  // LEGACY personal-tenant fallbacks (production fix): the dashboard falls back to these paths when
-  // no tenant is selected (single/zero-tenant viewers with the switcher hidden). They resolve the
-  // viewer's PERSONAL tenant and delegate to the same logic as the tenant-scoped routes above —
-  // the viewer is implicitly admin of their own personal tenant, so no membership check is needed.
-  app.get("/dashboard/usage", async (c) => {
-    const session = await requireDashboardSession(c, config);
-    const days = parseUsageDays(c.req.query("days"));
-    const tenantId = session
-      ? await getTenantIdForUser(session.user.id, session.userId).catch(() => undefined)
-      : undefined;
-    if (!tenantId) {
-      return c.json({
-        period: { days },
-        totals: {
-          runs: 0,
-          completed_runs: 0,
-          infra_credits: 0,
-          ai_credits: 0,
-          total_credits: 0,
-          model_cost_usd: "0",
-          byok_runs: 0,
-          harness_runs: 0,
-        },
-        daily: [],
-        recent_runs: [],
-      });
-    }
-    return c.json(await getTenantUsageSummary(tenantId, days));
-  });
-
-  app.get("/dashboard/review-trigger", async (c) => {
-    const session = await requireDashboardSession(c, config);
-    const tenantId = session ? await ensurePersonalTenantId(session.user.id, session.user.login) : undefined;
-    if (!tenantId) {
-      return c.json({ mode: "every_commit" });
-    }
-    return c.json({ mode: await getTenantReviewTriggerMode(tenantId) });
-  });
-
-  app.put("/dashboard/review-trigger", requireDashboardOrigin, requireJsonContentType, async (c) => {
-    const session = await requireDashboardSession(c, config);
-    if (!session) {
-      return c.json({ error: "authentication required" }, 401);
-    }
-    const mode = normalizeReviewTriggerMode(((await c.req.json().catch(() => ({}))) as Record<string, unknown>).mode);
-    const tenantId = await ensurePersonalTenantId(session.user.id, session.user.login);
-    if (!tenantId) {
-      return c.json({ error: "no personal tenant" }, 409);
-    }
-    await saveTenantReviewTriggerMode(tenantId, mode);
-    return c.json({ mode: await getTenantReviewTriggerMode(tenantId) });
-  });
-
-  app.get("/dashboard/model-provider", async (c) => {
-    const session = await requireDashboardSession(c, config);
-    const tenantId = session ? await ensurePersonalTenantId(session.user.id, session.user.login) : undefined;
-    if (!tenantId) {
-      return c.json({ provider: "auto" });
-    }
-    return c.json({ provider: await getTenantModelProvider(tenantId) });
-  });
-
-  app.put("/dashboard/model-provider", requireDashboardOrigin, requireJsonContentType, async (c) => {
-    const session = await requireDashboardSession(c, config);
-    if (!session) {
-      return c.json({ error: "authentication required" }, 401);
-    }
-    const provider = normalizeModelProvider(((await c.req.json().catch(() => ({}))) as Record<string, unknown>).provider);
-    const tenantId = await ensurePersonalTenantId(session.user.id, session.user.login);
-    if (!tenantId) {
-      return c.json({ error: "no personal tenant" }, 409);
-    }
-    await saveTenantModelProvider(tenantId, provider, session.userId);
-    return c.json({ provider: await getTenantModelProvider(tenantId) });
-  });
-
-  app.put("/dashboard/billing/limits", requireDashboardOrigin, requireJsonContentType, async (c) => {
-    const session = await requireDashboardSession(c, config);
-    if (!session) {
-      return c.json({ error: "authentication required" }, 401);
-    }
-    const input = parseAutoReviewLimitBody((await c.req.json().catch(() => ({}))) as unknown);
-    const tenantId = await ensurePersonalTenantId(session.user.id, session.user.login);
-    if (!tenantId) {
-      return c.json({ error: "no personal tenant" }, 409);
-    }
-    await saveTenantAutoReviewLimit(tenantId, input);
-    const policy = await getTenantBillingPolicy(tenantId);
-    return c.json({
-      auto_review_limit: {
-        enabled: policy.auto_review_limit_enabled,
-        limit_credits: policy.auto_review_limit_credits,
-      },
-    });
-  });
-
-  app.post("/dashboard/billing/subscribe", requireDashboardOrigin, requireJsonContentType, async (c) => {
-    const session = await requireDashboardSession(c, config);
-    if (!session) {
-      return c.json({ error: "authentication required" }, 401);
-    }
-    const planId = parseSubscribePlanId((await c.req.json().catch(() => ({}))) as unknown);
-    if (!billing.billingConfigured()) {
-      return c.json({ error: "billing is not configured" }, 409);
-    }
-    // Bug fix (org billing landed on personal): this legacy fallback MUST NOT mint a personal tenant and
-    // attach a plan to it. Use a read-only lookup; a viewer with no existing personal tenant is directed
-    // to the tenant-scoped route (they should pick the org/account explicitly). Existing personal-only
-    // viewers still subscribe their real personal tenant. The customer is named by TENANT identity, not
-    // the person, so a personal customer is distinguishable from that person's org customer in Autumn.
-    const tenantId = await getTenantIdForUser(session.user.id, session.userId).catch(() => undefined);
-    if (!tenantId) {
-      return c.json({ error: "select an account to subscribe" }, 409);
-    }
-    try {
-      const identity = await tenantAutumnIdentity(tenantId);
-      const url = await billing.subscribeUrl(tenantId, planId, identity.name, identity.metadata);
-      if (!url) {
-        return c.json({ error: "billing is not configured" }, 409);
-      }
-      return c.json({ url });
-    } catch (error) {
-      console.warn("billing_subscribe_failed", {
-        tenant_id: tenantId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return c.json({ error: "could not start checkout" }, 502);
-    }
-  });
-
-  app.put("/dashboard/billing/auto-reload", requireDashboardOrigin, requireJsonContentType, async (c) => {
-    const session = await requireDashboardSession(c, config);
-    if (!session) {
-      return c.json({ error: "authentication required" }, 401);
-    }
-    const input = parseAutoReloadBody((await c.req.json().catch(() => ({}))) as unknown);
-    if (!billing.billingConfigured()) {
-      return c.json({ error: "billing is not configured" }, 409);
-    }
-    const tenantId = await ensurePersonalTenantId(session.user.id, session.user.login);
-    if (!tenantId) {
-      return c.json({ error: "no personal tenant" }, 409);
-    }
-    try {
-      const identity = await tenantAutumnIdentity(tenantId);
-      const applied = await billing.setAutoReload(tenantId, input, identity.name, identity.metadata);
-      if (!applied) {
-        return c.json({ error: "billing is not configured" }, 409);
-      }
-      return c.json({ auto_reload: input });
-    } catch (error) {
-      console.warn("billing_auto_reload_failed", {
-        tenant_id: tenantId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return c.json({ error: "could not update auto-reload" }, 502);
-    }
-  });
-
   app.post("/dashboard/tenants/:tenantId/billing/topup", requireDashboardOrigin, async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
@@ -1568,7 +1226,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
         error: error instanceof Error ? error.message : String(error),
       });
       // With the inbox enabled this leaves the authoritative delivery retryable.
-      // In legacy direct mode the non-2xx response still allows manual redelivery.
+      // In direct local mode the non-2xx response still allows manual redelivery.
       throw new ApiError(424, "Context event relay failed");
     }
     return response;
@@ -1635,35 +1293,6 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     authorizeInternal(c, config);
     if (!githubWebhookInbox) throw new ApiError(409, "GitHub webhook inbox is not enabled");
     return c.json(await githubWebhookInbox.snapshot());
-  });
-
-  app.post("/internal/github-webhook-inbox/mode", async (c) => {
-    authorizeInternal(c, config);
-    if (!githubWebhookInbox) throw new ApiError(409, "GitHub webhook inbox is not enabled");
-    const body = await c.req.json().catch(() => undefined) as Record<string, unknown> | undefined;
-    const expectedGeneration = body?.expected_generation;
-    const mode = body?.mode;
-    if (!Number.isSafeInteger(expectedGeneration) || (expectedGeneration as number) < 1) {
-      throw new ApiError(400, "expected_generation must be a positive integer");
-    }
-    if (!isGithubWebhookInboxMode(mode)) {
-      throw new ApiError(400, "mode is invalid");
-    }
-    try {
-      return c.json(await githubWebhookInbox.transitionMode({
-        expectedGeneration: expectedGeneration as number,
-        mode,
-        updatedBy: c.req.header("x-jina-principal-id")?.trim() || "internal-operator",
-      }));
-    } catch (error) {
-      if (
-        error instanceof GithubWebhookInboxGenerationConflictError ||
-        error instanceof GithubWebhookInboxEpochError
-      ) {
-        throw new ApiError(409, error.message);
-      }
-      throw error;
-    }
   });
 
   app.post("/internal/github-webhook-inbox/process", async (c) => {
@@ -1771,13 +1400,6 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
   return app;
 }
 
-function isGithubWebhookInboxMode(value: unknown): value is GithubWebhookInboxMode {
-  return value === "capture_only" ||
-    value === "canary_only" ||
-    value === "capture_and_process" ||
-    value === "legacy_forward";
-}
-
 export function parseReviewGraphAvailabilityBody(body: unknown): {
   installationId: number;
   githubRepoId: number;
@@ -1844,17 +1466,6 @@ async function tenantGraphContext(tenantId: string, repositoryName?: string) {
   };
 }
 
-function allowedDashboardProjectNames(
-  session: DashboardSession | undefined,
-  team: DashboardTeam | undefined,
-): string[] | null {
-  const allowed = sessionAccessibleNames(session);
-  if (!allowed || !team) {
-    return allowed;
-  }
-  return allowed.filter((name) => teamAllowsProject(team, name));
-}
-
 async function tenantDashboardProjects(tenantId: string): Promise<DashboardProject[]> {
   return (await knownProjects(tenantId)).map((project) => ({
     id: project.full_name,
@@ -1881,7 +1492,7 @@ function tenantDashboardTeams(
 }
 
 /**
- * requireTenantAccess: gate a tenant-scoped route on tenant_members. The viewer must have a membership
+ * requireTenantAccess: gate a tenant-scoped route on Clerk tenant membership. The viewer must have a membership
  * row (any role) to READ; writes pass { requireAdmin: true } and additionally require 'admin'. A missing
  * session (auth disabled / not signed in) is 401; a non-member is 403; a non-admin write is 403. Throws
  * ApiError (caught by app.onError), so handlers can await it and proceed once it returns.
@@ -1928,55 +1539,14 @@ async function requireTenantMembership(
     throw new ApiError(401, "dashboard authentication required");
   }
   const role = await getTenantMembershipRole(
-    session.user.id,
-    tenantId,
     session.userId,
-    session.membershipAuthority ?? "legacy",
+    tenantId,
   );
   const denial = tenantAccessDenial(role, opts.requireAdmin);
   if (denial) {
     throw new ApiError(denial.status, denial.message);
   }
-  // Clerk organization roles are the authority after the hard migration. A
-  // migrated Clerk admin must not be forced back through the retired GitHub
-  // OAuth membership check merely because a preserved legacy tenant_members
-  // observation has aged past its five-minute verification window.
-  if (opts.requireAdmin && role === "admin" && githubAdminRevalidationRequired(session.membershipAuthority)) {
-    const refresh = await getGithubTenantAdminRefreshRequirement(
-      session.user.id,
-      tenantId,
-      session.userId,
-    );
-    if (refresh) {
-      if (!session.accessToken || !refresh.account) {
-        throw new ApiError(403, "fresh GitHub organization admin access is required");
-      }
-      const verified = await canUserAdministerInstallation(
-        session.accessToken,
-        session.user.id,
-        { id: 0, account: refresh.account },
-      );
-      if (!verified) {
-        throw new ApiError(403, "fresh GitHub organization admin access is required");
-      }
-      await refreshGithubTenantAdminMembership(session.user.id, tenantId, session.userId);
-    }
-  }
   return role!;
-}
-
-export function githubAdminRevalidationRequired(
-  authority: DashboardSession["membershipAuthority"],
-): boolean {
-  return authority !== "clerk";
-}
-
-function containsControlCharacters(value: string): boolean {
-  for (const character of value) {
-    const code = character.codePointAt(0)!;
-    if (code < 0x20 || code === 0x7f) return true;
-  }
-  return false;
 }
 
 function numberQuery(value: string | undefined): number | undefined {
@@ -2006,23 +1576,6 @@ async function tenantAutumnIdentity(
       jina_tenant_name: identity.name,
     },
   };
-}
-
-export function parseJinaOrganizationName(value: unknown): string {
-  if (typeof value !== "string") {
-    throw new ApiError(400, "organization name is required");
-  }
-  if (!value.trim()) {
-    throw new ApiError(400, "organization name is required");
-  }
-  if (containsControlCharacters(value)) {
-    throw new ApiError(400, "organization name cannot contain control characters");
-  }
-  const name = value.trim().replace(/[ \t]+/g, " ");
-  if (name.length > 80) {
-    throw new ApiError(400, "organization name must not exceed 80 characters");
-  }
-  return name;
 }
 
 /** Allowed usage windows. Absent -> 30; a present value must be one of these (else 400). */

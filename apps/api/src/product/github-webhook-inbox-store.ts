@@ -1,14 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type pg from "pg";
-
 import { query, queryOne, withTransaction } from "./db.js";
-
-export type GithubWebhookInboxMode =
-  | "capture_only"
-  | "canary_only"
-  | "capture_and_process"
-  | "legacy_forward";
 
 type GithubWebhookInboxStatus =
   | "pending"
@@ -16,13 +8,6 @@ type GithubWebhookInboxStatus =
   | "completed"
   | "retry_wait"
   | "dead_letter";
-
-export interface GithubWebhookInboxControl {
-  readonly mode: GithubWebhookInboxMode;
-  readonly generation: number;
-  readonly firstV2WorkflowId?: string;
-  readonly firstV2At?: Date;
-}
 
 export interface GithubWebhookInboxCapture {
   readonly deliveryId: string;
@@ -44,8 +29,6 @@ export interface GithubWebhookInboxCaptureResult {
 
 export interface GithubWebhookInboxLease {
   readonly leaseId: string;
-  readonly leaseGeneration: number;
-  readonly mode: Exclude<GithubWebhookInboxMode, "capture_only">;
   readonly deliveryId: string;
   readonly event: string;
   readonly action?: string;
@@ -57,7 +40,6 @@ export interface GithubWebhookInboxLease {
 }
 
 export interface GithubWebhookInboxSnapshot {
-  readonly control: GithubWebhookInboxControl;
   readonly pending: number;
   readonly leased: number;
   readonly retryWait: number;
@@ -67,7 +49,6 @@ export interface GithubWebhookInboxSnapshot {
   readonly deadLetterByErrorCode: Readonly<Record<string, number>>;
   /** Newest retained dead letters, capped by the store so the control response stays bounded. */
   readonly recentDeadLetters: readonly GithubWebhookInboxDeadLetterSummary[];
-  readonly priorGenerationLeases: number;
   /** Counts for rows that can still be claimed/retried, keyed by their pinned key version. */
   readonly activeKeyVersions: Readonly<Record<string, number>>;
   /** Terminal retained evidence by pinned key version; these rows are never claimed or retried. */
@@ -101,7 +82,6 @@ export interface GithubWebhookInboxRepository {
   claim(input: {
     readonly deliveryId?: string;
     readonly leaseMs: number;
-    readonly canaryRepositories: ReadonlySet<string>;
   }): Promise<GithubWebhookInboxLease | undefined>;
   complete(input: {
     readonly lease: GithubWebhookInboxLease;
@@ -116,11 +96,6 @@ export interface GithubWebhookInboxRepository {
     readonly lease: GithubWebhookInboxLease;
     readonly errorCode: string;
   }): Promise<void>;
-  transitionMode(input: {
-    readonly expectedGeneration: number;
-    readonly mode: GithubWebhookInboxMode;
-    readonly updatedBy: string;
-  }): Promise<GithubWebhookInboxControl>;
   snapshot(): Promise<GithubWebhookInboxSnapshot>;
 }
 
@@ -136,51 +111,6 @@ export class GithubWebhookInboxLeaseLostError extends Error {
     super(`GitHub webhook inbox lease was lost for ${deliveryId}`);
     this.name = "GithubWebhookInboxLeaseLostError";
   }
-}
-
-export class GithubWebhookInboxGenerationConflictError extends Error {
-  constructor() {
-    super("GitHub webhook inbox processor generation changed");
-    this.name = "GithubWebhookInboxGenerationConflictError";
-  }
-}
-
-export class GithubWebhookInboxEpochError extends Error {
-  constructor(readonly workflowId: string) {
-    super(`legacy_forward is permanently disabled after v2 workflow ${workflowId}`);
-    this.name = "GithubWebhookInboxEpochError";
-  }
-}
-
-export async function markFirstV2GithubWebhookWorkflowWithClient(
-  client: pg.PoolClient,
-  workflowId: string,
-): Promise<string> {
-  const locked = await client.query<ControlRow>(
-    `select mode,generation,first_v2_workflow_id,first_v2_at
-       from github_webhook_inbox_control
-      where singleton=true
-      for update`,
-  );
-  const control = requiredControl(locked.rows[0]);
-  if (control.mode === "legacy_forward") {
-    throw new Error("v2 review admission is forbidden while legacy_forward is active");
-  }
-  if (control.firstV2WorkflowId) return control.firstV2WorkflowId;
-  const updated = await client.query<{ first_v2_workflow_id: string }>(
-    `update github_webhook_inbox_control
-        set first_v2_workflow_id=$1,
-            first_v2_at=now(),
-            updated_at=now(),
-            updated_by='v2-review-admission'
-      where singleton=true
-        and first_v2_workflow_id is null
-    returning first_v2_workflow_id`,
-    [workflowId],
-  );
-  const marked = updated.rows[0]?.first_v2_workflow_id;
-  if (!marked) throw new Error("failed to record first v2 review workflow epoch");
-  return marked;
 }
 
 export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxRepository {
@@ -286,23 +216,9 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
   async claim(input: {
     readonly deliveryId?: string;
     readonly leaseMs: number;
-    readonly canaryRepositories: ReadonlySet<string>;
   }): Promise<GithubWebhookInboxLease | undefined> {
     return withTransaction(async (client) => {
-      const controlResult = await client.query<ControlRow>(
-        `select mode,generation,first_v2_workflow_id,first_v2_at
-           from github_webhook_inbox_control
-          where singleton=true
-          for share`,
-      );
-      const control = requiredControl(controlResult.rows[0]);
-      if (control.mode === "capture_only") return undefined;
-      if (control.mode === "legacy_forward" && control.firstV2WorkflowId) {
-        throw new GithubWebhookInboxEpochError(control.firstV2WorkflowId);
-      }
-
       const leaseId = randomUUID();
-      const canaryRepositories = [...input.canaryRepositories].map((value) => value.toLowerCase());
       const claimed = await client.query<LeaseRow>(
         `with candidate as (
            select delivery.github_delivery_id
@@ -313,7 +229,6 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
                 or (delivery.status='leased' and delivery.lease_expires_at <= now())
               )
               and delivery.available_at <= now()
-              and ($2::text <> 'canary_only' or lower(delivery.repository_full_name) = any($3::text[]))
               and not exists (
                 select 1
                   from github_webhook_inbox earlier
@@ -331,9 +246,8 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
          )
          update github_webhook_inbox delivery
             set status='leased',
-                lease_id=$4,
-                lease_expires_at=now() + ($5::bigint * interval '1 millisecond'),
-                lease_generation=$6,
+                lease_id=$2,
+                lease_expires_at=now() + ($3::bigint * interval '1 millisecond'),
                 attempt_count=delivery.attempt_count + 1,
                 last_error_code=null,
                 last_error_at=null
@@ -345,19 +259,14 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
                    delivery.attempt_count`,
         [
           input.deliveryId ?? null,
-          control.mode,
-          canaryRepositories,
           leaseId,
           input.leaseMs,
-          control.generation,
         ],
       );
       const row = claimed.rows[0];
       if (!row) return undefined;
       return {
         leaseId,
-        leaseGeneration: control.generation,
-        mode: control.mode,
         deliveryId: row.github_delivery_id,
         event: row.github_event,
         ...(row.action ? { action: row.action } : {}),
@@ -377,23 +286,20 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
     const rows = await query<{ github_delivery_id: string }>(
       `update github_webhook_inbox
           set status='completed',
-              processed_workflow_id=coalesce(processed_workflow_id,$4),
+              processed_workflow_id=coalesce(processed_workflow_id,$3),
               completed_at=now(),
               lease_id=null,
               lease_expires_at=null,
-              lease_generation=null,
               last_error_code=null,
               last_error_at=null
         where github_delivery_id=$1
           and status='leased'
           and lease_id=$2
-          and lease_generation=$3
-          and (processed_workflow_id is null or processed_workflow_id is not distinct from $4)
+          and (processed_workflow_id is null or processed_workflow_id is not distinct from $3)
       returning github_delivery_id`,
       [
         input.lease.deliveryId,
         input.lease.leaseId,
-        input.lease.leaseGeneration,
         input.processedWorkflowId ?? null,
       ],
     );
@@ -408,21 +314,18 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
     const rows = await query<{ github_delivery_id: string }>(
       `update github_webhook_inbox
           set status='retry_wait',
-              available_at=now() + ($4::bigint * interval '1 millisecond'),
+              available_at=now() + ($3::bigint * interval '1 millisecond'),
               lease_id=null,
               lease_expires_at=null,
-              lease_generation=null,
-              last_error_code=$5,
+              last_error_code=$4,
               last_error_at=now()
         where github_delivery_id=$1
           and status='leased'
           and lease_id=$2
-          and lease_generation=$3
       returning github_delivery_id`,
       [
         input.lease.deliveryId,
         input.lease.leaseId,
-        input.lease.leaseGeneration,
         input.retryAfterMs,
         safeErrorCode(input.errorCode),
       ],
@@ -440,67 +343,28 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
               completed_at=now(),
               lease_id=null,
               lease_expires_at=null,
-              lease_generation=null,
-              last_error_code=$4,
+              last_error_code=$3,
               last_error_at=now()
         where github_delivery_id=$1
           and status='leased'
           and lease_id=$2
-          and lease_generation=$3
       returning github_delivery_id`,
       [
         input.lease.deliveryId,
         input.lease.leaseId,
-        input.lease.leaseGeneration,
         safeErrorCode(input.errorCode),
       ],
     );
     if (!rows[0]) throw new GithubWebhookInboxLeaseLostError(input.lease.deliveryId);
   }
 
-  async transitionMode(input: {
-    readonly expectedGeneration: number;
-    readonly mode: GithubWebhookInboxMode;
-    readonly updatedBy: string;
-  }): Promise<GithubWebhookInboxControl> {
-    return withTransaction(async (client) => {
-      const locked = await client.query<ControlRow>(
-        `select mode,generation,first_v2_workflow_id,first_v2_at
-           from github_webhook_inbox_control
-          where singleton=true
-          for update`,
-      );
-      const control = requiredControl(locked.rows[0]);
-      if (control.generation !== input.expectedGeneration) {
-        throw new GithubWebhookInboxGenerationConflictError();
-      }
-      if (input.mode === "legacy_forward" && control.firstV2WorkflowId) {
-        throw new GithubWebhookInboxEpochError(control.firstV2WorkflowId);
-      }
-      const updated = await client.query<ControlRow>(
-        `update github_webhook_inbox_control
-            set mode=$1,generation=generation + 1,updated_at=now(),updated_by=$2
-          where singleton=true
-        returning mode,generation,first_v2_workflow_id,first_v2_at`,
-        [input.mode, input.updatedBy.slice(0, 200)],
-      );
-      return requiredControl(updated.rows[0]);
-    });
-  }
-
   async snapshot(): Promise<GithubWebhookInboxSnapshot> {
-    const control = requiredControl(await queryOne<ControlRow>(
-      `select mode,generation,first_v2_workflow_id,first_v2_at
-         from github_webhook_inbox_control
-        where singleton=true`,
-    ));
     const counts = await queryOne<{
       pending: number;
       leased: number;
       retry_wait: number;
       completed: number;
       dead_letter: number;
-      prior_generation_leases: number;
       oldest_pending_at: Date | null;
     }>(
       `select
@@ -509,12 +373,9 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
          count(*) filter (where status='retry_wait')::int as retry_wait,
          count(*) filter (where status='completed')::int as completed,
          count(*) filter (where status='dead_letter')::int as dead_letter,
-         count(*) filter (where status='leased' and lease_generation < $1)::int
-           as prior_generation_leases,
          min(received_at) filter (where status in ('pending','retry_wait','leased'))
            as oldest_pending_at
        from github_webhook_inbox`,
-      [control.generation],
     );
     const keyVersions = await query<{
       encryption_key_version: string;
@@ -565,7 +426,6 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
         limit 25`,
     );
     return {
-      control,
       pending: counts?.pending ?? 0,
       leased: counts?.leased ?? 0,
       retryWait: counts?.retry_wait ?? 0,
@@ -583,7 +443,6 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
         attemptCount: Number(row.attempt_count),
         deadLetteredAt: row.completed_at,
       })),
-      priorGenerationLeases: counts?.prior_generation_leases ?? 0,
       activeKeyVersions: Object.fromEntries(
         keyVersions.map((row) => [row.encryption_key_version, Number(row.active_count)]),
       ),
@@ -598,13 +457,6 @@ export class PostgresGithubWebhookInboxRepository implements GithubWebhookInboxR
   }
 }
 
-interface ControlRow {
-  readonly mode: GithubWebhookInboxMode;
-  readonly generation: number;
-  readonly first_v2_workflow_id: string | null;
-  readonly first_v2_at: Date | null;
-}
-
 interface LeaseRow {
   readonly github_delivery_id: string;
   readonly github_event: string;
@@ -614,16 +466,6 @@ interface LeaseRow {
   readonly payload_ciphertext: Buffer;
   readonly encryption_key_version: string;
   readonly attempt_count: number;
-}
-
-function requiredControl(row: ControlRow | undefined): GithubWebhookInboxControl {
-  if (!row) throw new Error("GitHub webhook inbox control row is missing");
-  return {
-    mode: row.mode,
-    generation: Number(row.generation),
-    ...(row.first_v2_workflow_id ? { firstV2WorkflowId: row.first_v2_workflow_id } : {}),
-    ...(row.first_v2_at ? { firstV2At: row.first_v2_at } : {}),
-  };
 }
 
 function safeErrorCode(value: string): string {

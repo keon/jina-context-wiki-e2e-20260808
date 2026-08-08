@@ -56,9 +56,7 @@ test("product API routes share /api while preserving their Clerk auth boundary",
     ["GET", "/api/dashboard/me"],
     ["POST", "/api/dashboard/session/refresh"],
     ["PUT", "/api/dashboard/tenants/tenant-1/model-settings"],
-    ["PATCH", "/api/dashboard/tenants/tenant-1"],
-    ["DELETE", "/api/dashboard/tenants/tenant-1/integrations/openrouter"],
-    ["GET", "/api/auth/github/callback"]
+    ["DELETE", "/api/dashboard/tenants/tenant-1/integrations/openrouter"]
   ] as const) {
     assert.equal(isProductDashboardApiRequest(method, pathname), true, pathname);
     assert.equal(isAllowedDashboardApiRequest(method, pathname, true), true, pathname);

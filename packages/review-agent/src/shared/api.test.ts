@@ -101,7 +101,7 @@ test("safeLogPreview truncates long payload and error previews", () => {
 test("safeLogPreview redacts codex harness auth blobs and JSON-quoted token fields", () => {
   const blob = JSON.stringify({ tokens: { refresh_token: "rt-SUPERSECRET-1", access_token: "at-SUPERSECRET-2" } });
 
-  const objectPreview = safeLogPreview({ codex_harness_auth: blob, harness_owner_login: "keon", ok: true });
+  const objectPreview = safeLogPreview({ codex_harness_auth: blob, request_id: "req-1", ok: true });
   assert.ok(!objectPreview.includes("SUPERSECRET"), "object field must be redacted");
   assert.match(objectPreview, /\*\*\*REDACTED\*\*\*/);
 

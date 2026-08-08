@@ -8,7 +8,7 @@ import { DASHBOARD_LIST_EVENT_LIMIT, DASHBOARD_LIST_EVENTS_SQL } from "./store.j
 const connectionString = process.env.TEST_DATABASE_URL;
 
 test(
-  "database projection invariants close the old-writer deployment window",
+  "database projection invariants keep current review list rows bounded",
   { skip: connectionString ? false : "TEST_DATABASE_URL is not configured" },
   async () => {
     assert.ok(connectionString);
@@ -22,10 +22,15 @@ test(
          values ($1, 'projection-invariant', 'Organization') returning id`,
         [githubAccountId],
       );
-      const repository = await client.query<{ id: string }>(
-        `insert into repositories (tenant_id, github_repo_id, owner, name, default_branch)
-         values ($1, $2, 'omxyz', 'projection-invariant', 'main') returning id`,
+      const installation = await client.query<{ id: string }>(
+        `insert into installations (tenant_id, github_installation_id)
+         values ($1, $2) returning id`,
         [tenant.rows[0].id, githubAccountId + 1],
+      );
+      const repository = await client.query<{ id: string }>(
+        `insert into repositories (tenant_id, installation_id, github_repo_id, owner, name, default_branch)
+         values ($1, $2, $3, 'omxyz', 'projection-invariant', 'main') returning id`,
+        [tenant.rows[0].id, installation.rows[0].id, githubAccountId + 2],
       );
       const run = await client.query<{ id: string }>(
         `insert into review_runs
@@ -35,27 +40,14 @@ test(
         [tenant.rows[0].id, repository.rows[0].id, `projection-invariant-${githubAccountId}`],
       );
 
-      // The pre-projection API changed only the canonical column.
       await client.query(
         `update review_runs
          set result_json = jsonb_build_object(
            'status', '  completed  ',
-           'review_gate', jsonb_build_object(
-             'blocking', true,
-             'blocking_count', 2,
-             'scenario_counts', jsonb_build_object('total', 9, 'raw', repeat('x', 20000))
-           ),
-           'simulation', jsonb_build_object(
-             'status', 'failed',
-             'duration_ms', 123,
-             'scenarios', jsonb_build_array(jsonb_build_object('transcript', repeat('x', 20000)))
-           ),
-           'final_review', jsonb_build_object(
-             'status', 'issues_found',
-             'summary', repeat('x', 20000),
+           'error', repeat('e', 2000),
+           'runtime_review', jsonb_build_object(
              'findings', jsonb_build_array(jsonb_build_object('body', repeat('x', 20000)))
-           ),
-           'review_markdown', repeat('x', 20000)
+           )
          )
          where id = $1`,
         [run.rows[0].id],
@@ -66,11 +58,8 @@ test(
       );
       const result = projectedRun.rows[0].dashboard_result_json;
       assert.equal(result.status, "completed");
-      assert.equal(((result.final_review as Record<string, unknown>).summary as string).length, 500);
-      assert.deepEqual((result.final_review as Record<string, unknown>).findings, []);
-      assert.deepEqual((result.simulation as Record<string, unknown>).scenarios, []);
-      assert.deepEqual((result.review_gate as Record<string, unknown>).scenario_counts, { total: 9 });
-      assert.equal("review_markdown" in result, false);
+      assert.equal((result.error as string).length, 500);
+      assert.deepEqual(Object.keys(result).sort(), ["error", "status"]);
 
       // A later source-only update must replace, not retain, the old projection.
       await client.query(
@@ -97,7 +86,7 @@ test(
              'findings_count', 7,
              'runtime_review', jsonb_build_object('investigations', jsonb_build_array(repeat('x', 20000)))
            ),
-           'old-writer'
+           'current-writer'
          )
          returning dashboard_payload_json`,
         [run.rows[0].id],

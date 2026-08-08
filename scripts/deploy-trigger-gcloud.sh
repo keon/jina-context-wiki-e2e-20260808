@@ -33,11 +33,11 @@ case "${environment}" in
   production)
     project_id="jina-v2"
     service_account="jina-cloud-build-deployer@${project_id}.iam.gserviceaccount.com"
-    # Additive project created and inventoried on 2026-08-06. It is review-only
-    # and has never owned the legacy billing/backfill/review-scan schedules.
+    # The production Trigger project is review-only and owns no scheduled
+    # billing, installation-sync, or review-scan tasks.
     trigger_project_ref="proj_yrxsqjznkghpwsolfmjp"
     trigger_access_token_secret="jina-trigger-access-token"
-    internal_api_token_secret="jina-v1-internal-api-token"
+    internal_api_token_secret="jina-product-internal-api-token"
     daytona_api_key_secret="jina-daytona-api-key"
     github_app_id_secret="jina-github-app-id"
     github_app_private_key_secret="jina-github-app-private-key"

@@ -5,9 +5,7 @@ import { GithubWebhookRedeliveryReconciler } from "./github-webhook-redelivery-r
 import type {
   GithubWebhookInboxCapture,
   GithubWebhookInboxCaptureResult,
-  GithubWebhookInboxControl,
   GithubWebhookInboxLease,
-  GithubWebhookInboxMode,
   GithubWebhookInboxRepository,
   GithubWebhookInboxSnapshot,
 } from "./github-webhook-inbox-store.js";
@@ -76,7 +74,6 @@ test("reconciler rejects malformed or non-failure provider entries without redel
 });
 
 class ReconcileRepository implements GithubWebhookInboxRepository {
-  mode: GithubWebhookInboxMode = "capture_only";
   captured = new Set<string>();
   cooldown = new Set<string>();
   reserved: string[] = [];
@@ -120,10 +117,6 @@ class ReconcileRepository implements GithubWebhookInboxRepository {
   }
 
   async deadLetter(): Promise<void> {
-    throw new Error("unused");
-  }
-
-  async transitionMode(): Promise<GithubWebhookInboxControl> {
     throw new Error("unused");
   }
 

@@ -26,7 +26,7 @@ test("rejects invalid GitHub signatures", () => {
 
 test("ignores check_run requested actions without triggering a task", async () => {
   const trigger = new FakeTrigger();
-  const body = JSON.stringify(checkRunPayload({ repositoryFullName: "omxyz/jina-simulation" }));
+  const body = JSON.stringify(checkRunPayload({ repositoryFullName: "acme/widgets" }));
 
   const response = await handleGithubWebhook({
     config: testConfig(),
@@ -63,33 +63,6 @@ test("ignores pull_request actions when review trigger task is disabled", async 
     assert.equal(response.task_id, undefined);
     assert.equal(response.ignored_reason, "review trigger task is disabled for repository");
     assert.equal(trigger.calls.length, 0);
-  } finally {
-    reviewTaskTriggerControl.enabled = previousState;
-  }
-});
-
-test("triggers review task for the allowlisted repo while the default switch is disabled", async () => {
-  const previousState = reviewTaskTriggerControl.enabled;
-  reviewTaskTriggerControl.enabled = false;
-  try {
-    const trigger = new FakeTrigger();
-    const body = JSON.stringify(pullRequestPayload({ action: "opened", repositoryFullName: "omxyz/jina-simulation" }));
-
-    const response = await handleGithubWebhook({
-      config: testConfig(),
-      board: trigger,
-      headers: signedHeaders(body, "pull_request"),
-      rawBody: body,
-    });
-
-    assert.equal(response.accepted, true);
-    assert.equal(response.event, "pull_request");
-    assert.equal(response.action, "opened");
-    assert.equal(response.task_id, "review");
-    assert.equal(response.run_id, "run-1");
-    assert.equal(trigger.calls.length, 1);
-    assert.equal(trigger.calls[0]?.options.idempotencyKey, "review:456:123:42:head-sha-1:code_review");
-    assert.equal(trigger.calls[0]?.options.concurrencyKey, "review:456:123:42:head-sha-1:code_review");
   } finally {
     reviewTaskTriggerControl.enabled = previousState;
   }
@@ -174,7 +147,7 @@ test("triggers the review task even when the billing gate is advisory (FINDING 2
       gateCalls.push({ installationId, authorLogin });
     },
   } as unknown as Parameters<typeof handleGithubWebhook>[0]["billing"];
-  const body = JSON.stringify(pullRequestPayload({ action: "opened", repositoryFullName: "omxyz/jina-simulation" }));
+  const body = JSON.stringify(pullRequestPayload({ action: "opened", repositoryFullName: "acme/widgets" }));
 
   const response = await handleGithubWebhook({
     config: testConfig(),
@@ -291,7 +264,7 @@ test("inline @usejina replies stay scoped to the parent Jina issue", async () =>
   const trigger = new FakeTrigger();
   const github = new FakeReviewGithub();
   github.parent = {
-    user: { login: "jina-simulation[bot]", type: "Bot" },
+    user: { login: "jina-review-bot[bot]", type: "Bot" },
     body: '<!-- jina:issue {"reviewRunId":"run-1","headSha":"manual-head","stage":"runtime","fingerprint":"retry","blocking":true} -->\n\n### Retry loses updates',
   };
   const body = JSON.stringify(commentPayload(
@@ -322,10 +295,10 @@ test("inline scope requires a valid issue marker from this GitHub App", async ()
     reviewRunId: "run-1", headSha: "head", stage: "runtime", fingerprint, blocking: true,
   });
   for (const { parent, appSlug } of [
-    { appSlug: "jina-simulation", parent: { user: { login: "other[bot]", type: "Bot" }, body: `<!-- jina:issue ${marker("retry")} -->\n### Other bot` } },
-    { appSlug: "jina-simulation", parent: { user: { login: "jina-simulation[bot]", type: "Bot" }, body: "<!-- jina:issue NOT-JSON -->\n### Invalid marker" } },
-    { appSlug: "jina-simulation", parent: { user: { login: "jina-simulation[bot]", type: "Bot" }, body: `<!-- jina:issue ${marker("")} -->\n### Empty fingerprint` } },
-    { appSlug: undefined, parent: { user: { login: "jina-simulation[bot]", type: "Bot" }, body: `<!-- jina:issue ${marker("retry")} -->\n### Unconfigured app` } },
+    { appSlug: "jina-review-bot", parent: { user: { login: "other[bot]", type: "Bot" }, body: `<!-- jina:issue ${marker("retry")} -->\n### Other bot` } },
+    { appSlug: "jina-review-bot", parent: { user: { login: "jina-review-bot[bot]", type: "Bot" }, body: "<!-- jina:issue NOT-JSON -->\n### Invalid marker" } },
+    { appSlug: "jina-review-bot", parent: { user: { login: "jina-review-bot[bot]", type: "Bot" }, body: `<!-- jina:issue ${marker("")} -->\n### Empty fingerprint` } },
+    { appSlug: undefined, parent: { user: { login: "jina-review-bot[bot]", type: "Bot" }, body: `<!-- jina:issue ${marker("retry")} -->\n### Unconfigured app` } },
   ]) {
     const trigger = new FakeTrigger();
     const github = new FakeReviewGithub();
@@ -394,7 +367,7 @@ class FakeTrigger {
 }
 
 class FakeReviewGithub implements ReviewCommandGithub {
-  appSlug: string | undefined = "jina-simulation";
+  appSlug: string | undefined = "jina-review-bot";
   permission: Awaited<ReturnType<ReviewCommandGithub["getRepositoryPermission"]>> = { permission: "write" };
   parent: Awaited<ReturnType<ReviewCommandGithub["getReviewComment"]>> = {};
   parentError?: Error;
@@ -425,8 +398,8 @@ function commentPayload(event: "issue_comment" | "pull_request_review_comment", 
     installation: { id: 456 },
     repository: {
       id: 123,
-      full_name: "omxyz/jina-simulation",
-      name: "jina-simulation",
+      full_name: "acme/widgets",
+      name: "widgets",
       owner: { login: "omxyz", id: 12, type: "Organization" },
       default_branch: "main",
       private: false,
@@ -445,7 +418,7 @@ function commentPayload(event: "issue_comment" | "pull_request_review_comment", 
 }
 
 function pullRequestPayload(input: { action: string; repositoryFullName?: string }) {
-  const repositoryFullName = input.repositoryFullName ?? "omxyz/jina-simulation";
+  const repositoryFullName = input.repositoryFullName ?? "acme/widgets";
   const [owner, name] = repositoryFullName.split("/");
   return {
     action: input.action,
@@ -461,7 +434,7 @@ function pullRequestPayload(input: { action: string; repositoryFullName?: string
     pull_request: {
       number: 42,
       title: "Add feature",
-      html_url: "https://github.com/omxyz/jina-simulation/pull/42",
+      html_url: "https://github.com/acme/widgets/pull/42",
       draft: false,
       head: {
         sha: "head-sha-1",
@@ -496,9 +469,6 @@ function testConfig(): AppConfig {
     dashboardUrl: "https://dashboard.example.test",
     auth: {
       mode: "disabled",
-      githubScopes: "read:user",
-      sessionCookieName: "session",
-      oauthStateCookieName: "oauth-state",
       cookieSecure: false,
       cookieSameSite: "Lax",
       sessionTtlSeconds: 3600,
@@ -509,7 +479,6 @@ function testConfig(): AppConfig {
       managedAiFeatureId: "managed_ai_access",
       enforce: "off",
     },
-    reviewBoardPipeline: { mode: "v1", v2Repositories: new Set() },
   };
 }
 

@@ -27,14 +27,8 @@ export function runtimeReviewMarker(headSha: string, reviewRunId?: string): stri
   return `<!-- jina-runtime-review:${headSha}${reviewRunId ? `:${reviewRunId}` : ""} -->`;
 }
 
-export function legacyRuntimeReviewMarker(headSha: string): string {
-  return `<!-- jina-issue-validation:${headSha} -->`;
-}
-
 export function runtimeReviewMarkers(headSha: string, reviewRunId?: string): string[] {
-  return reviewRunId
-    ? [runtimeReviewMarker(headSha, reviewRunId)]
-    : [runtimeReviewMarker(headSha), legacyRuntimeReviewMarker(headSha)];
+  return [runtimeReviewMarker(headSha, reviewRunId)];
 }
 
 export function buildRuntimeReviewRequest(input: {
@@ -60,7 +54,10 @@ export function buildRuntimeReviewRequest(input: {
   const publishableFindings = input.result.findings;
   const lowConfidenceFindings: RuntimeReviewFinding[] = [];
   const findingsByFingerprint = new Map(publishableFindings.map((finding) => [finding.fingerprint, finding]));
-  const publication = input.result.publication ?? fallbackPublication(input.result);
+  const publication = input.result.publication;
+  if (!publication) {
+    throw new Error("runtime review result is missing its publication artifact");
+  }
 
   for (const issue of publication.issues) {
     const finding = issue.sourceFingerprints.map((fingerprint) => findingsByFingerprint.get(fingerprint)).find(Boolean);
@@ -192,63 +189,8 @@ function renderRuntimeReviewBody(input: {
     .trim();
 }
 
-function fallbackPublication(result: RuntimeReviewResult): RuntimeReviewPublication {
-  return {
-    areaSummaries: result.areas.map((area) => ({
-      areaId: area.areaId,
-      title: area.title,
-      summary: truncateText(
-        area.summary || `${area.tasks.length} task(s) completed; ${area.issues.length} issue(s) found.`,
-        800
-      )
-    })),
-    issues: result.findings.map((finding) => {
-      const severity = fallbackSeverity(finding);
-      return {
-        title: finding.title,
-        body: finding.body,
-        severity,
-        severityDescription: fallbackSeverityDescription(severity),
-        sourceFingerprints: [finding.fingerprint]
-      };
-    })
-  };
-}
-
-function severityLabel(severity: RuntimeReviewPublishedIssue["severity"], description?: string): string {
-  return `**${severity}** · ${cleanInlineText(description || fallbackSeverityDescription(severity))}`;
-}
-
-function fallbackSeverityDescription(severity: RuntimeReviewPublishedIssue["severity"]): string {
-  switch (severity) {
-    case "P0":
-      return "Critical — Must fix before merging";
-    case "P1":
-      return "High — Should fix";
-    case "P2":
-      return "Medium — Consider fixing";
-    case "P3":
-      return "Low — Low priority";
-  }
-}
-
-function fallbackSeverity(finding: RuntimeReviewFinding): RuntimeReviewPublishedIssue["severity"] {
-  const score =
-    riskWeight(finding.risk) + confidenceWeight(finding.confidence) + confidenceWeight(finding.likelihood ?? "medium");
-  if (score >= 9) return "P0";
-  if (score >= 7) return "P1";
-  if (score >= 5) return "P2";
-  return "P3";
-}
-
-function riskWeight(risk: RuntimeReviewFinding["risk"]): number {
-  return risk === "high" ? 3 : risk === "medium" ? 2 : 1;
-}
-
-function confidenceWeight(
-  confidence: NonNullable<RuntimeReviewFinding["likelihood"]> | RuntimeReviewFinding["confidence"]
-): number {
-  return confidence === "high" ? 3 : confidence === "medium" ? 2 : 1;
+function severityLabel(severity: RuntimeReviewPublishedIssue["severity"], description: string): string {
+  return `**${severity}** · ${cleanInlineText(description)}`;
 }
 
 function readinessRecommendation(score: number | undefined): string {

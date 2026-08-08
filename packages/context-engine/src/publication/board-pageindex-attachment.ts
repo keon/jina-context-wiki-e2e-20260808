@@ -115,8 +115,8 @@ export interface BoardPageIndexAttachmentRecord {
 export interface BoardPageIndexAttachmentTransactionPort {
   /**
    * Attaches the immutable hierarchy and, in the same fenced transaction,
-   * makes the prepared release query-visible and advances the ref's public
-   * current pointer. Replaying the same immutable attachment is idempotent.
+   * makes the prepared release query-visible. The highest attached sequence is
+   * current. Replaying the same immutable attachment is idempotent.
    */
   attachPageIndexAtomically(input: BoardPageIndexAttachCommit): Promise<BoardPageIndexAttachmentRecord>;
 }
