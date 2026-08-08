@@ -698,7 +698,7 @@ function prEvent(
   pullRequestNumber: number,
   headSha: string
 ): GitHubWebhookEvent {
-  return { type, pullRequestNumber, headSha };
+  return { type, pullRequestNumber, headSha, baseSha: "0".repeat(40) };
 }
 
 function assertScope(

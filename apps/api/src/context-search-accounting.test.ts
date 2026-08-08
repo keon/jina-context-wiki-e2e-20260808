@@ -6,6 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { ContextEngineStore, GenerationProjection } from "@jina/context-engine";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
+import type { WikiReleaseIdentity, WikiReleaseQueryStore } from "./context-wiki-query.js";
 import { createApiServer } from "./server.js";
 
 const tenantId = "tenant-search-accounting";
@@ -109,6 +110,62 @@ test("query-rate limits remain enforced without consuming model quota", async ()
   });
 });
 
+test("HTTP wiki queries resolve strict selectors, locale, audit, ask, and export against one immutable release", async () => {
+  await withServer(
+    projection(true),
+    quotaService(),
+    async (baseUrl) => {
+      const selected = await fetch(`${baseUrl}/wiki/list?repository=${repository}&branch=main&locale=en`, {
+        headers: headers()
+      });
+      assert.equal(selected.status, 200, await selected.clone().text());
+      const selectedBody = record(await selected.json());
+      assert.equal(record(selectedBody.release).releaseId, "release-1");
+      assert.equal(record(selectedBody.release).locale, "en");
+      assert.equal(record(selectedBody.audit).quality, "passed");
+
+      const ambiguous = await fetch(
+        `${baseUrl}/wiki/list?repository=${repository}&branch=main&commitSha=${"1".repeat(40)}`,
+        { headers: headers() }
+      );
+      assert.equal(ambiguous.status, 400);
+
+      const wrongLocale = await fetch(
+        `${baseUrl}/wiki/read?repository=${repository}&releaseId=release-1&locale=fr&document=derived-1`,
+        { headers: headers() }
+      );
+      assert.equal(wrongLocale.status, 400);
+
+      const searched = await fetch(`${baseUrl}/wiki/search`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ repository, selector: { commitSha: "1".repeat(40) }, locale: "en", query: "cache" })
+      });
+      assert.equal(searched.status, 200, await searched.clone().text());
+      assert.equal(record(record(await searched.json()).release).commitSha, "1".repeat(40));
+
+      const asked = await fetch(`${baseUrl}/wiki/ask`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ repository, selector: { branch: "main" }, question: "How is the cache invalidated?" })
+      });
+      assert.equal(asked.status, 200, await asked.clone().text());
+      const answer = record(await asked.json());
+      assert.match(String(answer.answer), /cache invalidates/i);
+      assert.equal(record(answer.release).releaseId, "release-1");
+      assert.equal(record(answer.audit).quality, "passed");
+
+      const exported = await fetch(`${baseUrl}/wiki/export?repository=${repository}&releaseId=release-1`, {
+        headers: headers()
+      });
+      assert.equal(exported.status, 200, await exported.clone().text());
+      assert.match(exported.headers.get("content-disposition") ?? "", /release-1-en\.wiki\.json/);
+      assert.equal(record(record(await exported.json()).bundle).version, 1);
+    },
+    true
+  );
+});
+
 function quotaService(defaults: Record<string, number> = {}): ContextQuotaService {
   return new ContextQuotaService({
     store: new InMemoryContextQuotaStore(),
@@ -123,7 +180,8 @@ function quotaService(defaults: Record<string, number> = {}): ContextQuotaServic
 async function withServer(
   value: GenerationProjection,
   quota: ContextQuotaService,
-  assertion: (baseUrl: string) => Promise<void>
+  assertion: (baseUrl: string) => Promise<void>,
+  wikiQuery = false
 ): Promise<void> {
   const store = {
     async listGenerations() {
@@ -144,7 +202,28 @@ async function withServer(
     enableDevEndpoints: true,
     contextStore: store,
     contextQuotaService: quota,
-    tenantAdminPrincipalIds: [principalId]
+    tenantAdminPrincipalIds: [principalId],
+    ...(wikiQuery
+      ? {
+          contextWikiReleaseQueryStore: wikiQueryStore(value.generation),
+          contextWikiContentBundleReader: {
+            async get() {
+              return {
+                version: 1 as const,
+                publicSnapshotDigest: "b".repeat(64),
+                pages: [
+                  {
+                    documentPath: "cache.md",
+                    bodyMarkdown: "# Cache\n",
+                    bodySha256: "c".repeat(64)
+                  }
+                ]
+              };
+            }
+          },
+          contextWikiAuditPolicyVersion: "audit-v2"
+        }
+      : {})
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -153,6 +232,60 @@ async function withServer(
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
+}
+
+function wikiQueryStore(generation: GenerationProjection["generation"]): WikiReleaseQueryStore {
+  const release: WikiReleaseIdentity = {
+    releaseId: generation.id,
+    releaseFamilyId: "family-1",
+    generationId: generation.id,
+    repository,
+    ref: "refs/heads/main",
+    refSequence: 1,
+    commitSha: generation.commitSha,
+    publicSnapshotDigest: "b".repeat(64),
+    locale: "en",
+    scopeKind: "branch",
+    scopeKey: "main",
+    publishedAt: generation.publishedAt!,
+    contentBundleArtifact: {
+      version: 1,
+      tenantId,
+      repository,
+      publicSnapshotDigest: "b".repeat(64),
+      bundleSha256: "a".repeat(64),
+      uri: "gs://wiki/release-1.json",
+      key: "wiki/release-1.json",
+      contentType: "application/json",
+      bytes: 42,
+      sha256: "a".repeat(64),
+      objectGeneration: "1"
+    }
+  };
+  return {
+    async findPublishedWikiRelease(input) {
+      return input.releaseId === release.releaseId ? release : undefined;
+    },
+    async findCurrentPublishedWikiRelease(input) {
+      return input.ref === release.ref && input.locale === release.locale ? release : undefined;
+    },
+    async findNewestPublishedWikiReleaseForCommit(input) {
+      return input.commitSha === release.commitSha && input.locale === release.locale ? release : undefined;
+    },
+    async listPublishedWikiReleases() {
+      return [release];
+    },
+    async latestWikiAuditSummary(input) {
+      return input.auditPolicyVersion === "audit-v2"
+        ? {
+            quality: "passed" as const,
+            auditId: "audit-1",
+            auditPolicyVersion: "audit-v2",
+            auditedAt: "2026-08-08T00:00:00.000Z"
+          }
+        : undefined;
+    }
+  };
 }
 
 async function search(

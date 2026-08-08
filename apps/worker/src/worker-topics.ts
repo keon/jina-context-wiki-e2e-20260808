@@ -1,23 +1,23 @@
 import {
   causalGraphWorkerTopics,
+  contextWikiWorkerTopic,
   contextWorkflowWorkerTopics,
   controlBoardWorkerTopics,
   reviewWorkerTopic,
   supportedWorkerTopics,
   type CausalGraphWorkerTopic,
   type ControlBoardWorkerTopic,
-  type ContextWorkflowWorkerTopic,
   type EmbeddedContextStageTopic,
   type SupportedWorkerTopic,
   type WorkerTopic
 } from "@jina/shared-kernel";
 
-export const CONTEXT_BOARD_TOPICS = contextWorkflowWorkerTopics;
+export const CONTEXT_BOARD_TOPICS = [contextWikiWorkerTopic, ...contextWorkflowWorkerTopics] as const;
 export const CAUSAL_GRAPH_TOPICS = causalGraphWorkerTopics;
 export const CONTROL_BOARD_TOPICS = controlBoardWorkerTopics;
 export const SUPPORTED_WORKER_TOPICS = supportedWorkerTopics;
 
-export type ContextWorkerTopic = ContextWorkflowWorkerTopic;
+export type ContextWorkerTopic = (typeof CONTEXT_BOARD_TOPICS)[number];
 export type {
   CausalGraphWorkerTopic,
   ControlBoardWorkerTopic,
@@ -68,7 +68,7 @@ export function configuredWorkerTopics(value: string | undefined): SupportedWork
 export function requiresBoardAgentExecutor(topics: readonly WorkerTopic[]): boolean {
   return topics.some(
     (topic) =>
-      CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic) ||
+      (CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic) && topic !== contextWikiWorkerTopic) ||
       CAUSAL_GRAPH_TOPICS.includes(topic as CausalGraphWorkerTopic)
   );
 }

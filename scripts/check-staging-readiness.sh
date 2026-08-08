@@ -159,6 +159,10 @@ product_secrets=(
   jina-staging-graph-api-token
   jina-staging-graph-internal-token
   jina-staging-autumn-secret-key
+  jina-staging-context-trigger-secret-key
+  jina-staging-context-trigger-service-token
+  jina-staging-context-execution-grant-secret
+  jina-staging-context-trigger-dispatch-secret
 )
 for secret_name in "${product_secrets[@]}"; do
   if gcloud secrets versions describe latest --secret="${secret_name}" \

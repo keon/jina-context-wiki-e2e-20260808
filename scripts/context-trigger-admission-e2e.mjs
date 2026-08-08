@@ -541,6 +541,7 @@ function pullRequestFixture(config, action, headSha) {
       number: config.prNumber,
       title: `Context trigger acceptance PR ${config.prNumber}`,
       head: { sha: headSha },
+      base: { sha: config.currentSha },
       draft: false
     },
     ...providerFixture(config)

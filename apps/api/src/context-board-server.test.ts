@@ -914,7 +914,7 @@ test("a newer PR delivery queues behind leased work without settling or cancelin
   const rawBody = JSON.stringify({
     action: "synchronize",
     repository: { full_name: repository, default_branch: "main" },
-    pull_request: { number: 88, head: { sha: secondHead } }
+    pull_request: { number: 88, head: { sha: secondHead }, base: { sha: firstHead } }
   });
   const signature = `sha256=${createHmac("sha256", webhookSecret).update(rawBody).digest("hex")}`;
   const deliver = () =>
@@ -956,6 +956,80 @@ test("a newer PR delivery queues behind leased work without settling or cancelin
     assert.equal(duplicateBody.duplicate, true);
     assert.equal((await quotaService.snapshot(tenantId)).active.modelTasks, 1);
     assert.equal(quotaService.successfulSettlementAttempts, 0);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("durable follow-up promotion does not reschedule itself while restoring the mutation snapshot", async () => {
+  const tenantId = "tenant-followup-self-reschedule";
+  const repository = "omxyz/followup-self-reschedule";
+  const initial = createContextWorkflowBoardBuild(createEmptyBoardState(), {
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-page-workflow-1",
+    validatorVersion: "context-page-validator-1",
+    pageIndexVersion: "pageindex-local-1",
+    executionProfileDigest: "f".repeat(64),
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "initial-followup-self-reschedule",
+    commitSha: "1".repeat(40),
+    trigger: "push",
+    now: NOW
+  });
+  let board = transitionBoardTask(initial.state, initial.buildTaskId, "in_progress", NOW);
+  board = transitionBoardTask(board, initial.buildTaskId, "done", NOW);
+  const queued = applyCommand(
+    board,
+    {
+      command: "CommentTask",
+      taskId: initial.buildTaskId,
+      eventType: "context.build_followup_requested",
+      payload: {
+        followup: {
+          tenantId,
+          repository,
+          ref: "main",
+          requestKey: "followup-self-reschedule",
+          commitSha: "2".repeat(40),
+          trigger: "push"
+        }
+      }
+    },
+    { actor: { type: "system", id: "followup-self-reschedule-test" }, now: NOW }
+  );
+  assert.equal(queued.accepted, true);
+  const stateStore = mutableStateStore({
+    intakeState: { board: queued.state },
+    devDeliverySequence: 0
+  });
+  const server = createApiServer({ tenantId, stateStore });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    assert.equal((await fetch(`${baseUrl}/health`)).status, 200);
+    const deadline = Date.now() + 3_000;
+    while (
+      Date.now() < deadline &&
+      !stateStore
+        .current()
+        .intakeState.board.tasks.some((task) => task.metadata.requestKey === "followup-self-reschedule")
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(
+      stateStore
+        .current()
+        .intakeState.board.tasks.some((task) => task.metadata.requestKey === "followup-self-reschedule"),
+      "the durable follow-up should be promoted"
+    );
+    const settledUpdateCount = stateStore.updateCount();
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    assert.equal(stateStore.updateCount(), settledUpdateCount, "a successful promotion must not schedule itself again");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }

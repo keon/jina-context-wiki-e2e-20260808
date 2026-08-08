@@ -5,20 +5,16 @@ import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { contextMermaidConfig } from "@jina/shared-kernel/mermaid-config";
 import { resolveContextMarkdownLink } from "../../lib/context-citations.ts";
 import type { ContextCatalogDocument, ContextRelease } from "../../lib/types.ts";
 
 let mermaidLoader: Promise<(typeof import("mermaid"))["default"]> | undefined;
+const MERMAID_RENDER_TIMEOUT_MS = 2_000;
 
 function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
   mermaidLoader ??= import("mermaid").then(({ default: mermaid }) => {
-    mermaid.initialize({
-      startOnLoad: false,
-      suppressErrorRendering: true,
-      securityLevel: "strict",
-      theme: "dark",
-      fontFamily: "ui-sans-serif, system-ui, sans-serif"
-    });
+    mermaid.initialize(contextMermaidConfig);
     return mermaid;
   });
   return mermaidLoader;
@@ -37,20 +33,40 @@ function MermaidDiagram({ source }: { readonly source: string }) {
 
   useEffect(() => {
     let active = true;
+    let settled = false;
     const diagramId = `context-mermaid-${reactId.replace(/[^a-z0-9_-]/gi, "")}`;
     setSvg("");
     setRenderFailed(false);
+    const timeout = globalThis.setTimeout(() => {
+      if (!active || settled) return;
+      settled = true;
+      removeMermaidArtifacts(diagramId);
+      setRenderFailed(true);
+    }, MERMAID_RENDER_TIMEOUT_MS);
     void loadMermaid()
       .then((mermaid) => mermaid.render(diagramId, source))
       .then(({ svg: rendered }) => {
-        if (active) setSvg(rendered);
+        if (!active || settled) {
+          removeMermaidArtifacts(diagramId);
+          return;
+        }
+        settled = true;
+        globalThis.clearTimeout(timeout);
+        setSvg(rendered);
       })
       .catch(() => {
+        if (settled) {
+          removeMermaidArtifacts(diagramId);
+          return;
+        }
+        settled = true;
+        globalThis.clearTimeout(timeout);
         removeMermaidArtifacts(diagramId);
         if (active) setRenderFailed(true);
       });
     return () => {
       active = false;
+      globalThis.clearTimeout(timeout);
       removeMermaidArtifacts(diagramId);
     };
   }, [reactId, source]);

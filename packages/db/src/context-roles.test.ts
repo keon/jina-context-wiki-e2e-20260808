@@ -4,15 +4,23 @@ import { CONTEXT_ROLES_SQL, CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
 import { CONTEXT_SCHEMA_SQL } from "./context/schema.js";
 
 const currentTables = [
+  "context_board_publications",
+  "context_evidence_snapshots",
   "context_phase_checkpoints",
+  "context_phase_operation_leases",
   "context_quota_ledgers",
+  "context_release_audit_followups",
+  "context_release_audit_runs",
+  "context_release_audits",
   "context_releases",
+  "context_wiki_projections",
+  "current_context_board_releases",
   "issue_graph_releases",
   "repositories",
   "repository_access"
 ] as const;
 
-test("Context schema has only the six current happy-path tables", () => {
+test("Context schema has only compact current-path tables", () => {
   const declared = [...CONTEXT_SCHEMA_SQL.matchAll(/create table if not exists jina_context\.([a-z_]+)/g)].map(
     (match) => match[1]
   );
@@ -51,7 +59,10 @@ test("runtime roles expose only current-path capabilities", () => {
   ]);
   assert.match(CONTEXT_ROLES_SQL, /grant select on[\s\S]*jina_context\.context_releases/);
   assert.match(CONTEXT_ROLES_SQL, /grant select,insert,update on jina_context\.context_quota_ledgers/);
-  assert.doesNotMatch(CONTEXT_ROLES_SQL, /evidence|knowledge|projector|outbox|manifest|dense|identity/);
+  assert.doesNotMatch(
+    CONTEXT_ROLES_SQL,
+    /evidence_records|evidence_checkpoints|context_documents|context_fragments|generation_projectors|exact_index/
+  );
 });
 
 test("direct repository access replaces the observation and ACL projection pipeline", () => {

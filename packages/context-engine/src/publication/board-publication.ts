@@ -155,6 +155,7 @@ export interface BoardContextReleaseSeedPort {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
+    readonly locale?: string;
   }): Promise<ContextPriorReleaseSeed | undefined>;
 }
 

@@ -5,37 +5,50 @@ import {
   type StreamableHTTPServerTransportOptions
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { ContextCatalogService, ContextSearchResponse } from "@jina/context-engine";
 import * as z from "zod/v4";
-
-type CatalogList = Awaited<ReturnType<ContextCatalogService["listContext"]>>;
-type CatalogRead = Awaited<ReturnType<ContextCatalogService["readContext"]>>;
-type CatalogDiff = Awaited<ReturnType<ContextCatalogService["diffContext"]>>;
+import { parseWikiSelector, type WikiSelector } from "./context-wiki-query.js";
 
 export interface ContextMcpHandlers {
   search(input: {
     repository: string;
     query: string;
-    ref?: string;
-    releaseId?: string;
+    selector?: WikiSelector;
+    locale?: string;
     limit?: number;
-  }): Promise<ContextSearchResponse>;
-  list(input: { repository: string; ref?: string; releaseId?: string }): Promise<CatalogList>;
-  read(input: { repository: string; document: string; ref?: string; releaseId?: string }): Promise<CatalogRead>;
-  diff(input: { repository: string; fromReleaseId: string; toReleaseId: string }): Promise<CatalogDiff>;
+  }): Promise<unknown>;
+  list(input: { repository: string; selector?: WikiSelector; locale?: string }): Promise<unknown>;
+  read(input: { repository: string; document: string; selector?: WikiSelector; locale?: string }): Promise<unknown>;
+  diff(input: { repository: string; fromReleaseId: string; toReleaseId: string }): Promise<unknown>;
+  ask(input: {
+    repository: string;
+    question: string;
+    selector?: WikiSelector;
+    locale?: string;
+    maxEvidenceItems?: number;
+  }): Promise<unknown>;
 }
 
 const repository = z.string().trim().min(1).max(300).describe("Repository name, for example omlabs/jina");
-const ref = z.string().trim().min(1).max(300).optional().describe("Branch or context preview ref");
+const branch = z.string().trim().min(1).max(255).optional().describe("Git branch name");
+const pullRequest = z.number().int().positive().optional().describe("GitHub pull request number");
+const commitSha = z
+  .string()
+  .trim()
+  .regex(/^[0-9a-fA-F]{40}$/)
+  .optional()
+  .describe("Full Git commit SHA");
+const ref = z.string().trim().min(1).max(300).optional().describe("Legacy canonical ref selector");
 const releaseId = z.string().trim().min(1).max(300).optional().describe("Immutable context release ID");
+const locale = z.string().trim().min(2).max(80).optional().describe("Wiki locale; defaults to the configured locale");
+const selectorSchema = { releaseId, branch, pullRequest, commitSha, ref, locale };
 
-/** Creates the context-pack MCP surface. None of these tools synthesizes an answer. */
+/** Creates the release-explicit context-pack and grounded answer MCP surface. */
 function createContextMcpServer(handlers: ContextMcpHandlers): McpServer {
   const server = new McpServer(
     { name: "jina-context", version: "2.0.0" },
     {
       instructions:
-        "Use search_context to retrieve citation-grounded derived context, list_context to browse its tree, read_context for a complete document, and diff_context to compare immutable releases. These tools return context packs for the calling agent; they do not answer questions."
+        "Use ask_context for a release-explicit citation-grounded answer, search_context to retrieve evidence, list_context to browse its tree, read_context for a complete document, and diff_context to compare immutable releases. Selectors are mutually exclusive and locale-isolated."
     }
   );
 
@@ -48,8 +61,7 @@ function createContextMcpServer(handlers: ContextMcpHandlers): McpServer {
       inputSchema: {
         repository,
         query: z.string().trim().min(1).max(4_000),
-        ref,
-        releaseId,
+        ...selectorSchema,
         limit: z.number().int().min(1).max(25).optional()
       },
       annotations: readOnlyAnnotations
@@ -59,8 +71,7 @@ function createContextMcpServer(handlers: ContextMcpHandlers): McpServer {
         await handlers.search({
           repository: input.repository,
           query: input.query,
-          ...(input.ref ? { ref: input.ref } : {}),
-          ...(input.releaseId ? { releaseId: input.releaseId } : {}),
+          ...mcpSelection(input),
           ...(input.limit ? { limit: input.limit } : {})
         }),
         "context search"
@@ -72,15 +83,14 @@ function createContextMcpServer(handlers: ContextMcpHandlers): McpServer {
     {
       title: "List context",
       description: "List derived context documents and their deterministic PageIndex-style hierarchy.",
-      inputSchema: { repository, ref, releaseId },
+      inputSchema: { repository, ...selectorSchema },
       annotations: readOnlyAnnotations
     },
     async (input) =>
       result(
         await handlers.list({
           repository: input.repository,
-          ...(input.ref ? { ref: input.ref } : {}),
-          ...(input.releaseId ? { releaseId: input.releaseId } : {})
+          ...mcpSelection(input)
         }),
         "context catalog"
       )
@@ -94,8 +104,7 @@ function createContextMcpServer(handlers: ContextMcpHandlers): McpServer {
       inputSchema: {
         repository,
         document: z.string().trim().min(1).max(1_000).describe("Document ID, logical ID, or revision ID"),
-        ref,
-        releaseId
+        ...selectorSchema
       },
       annotations: readOnlyAnnotations
     },
@@ -104,8 +113,7 @@ function createContextMcpServer(handlers: ContextMcpHandlers): McpServer {
         await handlers.read({
           repository: input.repository,
           document: input.document,
-          ...(input.ref ? { ref: input.ref } : {}),
-          ...(input.releaseId ? { releaseId: input.releaseId } : {})
+          ...mcpSelection(input)
         }),
         "context document"
       )
@@ -126,7 +134,48 @@ function createContextMcpServer(handlers: ContextMcpHandlers): McpServer {
     async (input) => result(await handlers.diff(input), "context diff")
   );
 
+  server.registerTool(
+    "ask_context",
+    {
+      title: "Ask context",
+      description:
+        "Answer a question from one immutable wiki release and return its release identity, evidence citations, coverage, audit summary, and separately metered usage.",
+      inputSchema: {
+        repository,
+        question: z.string().trim().min(1).max(4_000),
+        ...selectorSchema,
+        maxEvidenceItems: z.number().int().min(1).max(25).optional()
+      },
+      annotations: readOnlyAnnotations
+    },
+    async (input) =>
+      result(
+        await handlers.ask({
+          repository: input.repository,
+          question: input.question,
+          ...mcpSelection(input),
+          ...(input.maxEvidenceItems ? { maxEvidenceItems: input.maxEvidenceItems } : {})
+        }),
+        "context answer"
+      )
+  );
+
   return server;
+}
+
+function mcpSelection(input: {
+  readonly releaseId?: string | undefined;
+  readonly branch?: string | undefined;
+  readonly pullRequest?: number | undefined;
+  readonly commitSha?: string | undefined;
+  readonly ref?: string | undefined;
+  readonly locale?: string | undefined;
+}): { readonly selector?: WikiSelector; readonly locale?: string } {
+  const selector = parseWikiSelector(input, { allowOmitted: true });
+  return {
+    ...(selector ? { selector } : {}),
+    ...(input.locale ? { locale: input.locale } : {})
+  };
 }
 
 const readOnlyAnnotations = {

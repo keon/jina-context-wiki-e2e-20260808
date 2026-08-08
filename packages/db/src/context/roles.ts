@@ -21,9 +21,17 @@ const tenantScopeSql = (column = "tenant_id", allowAdminSystemScope = true) =>
 const tenantScopedTables = [
   "repositories",
   "repository_access",
+  "context_evidence_snapshots",
   "context_releases",
+  "context_wiki_projections",
+  "context_board_publications",
+  "current_context_board_releases",
+  "context_release_audit_runs",
+  "context_release_audits",
+  "context_release_audit_followups",
   "issue_graph_releases",
   "context_phase_checkpoints",
+  "context_phase_operation_leases",
   "context_quota_ledgers"
 ] as const;
 
@@ -52,7 +60,10 @@ grant usage on schema public to jina_context_tokens;
 
 grant select on
   jina_context.repositories,jina_context.repository_access,
-  jina_context.context_releases,jina_context.issue_graph_releases
+  jina_context.context_releases,jina_context.context_board_publications,
+  jina_context.current_context_board_releases,jina_context.context_release_audit_runs,
+  jina_context.context_release_audits,
+  jina_context.context_release_audit_followups,jina_context.issue_graph_releases
 to jina_context_query;
 
 grant select,insert,update on jina_context.context_quota_ledgers

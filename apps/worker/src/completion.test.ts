@@ -42,6 +42,134 @@ test("paused drain workers stay healthy without issuing Board claims", async (co
   assert.equal(claimCount, 0);
 });
 
+test("wiki bridge dispatches once and detaches without polling Trigger or completing the Board lease", async (context) => {
+  let claimed = false;
+  let dispatches = 0;
+  let triggerRetrievals = 0;
+  let boardCompletions = 0;
+  let renewals = 0;
+  const requestDigest = "a".repeat(64);
+  const triggerRequest = {
+    schemaVersion: 1,
+    taskIdentifier: "generate-wiki",
+    boardBuildId: "task_wiki_async",
+    tenantId: "tenant-wiki-async",
+    repository: "acme/docs",
+    source: {
+      ref: "refs/heads/main",
+      scopeKind: "branch",
+      scopeKey: "main",
+      refSequence: 1,
+      commitSha: "b".repeat(40)
+    },
+    requestKey: "wiki:async",
+    generationReason: "initial",
+    releaseFamilyId: "family-async",
+    requestedLocale: "en",
+    pipelineVersion: "context_wiki.trigger.v1",
+    generatorPolicyVersion: "wiki-generator-v1",
+    options: {
+      idempotencyKey: "wiki:async",
+      concurrencyKey: "wiki:tenant-wiki-async:acme/docs:main:en",
+      queue: "context-wiki",
+      tags: ["kind:context-wiki-build"]
+    }
+  };
+  const api = createServer(async (request, response) => {
+    const body = await readJson(request);
+    if (request.url === "/internal/worker/claim") {
+      if (claimed) {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      claimed = true;
+      json(response, 200, {
+        message: {
+          id: "message_wiki_async",
+          topic: "run-wiki-build",
+          leaseId: "lease_wiki_async",
+          leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          attempt: 1,
+          writeFenceToken: "fence_wiki_async"
+        },
+        task: {
+          id: triggerRequest.boardBuildId,
+          metadata: {
+            tenantId: triggerRequest.tenantId,
+            repository: triggerRequest.repository,
+            ref: triggerRequest.source.ref,
+            refSequence: triggerRequest.source.refSequence,
+            commitSha: triggerRequest.source.commitSha,
+            locale: triggerRequest.requestedLocale,
+            contextBuildId: triggerRequest.boardBuildId,
+            requestDigest,
+            triggerRequest
+          }
+        }
+      });
+      return;
+    }
+    if (request.url === "/internal/context/wiki/dispatch/authorize") {
+      assert.equal(body.taskId, triggerRequest.boardBuildId);
+      json(response, 200, {
+        boardBuildId: triggerRequest.boardBuildId,
+        request: triggerRequest,
+        requestDigest,
+        dispatchNonce: "nonce_wiki_async",
+        attempt: 1
+      });
+      return;
+    }
+    if (request.url === "/internal/worker/renew") renewals += 1;
+    if (request.url === "/internal/worker/complete") boardCompletions += 1;
+    json(response, 200, { accepted: true });
+  });
+  const trigger = createServer(async (request, response) => {
+    await readJson(request);
+    if (request.method === "POST" && request.url === "/api/v1/tasks/generate-wiki/trigger") {
+      dispatches += 1;
+      json(response, 200, { id: "run_async1" });
+      return;
+    }
+    triggerRetrievals += 1;
+    json(response, 200, { id: "run_async1", status: "EXECUTING", isCompleted: false });
+  });
+  await Promise.all([
+    new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve)),
+    new Promise<void>((resolve) => trigger.listen(0, "127.0.0.1", resolve))
+  ]);
+  const workerPort = await availablePort();
+  const worker = spawn(process.execPath, [new URL("./server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: String(workerPort),
+      JINA_API_URL: `http://127.0.0.1:${(api.address() as AddressInfo).port}`,
+      INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
+      WORKER_TOPICS: "run-wiki-build",
+      WORKER_POLL_INTERVAL_MS: "20",
+      WORKER_HEARTBEAT_INTERVAL_MS: "25",
+      JINA_CONTEXT_TRIGGER_API_URL: `http://127.0.0.1:${(trigger.address() as AddressInfo).port}`,
+      JINA_CONTEXT_TRIGGER_SECRET_KEY: "tr_test_async",
+      JINA_CONTEXT_TRIGGER_REQUEST_TIMEOUT_MS: "1000"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  context.after(async () => {
+    await terminate(worker);
+    await Promise.all([api, trigger].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  });
+
+  const health = await waitForHealth(workerPort, (value) => recordOrUndefined(value.lastWork)?.outcome === "deferred");
+  assert.equal(recordOrUndefined(health.lastWork)?.topic, "run-wiki-build");
+  await delay(100);
+  assert.equal(dispatches, 1);
+  assert.equal(triggerRetrievals, 0);
+  assert.equal(boardCompletions, 0);
+  assert.equal(renewals, 0);
+});
+
 test("Context quota claim backpressure remains healthy and poll-cadenced", async (context) => {
   const claimTimes: number[] = [];
   const privateDetail = "private-tenant-detail-must-not-be-logged";

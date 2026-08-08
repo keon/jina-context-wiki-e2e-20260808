@@ -1,4 +1,5 @@
 import type { GenerationProjection, IndexGeneration } from "@jina/context-engine";
+import { CONTEXT_CATALOG_ROWS_SQL } from "./catalog-query.js";
 import { ContextDatabase } from "./database.js";
 import { parseStoredContextCatalog } from "./release-catalog.js";
 
@@ -14,8 +15,8 @@ export class PostgresProjectionRepository {
     const result = await this.database.queryAs<CatalogRow>(
       "jina_context_admin",
       { system: true },
-      `select catalog from jina_context.context_releases
-       where release_id=$1 and pageindex_attached_at is not null`,
+      `select catalog from ${CONTEXT_CATALOG_ROWS_SQL} releases
+       where release_id=$1 and activated_at is not null`,
       [generationId],
       "context.release.get"
     );
@@ -27,9 +28,9 @@ export class PostgresProjectionRepository {
       "jina_context_admin",
       { system: true },
       `select release.catalog
-       from jina_context.context_releases release
+       from ${CONTEXT_CATALOG_ROWS_SQL} release
        where release.release_id=$1
-         and release.pageindex_attached_at is not null
+         and release.activated_at is not null
          and exists (
            select 1 from jina_context.repository_access access
            where access.tenant_id=release.tenant_id and access.repository=release.repository
@@ -45,9 +46,9 @@ export class PostgresProjectionRepository {
     const result = await this.database.queryAs<CatalogRow>(
       "jina_context_query",
       { tenantIds: [tenantId] },
-      `select catalog from jina_context.context_releases
+      `select catalog from ${CONTEXT_CATALOG_ROWS_SQL} releases
        where tenant_id=$1 and repository=$2
-       order by ref_name,ref_sequence desc,release_id desc`,
+       order by ref_name,ref_sequence desc nulls last,release_id desc`,
       [tenantId, repository],
       "context.release.list"
     );

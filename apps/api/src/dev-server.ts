@@ -1,18 +1,23 @@
 import {
   ContextDatabase,
   GcsContextArtifactStore,
+  GcsWikiArtifactStore,
   PostgresBoardPageIndexAttachmentRepository,
   PostgresBoardContextPublicationRepository,
   PostgresContextQuotaStore,
   PostgresContextEngineStore,
+  PostgresEvidenceStore,
   PostgresContextPhaseCheckpointRepository,
   PostgresJsonStateStore,
+  PostgresWikiTriggerPublicationRepository,
+  PostgresWikiAuditRepository,
   PostgresIssueGraphRepository,
   PostgresRelationalBoardWorkerStore,
   PostgresSharedIdentityStore,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
 import {
+  ContextCatalogService,
   FileContextArtifactStore,
   MemoryContextEngineStore,
   MemoryContextPhaseCheckpointStore,
@@ -20,6 +25,9 @@ import {
 } from "@jina/context-engine";
 import { createLogger, errorLogFields, startOpenTelemetry } from "@jina/observability";
 import { createApiServer } from "./server.js";
+import { ContextWikiStageExecutor } from "./context-wiki-execution.js";
+import { ApiOwnedContextWikiPublicationRuntime } from "./context-wiki-publication.js";
+import { ContextWikiAuditCoordinator } from "./context-wiki-audit.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
@@ -75,6 +83,9 @@ const contextDatabase = postgresConfig
   : undefined;
 const stateStore = createStateStore(postgresConfig, contextDatabase?.pool);
 const contextStore = createContextStore(contextDatabase);
+const contextEvidenceStore = contextDatabase
+  ? new PostgresEvidenceStore(contextDatabase)
+  : new MemoryContextEngineStore();
 const contextPhaseCheckpointStore = contextDatabase
   ? new PostgresContextPhaseCheckpointRepository(contextDatabase)
   : new MemoryContextPhaseCheckpointStore();
@@ -110,6 +121,92 @@ const contextArtifactStore = process.env.CONTEXT_GCS_BUCKET
   : enableDevEndpoints
     ? new FileContextArtifactStore(process.env.CONTEXT_ARTIFACT_DIRECTORY?.trim() || ".jina/context-artifacts")
     : undefined;
+const contextWikiContentStore = process.env.CONTEXT_GCS_BUCKET
+  ? new GcsWikiArtifactStore(process.env.CONTEXT_GCS_BUCKET, {
+      ...(process.env.GOOGLE_CLOUD_PROJECT ? { projectId: process.env.GOOGLE_CLOUD_PROJECT } : {}),
+      ...(process.env.GOOGLE_APPLICATION_CREDENTIALS ? { keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS } : {})
+    })
+  : undefined;
+const contextWikiPublicationStore = contextDatabase
+  ? new PostgresWikiTriggerPublicationRepository(contextDatabase)
+  : undefined;
+const contextWikiAuditCatalog = new ContextCatalogService(contextStore);
+const contextWikiStageExecutor =
+  contextArtifactStore && contextWikiContentStore && contextWikiPublicationStore
+    ? new ContextWikiStageExecutor({
+        artifactStore: contextArtifactStore,
+        contentStore: contextWikiContentStore,
+        evidenceStore: contextEvidenceStore,
+        publication: new ApiOwnedContextWikiPublicationRuntime(
+          contextArtifactStore,
+          contextWikiContentStore,
+          contextWikiPublicationStore
+        ),
+        priorReleases: contextWikiPublicationStore,
+        auditArtifacts: contextWikiContentStore,
+        ...(process.env.OPENAI_API_KEY ? { openAiApiKey: process.env.OPENAI_API_KEY } : {}),
+        ...(process.env.JINA_WIKI_MODEL ? { openAiModel: process.env.JINA_WIKI_MODEL } : {}),
+        ...(process.env.JINA_WIKI_CHROMIUM_EXECUTABLE_PATH
+          ? { chromiumExecutablePath: process.env.JINA_WIKI_CHROMIUM_EXECUTABLE_PATH }
+          : {})
+      })
+    : undefined;
+const contextWikiAuditCoordinator =
+  contextDatabase &&
+  contextWikiContentStore &&
+  contextWikiPublicationStore &&
+  process.env.JINA_CONTEXT_TRIGGER_DISPATCH_SECRET
+    ? new ContextWikiAuditCoordinator(
+        new PostgresWikiAuditRepository(contextDatabase),
+        contextWikiPublicationStore,
+        contextWikiContentStore,
+        contextWikiContentStore,
+        process.env.JINA_CONTEXT_TRIGGER_DISPATCH_SECRET,
+        undefined,
+        {
+          async probe(input) {
+            const access = {
+              tenantId: input.tenantId,
+              repository: input.repository,
+              releaseId: input.releaseId,
+              principalId: "svc:context-wiki-audit",
+              tenantAdmin: true
+            } as const;
+            const listed = await contextWikiAuditCatalog.listContext(access);
+            const searches = await Promise.all(
+              input.queries.map(async (query) => {
+                const result = await contextWikiAuditCatalog.searchContext({ ...access, query, limit: 5 });
+                return {
+                  query,
+                  resultPaths: result.results.map((candidate) => candidate.logicalId)
+                };
+              })
+            );
+            const countTree = (nodes: readonly { readonly children: readonly unknown[] }[]): number =>
+              nodes.reduce(
+                (count, node) =>
+                  count +
+                  1 +
+                  countTree(
+                    node.children as readonly {
+                      readonly children: readonly unknown[];
+                    }[]
+                  ),
+                0
+              );
+            return {
+              releaseId: listed.release.id,
+              documentPaths: listed.documents.map((document) => document.logicalId),
+              treeNodeCount: countTree(listed.tree),
+              citationCount: listed.documents.reduce((count, document) => count + document.citations.length, 0),
+              searches
+            };
+          }
+        },
+        contextArtifactStore,
+        process.env.JINA_WIKI_CHROMIUM_EXECUTABLE_PATH
+      )
+    : undefined;
 
 const productApiRequestHandler = await loadProductApiRequestHandler(contextDatabase?.pool);
 
@@ -135,6 +232,23 @@ const server = createApiServer({
   requireWorkerReleaseGate,
   ...(process.env.JINA_INTERNAL_PRINCIPAL_ID ? { internalApiPrincipalId: process.env.JINA_INTERNAL_PRINCIPAL_ID } : {}),
   ...(process.env.CONTEXT_API_TOKEN ? { contextApiToken: process.env.CONTEXT_API_TOKEN } : {}),
+  ...(process.env.JINA_CONTEXT_TRIGGER_SERVICE_TOKEN
+    ? { contextWikiTriggerServiceToken: process.env.JINA_CONTEXT_TRIGGER_SERVICE_TOKEN }
+    : {}),
+  ...(process.env.JINA_CONTEXT_EXECUTION_GRANT_SECRET
+    ? { contextWikiExecutionGrantSecret: process.env.JINA_CONTEXT_EXECUTION_GRANT_SECRET }
+    : {}),
+  ...(process.env.JINA_CONTEXT_TRIGGER_DISPATCH_SECRET
+    ? { contextWikiDispatchSecret: process.env.JINA_CONTEXT_TRIGGER_DISPATCH_SECRET }
+    : {}),
+  ...(contextWikiStageExecutor ? { contextWikiStageExecutor } : {}),
+  ...(contextWikiAuditCoordinator ? { contextWikiAuditCoordinator } : {}),
+  contextWikiAuditFixEnabled: booleanEnvironment("JINA_WIKI_AUDIT_FIX_ENABLED", false),
+  ...(contextWikiPublicationStore ? { contextWikiReleaseQueryStore: contextWikiPublicationStore } : {}),
+  ...(contextWikiContentStore ? { contextWikiContentBundleReader: contextWikiContentStore } : {}),
+  contextWikiDefaultBranch: process.env.JINA_WIKI_DEFAULT_BRANCH?.trim() || "main",
+  contextWikiDefaultLocale: process.env.JINA_WIKI_DEFAULT_LOCALE?.trim() || "en",
+  contextWikiAuditPolicyVersion: process.env.JINA_WIKI_AUDIT_POLICY_VERSION?.trim() || "wiki-audit-v1",
   ...(process.env.JINA_CONTEXT_TENANT_ID ? { contextApiTenantId: process.env.JINA_CONTEXT_TENANT_ID } : {}),
   ...(process.env.JINA_CONTEXT_PRINCIPAL_ID ? { contextApiPrincipalId: process.env.JINA_CONTEXT_PRINCIPAL_ID } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
@@ -156,7 +270,8 @@ server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
   if (enableDevEndpoints) {
     console.log(`jina api server: http://localhost:${port}`);
     console.log("  GET  /board  /events  /wiki/releases  /wiki/list  /wiki/read  /wiki/diff  /health");
-    console.log("  POST /wiki/build  /wiki/search  /mcp");
+    console.log("  GET  /wiki/export");
+    console.log("  POST /wiki/build  /wiki/search  /wiki/ask  /mcp");
     console.log("  POST /wiki/webhooks/github  (signed Context deliveries)");
     console.log("  POST /dev/webhooks/github  (unsigned local demo events)");
   }

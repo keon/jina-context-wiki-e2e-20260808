@@ -5,6 +5,7 @@ import {
   contextArtifactKey,
   isCanonicalContextArtifactKey,
   type ContextArtifactKind,
+  type ContextArtifactLookup,
   type ContextArtifactRef,
   type ContextArtifactStore,
   type ContextArtifactWrite
@@ -113,6 +114,42 @@ export class GcsContextArtifactStore implements ContextArtifactStore {
       throw new Error(`GCS artifact bytes do not match their immutable reference`);
     }
     return content;
+  }
+
+  async find(input: ContextArtifactLookup): Promise<ContextArtifactRef | undefined> {
+    const key = contextArtifactKey({ ...input, content: "" });
+    const file = this.#storage.bucket(this.#bucketName).file(key);
+    let metadata: FileMetadata;
+    try {
+      [metadata] = await file.getMetadata();
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error ? Number(error.code) : 0;
+      if (code === 404) return undefined;
+      throw error;
+    }
+    const generation = requiredGeneration(metadata);
+    const bytes = Number(metadata.size);
+    const sha256 = String(metadata.metadata?.sha256 ?? "");
+    if (
+      !Number.isSafeInteger(bytes) ||
+      bytes < 0 ||
+      !/^[a-f0-9]{64}$/.test(sha256) ||
+      metadata.contentType !== input.contentType ||
+      metadata.metadata?.tenantId !== input.tenantId ||
+      metadata.metadata?.repository !== input.repository ||
+      metadata.metadata?.buildId !== input.buildId ||
+      metadata.metadata?.kind !== input.kind
+    ) {
+      throw new Error(`GCS artifact lookup metadata mismatch for ${key}`);
+    }
+    return {
+      uri: this.uri(key),
+      key,
+      contentType: input.contentType,
+      bytes,
+      sha256,
+      objectGeneration: generation
+    };
   }
 
   private uri(key: string): string {

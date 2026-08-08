@@ -3,3 +3,7 @@ export * from "./time.js";
 export * from "./errors.js";
 export * from "./worker-topics.js";
 export * from "./review-trigger-request.js";
+export * from "./wiki-ref.js";
+export * from "./wiki-trigger-request.js";
+export * from "./wiki-trigger-result.js";
+export * from "./mermaid-config.js";

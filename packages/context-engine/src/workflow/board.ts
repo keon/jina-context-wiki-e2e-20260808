@@ -7,7 +7,18 @@ import {
   type TaskId,
   type TaskTypeDefinition
 } from "@jina/board";
-import { causalGraphBoardTopics, entityId, type CausalGraphWorkerTopic, type IsoTimestamp } from "@jina/shared-kernel";
+import {
+  causalGraphBoardTopics,
+  contextWikiWorkerTopic,
+  entityId,
+  parseWikiTriggerCompletedOutput,
+  parseWikiTriggerRequest,
+  wikiTriggerRequestDigest,
+  type CausalGraphWorkerTopic,
+  type IsoTimestamp,
+  type WikiTriggerCompletedOutputV1,
+  type WikiTriggerRequestV1
+} from "@jina/shared-kernel";
 import { fingerprint, isFullCommitSha, normalizeIsoTime, normalizeRepository } from "../domain/fingerprint.js";
 import {
   isContextArtifactKeyInScope,
@@ -25,6 +36,11 @@ export const causalGraphBoardTaskTypes = {
 export type CausalGraphBoardTaskType = (typeof causalGraphBoardTaskTypes)[keyof typeof causalGraphBoardTaskTypes];
 export { causalGraphBoardTopics };
 export type CausalGraphBoardTopic = CausalGraphWorkerTopic;
+
+export const contextWikiBoardTaskType = "build-wiki" as const;
+export type ContextWikiBoardTaskType = typeof contextWikiBoardTaskType;
+export const contextWikiBoardTopic = contextWikiWorkerTopic;
+export type ContextWikiBoardTopic = typeof contextWikiBoardTopic;
 
 export const causalGraphBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] = [
   definition(causalGraphBoardTaskTypes.build, "aggregate", "system", "Coordinates one immutable causal graph release."),
@@ -51,6 +67,16 @@ export const causalGraphBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] 
   )
 ];
 
+export const contextWikiBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] = [
+  definition(
+    contextWikiBoardTaskType,
+    "dispatchable",
+    "context_trigger",
+    "Builds and atomically publishes one usable wiki through Trigger.dev.",
+    contextWikiBoardTopic
+  )
+];
+
 export interface CausalGraphBuildScope {
   readonly tenantId: string;
   readonly repository: string;
@@ -70,6 +96,13 @@ export interface IssueGraphBoardBuild {
   readonly snapshotTaskId: TaskId;
   readonly deriveTaskId: TaskId;
   readonly publicationTaskId: TaskId;
+}
+
+export interface ContextWikiBoardBuild {
+  readonly state: BoardState;
+  readonly buildTaskId: TaskId;
+  readonly request: WikiTriggerRequestV1;
+  readonly requestDigest: string;
 }
 
 export type CausalGraphBoardTaskResult =
@@ -290,12 +323,126 @@ export function parseCausalGraphBoardTaskResult(
   throw new Error(`causal graph task type ${task.type} does not produce a worker result`);
 }
 
+/** Parses the compact Trigger result and binds it to the root Board authority. */
+export function parseContextWikiBoardTaskResult(
+  state: BoardState,
+  taskId: TaskId,
+  value: unknown
+): WikiTriggerCompletedOutputV1 {
+  const task = findTask(state, taskId);
+  if (!task || task.type !== contextWikiBoardTaskType || task.kind !== "dispatchable") {
+    throw new Error("wiki Board build task not found");
+  }
+  const request = parseWikiTriggerRequest(task.metadata.triggerRequest);
+  const requestDigest = wikiTriggerRequestDigest(request);
+  const completed = parseWikiTriggerCompletedOutput(value);
+  if (
+    task.id !== request.boardBuildId ||
+    task.metadata.contextBuildId !== task.id ||
+    task.metadata.tenantId !== request.tenantId ||
+    task.metadata.repository !== request.repository ||
+    task.metadata.ref !== request.source.ref ||
+    task.metadata.refSequence !== request.source.refSequence ||
+    task.metadata.commitSha !== request.source.commitSha ||
+    task.metadata.locale !== request.requestedLocale ||
+    task.metadata.requestKey !== request.requestKey ||
+    task.metadata.orchestrator !== "trigger" ||
+    task.metadata.pipelineVersion !== request.pipelineVersion ||
+    task.metadata.requestDigest !== requestDigest ||
+    completed.boardBuildId !== task.id ||
+    completed.requestDigest !== requestDigest ||
+    completed.tenantId !== request.tenantId ||
+    completed.repository !== request.repository ||
+    completed.commitSha !== request.source.commitSha ||
+    completed.locale !== request.requestedLocale ||
+    completed.releaseFamilyId !== request.releaseFamilyId
+  ) {
+    throw new Error("wiki Trigger result does not match the immutable Board authority");
+  }
+  return completed;
+}
+
+export function isContextWikiBoardTaskType(value: string): value is ContextWikiBoardTaskType {
+  return value === contextWikiBoardTaskType;
+}
+
+/**
+ * Adds the complete Board representation of the Trigger flow: one root
+ * dispatchable task. Trigger owns every internal generation stage.
+ */
+export function createContextWikiBoardBuild(
+  state: BoardState,
+  input: { readonly request: unknown; readonly now: string }
+): ContextWikiBoardBuild {
+  const request = parseWikiTriggerRequest(input.request);
+  const requestDigest = wikiTriggerRequestDigest(request);
+  const buildTaskId = entityId<"task">(request.boardBuildId);
+  const now = normalizeIsoTime(input.now);
+  const metadata = {
+    workflowVersion: 2,
+    contextBuildId: buildTaskId,
+    tenantId: request.tenantId,
+    repository: request.repository,
+    ref: request.source.ref,
+    ...(request.source.refSequence !== undefined ? { refSequence: request.source.refSequence } : {}),
+    commitSha: request.source.commitSha,
+    locale: request.requestedLocale,
+    requestKey: request.requestKey,
+    orchestrator: "trigger",
+    pipelineVersion: request.pipelineVersion,
+    triggerRequest: request,
+    requestDigest
+  } as const;
+  const existing = findTask(state, buildTaskId);
+  if (existing) {
+    const hasDependencies = state.dependencies.some(
+      (dependency) => dependency.taskId === buildTaskId || dependency.dependsOnTaskId === buildTaskId
+    );
+    if (
+      existing.type !== contextWikiBoardTaskType ||
+      existing.kind !== "dispatchable" ||
+      existing.parentTaskId !== undefined ||
+      existing.dispatchTopic !== contextWikiBoardTopic ||
+      existing.metadata.workflowVersion !== 2 ||
+      existing.metadata.contextBuildId !== buildTaskId ||
+      existing.metadata.tenantId !== request.tenantId ||
+      existing.metadata.repository !== request.repository ||
+      existing.metadata.ref !== request.source.ref ||
+      existing.metadata.refSequence !== request.source.refSequence ||
+      existing.metadata.commitSha !== request.source.commitSha ||
+      existing.metadata.locale !== request.requestedLocale ||
+      existing.metadata.requestKey !== request.requestKey ||
+      existing.metadata.orchestrator !== "trigger" ||
+      existing.metadata.pipelineVersion !== request.pipelineVersion ||
+      existing.metadata.requestDigest !== requestDigest ||
+      wikiTriggerRequestDigest(existing.metadata.triggerRequest) !== requestDigest ||
+      hasDependencies
+    ) {
+      throw new Error("wiki Board build ID is already bound to a different workflow");
+    }
+    return { state, buildTaskId, request, requestDigest };
+  }
+
+  const next = createTask(state, {
+    id: buildTaskId,
+    type: contextWikiBoardTaskType,
+    title: `Build wiki for ${request.repository}@${request.source.scopeKey}`,
+    role: "context_trigger",
+    dedupeKey: `wiki:${request.tenantId}:${request.requestKey}:${requestDigest}`,
+    kind: "dispatchable",
+    topic: contextWikiBoardTopic,
+    now,
+    metadata
+  });
+  return { state: reduceBoard(next, now), buildTaskId, request, requestDigest };
+}
+
 function definition(
-  type: CausalGraphBoardTaskType,
+  type: CausalGraphBoardTaskType | ContextWikiBoardTaskType,
   kind: TaskTypeDefinition["kind"],
   defaultAssigneeRole: string,
   description: string,
-  dispatchTopic?: CausalGraphBoardTopic
+  dispatchTopic?: CausalGraphBoardTopic | ContextWikiBoardTopic
 ): TaskTypeDefinition {
   return { type, kind, defaultAssigneeRole, description, ...(dispatchTopic ? { dispatchTopic } : {}) };
 }
@@ -304,12 +451,12 @@ function createTask(
   state: BoardState,
   input: {
     readonly id: TaskId;
-    readonly type: CausalGraphBoardTaskType;
+    readonly type: CausalGraphBoardTaskType | ContextWikiBoardTaskType;
     readonly title: string;
     readonly role: string;
     readonly dedupeKey: string;
     readonly kind: "aggregate" | "dispatchable";
-    readonly topic?: CausalGraphBoardTopic;
+    readonly topic?: CausalGraphBoardTopic | ContextWikiBoardTopic;
     readonly parentTaskId?: TaskId;
     readonly dependencies?: readonly TaskDependencyDraft[];
     readonly now: IsoTimestamp;

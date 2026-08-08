@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { PostgresContextPhaseCheckpointRepository } from "./context/context-phase-checkpoint-repository.js";
 import { ContextDatabase } from "./context/database.js";
 
 // This test recreates jina_context. Never fall back to DATABASE_URL.
@@ -9,10 +10,15 @@ const REPOSITORY = "acme/context";
 const COMMIT = "a".repeat(40);
 
 test(
-  "the lean Context schema persists releases and derives current state without pointer tables",
+  "the lean Context schema persists V1 and V2 releases with a locale-scoped V2 pointer",
   { skip: !databaseUrl },
   async () => {
-    const database = new ContextDatabase({ connectionString: databaseUrl, manageSchema: true, max: 2 });
+    const database = new ContextDatabase({
+      connectionString: databaseUrl,
+      manageSchema: true,
+      manageRoles: true,
+      max: 2
+    });
     try {
       await database.pool.query("drop schema if exists jina_context cascade");
       await database.initialize();
@@ -26,13 +32,95 @@ test(
       assert.deepEqual(
         tables.rows.map((row) => row.table_name),
         [
+          "context_board_publications",
+          "context_evidence_snapshots",
           "context_phase_checkpoints",
+          "context_phase_operation_leases",
           "context_quota_ledgers",
+          "context_release_audit_followups",
+          "context_release_audit_runs",
+          "context_release_audits",
           "context_releases",
+          "context_wiki_projections",
+          "current_context_board_releases",
           "issue_graph_releases",
           "repositories",
           "repository_access"
         ]
+      );
+
+      const operationLeases = new PostgresContextPhaseCheckpointRepository(database);
+      const operation = {
+        tenantId: TENANT,
+        repository: REPOSITORY,
+        buildId: "build-operation-lease",
+        taskId: "task-operation-lease",
+        phase: "wiki-trigger-operation",
+        operationKey: "operation-lease-key",
+        inputDigest: "e".repeat(64),
+        now: "2026-08-08T12:00:00.000Z",
+        leaseDurationMs: 300_000
+      };
+      assert.equal(
+        (await operationLeases.claimOperation({ ...operation, ownerToken: "owner-one" })).outcome,
+        "acquired"
+      );
+      assert.equal((await operationLeases.claimOperation({ ...operation, ownerToken: "owner-two" })).outcome, "held");
+      assert.equal(
+        (
+          await operationLeases.claimOperation({
+            ...operation,
+            inputDigest: "f".repeat(64),
+            ownerToken: "owner-two"
+          })
+        ).outcome,
+        "conflict"
+      );
+      assert.equal(
+        await operationLeases.renewOperation({
+          tenantId: TENANT,
+          taskId: operation.taskId,
+          phase: operation.phase,
+          operationKey: operation.operationKey,
+          ownerToken: "owner-one",
+          now: operation.now,
+          leaseDurationMs: operation.leaseDurationMs
+        }),
+        true
+      );
+      assert.equal(
+        await operationLeases.releaseOperation({
+          tenantId: TENANT,
+          taskId: operation.taskId,
+          phase: operation.phase,
+          operationKey: operation.operationKey,
+          ownerToken: "owner-two"
+        }),
+        false
+      );
+      assert.equal(
+        await operationLeases.releaseOperation({
+          tenantId: TENANT,
+          taskId: operation.taskId,
+          phase: operation.phase,
+          operationKey: operation.operationKey,
+          ownerToken: "owner-one"
+        }),
+        true
+      );
+      assert.equal(
+        (await operationLeases.claimOperation({ ...operation, ownerToken: "owner-two" })).outcome,
+        "acquired"
+      );
+      assert.equal(
+        await operationLeases.releaseOperation({
+          tenantId: TENANT,
+          taskId: operation.taskId,
+          phase: operation.phase,
+          operationKey: operation.operationKey,
+          ownerToken: "owner-one"
+        }),
+        false
       );
 
       await database.pool.query(

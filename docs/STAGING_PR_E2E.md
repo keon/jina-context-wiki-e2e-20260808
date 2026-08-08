@@ -52,14 +52,23 @@ must not appear as additional Board tasks. While Trigger is nonterminal, the
 Board task is `waiting_external`; after Trigger reaches `COMPLETED`, it becomes
 `succeeded` only after the worker acknowledges that terminal state to the Board.
 
-The Context workflow must create:
+The Trigger-backed Context wiki workflow must create exactly one Board task:
 
-1. `build-context`
-2. `context-build-graph`
-3. `snapshot-context-input`
-4. `plan-context-pages`
-5. one or more `build-context-page` tasks
-6. `publish-context-release`
+1. `build-wiki` on `run-wiki-build`
+
+The Context worker authorizes and dispatches `generate-wiki`, then returns
+`deferred` without polling or holding its lease. Trigger owns `wiki-snapshot`,
+`wiki-plan`, the `wiki-write-page` fan-out, `wiki-finalize`, `wiki-project`, and
+`wiki-pageindex`. These are Trigger execution details and must not appear as
+Board tasks. After activation, the Trigger parent calls the storage-attested
+completion endpoint, which marks the single Board task done.
+If a Trigger child or parent exhausts retries before activation, the parent uses
+the run-bound failure callback to mark that same task failed. A five-minute
+`scheduled-wiki-reconciliation` task covers Trigger crash, system-failure,
+expiry, timeout, and cancellation states for which lifecycle hooks do not run.
+The reconciler queries Trigger; the Board worker remains dispatch-and-detach and
+never polls. The API checks publication storage first, so an activation-won
+race still completes the Board task as `done`.
 
 The causal graph is intentionally not a PR-webhook child. It is admitted
 separately through `POST /causal-graph/build` and must create
@@ -88,13 +97,28 @@ and `publish-causal-graph`.
    to reach terminal success, and confirm the root used the expected deployment
    environment and preview branch. The product review row's `trigger_run_id`
    must match the Board effect receipt.
-7. Query the Context Board for the same delivery and exact head SHA. Require the
-   aggregate, graph, snapshot, planner, every page, and publication task to reach
-   `done`.
-8. Require the highest-sequence attached `context_releases` row to match
-   the head SHA and contain a PageIndex attachment plus at least one catalog document.
-9. If causal graph is in scope, trigger its dedicated staging endpoint and
-   independently verify its four-task graph and immutable current release.
+7. Query the Context Board for the same delivery and exact head SHA. Require one
+   `build-wiki` task, zero children, zero dependencies, one authorized Trigger
+   parent run, and final `done` state from the attested completion callback.
+8. In failure-injection staging, exhaust one child retry and separately force a
+   terminal `SYSTEM_FAILURE` or `TIMED_OUT`. Require the same single task to
+   become `failed`, its outbox message to become dispatched, one failure receipt
+   to exist, and the active build quota reservation to be released. Replay the
+   callback and require no second receipt. For an activation-before-callback
+   injection, require `done` rather than `failed`.
+9. In the isolated Context Trigger project, require that parent to reach
+   `COMPLETED` and its snapshot, plan, page fan-out, finalization, projection,
+   and PageIndex children to succeed.
+10. Resolve the PR selector with locale `en`; require the activated V2 compact
+    catalog to match the exact head SHA, contain `overview.md`, `quickstart.md`,
+    `architecture.md`, `development.md`, and `reference.md`, and expose at least
+    one safe Mermaid diagram. Exercise `/wiki/list`, `/wiki/read`, `/wiki/search`,
+    `/wiki/ask`, `/wiki/diff` when a prior release exists, and `/wiki/export`.
+11. Trigger `audit-wiki` separately (or the daily schedule), require an immutable
+    audit record for that release, and confirm that it neither mutates the release
+    nor advances the PR pointer. If it admits a fix, require a new one-task build.
+12. If causal graph is in scope, trigger its dedicated staging endpoint and
+    independently verify its four-task graph and immutable current release.
 
 Do not count a review-only success as end-to-end success. Do not count a prior
 Context release whose commit differs from the tested PR head. A failed optional
@@ -109,7 +133,8 @@ Add one dated record for each release acceptance containing:
 - fixture repository, PR number, delivery ID, and exact head SHA;
 - product review run ID, Board workflow/task IDs, workflow trace ID, Trigger
   root run ID, and Trigger summary/runtime child run IDs;
-- Context build ID, release ID, document count, and PageIndex attachment time;
+- Context Board task ID, Trigger parent/child run IDs, release/family IDs,
+  locale, document count, PageIndex attachment time, and audit ID;
 - causal build/release IDs when separately exercised;
 - links to the PR and staging dashboard; and
 - any retries, failure categories, and the corrective commit.

@@ -17,6 +17,7 @@ import { PostgresApiTokenRepository } from "./api-token-repository.js";
 import { PostgresIssueGraphRepository } from "./issue-graph-repository.js";
 import { PostgresProjectionRepository } from "./projection-repository.js";
 import { parseStoredContextCatalog } from "./release-catalog.js";
+import { CONTEXT_CATALOG_ROWS_SQL } from "./catalog-query.js";
 
 interface CatalogRow {
   readonly release_id: string;
@@ -111,10 +112,10 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     const result = await this.database.queryAs<CatalogRow>(
       "jina_context_admin",
       { system: true },
-      `select release_id,catalog from jina_context.context_releases
-       where pageindex_attached_at is not null
+      `select release_id,catalog from ${CONTEXT_CATALOG_ROWS_SQL} releases
+       where activated_at is not null
          and catalog @> jsonb_build_object('revisions',jsonb_build_array(jsonb_build_object('id',$1::text)))
-       order by ref_sequence desc,release_id desc`,
+       order by ref_sequence desc nulls last,release_id desc`,
       [revisionId],
       "context.citations.single"
     );
@@ -136,9 +137,9 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     const result = await this.database.queryAs<CatalogRow>(
       "jina_context_admin",
       { system: true },
-      `select release_id,catalog from jina_context.context_releases
-       where pageindex_attached_at is not null
-       order by ref_sequence desc,release_id desc`,
+      `select release_id,catalog from ${CONTEXT_CATALOG_ROWS_SQL} releases
+       where activated_at is not null
+       order by ref_sequence desc nulls last,release_id desc`,
       [],
       "context.citations.batch"
     );
@@ -267,8 +268,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     const result = await this.database.queryAs<CatalogRow>(
       "jina_context_admin",
       { tenantIds: [tenantId] },
-      `select release_id,catalog from jina_context.context_releases
-       where tenant_id=$1 and pageindex_attached_at is not null`,
+      `select release_id,catalog from ${CONTEXT_CATALOG_ROWS_SQL} releases
+       where tenant_id=$1 and activated_at is not null`,
       [tenantId],
       "context.metrics.catalog-counts"
     );
@@ -324,10 +325,10 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     const result = await this.database.queryAs<CatalogRow>(
       "jina_context_admin",
       { tenantIds: [tenantId] },
-      `select release_id,catalog from jina_context.context_releases
+      `select release_id,catalog from ${CONTEXT_CATALOG_ROWS_SQL} releases
        where tenant_id=$1 and repository=$2
-         and pageindex_attached_at is not null
-       order by ref_sequence desc,release_id desc`,
+         and activated_at is not null
+       order by ref_sequence desc nulls last,release_id desc`,
       [tenantId, repository]
     );
     return result.rows;

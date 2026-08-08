@@ -31,7 +31,8 @@ test("parses an opened pull request delivery", () => {
         html_url: "https://github.com/omlabs/example/pull/42",
         draft: false,
         user: { id: 1, login: "octocat", type: "User" },
-        head: { sha: "abc123" }
+        head: { sha: "abc123" },
+        base: { sha: "base123" }
       },
       repository: { id: 10, full_name: "omlabs/example", owner: { id: 20, login: "omlabs", type: "Organization" } },
       installation: { id: 99 },
@@ -47,6 +48,7 @@ test("parses an opened pull request delivery", () => {
     type: "pull_request.opened",
     pullRequestNumber: 42,
     headSha: "abc123",
+    baseSha: "base123",
     title: "Make it work",
     url: "https://github.com/omlabs/example/pull/42",
     authorId: 1,
@@ -113,8 +115,13 @@ test("Context trigger policy admits only new issues, new PR heads, and branch-he
   const sha = "b".repeat(40);
   const admitted: readonly GitHubWebhookEvent[] = [
     { type: "issue.opened", issueNumber: 7, title: "New issue" },
-    { type: "pull_request.opened", pullRequestNumber: 8, headSha: sha },
-    { type: "pull_request.synchronize", pullRequestNumber: 8, headSha: "c".repeat(40) },
+    { type: "pull_request.opened", pullRequestNumber: 8, headSha: sha, baseSha: "a".repeat(40) },
+    {
+      type: "pull_request.synchronize",
+      pullRequestNumber: 8,
+      headSha: "c".repeat(40),
+      baseSha: "a".repeat(40)
+    },
     { type: "push", ref: "refs/heads/main", headSha: sha, deleted: false }
   ];
   for (const event of admitted) assert.equal(isContextTrigger(event), true, event.type);
@@ -152,7 +159,8 @@ test("parses a synchronized PR head as a new-commit Context trigger", () => {
       pull_request: {
         number: 42,
         title: "Advance the PR",
-        head: { sha: "d".repeat(40) }
+        head: { sha: "d".repeat(40) },
+        base: { sha: "b".repeat(40) }
       },
       repository: { id: 10, full_name: "omlabs/example" },
       installation: { id: 99 }
@@ -163,6 +171,7 @@ test("parses a synchronized PR head as a new-commit Context trigger", () => {
     type: "pull_request.synchronize",
     pullRequestNumber: 42,
     headSha: "d".repeat(40),
+    baseSha: "b".repeat(40),
     title: "Advance the PR"
   });
   assert.equal(parsed === undefined ? false : isContextTrigger(parsed.event), true);

@@ -6,6 +6,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./mermaid-config": {
+      "types": "./dist/mermaid-config.d.ts",
+      "default": "./dist/mermaid-config.js"
     }
   },
   "scripts": {
