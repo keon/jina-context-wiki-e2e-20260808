@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { generateWikiPayload } from "../../../../apps/worker/src/context-wiki-trigger-payload.js";
+
 import {
   MAX_PAGE_JOBS,
   canonicalSha256,
@@ -80,6 +82,20 @@ test("parseGenerateWikiPayload validates canonical digest and attempt", () => {
       }),
     /positive integer/
   );
+});
+
+test("worker generate-wiki envelope satisfies the deployed Trigger parser", () => {
+  const requestDigest = canonicalSha256(request);
+  const payload = generateWikiPayload({
+    request,
+    requestDigest,
+    dispatchNonce: "n".repeat(32),
+    attempt: 1
+  });
+
+  assert.deepEqual(parseGenerateWikiPayload(payload), payload);
+  assert.equal(payload.schemaVersion, 1);
+  assert.equal(payload.request.schemaVersion, 1);
 });
 
 test("parseGenerateWikiPayload rejects a queue not declared by the Trigger deployment", () => {

@@ -48,6 +48,7 @@ test("wiki bridge dispatches once and detaches without polling Trigger or comple
   let triggerRetrievals = 0;
   let boardCompletions = 0;
   let renewals = 0;
+  let triggerDispatchBody: Record<string, unknown> | undefined;
   const requestDigest = "a".repeat(64);
   const triggerRequest = {
     schemaVersion: 1,
@@ -126,9 +127,10 @@ test("wiki bridge dispatches once and detaches without polling Trigger or comple
     json(response, 200, { accepted: true });
   });
   const trigger = createServer(async (request, response) => {
-    await readJson(request);
+    const body = await readJson(request);
     if (request.method === "POST" && request.url === "/api/v1/tasks/generate-wiki/trigger") {
       dispatches += 1;
+      triggerDispatchBody = body;
       json(response, 200, { id: "run_async1" });
       return;
     }
@@ -168,6 +170,13 @@ test("wiki bridge dispatches once and detaches without polling Trigger or comple
   assert.equal(triggerRetrievals, 0);
   assert.equal(boardCompletions, 0);
   assert.equal(renewals, 0);
+  assert.deepEqual(recordOrUndefined(triggerDispatchBody?.payload), {
+    schemaVersion: 1,
+    requestDigest,
+    dispatchNonce: "nonce_wiki_async",
+    attempt: 1,
+    request: triggerRequest
+  });
 });
 
 test("Context quota claim backpressure remains healthy and poll-cadenced", async (context) => {
