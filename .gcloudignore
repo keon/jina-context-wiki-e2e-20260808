@@ -1,6 +1,9 @@
 .gcloudignore
 .git
-.github
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/deploy-context-trigger.yml
 .turbo
 **/.turbo
 **/.next
