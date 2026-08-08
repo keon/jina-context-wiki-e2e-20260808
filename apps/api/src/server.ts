@@ -4435,7 +4435,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const attempt = contextFollowupPromotionRetryAttempts.get(key) ?? 0;
     const delayMs = Math.min(30_000, 250 * 2 ** Math.min(attempt, 7));
     const timer = setTimeout(() => {
-      contextFollowupPromotionRetryTimers.delete(key);
       void (async () => {
         if (!latestContextBoardFollowup(intakeState.board, completedBuildTaskId)) {
           clearContextBoardFollowupPromotionRetry(tenantId, completedBuildTaskId);
@@ -4456,6 +4455,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             ...errorLogFields(error)
           });
         }
+        // Keep the fired timer registered while the persisted mutation is in
+        // flight. `mutate()` restores the durable snapshot before applying the
+        // transition, and `restore()` schedules unfinished follow-ups. Removing
+        // this entry before that restore creates a self-rescheduling loop on
+        // every successful or duplicate promotion.
+        contextFollowupPromotionRetryTimers.delete(key);
         contextFollowupPromotionRetryAttempts.set(key, attempt + 1);
         scheduleContextBoardFollowupPromotion(tenantId, completedBuildTaskId);
       })();
