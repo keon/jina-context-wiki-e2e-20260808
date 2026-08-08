@@ -338,8 +338,9 @@ write cannot reach a read path.
 
 Per-principal tokens are issued rather than configured. A token is
 `jina_atk_<43 chars base64url>`, stored only as a SHA-256 hash in
-`jina_context.api_tokens`, and verified on every request by the `jina_context_tokens`
-capability role — the one role in this schema that reads across tenants, because
+`public.api_tokens` (promoted from `jina_context` so product features can share the
+same credentials), and verified on every request by the `jina_context_tokens`
+capability role — the one capability role that reads across tenants, because
 verification resolves the tenant from the token it is looking up. Mint with
 `POST /internal/context/tokens` (body: `principalId`, `name`, `scopes`,
 `expiresInMinutes`, optionally `administrator: true`); the secret is returned once and is

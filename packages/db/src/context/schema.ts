@@ -22,14 +22,10 @@ $immutable$;
 create table if not exists jina_context.repositories (
   tenant_id text not null,
   repository text not null,
-  provider text not null,
-  provider_repository_id text not null,
   default_ref text not null,
-  metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null,
   updated_at timestamptz not null,
-  primary key (tenant_id,repository),
-  unique (tenant_id,provider,provider_repository_id)
+  primary key (tenant_id,repository)
 );
 
 create table if not exists jina_context.repository_access (
@@ -146,7 +142,11 @@ create table if not exists jina_context.context_quota_ledgers (
   updated_at timestamptz not null
 );
 
-create table if not exists jina_context.api_tokens (
+-- api_tokens is a product-level credential store: tokens will authenticate
+-- product features beyond Context, so the table lives in public. The Context
+-- token capability role keeps its scoped grants and row policies (roles.ts),
+-- and migration 0038 moves legacy jina_context rows here.
+create table if not exists public.api_tokens (
   id text primary key,
   tenant_id text not null,
   principal_id text not null,
@@ -161,8 +161,8 @@ create table if not exists jina_context.api_tokens (
   revoked_by text,
   check ((revoked_at is null) = (revoked_by is null))
 );
-create index if not exists context_api_tokens_tenant
-  on jina_context.api_tokens (tenant_id,created_at desc,id);
+create index if not exists api_tokens_tenant
+  on public.api_tokens (tenant_id,created_at desc,id);
 
 drop trigger if exists context_releases_immutable on jina_context.context_releases;
 create or replace function jina_context.guard_context_release_change()

@@ -24,8 +24,7 @@ const tenantScopedTables = [
   "context_releases",
   "issue_graph_releases",
   "context_phase_checkpoints",
-  "context_quota_ledgers",
-  "api_tokens"
+  "context_quota_ledgers"
 ] as const;
 
 export const CONTEXT_ROLES_SQL = `
@@ -55,8 +54,8 @@ to jina_context_query;
 grant select,insert,update on jina_context.context_quota_ledgers
   to jina_context_quota;
 
-grant select,insert on jina_context.api_tokens to jina_context_tokens;
-grant update (last_used_at,revoked_at,revoked_by) on jina_context.api_tokens
+grant select,insert on public.api_tokens to jina_context_tokens;
+grant update (last_used_at,revoked_at,revoked_by) on public.api_tokens
   to jina_context_tokens;
 
 grant select on jina_context.repositories,jina_context.issue_graph_releases
@@ -71,15 +70,19 @@ grant all privileges on all sequences in schema jina_context to
 grant execute on all functions in schema jina_context to
   jina_context_tenant_admin,jina_context_admin;
 
-alter table jina_context.api_tokens enable row level security;
-drop policy if exists context_api_tokens_verify on jina_context.api_tokens;
-create policy context_api_tokens_verify on jina_context.api_tokens
+alter table public.api_tokens enable row level security;
+drop policy if exists context_api_tokens_verify on public.api_tokens;
+create policy context_api_tokens_verify on public.api_tokens
   for select to jina_context_tokens
   using (
     current_setting('jina.tenant_id',true)='*'
     and revoked_at is null
     and expires_at > now()
   );
+drop policy if exists context_tenant_scope on public.api_tokens;
+create policy context_tenant_scope on public.api_tokens
+  using (${tenantScopeSql()})
+  with check (${tenantScopeSql()});
 
 ${tenantScopedTables
   .map(

@@ -193,8 +193,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     for (const repository of desired) {
       await client.query(
         `insert into jina_context.repositories
-          (tenant_id,repository,provider,provider_repository_id,default_ref,metadata,created_at,updated_at)
-         values ($1,$2,'unknown',$2,'main','{}'::jsonb,$3,$3)
+          (tenant_id,repository,default_ref,created_at,updated_at)
+         values ($1,$2,'main',$3,$3)
          on conflict (tenant_id,repository) do nothing`,
         [tenantId, repository, now]
       );

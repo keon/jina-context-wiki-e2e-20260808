@@ -47,7 +47,7 @@ export class PostgresApiTokenRepository {
       "jina_context_tokens",
       expectedTenantId === undefined ? contextSystemScope : contextTenantScope(expectedTenantId),
       `select id,tenant_id,principal_id,scopes,last_used_at
-       from jina_context.api_tokens
+       from public.api_tokens
        where secret_hash=$1
          and ($2::text is null or tenant_id=$2)
          and revoked_at is null and expires_at > now()`,
@@ -69,7 +69,7 @@ export class PostgresApiTokenRepository {
     await this.database.queryAs(
       "jina_context_tokens",
       contextTenantScope(tenantId),
-      "update jina_context.api_tokens set last_used_at=$3 where tenant_id=$1 and id=$2",
+      "update public.api_tokens set last_used_at=$3 where tenant_id=$1 and id=$2",
       [tenantId, tokenId, usedAt]
     );
   }
@@ -83,7 +83,7 @@ export class PostgresApiTokenRepository {
     const result = await this.database.queryAs<ApiTokenRow>(
       "jina_context_tokens",
       contextTenantScope(token.tenantId),
-      `insert into jina_context.api_tokens
+      `insert into public.api_tokens
          (id,tenant_id,principal_id,name,secret_hash,scopes,created_at,created_by,expires_at)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        returning ${TOKEN_COLUMNS}`,
@@ -106,7 +106,7 @@ export class PostgresApiTokenRepository {
     const result = await this.database.queryAs<ApiTokenRow>(
       "jina_context_tokens",
       contextTenantScope(tenantId),
-      `select ${TOKEN_COLUMNS} from jina_context.api_tokens
+      `select ${TOKEN_COLUMNS} from public.api_tokens
        where tenant_id=$1 order by created_at desc,id desc`,
       [tenantId]
     );
@@ -128,14 +128,14 @@ export class PostgresApiTokenRepository {
     await this.database.queryAs(
       "jina_context_tokens",
       contextTenantScope(tenantId),
-      `update jina_context.api_tokens set revoked_at=$4,revoked_by=$3
+      `update public.api_tokens set revoked_at=$4,revoked_by=$3
        where tenant_id=$1 and id=$2 and revoked_at is null`,
       [tenantId, tokenId, revokedBy, revokedAt]
     );
     const result = await this.database.queryAs<ApiTokenRow>(
       "jina_context_tokens",
       contextTenantScope(tenantId),
-      `select ${TOKEN_COLUMNS} from jina_context.api_tokens where tenant_id=$1 and id=$2`,
+      `select ${TOKEN_COLUMNS} from public.api_tokens where tenant_id=$1 and id=$2`,
       [tenantId, tokenId]
     );
     const row = result.rows[0];

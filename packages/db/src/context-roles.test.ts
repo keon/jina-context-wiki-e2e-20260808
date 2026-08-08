@@ -4,7 +4,6 @@ import { CONTEXT_ROLES_SQL, CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
 import { CONTEXT_SCHEMA_SQL } from "./context/schema.js";
 
 const currentTables = [
-  "api_tokens",
   "context_phase_checkpoints",
   "context_quota_ledgers",
   "context_releases",
@@ -13,7 +12,7 @@ const currentTables = [
   "repository_access"
 ] as const;
 
-test("Context schema has only the seven current happy-path tables", () => {
+test("Context schema has only the six current happy-path tables", () => {
   const declared = [...CONTEXT_SCHEMA_SQL.matchAll(/create table if not exists jina_context\.([a-z_]+)/g)].map(
     (match) => match[1]
   );
@@ -25,6 +24,14 @@ test("every current Context table is tenant scoped", () => {
     assert.match(CONTEXT_ROLES_SQL, new RegExp(`alter table jina_context\\.${table} enable row level security`));
     assert.match(CONTEXT_ROLES_SQL, new RegExp(`create policy context_tenant_scope on jina_context\\.${table}`));
   }
+});
+
+test("promoted api_tokens keeps its Context security model in public", () => {
+  assert.match(CONTEXT_SCHEMA_SQL, /create table if not exists public\.api_tokens/);
+  assert.match(CONTEXT_ROLES_SQL, /alter table public\.api_tokens enable row level security/);
+  assert.match(CONTEXT_ROLES_SQL, /create policy context_api_tokens_verify on public\.api_tokens/);
+  assert.match(CONTEXT_ROLES_SQL, /create policy context_tenant_scope on public\.api_tokens/);
+  assert.match(CONTEXT_ROLES_SQL, /grant select,insert on public\.api_tokens to jina_context_tokens/);
 });
 
 test("release tables are immutable except the one-time Context attachment", () => {

@@ -273,8 +273,6 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
     ? await upsertGithubUserIdentity({
         githubUserId: accountGithubUserId,
         githubLogin: accountGithubLogin!,
-        displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || accountGithubLogin!,
-        avatarUrl: user.imageUrl,
       }).then((identity) => {
         if (prelinked && identity && prelinked.userId !== identity.userId) {
           throw new ApiError(403, "This Clerk account is linked to a different Jina account");
@@ -415,8 +413,6 @@ async function refreshSessionAccessOnce(
     const identity = await upsertGithubUserIdentity({
       githubUserId: access.user.id,
       githubLogin: access.user.login,
-      displayName: access.user.name,
-      avatarUrl: access.user.avatar_url,
     });
     const refreshed: DashboardSession = {
       ...session,

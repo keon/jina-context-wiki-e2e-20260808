@@ -126,8 +126,8 @@ async function persistIssueGraphRelease(client: PoolClient, release: IssueGraphR
   ]);
   await client.query(
     `insert into jina_context.repositories
-      (tenant_id,repository,provider,provider_repository_id,default_ref,metadata,created_at,updated_at)
-     values ($1,$2,'unknown',$2,$3,'{}'::jsonb,$4,$4)
+      (tenant_id,repository,default_ref,created_at,updated_at)
+     values ($1,$2,$3,$4,$4)
      on conflict (tenant_id,repository) do nothing`,
     [release.tenantId, release.repository, release.ref, release.publishedAt]
   );

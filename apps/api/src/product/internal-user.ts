@@ -3,8 +3,6 @@ import type pg from "pg";
 export interface GithubIdentityProfile {
   githubUserId: number;
   githubLogin: string;
-  displayName?: string | null;
-  avatarUrl?: string;
 }
 
 export interface InternalUserIdentity {
@@ -40,8 +38,6 @@ export async function upsertGithubUserIdentity(
     throw new Error("GitHub login is required");
   }
   const providerUserId = String(profile.githubUserId);
-  const displayName = profile.displayName?.trim() || githubLogin;
-  const avatarUrl = profile.avatarUrl?.trim() || null;
 
   await client.query(
     "select pg_advisory_xact_lock(hashtextextended('github:' || $1::text, 0))",
@@ -57,10 +53,8 @@ export async function upsertGithubUserIdentity(
 
   if (!identity.rows[0]) {
     const user = await client.query<{ id: string }>(
-      `insert into users (display_name, avatar_url)
-       values ($1, $2)
+      `insert into users default values
        returning id`,
-      [displayName, avatarUrl],
     );
     identity = await client.query<{ user_id: string }>(
       `insert into user_identities (user_id, provider, provider_user_id, provider_login)
@@ -74,12 +68,6 @@ export async function upsertGithubUserIdentity(
           set provider_login = $2, updated_at = now()
         where provider = 'github' and provider_user_id = $1`,
       [providerUserId, githubLogin],
-    );
-    await client.query(
-      `update users
-          set display_name = $2, avatar_url = coalesce($3, avatar_url), updated_at = now()
-        where id = $1`,
-      [identity.rows[0].user_id, displayName, avatarUrl],
     );
   }
 

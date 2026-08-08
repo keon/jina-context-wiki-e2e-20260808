@@ -4,7 +4,6 @@ import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const CURRENT_CONTEXT_TABLES = [
-  "api_tokens",
   "context_phase_checkpoints",
   "context_quota_ledgers",
   "context_releases",
@@ -12,6 +11,10 @@ const CURRENT_CONTEXT_TABLES = [
   "repositories",
   "repository_access"
 ];
+
+// api_tokens moved to public (migration 0038); the compatibility view keeps
+// the old name alive for the previous revision until the next baseline squash.
+const CURRENT_CONTEXT_VIEWS = ["api_tokens"];
 
 const command = process.argv.at(-1);
 if (command === "daytona") {
@@ -185,7 +188,7 @@ async function inspectSchemaDatabase(database, beforeMigration) {
   const tables = await contextTables(database);
   if (!beforeMigration) {
     assertExactSet(tables, CURRENT_CONTEXT_TABLES, "current Context schema");
-    assertExactSet(await contextViews(database), [], "current Context views");
+    assertExactSet(await contextViews(database), CURRENT_CONTEXT_VIEWS, "current Context views");
   }
   console.log(
     JSON.stringify({
