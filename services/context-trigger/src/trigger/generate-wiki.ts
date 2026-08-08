@@ -1,4 +1,4 @@
-import { batch, logger, tags, task } from "@trigger.dev/sdk";
+import { batch, logger, queue, tags, task } from "@trigger.dev/sdk";
 
 import { ContextWikiApiClient } from "../shared/api.js";
 import {
@@ -21,6 +21,7 @@ import { wikiProject } from "./wiki-project.js";
 import { wikiSnapshot } from "./wiki-snapshot.js";
 import { wikiWritePage } from "./wiki-write-page.js";
 import { notifyTerminalWikiFailure } from "../workflow/reconciliation.js";
+import { CONTEXT_WIKI_TRIGGER_QUEUE_NAME } from "../shared/queue-contract.js";
 
 type WikiChildTask =
   | typeof wikiSnapshot
@@ -35,9 +36,14 @@ type WikiChildTaskId =
 
 type ChildRunResult = { ok: boolean; output?: unknown; error?: unknown; taskIdentifier?: string };
 
+export const contextWikiQueue = queue({
+  name: CONTEXT_WIKI_TRIGGER_QUEUE_NAME,
+  concurrencyLimit: 10
+});
+
 export const generateWiki = task({
   id: "generate-wiki",
-  queue: { concurrencyLimit: 10 },
+  queue: contextWikiQueue,
   retry: { maxAttempts: 3, factor: 2, minTimeoutInMs: 1_000, maxTimeoutInMs: 30_000, randomize: true },
   machine: { preset: "small-1x" },
   maxDuration: 3_600,

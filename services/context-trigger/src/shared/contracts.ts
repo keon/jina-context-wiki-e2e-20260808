@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { CONTEXT_WIKI_TRIGGER_QUEUE_NAME } from "./queue-contract.js";
+
 type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
@@ -736,10 +738,14 @@ function parseOptions(value: unknown): WikiTriggerRequestV1["options"] {
   }
   const tags = object.tags.map((tag, index) => boundedIdentifier(tag, `tags[${index}]`, 120));
   if (new Set(tags).size !== tags.length) throw new Error("options.tags must not contain duplicates");
+  const queue = boundedIdentifier(object.queue, "queue", 120);
+  if (queue !== CONTEXT_WIKI_TRIGGER_QUEUE_NAME) {
+    throw new Error(`queue must be ${CONTEXT_WIKI_TRIGGER_QUEUE_NAME}`);
+  }
   return {
     idempotencyKey: boundedIdentifier(object.idempotencyKey, "idempotencyKey", 512),
     concurrencyKey: boundedIdentifier(object.concurrencyKey, "concurrencyKey", 512),
-    queue: boundedIdentifier(object.queue, "queue", 120),
+    queue,
     tags: tags.sort()
   };
 }

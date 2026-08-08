@@ -1,5 +1,7 @@
 import { normalizeWikiRefIdentity, wikiSourceScopeKinds, type WikiSourceScopeKind } from "./wiki-ref.js";
 
+export const CONTEXT_WIKI_TRIGGER_QUEUE_NAME = "context-wiki";
+
 export const wikiGenerationReasons = [
   "initial",
   "source_update",
@@ -302,10 +304,14 @@ function parseOptions(value: unknown): WikiTriggerOptionsV1 {
   const tags = raw.tags.map((tag, index) => identifier(tag, `options.tags[${index}]`, 120));
   if (new Set(tags).size !== tags.length) throw new Error("options.tags must not contain duplicates");
   const sortedTags = [...tags].sort();
+  const queue = identifier(raw.queue, "options.queue", 120);
+  if (queue !== CONTEXT_WIKI_TRIGGER_QUEUE_NAME) {
+    throw new Error(`options.queue must be ${CONTEXT_WIKI_TRIGGER_QUEUE_NAME}`);
+  }
   return {
     idempotencyKey: identifier(raw.idempotencyKey, "options.idempotencyKey", 512),
     concurrencyKey: identifier(raw.concurrencyKey, "options.concurrencyKey", 512),
-    queue: identifier(raw.queue, "options.queue", 120),
+    queue,
     tags: sortedTags
   };
 }

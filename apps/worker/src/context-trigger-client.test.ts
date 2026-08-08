@@ -41,6 +41,35 @@ test("Context Trigger client dispatches with global idempotency and preview rout
   });
 });
 
+test("Context Trigger client rejects an undeclared named queue before dispatch", async () => {
+  let requested = false;
+  const client = new ContextTriggerClient({
+    apiBaseUrl: "https://api.trigger.dev",
+    secretKey: "tr_test_secret",
+    requestTimeoutMs: 1_000,
+    fetch: async () => {
+      requested = true;
+      return Response.json({ id: "run_unexpected" });
+    }
+  });
+
+  await assert.rejects(
+    () =>
+      client.dispatch(
+        "generate-wiki",
+        {},
+        {
+          idempotencyKey: "wiki:build-1",
+          concurrencyKey: "wiki:tenant:repo:ref:en",
+          queue: "undeclared-wiki-queue",
+          tags: []
+        }
+      ),
+    /must be context-wiki/
+  );
+  assert.equal(requested, false);
+});
+
 test("Context Trigger client normalizes terminal success and failure", async () => {
   const responses = [
     { id: "run_success", status: "COMPLETED", output: { status: "completed" } },

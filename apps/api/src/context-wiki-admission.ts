@@ -8,6 +8,7 @@ import {
   type ContextWikiBoardBuild
 } from "@jina/context-engine";
 import {
+  CONTEXT_WIKI_TRIGGER_QUEUE_NAME,
   normalizeWikiRefIdentity,
   parseWikiTriggerRequest,
   type WikiGenerationReason,
@@ -114,7 +115,7 @@ export function admitContextWikiBuild(state: BoardState, input: ContextWikiAdmis
     options: {
       idempotencyKey: `wiki:${boardBuildId}`,
       concurrencyKey: `wiki:${fingerprint({ tenantId, repository, ref: identity.ref, locale }).slice(0, 32)}`,
-      queue: "context-wiki",
+      queue: CONTEXT_WIKI_TRIGGER_QUEUE_NAME,
       tags: [
         `build_${fingerprint(boardBuildId).slice(0, 20)}`,
         `repo_${fingerprint(`${tenantId}/${repository}`).slice(0, 20)}`,

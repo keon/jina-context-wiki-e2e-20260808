@@ -43,7 +43,7 @@ const request: WikiTriggerRequestV1 = {
   requestedLocale: "en",
   pipelineVersion: "context_wiki.trigger.v1",
   generatorPolicyVersion: "generator.v1",
-  options: { idempotencyKey: "idem-1", concurrencyKey: "concurrency-1", queue: "wiki", tags: [] }
+  options: { idempotencyKey: "idem-1", concurrencyKey: "concurrency-1", queue: "context-wiki", tags: [] }
 };
 
 const payload: GenerateWikiPayloadV1 = {
