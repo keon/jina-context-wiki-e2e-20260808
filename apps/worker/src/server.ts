@@ -123,6 +123,7 @@ import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCate
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
 import { ContextTriggerClient } from "./context-trigger-client.js";
+import { generateWikiPayload } from "./context-wiki-trigger-payload.js";
 import { contextPhaseCandidateArtifact } from "./phase-checkpoint-artifact.js";
 import { runtimeWorkerId } from "./worker-identity.js";
 import {
@@ -1066,7 +1067,7 @@ async function runWikiBuild(work: ClaimedWork<"run-wiki-build">): Promise<WorkRe
   const tags = requiredStringArray(requestOptions.tags, "wiki tags", 10);
   const run = await contextTriggerClient.dispatch(
     "generate-wiki",
-    { request: authority.request, requestDigest, dispatchNonce, attempt },
+    generateWikiPayload({ request: authority.request, requestDigest, dispatchNonce, attempt }),
     { idempotencyKey, concurrencyKey, queue, tags },
     activeLease?.controller.signal
   );
