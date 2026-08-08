@@ -799,29 +799,32 @@ async function executeClaimedWork(work: ClaimedWork<SupportedWorkerTopic>): Prom
   const lease: LeaseExecutionState = { controller: new AbortController() };
   activeLease = lease;
   const buildDeadlineTimer = scheduleBoardBuildDeadline(work, lease.controller);
-  const heartbeat = setInterval(() => {
-    if (lease.renewalInFlight) return;
-    lease.renewalInFlight = true;
-    void renew(work)
-      .catch((error) => {
-        if (error instanceof LeaseLostError) {
-          loseLease(lease, error);
-          metrics.count("worker.lease_lost", { topic: work.message.topic });
-          return;
-        }
-        recordApiFailure(error);
-        logger.warn("worker lease renewal failed, retrying", {
-          event: "worker.lease_renewal_retry",
-          workerId,
-          taskId: work.task.id,
-          ...errorLogFields(error)
-        });
-      })
-      .finally(() => {
-        lease.renewalInFlight = false;
-      });
-  }, heartbeatIntervalMs);
-  heartbeat.unref();
+  const heartbeat =
+    work.topic === "run-wiki-build"
+      ? undefined
+      : setInterval(() => {
+          if (lease.renewalInFlight) return;
+          lease.renewalInFlight = true;
+          void renew(work)
+            .catch((error) => {
+              if (error instanceof LeaseLostError) {
+                loseLease(lease, error);
+                metrics.count("worker.lease_lost", { topic: work.message.topic });
+                return;
+              }
+              recordApiFailure(error);
+              logger.warn("worker lease renewal failed, retrying", {
+                event: "worker.lease_renewal_retry",
+                workerId,
+                taskId: work.task.id,
+                ...errorLogFields(error)
+              });
+            })
+            .finally(() => {
+              lease.renewalInFlight = false;
+            });
+        }, heartbeatIntervalMs);
+  heartbeat?.unref();
 
   let result: WorkResult | undefined;
   try {
@@ -843,7 +846,7 @@ async function executeClaimedWork(work: ClaimedWork<SupportedWorkerTopic>): Prom
           : { outcome: "failed", reason, failureCategory };
     }
   } finally {
-    clearInterval(heartbeat);
+    if (heartbeat) clearInterval(heartbeat);
     if (buildDeadlineTimer) clearTimeout(buildDeadlineTimer);
   }
 
