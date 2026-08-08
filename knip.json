@@ -2,7 +2,12 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": {
-      "entry": ["autumn.config.ts", "scripts/context-production-preflight.mjs", "scripts/verify-trigger-project.mjs"],
+      "entry": [
+        "autumn.config.ts",
+        "scripts/context-production-preflight.mjs",
+        "scripts/verify-trigger-project.mjs",
+        "scripts/verify-trigger-source-manifest.mjs"
+      ],
       "ignoreDependencies": ["pg"]
     },
     "apps/api": {
