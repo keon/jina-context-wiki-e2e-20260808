@@ -8,7 +8,7 @@ export const API_BOARD_STATE_IDLE_TIMEOUT_MS = 30_000;
  * Board state gets a dedicated pool so context/product query saturation cannot
  * block checkout before the state's own bounded advisory-lock acquisition.
  */
-export function dedicatedBoardStateStoreConfig(config: PostgresJsonStateStoreConfig): PostgresJsonStateStoreConfig {
+function dedicatedBoardStateStoreConfig(config: PostgresJsonStateStoreConfig): PostgresJsonStateStoreConfig {
   const {
     pool: _sharedPool,
     max: _sharedPoolMax,
