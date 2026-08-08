@@ -18,13 +18,14 @@ A fresh PostgreSQL 17 migration smoke test produces **39 application tables**:
 
 | Schema         | Count | Purpose                                                                         |
 | -------------- | ----: | ------------------------------------------------------------------------------- |
-| `public`       |    21 | product identity, GitHub intake, reviews, settings, and billing                 |
+| `public`       |    22 | product identity, GitHub intake, reviews, settings, billing, and API tokens     |
 | `jina_runtime` |    11 | relational Board, Context snapshot Board, delivery dedupe, and release controls |
-| `jina_context` |     7 | current Context catalogs, causal releases, ACL, checkpoints, quotas, and tokens |
+| `jina_context` |     6 | current Context catalogs, causal releases, ACL, checkpoints, and quotas         |
 
-### `public` (21)
+### `public` (22)
 
-`clerk_tenant_memberships`, `context_execution_profiles`, `dashboard_sessions`,
+`api_tokens`, `clerk_tenant_memberships`, `context_execution_profiles`,
+`dashboard_sessions`,
 `github_webhook_inbox`, `github_webhook_redelivery_requests`,
 `installations`, `pull_requests`,
 `repositories`, `review_findings`, `review_llm_usage`, `review_run_billing`,
@@ -40,7 +41,7 @@ A fresh PostgreSQL 17 migration smoke test produces **39 application tables**:
 `causal_graph_release_control`, `github_deliveries`, `release_control`, and
 `schema_migrations`.
 
-### `jina_context` (7)
+### `jina_context` (6)
 
 | Table                       | Current responsibility                                                                        |
 | --------------------------- | --------------------------------------------------------------------------------------------- |
@@ -50,11 +51,12 @@ A fresh PostgreSQL 17 migration smoke test produces **39 application tables**:
 | `issue_graph_releases`      | immutable causal graph release artifacts                                                      |
 | `context_phase_checkpoints` | durable artifacts for phases embedded inside current page-oriented tasks                      |
 | `context_quota_ledgers`     | one quota ledger per tenant                                                                   |
-| `api_tokens`                | hashed tenant API-token credentials and revocation state                                      |
 
-There are no `jina_context` views. “Current” Context and causal releases are
-derived by ordering immutable releases by `ref_sequence`; no mutable current
-pointer table exists.
+Hashed API-token credentials live in `public.api_tokens` (promoted by
+migration 0038). The only `jina_context` view is the transitional
+`api_tokens` compatibility view over that table. “Current” Context and causal
+releases are derived by ordering immutable releases by `ref_sequence`; no
+mutable current pointer table exists.
 
 ## Entity relationships
 
@@ -130,9 +132,13 @@ Those three relationships use the composite `(tenant_id, repository)` key.
 `context_phase_checkpoints` and `context_quota_ledgers` are tenant-scoped control
 records without a repository foreign key because checkpoints can be written
 before repository publication and quota rows cover all repositories in a tenant.
-`api_tokens` are tenant-scoped credentials but do not depend on a product user;
-the principal is stored as a normalized string so service principals remain
-valid.
+`public.api_tokens` (promoted out of `jina_context` in migration 0038 so other
+product features can authenticate with the same credentials) are tenant-scoped
+and do not depend on a product user; the principal is stored as a normalized
+string so service principals remain valid. The Context token capability role
+keeps its scoped grants and row policies on the promoted table, and a
+transitional `jina_context.api_tokens` view preserves the old name until the
+next baseline squash.
 
 ## Current happy-path lifecycle
 

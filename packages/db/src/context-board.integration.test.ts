@@ -26,7 +26,6 @@ test(
       assert.deepEqual(
         tables.rows.map((row) => row.table_name),
         [
-          "api_tokens",
           "context_phase_checkpoints",
           "context_quota_ledgers",
           "context_releases",
@@ -38,8 +37,8 @@ test(
 
       await database.pool.query(
         `insert into jina_context.repositories
-         (tenant_id,repository,provider,provider_repository_id,default_ref,created_at,updated_at)
-       values ($1,$2,'github','123','main',now(),now())`,
+         (tenant_id,repository,default_ref,created_at,updated_at)
+       values ($1,$2,'main',now(),now())`,
         [TENANT, REPOSITORY]
       );
       await database.pool.query(
