@@ -250,8 +250,9 @@ substitutions:
   _JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET: jina-trigger-acceptance-github-app-private-key
   _JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID: "150069172"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
-  # start. Each API instance owns three PostgreSQL pools capped at three
-  # connections, keeping four instances within an aggregate budget of 36.
+  # start. Each API instance reserves three connections for context/product,
+  # two for serialized Board state, and three for shared identity, keeping four
+  # instances within an aggregate budget of 32.
   _JINA_API_MIN_INSTANCES: "1"
   _JINA_API_MAX_INSTANCES: "4"
   _JINA_API_CONCURRENCY: "10"

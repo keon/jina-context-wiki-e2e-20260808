@@ -12,6 +12,8 @@ export interface PostgresContextDatabaseConfig extends PoolConfig {
   readonly manageRoles?: boolean;
 }
 
+export const CONTEXT_DATABASE_CONNECTION_TIMEOUT_MS = 10_000;
+
 export type ContextDatabaseScope = { readonly tenantIds: readonly string[] } | { readonly system: true };
 
 export const contextSystemScope: ContextDatabaseScope = { system: true };
@@ -36,7 +38,8 @@ export class ContextDatabase {
     this.pool = new Pool({
       ...poolConfig,
       application_name: "jina-context",
-      max: poolConfig.max ?? 10
+      max: poolConfig.max ?? 10,
+      connectionTimeoutMillis: poolConfig.connectionTimeoutMillis ?? CONTEXT_DATABASE_CONNECTION_TIMEOUT_MS
     });
   }
 
