@@ -16,9 +16,16 @@ export interface ClerkIdentityProfile {
   providerLogin?: string | null;
 }
 
-export type ClerkIdentityLinkResult =
-  | { status: "linked" | "already-linked"; userId: string }
-  | { status: "conflict"; userId: string };
+export interface ClerkIdentityBindResult {
+  userId: string;
+  /** Stale projections replaced to match Clerk, for observability. */
+  replacedClerkUserId?: string;
+  replacedUserId?: string;
+}
+
+export type GithubAdoptionResult =
+  | { status: "adopted" | "already-owned" }
+  | { status: "owned-elsewhere"; ownerUserId: string };
 
 /**
  * Resolve a GitHub login to one durable Jina user and one personal workspace.
@@ -100,16 +107,17 @@ export async function upsertGithubUserIdentity(
 }
 
 /**
- * Attach one Clerk principal to an already-resolved stable Jina user.
+ * Make the database's Clerk projection match Clerk.
  *
- * GitHub's immutable numeric id resolves the Jina user before this function is
- * called. We never merge by display name or email here. Both directions are
- * unique, and conflicts are returned without modifying either identity.
+ * Clerk owns identity: its unique `external_id` names the Jina user, and the
+ * caller verifies against Clerk that no other Clerk account holds this user
+ * before binding. Rows here are projections, so a row that disagrees with
+ * Clerk is stale by definition and is replaced rather than defended.
  */
-export async function linkClerkUserIdentity(
+export async function bindClerkUserIdentity(
   client: Pick<pg.PoolClient, "query">,
   profile: ClerkIdentityProfile,
-): Promise<ClerkIdentityLinkResult> {
+): Promise<ClerkIdentityBindResult> {
   const clerkUserId = profile.clerkUserId.trim();
   const userId = profile.userId.trim();
   const providerLogin = profile.providerLogin?.trim() || null;
@@ -124,40 +132,81 @@ export async function linkClerkUserIdentity(
   );
   await client.query("select id from users where id = $1::uuid for update", [userId]);
 
-  const byClerk = await client.query<{ user_id: string }>(
-    `select user_id
-       from user_identities
-      where provider = 'clerk' and provider_user_id = $1`,
-    [clerkUserId],
-  );
-  if (byClerk.rows[0] && byClerk.rows[0].user_id !== userId) {
-    return { status: "conflict", userId: byClerk.rows[0].user_id };
-  }
+  const result: ClerkIdentityBindResult = { userId };
 
-  const byUser = await client.query<{ provider_user_id: string }>(
-    `select provider_user_id
-       from user_identities
-      where provider = 'clerk' and user_id = $1::uuid`,
-    [userId],
+  const staleByUser = await client.query<{ provider_user_id: string }>(
+    `delete from user_identities
+      where provider = 'clerk' and user_id = $1::uuid and provider_user_id <> $2
+      returning provider_user_id`,
+    [userId, clerkUserId],
   );
-  if (byUser.rows[0] && byUser.rows[0].provider_user_id !== clerkUserId) {
-    return { status: "conflict", userId };
-  }
+  if (staleByUser.rows[0]) result.replacedClerkUserId = staleByUser.rows[0].provider_user_id;
 
-  if (byClerk.rows[0]) {
-    await client.query(
-      `update user_identities
-          set provider_login = coalesce($3, provider_login), updated_at = now()
-        where provider = 'clerk' and provider_user_id = $1 and user_id = $2::uuid`,
-      [clerkUserId, userId, providerLogin],
-    );
-    return { status: "already-linked", userId };
-  }
+  const rebound = await client.query<{ user_id: string }>(
+    `select user_id from user_identities
+      where provider = 'clerk' and provider_user_id = $1 and user_id <> $2::uuid`,
+    [clerkUserId, userId],
+  );
+  if (rebound.rows[0]) result.replacedUserId = rebound.rows[0].user_id;
 
   await client.query(
     `insert into user_identities (user_id, provider, provider_user_id, provider_login)
-     values ($1::uuid, 'clerk', $2, $3)`,
+     values ($1::uuid, 'clerk', $2, $3)
+     on conflict (provider, provider_user_id)
+       do update set user_id = excluded.user_id,
+                     provider_login = coalesce(excluded.provider_login, user_identities.provider_login),
+                     updated_at = now()`,
     [userId, clerkUserId, providerLogin],
   );
-  return { status: "linked", userId };
+  return result;
+}
+
+/** The GitHub identity recorded for a Jina user, if any. */
+export async function githubIdentityForUser(
+  client: Pick<pg.PoolClient, "query">,
+  userId: string,
+): Promise<{ githubUserId: number; githubLogin: string } | undefined> {
+  const row = await client.query<{ provider_user_id: string; provider_login: string | null }>(
+    `select provider_user_id, provider_login
+       from user_identities
+      where provider = 'github' and user_id = $1::uuid`,
+    [userId],
+  );
+  if (!row.rows[0]) return undefined;
+  const githubUserId = Number(row.rows[0].provider_user_id);
+  const githubLogin = row.rows[0].provider_login ?? "";
+  if (!Number.isSafeInteger(githubUserId) || !githubLogin) return undefined;
+  return { githubUserId, githubLogin };
+}
+
+/**
+ * Record an unclaimed GitHub identity for a Clerk-resolved user. GitHub
+ * attribution stays append-only: an identity already owned by another user is
+ * reported, never moved, because review and billing history hang off it.
+ */
+export async function adoptGithubIdentity(
+  client: Pick<pg.PoolClient, "query">,
+  input: { userId: string; githubUserId: number; githubLogin: string },
+): Promise<GithubAdoptionResult> {
+  const providerUserId = String(input.githubUserId);
+  await client.query(
+    "select pg_advisory_xact_lock(hashtextextended('github:' || $1::text, 0))",
+    [providerUserId],
+  );
+  const existing = await client.query<{ user_id: string }>(
+    `select user_id from user_identities
+      where provider = 'github' and provider_user_id = $1`,
+    [providerUserId],
+  );
+  if (existing.rows[0]) {
+    return existing.rows[0].user_id === input.userId
+      ? { status: "already-owned" }
+      : { status: "owned-elsewhere", ownerUserId: existing.rows[0].user_id };
+  }
+  await client.query(
+    `insert into user_identities (user_id, provider, provider_user_id, provider_login)
+     values ($1::uuid, 'github', $2, $3)`,
+    [input.userId, providerUserId, input.githubLogin],
+  );
+  return { status: "adopted" };
 }

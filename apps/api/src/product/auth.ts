@@ -5,15 +5,17 @@ import type { Context } from "hono";
 import type { AppConfig } from "./config.js";
 import { ApiError } from "./errors.js";
 import {
+  adoptGithubIdentity,
+  bindClerkUserIdentity,
   getSession,
+  githubIdentityForUser,
   hasInstallationForAccounts,
   knownProjects,
-  linkClerkUserIdentity,
-  resolveClerkUserIdentity,
   saveSession,
   syncClerkTenantMemberships,
   updateSessionIfCurrent,
   upsertGithubUserIdentity,
+  userExists,
 } from "./store.js";
 
 interface GithubUser {
@@ -260,49 +262,91 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
   const accountGithubLogin = githubAccount?.username?.trim();
   const hasGithubAccount =
     Number.isSafeInteger(accountGithubUserId) && accountGithubUserId > 0 && Boolean(accountGithubLogin);
-  const prelinked = await resolveClerkUserIdentity(auth.userId, user.externalId).catch(() => {
-    throw new ApiError(403, "This Clerk account conflicts with an existing Jina account");
-  });
-  if (user.externalId && !prelinked) {
-    throw new ApiError(403, "This Clerk account is linked to an unknown Jina account");
-  }
-  if (prelinked && hasGithubAccount && prelinked.githubUserId !== accountGithubUserId) {
-    throw new ApiError(403, "This Clerk account is linked to a different GitHub account");
-  }
-  const resolved = hasGithubAccount
-    ? await upsertGithubUserIdentity({
-        githubUserId: accountGithubUserId,
-        githubLogin: accountGithubLogin!,
-      }).then((identity) => {
-        if (prelinked && identity && prelinked.userId !== identity.userId) {
-          throw new ApiError(403, "This Clerk account is linked to a different Jina account");
-        }
-        return identity
-          ? { userId: identity.userId, githubUserId: accountGithubUserId, githubLogin: accountGithubLogin! }
-          : undefined;
-      })
-    : prelinked;
-  if (!resolved) {
-    throw new ApiError(403, "Connect GitHub to your Clerk profile before using Jina");
-  }
-  const { githubUserId, githubLogin, userId } = resolved;
 
-  if (user.externalId && user.externalId !== userId) {
-    throw new ApiError(403, "This Clerk account is linked to a different Jina account");
+  // Clerk owns users, sign-in, and organizations. Its unique external_id names
+  // the Jina user, and every identity row in our database is a projection that
+  // self-heals to match Clerk on login. The only refusals left are the
+  // genuinely ambiguous cases, and each says what to change in Clerk.
+  let userId = user.externalId && (await userExists(user.externalId)) ? user.externalId : undefined;
+  let githubUserId: number;
+  let githubLogin: string;
+
+  if (userId) {
+    const recorded = await githubIdentityForUser(userId);
+    if (hasGithubAccount) {
+      if (recorded && recorded.githubUserId !== accountGithubUserId) {
+        throw new ApiError(
+          403,
+          "The GitHub account connected to this Clerk profile is not the one recorded for its Jina user. " +
+            "In Clerk, connect the matching GitHub account or move this user's External ID.",
+        );
+      }
+      if (!recorded) {
+        const adoption = await adoptGithubIdentity({
+          userId,
+          githubUserId: accountGithubUserId,
+          githubLogin: accountGithubLogin!,
+        });
+        if (!adoption) throw new ApiError(503, "Jina identity storage is unavailable");
+        if (adoption.status === "owned-elsewhere") {
+          throw new ApiError(
+            403,
+            "The GitHub account connected to this Clerk profile already belongs to a different Jina user. " +
+              "Resolve ownership in Clerk before signing in.",
+          );
+        }
+      }
+      githubUserId = accountGithubUserId;
+      githubLogin = accountGithubLogin!;
+    } else if (recorded) {
+      githubUserId = recorded.githubUserId;
+      githubLogin = recorded.githubLogin;
+    } else {
+      throw new ApiError(403, "Connect GitHub to your Clerk profile before using Jina");
+    }
+  } else {
+    if (!hasGithubAccount) {
+      throw new ApiError(403, "Connect GitHub to your Clerk profile before using Jina");
+    }
+    const identity = await upsertGithubUserIdentity({
+      githubUserId: accountGithubUserId,
+      githubLogin: accountGithubLogin!,
+    });
+    if (!identity) throw new ApiError(503, "Jina identity storage is unavailable");
+    // external_id is unique in Clerk, so at most one other Clerk account can
+    // hold this Jina user; adopting over it would silently steal the identity.
+    const holders = await clerk.users.getUserList({ externalId: [identity.userId], limit: 2 });
+    const competitor = holders.data.find((holder) => holder.id !== auth.userId);
+    if (competitor) {
+      throw new ApiError(
+        403,
+        "This GitHub account's Jina identity is held by a different Clerk account. " +
+          "In Clerk, move that account's External ID here to transfer it.",
+      );
+    }
+    userId = identity.userId;
+    githubUserId = accountGithubUserId;
+    githubLogin = accountGithubLogin!;
   }
+
   const primaryEmail = user.primaryEmailAddressId
     ? user.emailAddresses.find((email) => email.id === user.primaryEmailAddressId)?.emailAddress
     : user.emailAddresses[0]?.emailAddress;
-  const clerkIdentity = await linkClerkUserIdentity({
+  const clerkIdentity = await bindClerkUserIdentity({
     clerkUserId: auth.userId,
     userId,
     providerLogin: primaryEmail,
   });
   if (!clerkIdentity) throw new ApiError(503, "Jina identity storage is unavailable");
-  if (clerkIdentity.status === "conflict") {
-    throw new ApiError(403, "This Clerk account is already linked to a different Jina account");
+  if (clerkIdentity.replacedClerkUserId || clerkIdentity.replacedUserId) {
+    console.warn("clerk_identity_projection_healed", {
+      clerk_user_id: auth.userId,
+      jina_user_id: userId,
+      replaced_clerk_user_id: clerkIdentity.replacedClerkUserId,
+      replaced_jina_user_id: clerkIdentity.replacedUserId,
+    });
   }
-  if (!user.externalId) {
+  if (user.externalId !== userId) {
     await clerk.users.updateUser(auth.userId, { externalId: userId }).catch((error: unknown) => {
       console.warn("clerk_external_id_sync_failed", {
         clerk_user_id: auth.userId,

@@ -11,10 +11,13 @@ import {
   type ReviewRunRecord,
 } from "./records.js";
 import {
-  linkClerkUserIdentity as linkClerkUserIdentityWithClient,
+  adoptGithubIdentity as adoptGithubIdentityWithClient,
+  bindClerkUserIdentity as bindClerkUserIdentityWithClient,
+  githubIdentityForUser as githubIdentityForUserWithClient,
   upsertGithubUserIdentity as upsertGithubUserIdentityWithClient,
-  type ClerkIdentityLinkResult,
+  type ClerkIdentityBindResult,
   type ClerkIdentityProfile,
+  type GithubAdoptionResult,
   type GithubIdentityProfile,
   type InternalUserIdentity,
 } from "./internal-user.js";
@@ -3910,59 +3913,39 @@ export async function upsertGithubUserIdentity(
   return withTransaction((client) => upsertGithubUserIdentityWithClient(client, profile));
 }
 
-export async function linkClerkUserIdentity(
+export async function bindClerkUserIdentity(
   profile: ClerkIdentityProfile,
-): Promise<ClerkIdentityLinkResult | undefined> {
+): Promise<ClerkIdentityBindResult | undefined> {
   if (!databaseConfigured()) {
     return undefined;
   }
-  return withTransaction((client) => linkClerkUserIdentityWithClient(client, profile));
+  return withTransaction((client) => bindClerkUserIdentityWithClient(client, profile));
 }
 
-export interface ResolvedClerkUserIdentity {
+/** Whether Clerk's external_id names a Jina user that exists here. */
+export async function userExists(userId: string): Promise<boolean> {
+  if (!databaseConfigured()) return false;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(userId)) {
+    return false;
+  }
+  const rows = await query<{ id: string }>("select id from users where id = $1::uuid", [userId]);
+  return rows.length > 0;
+}
+
+export async function githubIdentityForUser(
+  userId: string,
+): Promise<{ githubUserId: number; githubLogin: string } | undefined> {
+  if (!databaseConfigured()) return undefined;
+  return withTransaction((client) => githubIdentityForUserWithClient(client, userId));
+}
+
+export async function adoptGithubIdentity(input: {
   userId: string;
   githubUserId: number;
   githubLogin: string;
-}
-
-/** Resolve a prelinked Clerk principal without relying on mutable email/name fields. */
-export async function resolveClerkUserIdentity(
-  clerkUserId: string,
-  externalUserId?: string | null,
-): Promise<ResolvedClerkUserIdentity | undefined> {
+}): Promise<GithubAdoptionResult | undefined> {
   if (!databaseConfigured()) return undefined;
-  const externalId = externalUserId
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(externalUserId)
-    ? externalUserId
-    : null;
-  const rows = await query<{
-    user_id: string;
-    github_user_id: number;
-    github_login: string;
-  }>(
-    `select jina_user.id as user_id,
-            github.provider_user_id::bigint as github_user_id,
-            github.provider_login as github_login
-       from users jina_user
-       join user_identities github
-         on github.user_id = jina_user.id and github.provider = 'github'
-       left join user_identities clerk
-         on clerk.user_id = jina_user.id and clerk.provider = 'clerk'
-      where clerk.provider_user_id = $1
-         or ($2::uuid is not null and jina_user.id = $2::uuid)`,
-    [clerkUserId, externalId],
-  );
-  const uniqueUsers = new Set(rows.map((row) => row.user_id));
-  if (uniqueUsers.size > 1) {
-    throw new Error("Clerk principal and external id resolve to different Jina users");
-  }
-  const row = rows[0];
-  if (!row?.github_login) return undefined;
-  return {
-    userId: row.user_id,
-    githubUserId: Number(row.github_user_id),
-    githubLogin: row.github_login,
-  };
+  return withTransaction((client) => adoptGithubIdentityWithClient(client, input));
 }
 
 export async function saveSession(session: DashboardSession): Promise<void> {

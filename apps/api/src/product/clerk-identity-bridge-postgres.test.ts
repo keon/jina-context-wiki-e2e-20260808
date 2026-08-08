@@ -4,7 +4,9 @@ import { test } from "node:test";
 import pg from "pg";
 
 import {
-  linkClerkUserIdentity,
+  adoptGithubIdentity,
+  bindClerkUserIdentity,
+  githubIdentityForUser,
   upsertGithubUserIdentity,
 } from "./internal-user.js";
 import {
@@ -14,7 +16,7 @@ import {
 const connectionString = process.env.TEST_DATABASE_URL;
 
 test(
-  "Clerk identity and membership projection is explicit and idempotent",
+  "Clerk-authoritative identity projection self-heals and membership sync is idempotent",
   { skip: connectionString ? false : "TEST_DATABASE_URL is not configured" },
   async () => {
     assert.ok(connectionString);
@@ -26,6 +28,7 @@ test(
       const githubUserId = seed + 1;
       const otherGithubUserId = seed + 2;
       const clerkUserId = `user_clerk_bridge_${seed}`;
+      const otherClerkUserId = `${clerkUserId}_other`;
       const clerkOrganizationId = `org_clerk_bridge_${seed}`;
       const ignoredOrganizationId = `org_unlinked_bridge_${seed}`;
 
@@ -43,35 +46,78 @@ test(
          returning id`,
         [`Bridge ${seed}`, clerkOrganizationId],
       );
+
+      // First bind creates the projection; repeating it is a no-op.
       assert.deepEqual(
-        await linkClerkUserIdentity(client, {
+        await bindClerkUserIdentity(client, {
           clerkUserId,
           userId: identity.userId,
           providerLogin: `bridge-${seed}@example.test`,
         }),
-        { status: "linked", userId: identity.userId },
+        { userId: identity.userId },
       );
       assert.deepEqual(
-        await linkClerkUserIdentity(client, {
+        await bindClerkUserIdentity(client, {
           clerkUserId,
           userId: identity.userId,
           providerLogin: `bridge-${seed}@example.test`,
         }),
-        { status: "already-linked", userId: identity.userId },
+        { userId: identity.userId },
       );
+
+      // Clerk re-pointing this Clerk account at another user overwrites the
+      // stale projection and reports what it replaced.
       assert.deepEqual(
-        await linkClerkUserIdentity(client, {
+        await bindClerkUserIdentity(client, {
           clerkUserId,
           userId: otherIdentity.userId,
         }),
-        { status: "conflict", userId: identity.userId },
+        { userId: otherIdentity.userId, replacedUserId: identity.userId },
+      );
+
+      // A different Clerk account claiming a user replaces the previous
+      // account's row: the database follows Clerk, never defends stale state.
+      assert.deepEqual(
+        await bindClerkUserIdentity(client, {
+          clerkUserId: otherClerkUserId,
+          userId: otherIdentity.userId,
+        }),
+        { userId: otherIdentity.userId, replacedClerkUserId: clerkUserId },
+      );
+      assert.equal(
+        (
+          await client.query(
+            "select 1 from user_identities where provider = 'clerk' and provider_user_id = $1",
+            [clerkUserId],
+          )
+        ).rowCount,
+        0,
+      );
+
+      // Restore the original binding for the membership half of the test.
+      await bindClerkUserIdentity(client, { clerkUserId, userId: identity.userId });
+
+      // GitHub attribution is append-only: adoption records an unclaimed
+      // identity, reports an owned one, and never moves it.
+      assert.deepEqual(await githubIdentityForUser(client, identity.userId), {
+        githubUserId,
+        githubLogin: `bridge-${seed}`,
+      });
+      assert.deepEqual(
+        await adoptGithubIdentity(client, {
+          userId: identity.userId,
+          githubUserId,
+          githubLogin: `bridge-${seed}`,
+        }),
+        { status: "already-owned" },
       );
       assert.deepEqual(
-        await linkClerkUserIdentity(client, {
-          clerkUserId: `${clerkUserId}_other`,
+        await adoptGithubIdentity(client, {
           userId: identity.userId,
+          githubUserId: otherGithubUserId,
+          githubLogin: `bridge-other-${seed}`,
         }),
-        { status: "conflict", userId: identity.userId },
+        { status: "owned-elsewhere", ownerUserId: otherIdentity.userId },
       );
 
       const beforeTenantCount = await client.query<{ count: number }>(
