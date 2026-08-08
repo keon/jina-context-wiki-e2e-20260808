@@ -55,14 +55,13 @@ export function normalizeCodexHarnessAuthInput(value: unknown): string | undefin
   return value;
 }
 
-// The harness model a user may pin for their own-harness reviews, and the set a per-stage model must
-// map into when a run executes on a Codex harness. These are Codex-native OpenAI subscription model
-// names (NOT OpenRouter slugs — own-harness runs never touch OpenRouter). null = the Codex default.
+// The Codex-native OpenAI subscription models a per-stage model may map into when a run executes on
+// a Codex harness (NOT OpenRouter slugs — own-harness runs never touch OpenRouter).
 // The GPT-5.6 family (sol=flagship, terra=balanced, luna=fast) leads the list; the 5.5/5.4 line stays
 // for back-compat and cheaper runs.
 // KEEP IN SYNC with the HARNESS_MODELS Set in packages/review-agent/src/runtime-review/index.ts (separate package, no
 // shared import): a drift is caught by that package's harnessModelForStageSlug test, which pins this exact
-// list. A model valid here but missing there is silently downgraded to the pin/subscription default.
+// list. A model valid here but missing there is silently downgraded to the subscription default.
 export const HARNESS_MODELS = [
   "gpt-5.6-sol",
   "gpt-5.6-terra",
@@ -71,50 +70,3 @@ export const HARNESS_MODELS = [
   "gpt-5.4",
   "gpt-5.4-mini",
 ] as const;
-export type HarnessModel = (typeof HARNESS_MODELS)[number];
-
-/**
- * Validate a codex harness model against HARNESS_MODELS. A null/empty/whitespace value normalizes to
- * null (the Codex default); any other value must be one of HARNESS_MODELS or it throws ApiError(400).
- * Exported (and pure) so both the legacy save route and the run-resolution shape validate identically.
- */
-export function validateHarnessModel(value: unknown): HarnessModel | null {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  if (typeof value !== "string") {
-    throw new ApiError(400, `invalid codex harness model: ${HARNESS_MODELS.join(", ")} or null`);
-  }
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return null;
-  }
-  if (!(HARNESS_MODELS as readonly string[]).includes(trimmed)) {
-    throw new ApiError(400, `invalid codex harness model: ${HARNESS_MODELS.join(", ")} or null`);
-  }
-  return trimmed as HarnessModel;
-}
-
-/**
- * Interpret a POSTed `codex_harness_model` field into the value passed to the harness save helper:
- *   - omitted field        -> undefined (leave the stored preference unchanged)
- *   - null / empty string   -> null (reset to the Codex default)
- *   - non-empty string      -> validated against HARNESS_MODELS (throws ApiError(400) otherwise)
- * `provided` distinguishes an omitted field from an explicit reset so the save can leave it untouched.
- */
-export function normalizeHarnessModelInput(
-  value: unknown,
-  provided: boolean,
-): { model: HarnessModel | null; provided: boolean } {
-  if (!provided) {
-    return { model: null, provided: false };
-  }
-  return { model: validateHarnessModel(value), provided: true };
-}
-
-/** Coerce a stored harness-model value to a valid HARNESS_MODELS entry or null (never throws). */
-export function coerceStoredHarnessModel(value: unknown): HarnessModel | null {
-  return typeof value === "string" && (HARNESS_MODELS as readonly string[]).includes(value)
-    ? (value as HarnessModel)
-    : null;
-}

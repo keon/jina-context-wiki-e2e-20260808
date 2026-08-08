@@ -303,15 +303,7 @@ export class GraphApiClient {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /**
-   * The bearer to present for this tenant, and whether it was delegated.
-   *
-   * Falls back to the static credential whenever a delegated token cannot be
-   * obtained — no internal credential configured, or a graph service that does
-   * not issue tokens yet. That fallback is what makes this deployable in either
-   * order: behaviour is unchanged until both sides are in place, and no request
-   * fails because minting is unavailable.
-   */
+  /** The bearer to present for this tenant, and whether it was delegated. */
   private async authorization(
     tenantId: string,
   ): Promise<{ secret: string; delegated: boolean }> {
@@ -321,7 +313,10 @@ export class GraphApiClient {
     if (cached && this.now() < cached.renewAt)
       return { secret: cached.secret, delegated: true };
     const minted = await this.mintDelegatedToken(tenantId, cached);
-    return minted ? { secret: minted.secret, delegated: true } : staticToken;
+    if (!minted) {
+      throw new ApiError(503, "Context tenant access token is unavailable");
+    }
+    return { secret: minted.secret, delegated: true };
   }
 
   /**
@@ -499,7 +494,6 @@ export class GraphApiClient {
           Math.max(ttlMinutes * 60_000 - delegatedTokenRenewalMarginMs, 30_000),
       };
     } catch {
-      // Never fatal. The caller falls back to the static credential.
       return undefined;
     } finally {
       clearTimeout(timeout);
@@ -1097,7 +1091,7 @@ export class GraphApiClient {
     try {
       // Acquiring the credential happens before any request deadline starts, so
       // a slow mint cannot leave the request itself with no time left. Minting
-      // carries its own timeout and falls back to the static credential.
+      // carries its own timeout.
       const send = async (): Promise<Response> => {
         const secret = input.internalCredential
           ? this.internalAuthorization()

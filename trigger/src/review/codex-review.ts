@@ -47,6 +47,7 @@ type CodegraphContext = {
 
 type ReusableCheckoutInput = PullRequestReviewInput & { repoDir?: string };
 
+/** @public Dynamically imported by the Daytona worker assembled in review-session.ts. */
 export async function runReviewContext(input: ReusableCheckoutInput): Promise<CodegraphReviewContextResult> {
   if (input.repoDir) {
     await ensurePullRequestCheckout({
@@ -150,7 +151,7 @@ function codegraphCommand(): string {
   return process.env.CODEGRAPH_BIN?.trim() || "codegraph";
 }
 
-export type PullRequestCheckoutInput = {
+type PullRequestCheckoutInput = {
   repository: GitHubRepository;
   token: string;
   pullRequestNumber: number;
@@ -159,7 +160,7 @@ export type PullRequestCheckoutInput = {
   repoDir: string;
 };
 
-export async function ensurePullRequestCheckout(input: PullRequestCheckoutInput): Promise<void> {
+async function ensurePullRequestCheckout(input: PullRequestCheckoutInput): Promise<void> {
   await mkdir(path.dirname(input.repoDir), { recursive: true });
   const gitEnv = githubGitEnv(input.token);
   const repoUrl = `https://github.com/${input.repository.fullName}.git`;
@@ -207,7 +208,7 @@ export async function ensurePullRequestCheckout(input: PullRequestCheckoutInput)
   await verifyPullRequestCheckout({ repoDir: input.repoDir, headSha: input.headSha });
 }
 
-export async function verifyPullRequestCheckout(input: { repoDir: string; headSha?: string }): Promise<void> {
+async function verifyPullRequestCheckout(input: { repoDir: string; headSha?: string }): Promise<void> {
   if (!(await isGitRepository(input.repoDir))) {
     throw new Error(`Expected an initialized git checkout at ${input.repoDir}`);
   }
@@ -260,7 +261,7 @@ async function isGitRepository(repoDir: string): Promise<boolean> {
   }
 }
 
-export async function gitHead(repoDir: string): Promise<string> {
+async function gitHead(repoDir: string): Promise<string> {
   return runCommand("git", ["rev-parse", "HEAD"], { cwd: repoDir, timeoutMs: 30_000 }).then((result) => result.stdout.trim());
 }
 

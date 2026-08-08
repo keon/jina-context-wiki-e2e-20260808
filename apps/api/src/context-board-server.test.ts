@@ -13,16 +13,15 @@ import {
   boardContextPublicationInputDigest,
   boardContextReleaseId,
   contextArtifactKey,
-  contextBoardTaskTypes,
-  contextBoardTopics,
   contextWorkflowBoardTaskTypes,
   contextWorkflowBoardTopics,
   contextPublicSnapshotDigest,
-  createContextBoardBuild,
   createContextWorkflowBoardBuild,
   serializeCertifiedContextReleaseArtifact,
   type CertifiedContextReleaseArtifactV1,
-  type ContextArtifactRef
+  type ContextArtifactRef,
+  type ContextWorkflowBuildScope,
+  type ContextWorkflowPriorReleaseSeed
 } from "@jina/context-engine";
 import {
   applyCommand,
@@ -94,8 +93,7 @@ test("collapsed Context planner checkpoints each allowed intermediate artifact k
   );
   const store = mutableStateStore({
     intakeState: {
-      board: reduceBoard(setTaskStatus(expanded.state, created.snapshotTaskId, "done"), NOW),
-      pullRequests: []
+      board: reduceBoard(setTaskStatus(expanded.state, created.snapshotTaskId, "done"), NOW)
     },
     devDeliverySequence: 0
   });
@@ -296,7 +294,7 @@ test("Context publication completion accepts its authoritative release artifact"
     contentType: "application/json",
     content: '{"version":1}'
   });
-  const stateStore = mutableStateStore({ intakeState: { board, pullRequests: [] }, devDeliverySequence: 0 });
+  const stateStore = mutableStateStore({ intakeState: { board }, devDeliverySequence: 0 });
   const server = createApiServer({
     tenantId,
     stateStore,
@@ -425,7 +423,7 @@ test("omitted Context page completion accepts its current citation audit", async
   board = reduceBoard(setTaskStatus(applied.state, planner.id, "done"), NOW);
   const page = board.tasks.find((task) => task.type === contextWorkflowBoardTaskTypes.page);
   assert.ok(page);
-  const stateStore = mutableStateStore({ intakeState: { board, pullRequests: [] }, devDeliverySequence: 0 });
+  const stateStore = mutableStateStore({ intakeState: { board }, devDeliverySequence: 0 });
   const quotaService = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
   await quotaService.admitBuild({ tenantId, buildId: created.buildTaskId });
   const server = createApiServer({
@@ -564,7 +562,7 @@ test("collapsed Context planner can be operator-retried after a terminal failure
   const contextStore = new MemoryContextEngineStore();
   await contextStore.replaceRepositoryAccess(tenantId, principalId, [repository]);
   const stateStore = mutableStateStore({
-    intakeState: { board, pullRequests: [] },
+    intakeState: { board },
     devDeliverySequence: 0
   });
   const quotaService = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
@@ -606,7 +604,7 @@ test("Context execution budgets ignore queue time and merge parallel lease windo
   const internalApiToken = "context-active-time-test-token";
   const createdAtMs = Date.now() - 600_000;
   const createdAt = new Date(createdAtMs).toISOString();
-  const created = createContextBoardBuild(createEmptyBoardState(), {
+  const created = createCurrentContextBuild(createEmptyBoardState(), {
     tenantId,
     repository,
     ref: "main",
@@ -653,7 +651,7 @@ test("Context execution budgets ignore queue time and merge parallel lease windo
   );
   board = executionEvent(board, "ended", `${firstMessage.id}-parallel`, "execution-two", base - 120_000, base - 90_000);
   const stateStore = mutableStateStore({
-    intakeState: { board, pullRequests: [] },
+    intakeState: { board },
     devDeliverySequence: 0
   });
   const contextStore = new MemoryContextEngineStore();
@@ -689,7 +687,7 @@ test("tenant administrators can extend and resume only the task canceled by a bu
   const repository = "omxyz/deadline-recovery";
   const principalId = "user:deadline-admin@example.com";
   const internalApiToken = "context-deadline-recovery-token";
-  const created = createContextBoardBuild(createEmptyBoardState(), {
+  const created = createCurrentContextBuild(createEmptyBoardState(), {
     tenantId,
     repository,
     ref: "main",
@@ -715,7 +713,7 @@ test("tenant administrators can extend and resume only the task canceled by a bu
     }
   );
   const stateStore = mutableStateStore({
-    intakeState: { board, pullRequests: [] },
+    intakeState: { board },
     devDeliverySequence: 0
   });
   const contextStore = new MemoryContextEngineStore();
@@ -738,7 +736,7 @@ test("tenant administrators can extend and resume only the task canceled by a bu
     const expiredClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
       method: "POST",
       headers: internalHeaders(internalApiToken),
-      body: JSON.stringify({ workerId: "deadline-recovery-test", topics: [contextBoardTopics.snapshot] })
+      body: JSON.stringify({ workerId: "deadline-recovery-test", topics: [contextWorkflowBoardTopics.snapshot] })
     });
     assert.equal(expiredClaim.status, 204);
     const expired = await fetch(`${baseUrl}/wiki/builds/${created.buildTaskId}/progress`, {
@@ -788,7 +786,7 @@ test("new build admission reconciles terminal and orphaned quota reservations ag
   const repository = "omxyz/quota-repair";
   const principalId = "user:quota-repair@example.com";
   const internalApiToken = "terminal-quota-repair-token";
-  const stale = createContextBoardBuild(createEmptyBoardState(), {
+  const stale = createCurrentContextBuild(createEmptyBoardState(), {
     tenantId,
     repository,
     ref: "main",
@@ -798,8 +796,7 @@ test("new build admission reconciles terminal and orphaned quota reservations ag
   });
   const stateStore = mutableStateStore({
     intakeState: {
-      board: setTaskStatus(stale.state, stale.buildTaskId, "failed"),
-      pullRequests: []
+      board: setTaskStatus(stale.state, stale.buildTaskId, "failed")
     },
     devDeliverySequence: 0
   });
@@ -902,7 +899,7 @@ test("a newer PR delivery queues behind leased work without settling or cancelin
   await quotaService.admitBuild({ tenantId, buildId: old.buildTaskId });
   await quotaService.startModelTask({ tenantId, taskId: quotaTaskId });
   const stateStore = deliveryTrackingStateStore({
-    intakeState: { board, pullRequests: [] },
+    intakeState: { board },
     devDeliverySequence: 0
   });
   const server = createApiServer({
@@ -939,7 +936,7 @@ test("a newer PR delivery queues behind leased work without settling or cancelin
     assert.notEqual(committed.tasks.find((task) => task.id === old.buildTaskId)?.status, "canceled");
     assert.equal(
       committed.tasks.some(
-        (task) => task.type === contextBoardTaskTypes.build && task.metadata.commitSha === secondHead
+        (task) => task.type === contextWorkflowBoardTaskTypes.build && task.metadata.commitSha === secondHead
       ),
       false
     );
@@ -972,20 +969,20 @@ test("a context worker can prefer release-acceptance repository work without exc
     {
       tenantId,
       taskId: ordinaryTaskId,
-      type: contextBoardTaskTypes.snapshot,
-      topic: contextBoardTopics.snapshot,
+      type: contextWorkflowBoardTaskTypes.snapshot,
+      topic: contextWorkflowBoardTopics.snapshot,
       repository: "acme/ordinary"
     },
     {
       tenantId,
       taskId: acceptanceTaskId,
-      type: contextBoardTaskTypes.snapshot,
-      topic: contextBoardTopics.snapshot,
+      type: contextWorkflowBoardTaskTypes.snapshot,
+      topic: contextWorkflowBoardTopics.snapshot,
       repository: "acme/release-fixture"
     }
   ]);
   const store = mutableStateStore({
-    intakeState: { board: initialBoard, pullRequests: [] },
+    intakeState: { board: initialBoard },
     devDeliverySequence: 0
   });
   const internalApiToken = "preferred-repository-token";
@@ -1004,7 +1001,7 @@ test("a context worker can prefer release-acceptance repository work without exc
       headers: internalHeaders(internalApiToken),
       body: JSON.stringify({
         workerId: "preferred-repository-worker",
-        topics: [contextBoardTopics.snapshot],
+        topics: [contextWorkflowBoardTopics.snapshot],
         preferredRepository: "acme/release-fixture"
       })
     });
@@ -1016,7 +1013,7 @@ test("a context worker can prefer release-acceptance repository work without exc
       headers: internalHeaders(internalApiToken),
       body: JSON.stringify({
         workerId: "preferred-repository-worker",
-        topics: [contextBoardTopics.snapshot],
+        topics: [contextWorkflowBoardTopics.snapshot],
         preferredRepository: "acme/release-fixture"
       })
     });
@@ -1036,27 +1033,27 @@ test("snapshot claims serialize checkout work per repository without blocking ot
     {
       tenantId,
       taskId: firstRepositoryTaskId,
-      type: contextBoardTaskTypes.snapshot,
-      topic: contextBoardTopics.snapshot,
+      type: contextWorkflowBoardTaskTypes.snapshot,
+      topic: contextWorkflowBoardTopics.snapshot,
       repository: "acme/large-repository"
     },
     {
       tenantId,
       taskId: queuedSameRepositoryTaskId,
-      type: contextBoardTaskTypes.snapshot,
-      topic: contextBoardTopics.snapshot,
+      type: contextWorkflowBoardTaskTypes.snapshot,
+      topic: contextWorkflowBoardTopics.snapshot,
       repository: "acme/large-repository"
     },
     {
       tenantId,
       taskId: otherRepositoryTaskId,
-      type: contextBoardTaskTypes.snapshot,
-      topic: contextBoardTopics.snapshot,
+      type: contextWorkflowBoardTaskTypes.snapshot,
+      topic: contextWorkflowBoardTopics.snapshot,
       repository: "acme/other-repository"
     }
   ]);
   const store = mutableStateStore({
-    intakeState: { board: initialBoard, pullRequests: [] },
+    intakeState: { board: initialBoard },
     devDeliverySequence: 0
   });
   const internalApiToken = "snapshot-fairness-token";
@@ -1073,7 +1070,7 @@ test("snapshot claims serialize checkout work per repository without blocking ot
     const response = await fetch(`${baseUrl}/internal/worker/claim`, {
       method: "POST",
       headers: internalHeaders(internalApiToken),
-      body: JSON.stringify({ workerId, topics: [contextBoardTopics.snapshot] })
+      body: JSON.stringify({ workerId, topics: [contextWorkflowBoardTopics.snapshot] })
     });
     const text = await response.text();
     assert.equal(response.status, 200, text);
@@ -1186,7 +1183,7 @@ test("a leased incremental build can read only its exact admission-bound prior r
     publicSnapshotDigest,
     releaseArtifact
   };
-  const created = createContextBoardBuild(createEmptyBoardState(), {
+  const created = createCurrentContextBuild(createEmptyBoardState(), {
     tenantId,
     repository,
     ref,
@@ -1197,7 +1194,7 @@ test("a leased incremental build can read only its exact admission-bound prior r
     now: NOW
   });
   const store = mutableStateStore({
-    intakeState: { board: created.state, pullRequests: [] },
+    intakeState: { board: created.state },
     devDeliverySequence: 0
   });
   const internalApiToken = "context-prior-release-token";
@@ -1214,7 +1211,7 @@ test("a leased incremental build can read only its exact admission-bound prior r
     const claimResponse = await fetch(`${baseUrl}/internal/worker/claim`, {
       method: "POST",
       headers: internalHeaders(internalApiToken),
-      body: JSON.stringify({ workerId: "prior-reader", topics: [contextBoardTopics.snapshot] })
+      body: JSON.stringify({ workerId: "prior-reader", topics: [contextWorkflowBoardTopics.snapshot] })
     });
     const claimText = await claimResponse.text();
     assert.equal(claimResponse.status, 200, claimText);
@@ -1222,7 +1219,11 @@ test("a leased incremental build can read only its exact admission-bound prior r
       message: { id: string; leaseId: string; attempt: number; writeFenceToken: string };
       task: { id: string; metadata: { priorRelease: unknown } };
     };
-    assert.deepEqual(claim.task.metadata.priorRelease, priorRelease);
+    assert.deepEqual(claim.task.metadata.priorRelease, {
+      ...priorRelease,
+      contract: CONTEXT_WORKFLOW_CONTRACT,
+      schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION
+    });
     const lease = {
       messageId: claim.message.id,
       taskId: claim.task.id,
@@ -1265,7 +1266,7 @@ test("worker completion attestations are internal, tenant-scoped, repository-aut
   const tenantA = "00000000-0000-4000-8000-000000000001";
   const tenantB = "00000000-0000-4000-8000-000000000002";
   const repositoryA = "omxyz/jina";
-  const first = createContextBoardBuild(createEmptyBoardState(), {
+  const first = createCurrentContextBuild(createEmptyBoardState(), {
     tenantId: tenantA,
     repository: repositoryA,
     ref: "main",
@@ -1273,7 +1274,7 @@ test("worker completion attestations are internal, tenant-scoped, repository-aut
     requestKey: "attestation:tenant-a",
     now: NOW
   });
-  const second = createContextBoardBuild(first.state, {
+  const second = createCurrentContextBuild(first.state, {
     tenantId: tenantB,
     repository: "omxyz/other",
     ref: "main",
@@ -1325,7 +1326,7 @@ test("worker completion attestations are internal, tenant-scoped, repository-aut
   ).state;
 
   const store = mutableStateStore({
-    intakeState: { board, pullRequests: [] },
+    intakeState: { board },
     devDeliverySequence: 0
   });
   const contextStore = new MemoryContextEngineStore();
@@ -1389,7 +1390,7 @@ test("worker completion attestations are internal, tenant-scoped, repository-aut
     assert.deepEqual(body.completions, [
       {
         taskId: first.snapshotTaskId,
-        taskType: contextBoardTaskTypes.snapshot,
+        taskType: contextWorkflowBoardTaskTypes.snapshot,
         attempt: 1,
         outcome: "done",
         workerReleaseId: "release-1",
@@ -1405,6 +1406,41 @@ test("worker completion attestations are internal, tenant-scoped, repository-aut
     await contextStore.close();
   }
 });
+
+type TestContextBuildScope = Omit<
+  ContextWorkflowBuildScope,
+  | "contextWorkflowContract"
+  | "contextWorkflowSchemaRevision"
+  | "promptContractVersion"
+  | "validatorVersion"
+  | "pageIndexVersion"
+  | "executionProfileDigest"
+  | "priorRelease"
+> & {
+  readonly priorRelease?: Omit<ContextWorkflowPriorReleaseSeed, "contract" | "schemaRevision">;
+};
+
+function createCurrentContextBuild(state: BoardState, input: TestContextBuildScope & { readonly now: string }) {
+  const { priorRelease, ...scope } = input;
+  return createContextWorkflowBoardBuild(state, {
+    ...scope,
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-page-workflow-1",
+    validatorVersion: "context-page-validator-1",
+    pageIndexVersion: "pageindex-local-1",
+    executionProfileDigest: "a".repeat(64),
+    ...(priorRelease
+      ? {
+          priorRelease: {
+            ...priorRelease,
+            contract: CONTEXT_WORKFLOW_CONTRACT,
+            schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION
+          }
+        }
+      : {})
+  });
+}
 
 function setTaskStatus(
   state: BoardState,
@@ -1547,8 +1583,8 @@ function quotaClaimBoard(
   tasks: readonly {
     readonly tenantId: string;
     readonly taskId: TaskId;
-    readonly type: typeof contextBoardTaskTypes.researchPlan | typeof contextBoardTaskTypes.snapshot;
-    readonly topic: typeof contextBoardTopics.researchPlan | typeof contextBoardTopics.snapshot;
+    readonly type: typeof contextWorkflowBoardTaskTypes.planner | typeof contextWorkflowBoardTaskTypes.snapshot;
+    readonly topic: typeof contextWorkflowBoardTopics.planner | typeof contextWorkflowBoardTopics.snapshot;
     readonly repository?: string;
   }[]
 ): BoardState {

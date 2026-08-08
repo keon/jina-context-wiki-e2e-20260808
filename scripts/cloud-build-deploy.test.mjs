@@ -126,10 +126,9 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--min-instances=3/);
   assert.match(stagingDeployment, /--max-instances=10/);
   assert.match(stagingDeployment, /--max-instances=5/);
-  assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
-  assert.match(stagingDeployment, /DASHBOARD_AUTH_MODE=\$\{dashboard_auth_mode\}/);
-  assert.match(stagingDeployment, /JINA_GITHUB_OAUTH_CLIENT_ID is required/);
-  assert.match(stagingDeployment, /GITHUB_OAUTH_CLIENT_SECRET=\$\{github_oauth_client_secret\}:latest/);
+  assert.match(stagingDeployment, /DASHBOARD_AUTH_MODE=clerk/);
+  assert.match(stagingDeployment, /CLERK_SECRET_KEY=\$\{clerk_secret\}:latest/);
+  assert.doesNotMatch(stagingDeployment, /GITHUB_OAUTH_CLIENT/);
   assert.match(stagingDeployment, /JINA_GRAPH_REQUEST_TIMEOUT_MS=30000/);
   assert.match(stagingDeployment, /github_app_slug="\$\{JINA_GITHUB_APP_SLUG:-jina-staging\}"/);
   assert.match(
@@ -162,7 +161,6 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.ok(closeClaims >= 0 && closeClaims < moveApi, "claim admission must close before traffic moves");
   assert.ok(moveApi < reopenClaims, "claim admission must reopen only after API traffic moves");
   assert.match(stagingDeployment, /restore_main_release_control/);
-  assert.match(stagingDeployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
   assert.match(stagingDeployment, /TRIGGER_SECRET_KEY=\$\{review_trigger_secret\}:latest/);
   assert.match(
     stagingDeployment,
@@ -191,18 +189,9 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--remove-headers=Authorization/);
   assert.doesNotMatch(stagingDeployment, /Authorization=Bearer|product_internal_token=.*secrets versions access/);
   assert.doesNotMatch(stagingDeployment, /Relational run-review (?:is|remains) blocked/);
-  assert.match(
-    stagingDeployment,
-    /review_topics="prepare-review\|summary-review\|runtime-review\|finalize-review\|publish-review\|settle-review\|run-review\|github-installation-backfill\|billing-retry"/
-  );
-  assert.match(
-    stagingDeployment,
-    /review_topics="prepare-review\|summary-review\|runtime-review\|finalize-review\|publish-review\|settle-review\|github-installation-backfill\|billing-retry"/
-  );
+  assert.match(stagingDeployment, /review_topics="run-review\|github-installation-backfill\|billing-retry"/);
   assert.doesNotMatch(stagingDeployment, /JINA_LEGACY_REVIEW_PIPELINE_ENABLED/);
   assert.doesNotMatch(deployment, /JINA_LEGACY_REVIEW_PIPELINE_ENABLED/);
-  assert.match(deployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
-  assert.doesNotMatch(deployment, /JINA_REVIEW_RUN_TOPIC_MODE=legacy/);
   assert.match(deployment, /JINA_PRODUCT_API_URL=\$\{product_api_url\}/);
   assert.match(deployment, /TRIGGER_API_URL=\$\{trigger_api_url\}/);
   assert.match(stagingDeployment, /deploy-staging-causal-graph\.sh/);
@@ -222,9 +211,7 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingCloudBuild, /id: deploy-staging[\s\S]+?scripts\/deploy-staging\.sh/);
   assert.match(stagingCloudBuild, /IMAGE_TAG=staging-\$COMMIT_SHA/);
   assert.match(stagingCloudBuild, /JINA_CONTEXT_TENANT_ID=\$\{_JINA_CONTEXT_TENANT_ID\}/);
-  assert.match(stagingCloudBuild, /JINA_REVIEW_BOARD_PIPELINE_MODE=v2/);
-  assert.match(stagingCloudBuild, /JINA_DASHBOARD_AUTH_MODE=\$\{_JINA_DASHBOARD_AUTH_MODE\}/);
-  assert.match(stagingCloudBuild, /JINA_GITHUB_OAUTH_CLIENT_ID=\$\{_JINA_GITHUB_OAUTH_CLIENT_ID\}/);
+  assert.doesNotMatch(stagingCloudBuild, /JINA_DASHBOARD_AUTH_MODE|JINA_GITHUB_OAUTH_CLIENT_ID/);
   assert.match(stagingCloudBuild, /JINA_GITHUB_WEBHOOK_INBOX_ENABLED=true/);
   assert.match(
     stagingCloudBuild,
@@ -308,7 +295,7 @@ test("production jobs execute the image-baked preflight without an oversized env
   );
   assert.match(deployment, /production_preflight_path="\/opt\/jina\/context-production-preflight\.mjs"/);
   assert.doesNotMatch(deployment, /JINA_PREFLIGHT_SOURCE_B64|preflight_program_b64|Buffer\.from\(.*base64/);
-  for (const action of ["daytona", "release-acquire", "schema-reset"]) {
+  for (const action of ["daytona", "release-acquire"]) {
     assert.ok(deployment.includes(`--args="\${production_preflight_path},${action}"`), action);
   }
 });
@@ -374,16 +361,16 @@ test("the private coordinated API cannot be mistaken for the public GitHub-auth 
   const privateApiSecrets = deployment.match(/api_secrets="([^"]+)"/)?.[1] ?? "";
   assert.doesNotMatch(privateApiSecrets, /GITHUB_OAUTH_CLIENT_SECRET|GITHUB_APP_PRIVATE_KEY|SECRETS_ENCRYPTION_KEY/);
   assert.match(cloudBuild, /_JINA_PUBLIC_API_BASE_URL: https:\/\/api\.usejina\.com/);
-  assert.match(cloudBuild, /_JINA_DASHBOARD_AUTH_MODE: github/);
   assert.match(publicApiCandidateDeployment, /service: "jina-code-review-api"/);
   assert.match(publicApiCandidateDeployment, /project: "jina-463721"/);
   for (const contract of [
     /API_BASE_URL: "https:\/\/api\.usejina\.com"/,
-    /SUPPORTED_DASHBOARD_AUTH_MODES[^\n]+"github"[^\n]+"clerk"/,
+    /DASHBOARD_AUTH_MODE: "clerk"/,
     /DASHBOARD_URL: "https:\/\/app\.usejina\.com"/,
     /DASHBOARD_COOKIE_SAMESITE: "None"/,
     /DASHBOARD_COOKIE_SECURE: "true"/,
-    /"GITHUB_OAUTH_CLIENT_SECRET"/
+    /"CLERK_PUBLISHABLE_KEY"/,
+    /"CLERK_SECRET_KEY"/
   ]) {
     assert.match(publicApiCandidateDeployment, contract);
   }
@@ -441,7 +428,6 @@ test("production long-lived services use only numeric Secret Manager versions", 
   ]) {
     assert.match(causalCloudBuild, new RegExp(`${substitution}: "[1-9][0-9]*"`));
   }
-  assert.match(deployment, /gcloud secrets versions access \{upstream_version\} --secret=\{upstream_secret\}/);
 });
 
 test("production run-review workers retain relational Trigger dispatch and exact credentials", () => {
@@ -616,25 +602,19 @@ test("production uses the exact API image to apply runtime and product migration
   assert.match(migrationDeployment, /--args=dist\/product\/migrate-all\.js,--install-roles/);
   assert.doesNotMatch(migrationDeployment, /node_modules\/@jina\/db\/dist\/migrate\.js/);
   assert.match(apiDockerfile, /test -f \/out\/dist\/product\/migrate-all\.js/);
-  assert.match(apiDockerfile, /test -f \/out\/product-migrations\/0031_github_webhook_inbox\.sql/);
+  assert.match(apiDockerfile, /test -f \/out\/product-migrations\/0037_collapse_context_schema\.sql/);
 });
 
-test("owner migration and destructive reset are bound to the live coordinated deployment lease", () => {
+test("owner migration is bound to the live coordinated deployment lease", () => {
   const migrationDeployment = deployment.match(
     /gcloud run jobs deploy jina-context-migrate[\s\S]+?gcloud run jobs execute jina-context-migrate/
   )?.[0];
-  const resetDeployment = deployment.match(
-    /gcloud run jobs deploy jina-context-legacy-reset[\s\S]+?gcloud run jobs execute jina-context-legacy-reset/
-  )?.[0];
   assert.ok(migrationDeployment);
-  assert.ok(resetDeployment);
-  for (const job of [migrationDeployment, resetDeployment]) {
-    assert.match(job, /JINA_WORKER_RELEASE_ID=\$\{CLOUD_BUILD_ID\}/);
-    assert.match(
-      job,
-      /JINA_WORKER_RELEASE_CREDENTIAL=\$\{worker_release_secret\}:\$\{deployment_release_secret_version\}/
-    );
-  }
+  assert.match(migrationDeployment, /JINA_WORKER_RELEASE_ID=\$\{CLOUD_BUILD_ID\}/);
+  assert.match(
+    migrationDeployment,
+    /JINA_WORKER_RELEASE_CREDENTIAL=\$\{worker_release_secret\}:\$\{deployment_release_secret_version\}/
+  );
   assert.match(databaseMigration, /applySchema\(pool, "jina_runtime\.schema", JINA_RUNTIME_SCHEMA_SQL\)/);
   assert.match(databaseMigration, /pg_advisory_lock\(hashtext\('jina_runtime\.api_state'\)\)/);
   assert.match(databaseMigration, /lease_credential_sha256=\$2/);
@@ -835,9 +815,6 @@ test("production preflight fences the exact durable Board leases and independent
   assert.match(productionPreflight, /set snapshot=\$1::jsonb,version=version\+1,updated_at=clock_timestamp\(\)/);
   assert.match(productionPreflight, /Board drain did not fence exactly the active lease inventory/);
   assert.match(productionPreflight, /Board has \$\{leases\.length\} active leases after worker drain/);
-  assert.match(productionPreflight, /assertPageOrientedContextCutover\(snapshot\)/);
-  assert.match(productionPreflight, /contextWorkflowContract !== "page-oriented"/);
-  assert.match(productionPreflight, /LEGACY_CONTEXT_OUTBOX_TOPICS\.has\(message\.topic\)/);
 });
 
 test("acceptance can be claimed only by the exact coordinated candidate worker revisions", () => {
@@ -867,33 +844,27 @@ test("acceptance can be claimed only by the exact coordinated candidate worker r
   assert.match(deploymentDocs, /Prior\s+worker revisions are not rollback candidates/);
 });
 
-test("deployment verifies a primary backup before migration and one-time reset", () => {
+test("deployment verifies a primary backup before destructive migration", () => {
   const lookup = deployment.indexOf("gcloud sql backups list");
   const backup = deployment.indexOf("gcloud sql backups create", lookup);
   const status = deployment.indexOf('context_backup_status="$(gcloud sql backups describe');
   const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate");
-  const reset = deployment.indexOf("gcloud run jobs deploy jina-context-legacy-reset");
   assert.ok(lookup > 0);
   assert.ok(backup > lookup);
   assert.ok(status > backup);
   assert.ok(migration > status);
-  assert.ok(reset > migration);
   assert.match(deployment, /if \[\[ -z "\$\{context_backup_id\}" \]\]; then/);
   assert.match(deployment, /--filter="description=\$\{backup_description\}"/);
-  assert.match(deployment, /JINA_CONTEXT_RESET_BACKUP_ID=\$\{context_backup_id\}/);
   assert.match(deployment, /context_backup_status.*SUCCESSFUL/s);
   assert.match(deployment, /roles\/jinaContextBackupOperator binding/);
 });
 
-test("one-time production reset is schema-exact and preserves the generic task board", () => {
-  assert.match(productionPreflight, /assertExactSet\(tables, legacy, "one-time legacy Context schema"\)/);
-  assert.match(productionPreflight, /assertPreservedShapes/);
-  assert.match(productionPreflight, /preservedDigests/);
-  assert.match(productionPreflight, /drop table \$\{LEGACY_CONTEXT_TABLES/);
-  assert.doesNotMatch(productionPreflight, /drop table[^;]*cascade/i);
-  assert.doesNotMatch(productionPreflight, /truncate[^;]*jina_runtime\.api_state/i);
-  assert.doesNotMatch(productionPreflight, /delete[^;]*jina_runtime\.api_state/i);
-  assert.match(cloudBuild, /_JINA_CONTEXT_RESET_MODE: disabled[\s\S]+?_JINA_CONFIRM_CONTEXT_RESET: ""/);
+test("production has one current Context schema and no legacy reset path", () => {
+  assert.match(productionPreflight, /const CURRENT_CONTEXT_TABLES = \[[\s\S]+?"context_releases"/);
+  assert.match(productionPreflight, /assertExactSet\(tables, CURRENT_CONTEXT_TABLES, "current Context schema"\)/);
+  assert.doesNotMatch(productionPreflight, /schema-reset|legacy-once|CONTEXT_RESET/);
+  assert.doesNotMatch(deployment, /jina-context-legacy-reset|JINA_CONTEXT_RESET/);
+  assert.doesNotMatch(cloudBuild, /JINA_CONTEXT_RESET/);
 });
 
 test("artifact bucket is a precreated least-privilege platform prerequisite", () => {

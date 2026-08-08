@@ -36,7 +36,7 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
         workflowId,
         tenantId: "tenant-worker-lifecycle",
         workflowType: "pr_review",
-        pipelineVersion: "pr_review.v1",
+        pipelineVersion: "fixture.pipeline.current",
         subjectType: "github_pull_request",
         subjectId: "321:7:head-sha",
         dedupeKey: "review:321:7:head-sha",
@@ -45,8 +45,8 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
         tasks: [
           {
             id: prepareTaskId,
-            taskType: "prepare-review",
-            topic: "prepare-review",
+            taskType: "fixture-prepare",
+            topic: "fixture-prepare",
             status: "queued",
             maxAttempts: 3,
             metadata: { repository: "omxyz/jina" }
@@ -54,24 +54,24 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
           {
             id: summaryTaskId,
             parentTaskId: prepareTaskId,
-            taskType: "summary-review",
-            topic: "summary-review",
+            taskType: "fixture-summary",
+            topic: "fixture-summary",
             status: "blocked",
             maxAttempts: 3
           },
           {
             id: runtimeTaskId,
             parentTaskId: prepareTaskId,
-            taskType: "runtime-review",
-            topic: "runtime-review",
+            taskType: "fixture-runtime",
+            topic: "fixture-runtime",
             status: "blocked",
             maxAttempts: 3
           },
           {
             id: finalizeTaskId,
             parentTaskId: prepareTaskId,
-            taskType: "finalize-review",
-            topic: "finalize-review",
+            taskType: "fixture-finalize",
+            topic: "fixture-finalize",
             status: "blocked",
             maxAttempts: 3
           }
@@ -105,7 +105,7 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
       })
     );
 
-    const firstClaim = await claim(pool, worker, ["prepare-review", "summary-review", "runtime-review"]);
+    const firstClaim = await claim(pool, worker, ["fixture-prepare", "fixture-summary", "fixture-runtime"]);
     assert.ok(firstClaim);
     assert.equal(firstClaim.taskId, prepareTaskId);
     assert.equal(firstClaim.attempt, 1);
@@ -126,7 +126,7 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
     const released = await inTransaction(pool, (client) => worker.releaseAttempt(client, fence(firstClaim)));
     assert.equal(released.accepted, true);
 
-    const secondClaim = await claim(pool, worker, ["prepare-review"]);
+    const secondClaim = await claim(pool, worker, ["fixture-prepare"]);
     assert.ok(secondClaim);
     assert.equal(secondClaim.taskId, prepareTaskId);
     assert.equal(secondClaim.deliveryId, firstClaim.deliveryId);
@@ -146,7 +146,7 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
     const conflictingReplay = await complete(pool, worker, secondClaim, "different-result");
     assert.equal(conflictingReplay.accepted, false);
 
-    const summaryClaim = await claim(pool, worker, ["summary-review"]);
+    const summaryClaim = await claim(pool, worker, ["fixture-summary"]);
     assert.ok(summaryClaim);
     assert.equal(summaryClaim.taskId, summaryTaskId);
     const retry = await inTransaction(pool, (client) =>
@@ -160,7 +160,7 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
     assert.equal(retry.accepted, true);
     assert.equal(retry.terminal, false);
 
-    const retriedSummary = await claim(pool, worker, ["summary-review"]);
+    const retriedSummary = await claim(pool, worker, ["fixture-summary"]);
     assert.ok(retriedSummary);
     assert.equal(retriedSummary.taskId, summaryTaskId);
     assert.equal(retriedSummary.attempt, 2);
@@ -168,12 +168,12 @@ test("relational Board worker leases, fences, retries, and reduces workflows", {
     assert.notEqual(retriedSummary.deliveryId, summaryClaim.deliveryId);
     assert.equal((await complete(pool, worker, retriedSummary, "summary")).accepted, true);
 
-    const runtimeClaim = await claim(pool, worker, ["runtime-review"]);
+    const runtimeClaim = await claim(pool, worker, ["fixture-runtime"]);
     assert.ok(runtimeClaim);
     assert.equal(runtimeClaim.taskId, runtimeTaskId);
     assert.equal((await complete(pool, worker, runtimeClaim, "runtime")).accepted, true);
 
-    const finalizeClaim = await claim(pool, worker, ["finalize-review"]);
+    const finalizeClaim = await claim(pool, worker, ["fixture-finalize"]);
     assert.ok(finalizeClaim);
     assert.equal(finalizeClaim.taskId, finalizeTaskId);
     assert.equal((await complete(pool, worker, finalizeClaim, "finalized")).accepted, true);

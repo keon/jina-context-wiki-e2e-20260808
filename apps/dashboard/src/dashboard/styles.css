@@ -888,7 +888,7 @@ button.nav__item:hover {
    that content sat flush against the card border. Put the body's inset on the
    section instead and pull `.section__title` back out to the edge it draws its
    rule against. `.review-detail-surface` opts out below: it flattens sections
-   and manages its own insets, and its `SectionFlush` bodies are flush by
+   and manages its own insets, and its flush-list bodies are flush by
    intent. */
 .section:not(:has(> .section__body)) {
   padding: 0 var(--space-5) var(--space-5);
@@ -1325,7 +1325,7 @@ button.nav__item:hover {
   gap: var(--space-4);
 }
 
-/* `SectionFlush` rows and the appendix manage their own body insets. */
+/* Flush-list rows and the appendix manage their own body insets. */
 .review-detail-surface > .section:not(:has(> .section__body)) {
   padding: 0;
 }

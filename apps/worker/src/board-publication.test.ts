@@ -223,6 +223,7 @@ test("current Context publication checkpoints PageIndex before attachment and co
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${(mock.address() as AddressInfo).port}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "10",
       WORKER_API_TIMEOUT_MS: "5000",

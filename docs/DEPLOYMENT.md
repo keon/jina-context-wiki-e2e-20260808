@@ -1,13 +1,12 @@
 # Deployment
 
 The unified API lives in `apps/api`; product/review, Board, Context, causal graph,
-and MCP routes ship in one backend image. The target topology and staging use the
-relational Board for review and control workflows; primary production still has the
-explicitly gated legacy review queue described under worker configuration. Context and
-causal-graph workflows use the generic snapshot Board and durable outbox while their
-releases and projections are relational. All are executed by `apps/worker`. The
-portable Daytona review runtime lives in `packages/review-agent`. The customer
-dashboard deploys from `apps/dashboard`.
+and MCP routes ship in one backend image. Production and staging use the relational
+one-task Board review path, with the task worker dispatching the pinned Trigger.dev
+workflow. Context and causal-graph workflows use the generic snapshot Board and durable
+outbox while their releases and projections are relational. All are executed by
+`apps/worker`. The portable Daytona review runtime lives in `packages/review-agent`.
+The customer dashboard deploys from `apps/dashboard`.
 
 Every push to `staging` starts the `jina-staging-deploy` Cloud Build trigger in the
 isolated `jina-staging-20260802` project. The trigger follows the same source-bound model
@@ -26,16 +25,8 @@ staging deploy installs the Board-recorded 15-minute billing retry schedule and 
 OpenTelemetry sidecars, including the causal worker's release-gated sidecar. Production continues to use the
 coordinated `cloudbuild.yaml` path below.
 
-Staging dashboard auth defaults to Clerk. A reversible identity-migration rehearsal may
-set Cloud Build substitutions `_JINA_DASHBOARD_AUTH_MODE=hybrid` and the non-secret
-`_JINA_GITHUB_OAUTH_CLIENT_ID`; the deploy then binds
-`jina-staging-github-oauth-client-secret` and fails closed if either half of the OAuth
-pair is unavailable. The detailed identity/data procedure is
-[CLERK_IDENTITY_CUTOVER.md](./CLERK_IDENTITY_CUTOVER.md).
-
-The audited staging-to-production source consolidation, provider inventory, backup,
-and rollback runbook is
-[STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md).
+Staging dashboard auth defaults to Clerk and fails closed when its configured
+publishable/secret key pair is unavailable.
 
 For an operator rerun, invoke the source-bound trigger with the exact audited staging SHA:
 
@@ -79,7 +70,7 @@ deployed to Cloud Run before production acceptance runs.
   `jina-task-worker`, `jina-dashboard`, `jina-admin`
 - Cloud Run jobs: `jina-context-daytona-preflight`, one short-lived
   `jina-context-release-<short-build-id>` control job per coordinated release,
-  `jina-context-migrate`, optional `jina-context-legacy-reset`, `jina-acceptance`,
+  `jina-context-migrate`, `jina-acceptance`,
   and operator-run `jina-context-production-trigger-acceptance`
 - Primary Cloud SQL: `jina-463721:us-east1:jina-db`, database `jina`
 - Context artifact bucket: `gs://jina-v2-jina-context-artifacts-us-east1`
@@ -175,7 +166,7 @@ deployment.
 
 Create the release-scoped credential secret once. Cloud Build adds two independent
 numbered versions per release: a short-lived deployment-control credential and a
-worker-generation credential. Control, migration, and reset jobs mount only the first;
+worker-generation credential. Control and migration jobs mount only the first;
 the exact candidate worker revisions mount only the second, while the release-control
 row stores the worker credential's SHA-256 digest:
 
@@ -405,8 +396,6 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | `_JINA_ACCEPTANCE_TIMEOUT_MS`                            |                                       `10800000` | Three-hour acceptance polling window.                                                                                                               |
 | `_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS`                   |                                          `11700` | Three hours fifteen minutes, leaving cleanup/logging time.                                                                                          |
 | `_JINA_DEPLOYMENT_ACCEPTANCE_MODE`                       |                                     `mechanical` | Nonblocking release gate; explicit `full` also runs the multi-hour candidate Context build before cutover.                                          |
-| `_JINA_CONTEXT_RESET_MODE`                               |                                       `disabled` | Set to `legacy-once` only for the audited first v2 transition.                                                                                      |
-| `_JINA_CONFIRM_CONTEXT_RESET`                            |                                            empty | Must equal `delete-rebuildable-context` only with `legacy-once`.                                                                                    |
 
 The API request timeout is 3,600 seconds. Each instance has one shared Context/state/product
 pool and one separate read-only shared-identity pool, each capped at three connections.
@@ -477,8 +466,8 @@ the worker resolves the write-once profile created by the unified API and honors
 reasoning effort, credential revision, and fallback policy. Credential/configuration,
 quota, and unknown-model failures are terminal and remain visible on the task board;
 only transient provider/sandbox failures consume bounded automatic retries.
-Production currently stores the latter under the historical
-`jina-v1-internal-api-token` secret name. Review and Context workers intentionally
+Production stores the latter under the current
+`jina-product-internal-api-token` secret name. Review and Context workers intentionally
 use different service-internal tokens. Rotate this mirror whenever the review
 internal token rotates; only the Context worker
 service account receives accessor permission.
@@ -502,14 +491,9 @@ and read-only `contents`, `issues`, `pull_requests`, and `metadata`; the returne
 scope is validated before checkout. This remains true when the controlled
 production-trigger fixture also has a separate write-capable mutation App; that
 fixture identity is mounted only into the operator-run trigger-acceptance job.
-`GITHUB_CLONE_TOKEN` is the manual-build fallback. The primary production
-release still runs the compatibility `run-review` queue and must set
-`JINA_LEGACY_REVIEW_PIPELINE_ENABLED=true`; the worker rejects that topic
-without the explicit gate. Staging and the target production topology use the
-relational review/control topics (`prepare-review` through `settle-review`,
-installation backfill, and billing retry). Remove the gate only after product
-migrations are applied, product API routing is enabled, and legacy review work
-has drained.
+`GITHUB_CLONE_TOKEN` is the manual-build fallback. Production and staging run only the
+one-task relational review bridge. There is no review-pipeline compatibility mode or
+legacy queue-drain lane.
 
 The worker image embeds the pinned PageIndex OSS source, isolated Python
 environment, and bridge. The pin is commit
@@ -597,8 +581,8 @@ At request admission, the API allocates a monotonic `refSequence` for the exact
 tenant/repository/ref under the same advisory lock used by ref-sensitive canonical
 writes, and records it on the build and ingest stage. The checkpoint retains that
 sequence. If an earlier accepted push finishes after a later accepted push, the earlier
-checkpoint remains stored for audit but cannot advance the projection-input frontier,
-commit derived context, become current, or publish a release over the higher
+checkpoint remains stored for audit but cannot commit derived context, become current,
+or publish a release over the higher
 admitted sequence. Pull-request heads are freshness-first: a new head cancels the older
 preview immediately, retires its leases, and releases its quota. Unstarted default-ref
 builds are also cheap to replace. Once a push-, issue-, or manually-triggered build has
@@ -665,9 +649,8 @@ for a different task is rejected.
 actor, reason, request key, attempts, and affected tasks. Before the Board update
 commits, the API reactivates that completed build's quota reservation under the
 active-build limit without consuming another build-rate token; a Board conflict
-compensates the reservation back to completed. The retired multi-topic page and
-gate remediation modes are not valid for page-oriented builds; see
-[Retired multi-topic Context remediation](CONTEXT_PAGE_REMEDIATION.md).
+compensates the reservation back to completed. Only the selected current task and its
+required failed/canceled dependent chain are reopened.
 
 The worker fetches the exact checkpoint SHA, creates a bounded Git archive, and
 supplies Codex a read-only repository plus only the stage inputs declared by
@@ -706,10 +689,9 @@ operation keeps its authority while a terminated process becomes reclaimable wit
 five minutes. Deployment validation requires the lease to cover at least three heartbeat
 intervals. Checkpointed model phases then resume without replaying completed work.
 
-Dense retrieval is disabled until its evaluation and approved embedding-provider gates
-pass. The pinned PageIndex Markdown hierarchy and deterministic bounded lexical tree
-search are active. Retrieval returns context packs and citations without invoking a model
-or synthesizing an answer.
+The pinned PageIndex Markdown hierarchy and deterministic bounded lexical tree search
+are active. Retrieval returns context packs and citations without invoking a model or
+synthesizing an answer.
 
 ## CI and image build
 
@@ -730,23 +712,16 @@ Database integration tests receive an ephemeral PostgreSQL 16 service through
 `TEST_DATABASE_URL`.
 
 The release race gate is mandatory and must not be skipped. `pnpm test` plus retained
-release evidence must cover, in both the memory contract and real PostgreSQL where
-applicable:
-
-- monotonic per-ref build allocation and delayed completion of a lower-sequence push;
-- rejection of a superseded checkpoint at generation creation/publication;
-- an erasure committed while projectors are materializing;
-- projection-input frontier changes before final publication;
-- invalidation/rebuild behavior for erasure and terminal knowledge revision events; and
-- repository-access mutation during ACL projection/publication.
-
-All cases must prove that no stale generation is published or remains query-visible.
+release evidence must cover monotonic per-ref build allocation, delayed completion of
+a lower-sequence push, rejection of stale prior-release seeds, live Board lease checks
+for publication and attachment, one-time attachment immutability, direct repository
+authorization, and causal-release sequence fencing. No stale release may become
+query-visible.
 
 The supported production path is the approval-gated `jina-main-deploy` trigger over
 `cloudbuild.yaml`. It builds all four images, deploys all five services, and runs
 migration plus acceptance in one build. Start it from a clean checkout of the exact
-audited SHA. For the one-time legacy transition, use the explicit destructive
-substitutions:
+audited SHA:
 
 ```sh
 release_sha="$(git rev-parse HEAD)"
@@ -754,13 +729,12 @@ test -z "$(git status --porcelain)"
 gcloud builds triggers run jina-main-deploy \
   --project=jina-v2 \
   --region=us-east1 \
-  --sha="${release_sha}" \
-  --substitutions=_JINA_CONTEXT_RESET_MODE=legacy-once,_JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context
+  --sha="${release_sha}"
 ```
 
 Record both `release_sha` and the returned Cloud Build ID. Before approval, describe that
 exact build and verify its source revision, deployer service account, 21,600-second
-timeout, both reset substitutions, and `PENDING` approval state:
+timeout, and `PENDING` approval state:
 
 ```sh
 gcloud builds describe "<build-id>" \
@@ -772,9 +746,9 @@ gcloud beta builds approve "<build-id>" \
   --region=us-east1
 ```
 
-If the main-branch event also created a reset-disabled pending build for the same SHA,
-inspect and cancel only that exact build before approving the reset-enabled build. Never
-approve both. After the one-time transition, normal releases leave reset mode disabled.
+If the main-branch event also created another pending build for the same SHA, inspect and
+cancel only that exact duplicate before approval. Never approve two coordinated releases
+for the same source revision.
 
 The build uses its unique ID
 for the deployed API, worker, dashboard, and admin image tags, so every service resolves
@@ -833,7 +807,7 @@ across tenants and repositories.
 
 The production transition program is copied into both immutable backend images at
 `/opt/jina/context-production-preflight.mjs` and executed from that path by the Daytona,
-release-control, and reset jobs. Do not encode it into an environment variable: Cloud
+and release-control jobs. Do not encode it into an environment variable: Cloud
 Run limits one environment-variable value to 32 KB, while this audited program is larger.
 
 ## Pre-deployment backup
@@ -890,8 +864,8 @@ The coordinated `cloudbuild.yaml` invocation above calls
    capability-role installation and runtime-login grants; the migration mounts the
    deployment-control credential, verifies the live deployment lease, and holds the
    Board advisory lock for its full DDL/role critical section;
-9. only when explicitly requested for the first v2 release, executes the atomic
-   `legacy-once` reset described below, also requiring the exact live release lease;
+9. verifies that the migration produced exactly the current seven-table Context
+   schema and no compatibility views before any candidate starts;
 10. enables only the exact candidate generation in the database and deploys all five
     services as short-tagged candidate revisions with
     `--no-traffic` and exact revision suffixes, then proves that each worker service
@@ -1011,16 +985,13 @@ a zero revision-level minimum; accepted candidates restore their configured warm
 minimum. Deletion is
 deliberate: routing an old polling revision to zero percent does not by itself prove its
 minimum instances have terminated. A final zero-lease check precedes schema mutation.
-That same locked preflight rejects non-terminal pre-page-oriented Context builds
-or claimable legacy Context topics, because the candidate worker cannot resume
-that queue topology.
 The standalone `worker-pause` recovery action applies the same locked zero-lease guard.
 The atomic waiter closes the race between observation and fencing even during the first
 rollout from an API revision that does not yet understand the shared claim-admission gate.
 Schema inspection and the verified backup already completed before quiescence; the
-schema is checked again under the deployment lease before migration or reset.
-Lease renewal intentionally does not take the Board advisory lock: migration and reset
-hold that lock across their full critical sections, while renewal continues to serialize
+schema is checked again under the deployment lease before migration.
+Lease renewal intentionally does not take the Board advisory lock: migration holds that
+lock across its full critical section, while renewal continues to serialize
 on the release-control row and release-control advisory lock. All gate-changing actions
 still take the Board lock before the release-control lock.
 
@@ -1041,52 +1012,6 @@ completed dispatchable Context task. It reads those receipts only through the in
 tenant- and repository-scoped
 `GET /internal/context/builds/{buildId}/worker-completions` view; aggregate and manual
 Board tasks are not worker-executed and therefore do not require receipts.
-
-### One-time legacy Context reset
-
-The primary database currently shares tenant identity and repository control data with
-the legacy Context corpus. The first v2 release is intentionally destructive only to
-rebuildable Context data. Invoke that release with both substitutions:
-
-```text
-_JINA_CONTEXT_RESET_MODE=legacy-once
-_JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context
-```
-
-The preflight accepts only the audited legacy base-table catalog and the exact current
-view catalog. After migration adds the three new v2 tables, the reset takes an advisory
-lock and one PostgreSQL transaction. It verifies every preserved table's column shape,
-truncates the compile-time classified rebuildable tables, restores ACL source
-observations, and drops exactly `derivation_progress`, `pipeline_builds`, and
-`pipeline_stages` without `CASCADE`. Unexpected/missing tables, external dependencies,
-or any before/after digest change in the preserved rows rolls the transaction back.
-The removed legacy tables are also the one-time marker: replaying `legacy-once` after a
-successful transition fails the catalog preflight.
-
-The following remain byte-for-byte present:
-
-- `jina_context.repositories`;
-- repository ACL observations and the observation rows they cite;
-- erasure filters and audit events;
-- per-tenant API-token hashes and revocation/expiry state;
-- public tenant, installation, repository, membership, and integration records; and
-- `jina_runtime.api_state` plus `jina_runtime.github_deliveries`.
-
-In particular, the reset never truncates the generic task board. On startup, the API's
-normal snapshot sanitizer removes task types unsupported by the new runtime while
-retaining unrelated review tasks, dependencies, outbox entries, events, publications,
-pull requests, and delivery identity.
-
-This first transition has a Context-only maintenance window. The reset removes the
-legacy corpus before the approximately 2.5-hour candidate build can prove the new one;
-the previously serving API and legacy worker are not compatible with the removed
-pipeline tables. Identity/control-plane and non-Context application data stay available,
-but legacy Context reads/builds are unsupported until candidate acceptance and cutover.
-Schedule the first release accordingly and do not use `legacy-once` for routine
-deployments. Normal releases require the current catalog, make no destructive reset,
-and keep foreground production traffic on the previous revision throughout candidate
-acceptance; background workers remain on the paused drains while the exact candidates
-are exercised through their tagged URLs.
 
 ### How the capability split survives a managed runtime login
 
@@ -1243,86 +1168,19 @@ prevented from receiving that static Context token.
    or replayed acceptance, then verifies no matching token remains. Whenever the
    response included the secret, the job also proves that both HTTP and MCP reject it
    after revocation;
-9. requires zero context outbox backlog through the administrator credential;
-10. uses app-level HTTP authentication plus a Cloud Run identity token to exercise the
-    deployed dashboard API proxy, then requires the deployed admin server render to
-    contain the same certified repository and release.
+9. uses app-level HTTP authentication plus a Cloud Run identity token to exercise the
+   deployed dashboard API proxy, then requires the deployed admin server render to
+   contain the same certified repository and release.
 
 The job exits `20` for workflow failures, `21` for release/commit failures, `22` for
-context availability, `23` for HTTP/MCP retrieval or citation failures, `24` for backlog,
-and `25` for transport or unexpected failures. Inspect the job execution logs before
+context availability, `23` for HTTP/MCP retrieval or citation failures, and `25` for
+transport or unexpected failures. Inspect the job execution logs before
 retrying with a new request key.
 
-For release-candidate quality checks beyond the deployment smoke query, run the
-real-question corpus evaluator:
-
-```sh
-JINA_API_URL="${JINA_API_URL}" \
-JINA_CONTEXT_REPOSITORY=owner/repository \
-JINA_CONTEXT_REF=main \
-CONTEXT_QUESTION_FILE=/absolute/path/questions.md \
-CONTEXT_API_TOKEN='<bound context query token>' \
-CONTEXT_QUESTION_MIN_RETRIEVED_RATE=0.8 \
-pnpm evaluate:questions > /tmp/context-question-report.json
-```
-
-Do not use `evaluate:context-board-quality` as a page-oriented release gate yet. Its v2
-artifact parser still expects retired source-challenge and task-evaluation artifacts;
-the limitation and replacement criteria are recorded in
-[Context quality benchmark](CONTEXT_QUALITY_BENCHMARK.md).
-
-The question file uses Markdown headings plus bullet queries. The JSON report records
-retrieved/no-context/error results, selected logical documents, original citation source
-IDs, immutable release, deterministic retrieval method, and latency. Do not put the report or a
-query token in repository source. See [AGENTIC_DERIVATION.md](AGENTIC_DERIVATION.md) and
-[CONTEXT_QUALITY_BENCHMARK.md](CONTEXT_QUALITY_BENCHMARK.md).
-
 Release evidence also records the build ID, stage IDs, repository/ref/commit,
-`refSequence`, release ID and projection-input fingerprint, document/citation counts,
-duration, outbox depth, the backup ID, immutable image/source SHA, deployed service accounts,
+`refSequence`, release ID, document/citation counts, duration, the backup ID,
+immutable image/source SHA, deployed service accounts,
 and owner-secret IAM inspection.
-
-## Outbox recovery and rebuild
-
-Outbox consumers own independent delivery rows and leases. If metrics show a backlog,
-an internal operator can drain up to 100 pending checkpoints per call:
-
-```sh
-curl -X POST "${JINA_API_URL}/internal/context/outbox/drain" \
-  -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
-  -H "X-Jina-Principal-Id: tenant:<uuid>" \
-  -H "X-Jina-Tenant-Id: <uuid>" \
-  -H "Content-Type: application/json" \
-  --data '{"limit":20}'
-```
-
-The endpoint selects checkpoint IDs represented by pending evidence, knowledge, ACL, or
-retention deliveries and re-runs the idempotent derived-projection outbox drain. This is
-projection recovery, not the production workflow scheduler. Each projector claims and
-acknowledges only its own unexpired delivery lease for the exact
-tenant/repository/ref/commit scope. The response reports processed checkpoint IDs and the
-remaining per-consumer backlog.
-
-Before selecting checkpoints, the store terminally completes pending evidence and
-knowledge deliveries whose source sequence is below a newer admitted or committed
-sequence for the same ref. They are recorded with
-`superseded by a newer admitted ref sequence` and no longer count toward backlog. This
-does not wait for the newer build to finish ingestion or publish, so a failed newer build
-cannot strand obsolete older deliveries.
-
-A tenant administrator can force a successor generation from the latest checkpoint:
-
-```sh
-curl -X POST "${JINA_API_URL}/wiki/rebuild" \
-  -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
-  -H "X-Jina-Principal-Id: tenant:<uuid>" \
-  -H "X-Jina-Tenant-Id: <uuid>" \
-  -H "Content-Type: application/json" \
-  --data '{"repository":"owner/repository","ref":"main"}'
-```
-
-Neither operation mutates canonical evidence or shares a global processed flag. If a
-delivery lease is lost, its acknowledgement fails and the delivery remains retryable.
 
 ## Migrations and roles
 
@@ -1342,21 +1200,9 @@ the schema, and is deliberately `NOINHERIT`. Adapters use `transactionAs`/`query
 execute `SET LOCAL ROLE` before accessing context tables. See
 [DATA_MODELS.md](DATA_MODELS.md) for the capability-role list.
 
-The production job now uses the exact release API image and runs
+The production job uses the exact release API image and runs
 `dist/product/migrate-all.js --install-roles`, applying runtime and product migrations
-through one ledgered path. This unified path is required for the source consolidation,
-as specified in
-[STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md#unified-production-migration-job).
-
-Install the pgvector extension/schema only when an approved embedding provider is ready
-for evaluation:
-
-```sh
-DATABASE_URL=postgresql://... \
-  pnpm --filter @jina/db migrate -- --install-pgvector
-```
-
-Schema availability alone does not enable dense retrieval.
+through one ledgered path. This is the only supported production migration path.
 
 ## Rollback
 

@@ -10,7 +10,6 @@ import {
   normalizeModelProvider,
   normalizeReviewTriggerMode,
   parseModelSettingsSnapshot,
-  planTenantMemberships,
   projectDashboardEventPayload,
   projectDashboardRunResult,
   resolveRunKeys,
@@ -23,13 +22,9 @@ import { harnessAllowed } from "./store.js";
 
 /* ------------------------------------------------ model routing (coverage) --- */
 
-test("normalizeModelProvider: three selections; everything unselected/legacy-auto defaults to 'managed'", () => {
+test("normalizeModelProvider accepts the current three selections and defaults everything else to managed", () => {
   for (const p of ["codex", "byok", "managed"]) assert.equal(normalizeModelProvider(p), p);
-  assert.equal(normalizeModelProvider("openai"), "byok");
-  assert.equal(normalizeModelProvider("openrouter"), "byok");
-  // No selection (and the retired 'auto') -> Jina managed until the user selects.
   assert.equal(normalizeModelProvider(null), "managed");
-  assert.equal(normalizeModelProvider("auto"), "managed");
   assert.equal(normalizeModelProvider("garbage"), "managed");
 });
 
@@ -99,8 +94,6 @@ test("applyProviderPreference: keys per routing decision; harness gated by the S
     openaiApiKey: "oai",
     codexHarnessAuth: "blob" as string,
     codexHarnessConnectedAtMs: 1_784_000_000_123,
-    harnessOwnerLogin: "octo",
-    codexHarnessModel: "gpt-5.5" as const,
   };
   // codex -> harness allowed; keys still resolve for non-harness authors' PRs.
   assert.deepEqual(applyProviderPreference(both, "codex", false), { ...both });
@@ -109,23 +102,19 @@ test("applyProviderPreference: keys per routing decision; harness gated by the S
     openrouter: undefined,
     openaiApiKey: undefined,
     codexHarnessAuth: undefined,
-    harnessOwnerLogin: undefined,
-    codexHarnessModel: null,
   });
   // byok -> keys stay, harness disabled (explicit selection beats the default priority).
   assert.deepEqual(applyProviderPreference(both, "byok", false), {
     openrouter: "or",
     openaiApiKey: "oai",
     codexHarnessAuth: undefined,
-    harnessOwnerLogin: undefined,
-    codexHarnessModel: null,
   });
   // Only an OpenAI key + a non-openai model (allModelsOpenai=false) -> whole-run managed fallback (drop it).
-  assert.deepEqual(applyProviderPreference({ openaiApiKey: "oai" }, "byok", false), { openrouter: undefined, openaiApiKey: undefined, codexHarnessAuth: undefined, harnessOwnerLogin: undefined, codexHarnessModel: null });
+  assert.deepEqual(applyProviderPreference({ openaiApiKey: "oai" }, "byok", false), { openrouter: undefined, openaiApiKey: undefined, codexHarnessAuth: undefined });
   // Only an OpenAI key + all-openai run -> keep it.
-  assert.deepEqual(applyProviderPreference({ openaiApiKey: "oai" }, "byok", true), { openrouter: undefined, openaiApiKey: "oai", codexHarnessAuth: undefined, harnessOwnerLogin: undefined, codexHarnessModel: null });
+  assert.deepEqual(applyProviderPreference({ openaiApiKey: "oai" }, "byok", true), { openrouter: undefined, openaiApiKey: "oai", codexHarnessAuth: undefined });
   // A whitespace-only key counts as ABSENT.
-  assert.deepEqual(applyProviderPreference({ openrouter: "  ", openaiApiKey: "oai" }, "byok", true), { openrouter: undefined, openaiApiKey: "oai", codexHarnessAuth: undefined, harnessOwnerLogin: undefined, codexHarnessModel: null });
+  assert.deepEqual(applyProviderPreference({ openrouter: "  ", openaiApiKey: "oai" }, "byok", true), { openrouter: undefined, openaiApiKey: "oai", codexHarnessAuth: undefined });
 });
 
 /* ------------------------------------------------ per-run billing shape --- */
@@ -190,11 +179,11 @@ test("computeBillableCost tolerates a BYOK row missing the fee or the upstream c
   assert.equal(computeBillableCost({ is_byok: true, cost: "0.05" }), "0.05");
 });
 
-test("computeBillableCost returns undefined when a BYOK row has neither cost (persisted NULL -> fallback)", () => {
+test("computeBillableCost returns undefined when a BYOK row has neither cost", () => {
   assert.equal(computeBillableCost({ is_byok: true }), undefined);
 });
 
-test("computeBillableCost returns undefined for a non-BYOK row with no cost (persisted NULL -> fallback)", () => {
+test("computeBillableCost returns undefined for a non-BYOK row with no cost", () => {
   assert.equal(computeBillableCost({ is_byok: false }), undefined);
 });
 
@@ -254,133 +243,15 @@ test("projectDashboardEventPayload preserves bounded publication state for list 
   assert.equal(projectDashboardEventPayload("runtime_review_started", { large: "x".repeat(20_000) }), undefined);
 });
 
-test("projectDashboardRunResult replaces detail arrays with a compact compatible summary", () => {
+test("projectDashboardRunResult keeps only current bounded completion fields", () => {
   const huge = "x".repeat(20_000);
   const projected = projectDashboardRunResult({
-    status: "completed",
-    review_gate: {
-      blocking_level: "high",
-      conclusion: "fail",
-      blocking: true,
-      blocking_count: 2,
-      scenario_counts: { total: 9, high: 2, medium: 3, low: 4, unknown: 0, raw: huge },
-      raw: huge,
-    },
-    simulation: {
-      status: "failed",
-      duration_ms: 123,
-      counts: { total: 9, pass: 7, fail: 2, warn: 0, raw: huge },
-      scenarios: Array.from({ length: 20 }, () => ({ transcript: huge })),
-    },
-    final_review: {
-      status: "issues_found",
-      summary: huge,
-      findings: Array.from({ length: 20 }, () => ({ body: huge })),
-      markdown: huge,
-    },
-    review_markdown: huge,
+    status: "  completed  ",
+    error: huge,
+    runtime_review: { findings: Array.from({ length: 20 }, () => ({ body: huge })) },
   });
 
-  assert.deepEqual(projected?.review_gate, {
-    blocking_level: "high",
-    conclusion: "fail",
-    blocking: true,
-    blocking_count: 2,
-    scenario_counts: { total: 9, high: 2, medium: 3, low: 4, unknown: 0 },
-  });
-  assert.deepEqual(projected?.simulation, {
-    status: "failed",
-    duration_ms: 123,
-    counts: { total: 9, pass: 7, fail: 2, warn: 0 },
-    scenarios: [],
-  });
-  assert.equal(((projected?.final_review as Record<string, unknown>).summary as string).length, 500);
-  assert.deepEqual((projected?.final_review as Record<string, unknown>).findings, []);
-  assert.equal("review_markdown" in (projected ?? {}), false);
-  assert.ok(JSON.stringify(projected).length < 1_500);
-});
-
-/* --- resolve-shape mapping (decryptIntegrationRow); values below are legacy plaintext, which
-   decryptSecret returns as-is regardless of SECRETS_ENCRYPTION_KEY, so the test is deterministic. --- */
-
-test("decryptIntegrationRow maps openrouter + author harness + owner login + harness model", () => {
-  assert.deepEqual(
-    decryptIntegrationRow({
-      openrouter_api_key: "sk-or-tenant",
-      codex_harness_auth: '{"tokens":{"refresh_token":"rt"}}',
-      codex_harness_connected_at: "2026-07-15T12:34:56.789Z",
-      harness_owner_login: "octocat",
-      codex_harness_model: "gpt-5.4",
-    }),
-    {
-      openrouter: "sk-or-tenant",
-      openaiApiKey: undefined,
-      codexHarnessAuth: '{"tokens":{"refresh_token":"rt"}}',
-      codexHarnessConnectedAtMs: Date.parse("2026-07-15T12:34:56.789Z"),
-      harnessOwnerLogin: "octocat",
-      codexHarnessModel: "gpt-5.4",
-    },
-  );
-});
-
-test("decryptIntegrationRow surfaces a tenant BYOK native OpenAI key", () => {
-  // The native OpenAI key resolves independently of the harness/openrouter credentials and drives the
-  // BYOK native route (openai/* -> api.openai.com under the tenant's own key).
-  assert.deepEqual(
-    decryptIntegrationRow({
-      openrouter_api_key: null,
-      openai_api_key: "sk-tenant-openai",
-      codex_harness_auth: null,
-      harness_owner_login: null,
-      codex_harness_model: null,
-    }),
-    {
-      openrouter: undefined,
-      openaiApiKey: "sk-tenant-openai",
-      codexHarnessAuth: undefined,
-      harnessOwnerLogin: undefined,
-      codexHarnessModel: null,
-    },
-  );
-});
-
-test("decryptIntegrationRow coerces an unknown stored harness model to null", () => {
-  // A stale/invalid stored model value must never flow to the runtime as-is.
-  assert.deepEqual(
-    decryptIntegrationRow({
-      openrouter_api_key: null,
-      codex_harness_auth: '{"tokens":{"refresh_token":"rt"}}',
-      harness_owner_login: "octocat",
-      codex_harness_model: "made-up-model",
-    }),
-    {
-      openrouter: undefined,
-      openaiApiKey: undefined,
-      codexHarnessAuth: '{"tokens":{"refresh_token":"rt"}}',
-      harnessOwnerLogin: "octocat",
-      codexHarnessModel: null,
-    },
-  );
-});
-
-test("decryptIntegrationRow omits harnessOwnerLogin + harness model when no harness blob resolved", () => {
-  // A matched author with an integration row but NO codex harness must not look like own-harness.
-  assert.deepEqual(
-    decryptIntegrationRow({
-      openrouter_api_key: "sk-or",
-      codex_harness_auth: null,
-      codex_harness_connected_at: "2026-07-15T12:34:56.789Z",
-      harness_owner_login: "octocat",
-      codex_harness_model: "gpt-5.5",
-    }),
-    {
-      openrouter: "sk-or",
-      openaiApiKey: undefined,
-      codexHarnessAuth: undefined,
-      harnessOwnerLogin: undefined,
-      codexHarnessModel: null,
-    },
-  );
+  assert.deepEqual(projected, { status: "completed", error: "x".repeat(500) });
 });
 
 test("decryptIntegrationRow returns an empty shape for a missing row", () => {
@@ -388,8 +259,6 @@ test("decryptIntegrationRow returns an empty shape for a missing row", () => {
     openrouter: undefined,
     openaiApiKey: undefined,
     codexHarnessAuth: undefined,
-    harnessOwnerLogin: undefined,
-    codexHarnessModel: null,
   });
 });
 
@@ -413,61 +282,6 @@ test("deriveKeySource: author harness WINS over a tenant key (mirrors runtime pr
   // so billing must classify this run "harness" too — otherwise a native own-subscription run would be
   // misbilled as managed/user AI.
   assert.equal(deriveKeySource(true, true), "harness");
-});
-
-/* --- tenant membership planner (planTenantMemberships): pure desired-set logic that the sync upserts,
-   and whose complement (this user's rows NOT in the set) is the stale-delete set. --- */
-
-test("planTenantMemberships adds an admin self-membership for the viewer's personal tenant", () => {
-  const desired = planTenantMemberships({
-    githubUserId: 7,
-    githubLogin: "octocat",
-    personalTenantId: "tenant-personal",
-    orgTenants: [],
-  });
-  assert.deepEqual(desired, [
-    { tenantId: "tenant-personal", githubUserId: 7, githubLogin: "octocat", role: "admin" },
-  ]);
-});
-
-test("planTenantMemberships carries each org's GitHub membership role", () => {
-  const desired = planTenantMemberships({
-    githubUserId: 7,
-    githubLogin: "octocat",
-    orgTenants: [
-      { tenantId: "tenant-admin-org", role: "admin" },
-      { tenantId: "tenant-member-org", role: "member" },
-    ],
-  });
-  assert.deepEqual(new Map(desired.map((m) => [m.tenantId, m.role])), new Map([
-    ["tenant-admin-org", "admin"],
-    ["tenant-member-org", "member"],
-  ]));
-  for (const membership of desired) {
-    assert.equal(membership.githubUserId, 7);
-    assert.equal(membership.githubLogin, "octocat");
-  }
-});
-
-test("planTenantMemberships keeps the personal 'admin' row when a tenant is both personal and an org", () => {
-  // Guard: a tenant that appears in both sets resolves to the personal 'admin' row (personal wins).
-  const desired = planTenantMemberships({
-    githubUserId: 7,
-    githubLogin: "octocat",
-    personalTenantId: "tenant-x",
-    orgTenants: [{ tenantId: "tenant-x", role: "member" }],
-  });
-  assert.equal(desired.length, 1);
-  assert.equal(desired[0].role, "admin");
-});
-
-test("planTenantMemberships returns an empty set for a viewer with no personal tenant and no known orgs", () => {
-  // The complement of the empty set is ALL of this user's existing rows -> the sync deletes them (they
-  // left every org / their personal tenant is gone).
-  assert.deepEqual(
-    planTenantMemberships({ githubUserId: 7, githubLogin: "octocat", orgTenants: [] }),
-    [],
-  );
 });
 
 /* --- tenant switcher ordering (sortViewerTenants): personal first, then orgs, each alphabetical. --- */

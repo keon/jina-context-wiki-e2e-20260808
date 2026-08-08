@@ -20,7 +20,6 @@ import {
   isTerminalReviewRunStatus,
   persistReviewFindings,
   persistReviewUsageRecords,
-  persistScenariosAndSimulations,
   reconcileReviewRunBillingKeySource,
   recordInstallation,
   recordReviewEvent as storeRecordReviewEvent,
@@ -54,17 +53,25 @@ export async function prepareReview(c: Context, config: AppConfig, billing?: Bil
   const payload = objectAt(body, ["payload"]);
   const repository = objectAt(payload, ["repository"]);
   const pullRequest = objectAt(payload, ["pull_request"]);
+  const idempotencyKey = stringValue(body.idempotency_key) ?? stringAt(payload, ["review_idempotency_key"]);
+  const installationId = numberAt(payload, ["github_installation_id"]);
+  if (!idempotencyKey) {
+    throw new ApiError(400, "idempotency_key is required");
+  }
+  if (!installationId) {
+    throw new ApiError(400, "github_installation_id is required");
+  }
 
   let reviewRunId: string;
   try {
     reviewRunId = await prepareReviewRun({
       triggerRunId,
-      idempotencyKey: stringValue(body.idempotency_key) ?? stringAt(payload, ["review_idempotency_key"]),
+      idempotencyKey,
       deliveryId: stringAt(payload, ["delivery_id"]),
       sourceEvent: stringAt(payload, ["source_event"]),
       triggerSource: stringAt(payload, ["trigger"]),
       orchestrationPayload: payload,
-      installationId: numberAt(payload, ["github_installation_id"]),
+      installationId,
       account: {
         id: numberAt(repository, ["owner_id"]),
         login: stringAt(repository, ["owner"]),
@@ -274,20 +281,8 @@ export async function recordReviewEvent(c: Context, config: AppConfig): Promise<
 
   await storeRecordReviewEvent(reviewRunId, status, botStatusFor(status), payload, stringValue(body.trigger_run_id));
 
-  // Recording the event is the primary job of this endpoint; persisting scenarios
-  // and findings is secondary. A persist failure (e.g. a pending migration) must
-  // not 500 the event callback and break the review pipeline — mirror completeReview.
-  if (shouldPersistScenarios(status, payload)) {
-    try {
-      await persistScenariosAndSimulations(reviewRunId, payload);
-    } catch (error) {
-      console.warn("scenario_persist_failed", {
-        review_run_id: reviewRunId,
-        status,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+  // Finding persistence is secondary. A persist failure must not 500 the event
+  // callback and break the review pipeline.
   if (shouldPersistFindings(status, payload)) {
     try {
       await persistReviewFindings(reviewRunId, payload);
@@ -325,15 +320,6 @@ export async function completeReview(
     stringAt(completion, ["error"]),
     stringValue(body.trigger_run_id),
   );
-
-  try {
-    await persistScenariosAndSimulations(reviewRunId, body.payload);
-  } catch (error) {
-    console.warn("scenario_persist_failed", {
-      review_run_id: reviewRunId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
 
   try {
     await persistReviewFindings(reviewRunId, body.payload);
@@ -431,9 +417,6 @@ export async function acceptBackfill(
     removedRepositories: removedRepositories.map(toInstallationRepository),
   });
 
-  if (!tenantId) {
-    throw new Error("installation backfill did not resolve a tenant");
-  }
   const billingIdentity = lifecycle === "suspended" || lifecycle === "deleted"
     ? undefined
     : await store.getTenantBillingIdentity(tenantId);
@@ -486,10 +469,10 @@ export async function resolveIntegrations(
   // recorded missing) rather than failing key resolution.
   const managedRun = !keys.codexHarnessAuth && !keys.openrouter && !keys.openaiApiKey;
   const openaiModelPricing = managedRun ? await loadOpenAiPricing() : {};
-  // codex_harness_auth + harness_owner_login carry the PR author's own-harness credential (the
-  // decrypted auth.json blob) to the trigger worker, which treats its presence as the
-  // highest-precedence credential. This internal endpoint is internal-token authorized; the blob is
-  // intended for the worker here and, unlike the dashboard GET path, is deliberately returned.
+  // codex_harness_auth carries the PR author's own-harness credential (the decrypted auth.json blob)
+  // to the trigger worker, which treats its presence as the highest-precedence credential. This
+  // internal endpoint is internal-token authorized; the blob is intended for the worker here and,
+  // unlike the dashboard GET path, is deliberately returned.
   return c.json({
     openrouter_api_key: keys.openrouter ?? null,
     // Tenant BYOK native OpenAI key. When present (and no author harness), the worker routes openai/*
@@ -500,10 +483,6 @@ export async function resolveIntegrations(
     // Opaque millisecond revision for the exact harness blob returned above. Runtime failure events
     // echo it so a stale in-flight run can never invalidate credentials connected after that run.
     codex_harness_connected_at_ms: keys.codexHarnessConnectedAtMs ?? null,
-    harness_owner_login: keys.harnessOwnerLogin ?? null,
-    // The PR author's pinned harness model (feature (c)): a validated HARNESS_MODELS value or null
-    // (= Codex default). Tied to the harness blob, so it is null unless an own-harness blob resolved.
-    codex_harness_model: keys.codexHarnessModel ?? null,
     // Native-OpenAI per-token pricing keyed by `openai/<model>` slug; {} for BYOK/harness runs (which
     // don't use the managed OpenAI key) or on a catalog outage.
     openai_model_pricing: openaiModelPricing,
@@ -874,7 +853,7 @@ async function readJson(c: Context): Promise<Record<string, unknown>> {
 }
 
 // The worker names failure events with an exact "failed"/"error" status or a "_failed"/
-// "_error" suffix (e.g. scenario_simulation_failed). Match that convention precisely
+// "_error" suffix. Match that convention precisely
 // instead of an open substring includes(), which would also flag statuses that merely
 // contain the word (e.g. a hypothetical "error_recovered").
 function isFailureStatus(status: string): boolean {
@@ -891,7 +870,6 @@ function isFailureStatus(status: string): boolean {
 
 const NON_FATAL_FAILURE_EVENTS = new Set([
   "github_review_progress_comment_update_failed",
-  "github_static_review_publish_failed",
   "github_runtime_review_publish_failed",
 ]);
 
@@ -913,26 +891,12 @@ export function botStatusFor(status: string): string {
   return "running";
 }
 
-function shouldPersistScenarios(status: string, payload: unknown): boolean {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return false;
-  }
-  if (status.includes("scenario_generation") || status.includes("scenario_simulation")) {
-    return true;
-  }
-  const record = payload as Record<string, unknown>;
-  return typeof record.review_markdown === "string" || Boolean(record.simulation);
-}
-
 function shouldPersistFindings(status: string, payload: unknown): boolean {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return false;
   }
-  if (status.includes("final_review")) {
-    return true;
-  }
   const record = payload as Record<string, unknown>;
-  return Boolean(record.final_review) || Array.isArray(record.findings);
+  return Array.isArray(record.findings);
 }
 
 function objectAt(value: unknown, path: string[]): Record<string, unknown> {

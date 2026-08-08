@@ -1,16 +1,8 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "ignore": ["trigger/**"],
   "workspaces": {
     ".": {
-      "entry": [
-        "autumn.config.ts",
-        "evals/review/run-isolated-review.mjs",
-        "scripts/context-production-preflight.mjs",
-        "scripts/verify-trigger-project.mjs",
-        "e2e/support/stub-api.ts",
-        "e2e/*.spec.ts"
-      ],
+      "entry": ["autumn.config.ts", "scripts/context-production-preflight.mjs", "scripts/verify-trigger-project.mjs"],
       "ignoreDependencies": ["pg"]
     },
     "apps/api": {
@@ -19,10 +11,6 @@
         "src/product/index.ts",
         "src/product/migrate.ts",
         "src/product/migrate-all.ts",
-        "src/product/database-cutover.ts",
-        "src/product/backfill-internal-users.ts",
-        "src/product/reconcile-clerk-identities.ts",
-        "src/product/rollback-tenant-installation.ts",
         "src/product/sync-github-webhook.ts",
         "src/**/*.test.ts"
       ]
@@ -58,9 +46,13 @@
         "src/migrate.ts",
         "src/migrate-causal-graph.ts",
         "src/activate-causal-graph-release.ts",
-        "src/reset-context-data.ts",
         "src/**/*.test.ts"
       ]
+    },
+    "trigger": {
+      "entry": ["trigger.config.ts", "src/trigger/*.ts", "src/**/*.test.ts"],
+      "ignoreDependencies": ["busboy", "trigger.dev"],
+      "ignoreBinaries": ["trigger"]
     }
   }
 }

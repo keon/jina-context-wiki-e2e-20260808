@@ -3,109 +3,23 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const LEGACY_CONTEXT_TABLES = ["derivation_progress", "pipeline_builds", "pipeline_stages"];
-const LEGACY_CONTEXT_OUTBOX_TOPICS = new Set([
-  "run-context-research-plan",
-  "run-context-research",
-  "run-context-publication-plan",
-  "run-context-page-write",
-  "run-context-page-audit",
-  "run-context-page-repair",
-  "run-context-source-challenge",
-  "run-context-task-evaluation",
-  "run-context-gap-repair",
-  "run-context-certification",
-  "run-context-pageindex",
-  "run-ingest-evidence",
-  "run-derive-knowledge",
-  "run-index-context"
-]);
-const TERMINAL_BOARD_TASK_STATUSES = new Set(["done", "canceled", "failed", "superseded"]);
-const TABLES_ADDED_AFTER_LEGACY = [
-  "context_board_publications",
+const CURRENT_CONTEXT_TABLES = [
+  "api_tokens",
+  "context_phase_checkpoints",
   "context_quota_ledgers",
-  "current_context_board_releases",
-  "current_issue_graph_releases",
-  "issue_graph_releases"
+  "context_releases",
+  "issue_graph_releases",
+  "repositories",
+  "repository_access"
 ];
-const CURRENT_CONTEXT_VIEWS = [
-  "current_repository_acl",
-  "published_context_documents",
-  "published_context_fragments",
-  "published_hierarchy_nodes",
-  "published_structural_relations"
-];
-const RESET_CONFIRMATION = "delete-rebuildable-context";
-const PRESERVED_COLUMNS = {
-  repositories: [
-    "tenant_id:text",
-    "repository:text",
-    "provider:text",
-    "provider_repository_id:text",
-    "default_ref:text",
-    "metadata:jsonb",
-    "created_at:timestamp with time zone",
-    "updated_at:timestamp with time zone"
-  ],
-  repository_acl_observations: [
-    "id:text",
-    "tenant_id:text",
-    "repository:text",
-    "principal_id:text",
-    "permission:text",
-    "acl_fingerprint:text",
-    "source_observation_id:text",
-    "observed_at:timestamp with time zone"
-  ],
-  erasure_filters: [
-    "id:text",
-    "tenant_id:text",
-    "repository:text",
-    "source_type:text",
-    "source_id:text",
-    "path_pattern:text",
-    "content_digest:text",
-    "reason:text",
-    "actor_id:text",
-    "created_at:timestamp with time zone"
-  ],
-  audit_events: [
-    "id:text",
-    "tenant_id:text",
-    "repository:text",
-    "sequence:bigint",
-    "actor_id:text",
-    "action:text",
-    "target_type:text",
-    "target_id:text",
-    "payload:jsonb",
-    "occurred_at:timestamp with time zone"
-  ],
-  api_tokens: [
-    "id:text",
-    "tenant_id:text",
-    "principal_id:text",
-    "name:text",
-    "secret_hash:text",
-    "scopes:ARRAY",
-    "created_at:timestamp with time zone",
-    "created_by:text",
-    "expires_at:timestamp with time zone",
-    "last_used_at:timestamp with time zone",
-    "revoked_at:timestamp with time zone",
-    "revoked_by:text"
-  ]
-};
 
 const command = process.argv.at(-1);
 if (command === "daytona") {
   await preflightDaytona();
 } else if (command === "schema-preflight") {
-  await withDatabase((pool, reset) => inspectSchema(pool, reset, true));
+  await withDatabase((pool) => inspectSchema(pool, true));
 } else if (command === "schema-inspect") {
-  await withDatabase((pool, reset) => inspectSchema(pool, reset, false));
-} else if (command === "schema-reset") {
-  await withDatabase((pool, reset) => resetLegacySchema(pool, reset));
+  await withDatabase((pool) => inspectSchema(pool, false));
 } else if (command === "board-drain") {
   await withDatabase((pool) => drainBoardLeases(pool));
 } else if (command === "board-await-drain") {
@@ -132,7 +46,7 @@ if (command === "daytona") {
     "Expected daytona, release-acquire, release-renew, worker-drain, worker-resume, worker-pause, worker-enable, " +
       "runtime-write-enable, release-release, board-drain, board-await-drain, board-await-quiescence, " +
       "board-verify, schema-preflight, " +
-      "schema-inspect, or schema-reset"
+      "or schema-inspect"
   );
 }
 
@@ -220,9 +134,8 @@ async function preflightDaytona() {
 }
 
 async function withDatabase(operation) {
-  const modulePath = process.env.CONTEXT_RESET_MODULE_PATH ?? "/app/node_modules/@jina/db/dist/reset-context-data.js";
+  const modulePath = process.env.CONTEXT_DB_MODULE_PATH ?? "/app/node_modules/@jina/db/dist/index.js";
   const realModulePath = realpathSync(modulePath);
-  const reset = await import(pathToFileURL(realModulePath).href);
   const require = createRequire(realModulePath);
   const { Pool } = require("pg");
   const host = optionalEnv("INSTANCE_UNIX_SOCKET") ?? optionalEnv("DB_HOST");
@@ -241,13 +154,13 @@ async function withDatabase(operation) {
     max: 1
   });
   try {
-    await operation(pool, reset);
+    await operation(pool);
   } finally {
     await pool.end();
   }
 }
 
-async function inspectSchema(pool, reset, beforeMigration) {
+async function inspectSchema(pool, beforeMigration) {
   if (optionalReleaseInput()) {
     const client = await pool.connect();
     try {
@@ -255,7 +168,7 @@ async function inspectSchema(pool, reset, beforeMigration) {
       await client.query("set local lock_timeout='60s'");
       await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
       await assertDeploymentLease(client);
-      await inspectSchemaDatabase(client, reset, beforeMigration);
+      await inspectSchemaDatabase(client, beforeMigration);
       await client.query("commit");
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
@@ -265,32 +178,18 @@ async function inspectSchema(pool, reset, beforeMigration) {
     }
     return;
   }
-  await inspectSchemaDatabase(pool, reset, beforeMigration);
+  await inspectSchemaDatabase(pool, beforeMigration);
 }
 
-async function inspectSchemaDatabase(database, reset, beforeMigration) {
-  const mode = resetMode();
+async function inspectSchemaDatabase(database, beforeMigration) {
   const tables = await contextTables(database);
-  const current = currentTables(reset);
-  const legacy = legacyLayout(current);
-  if (mode === "disabled") {
-    const views = await contextViews(database);
-    if (beforeMigration) {
-      assertNoUnexpected(tables, current, "current Context schema");
-      assertNoUnexpected(views, CURRENT_CONTEXT_VIEWS, "current Context views");
-    } else {
-      assertExactSet(tables, current, "current Context schema");
-      assertExactSet(views, CURRENT_CONTEXT_VIEWS, "current Context views");
-    }
-  } else {
-    assertExactSet(tables, legacy, "one-time legacy Context schema");
-    assertExactSet(await contextViews(database), CURRENT_CONTEXT_VIEWS, "one-time legacy Context views");
+  if (!beforeMigration) {
+    assertExactSet(tables, CURRENT_CONTEXT_TABLES, "current Context schema");
+    assertExactSet(await contextViews(database), [], "current Context views");
   }
-  await assertPreservedShapes(database);
   console.log(
     JSON.stringify({
-      mode,
-      layout: mode === "disabled" ? (beforeMigration ? "current-pre-migration" : "current") : "legacy-transition",
+      layout: beforeMigration ? "migration-pending" : "current",
       tableCount: tables.length
     })
   );
@@ -307,8 +206,8 @@ async function updateReleaseControl(pool, action) {
     // Gate changes take the Board lock first. Worker mutations take this same
     // lock before reading release_control, so pausing/enabling a release cannot
     // race a final claim/renew/complete transaction. Renewal is deliberately
-    // exempt: migration/reset hold the Board lock for their full critical
-    // section and must still be able to renew the deployment lease.
+    // exempt: migrations hold the Board lock for their full critical section
+    // and must still be able to renew the deployment lease.
     if (action !== "release-renew") {
       await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
     }
@@ -729,7 +628,6 @@ async function verifyBoardLeases(pool) {
     if (leases.length > 0) {
       throw new Error(`Board has ${leases.length} active leases after worker drain`);
     }
-    if (snapshot !== undefined) assertPageOrientedContextCutover(snapshot);
     await client.query("commit");
     console.log(JSON.stringify({ boardLeases: 0, verified: true }));
   } catch (error) {
@@ -761,29 +659,6 @@ function activeBoardLeaseInventory(snapshot) {
     leases.push({ id: message.id, topic: message.topic });
   }
   return leases;
-}
-
-function assertPageOrientedContextCutover(snapshot) {
-  const board = boardState(snapshot);
-  if (!Array.isArray(board.tasks)) throw new Error("Board snapshot has no task array");
-  const legacyBuilds = board.tasks.filter(
-    (task) =>
-      isRecord(task) &&
-      task.type === "build-context" &&
-      !TERMINAL_BOARD_TASK_STATUSES.has(task.status) &&
-      (!isRecord(task.metadata) || task.metadata.contextWorkflowContract !== "page-oriented")
-  );
-  const legacyMessages = board.outbox.filter(
-    (message) =>
-      isRecord(message) &&
-      (message.status === "pending" || message.status === "leased") &&
-      LEGACY_CONTEXT_OUTBOX_TOPICS.has(message.topic)
-  );
-  if (legacyBuilds.length > 0 || legacyMessages.length > 0) {
-    throw new Error(
-      `Board still has ${legacyBuilds.length} non-terminal legacy Context builds and ${legacyMessages.length} claimable legacy Context messages`
-    );
-  }
 }
 
 function fenceBoardSnapshot(snapshot, fenceOutboxLeases, input) {
@@ -831,98 +706,6 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function resetLegacySchema(pool, reset) {
-  if (resetMode() !== "legacy-once") {
-    throw new Error("schema-reset is available only with JINA_CONTEXT_RESET_MODE=legacy-once");
-  }
-  if (process.env.JINA_CONFIRM_CONTEXT_RESET !== RESET_CONFIRMATION) {
-    throw new Error(`JINA_CONFIRM_CONTEXT_RESET=${RESET_CONFIRMATION} is required`);
-  }
-  if (!/^[1-9][0-9]*$/.test(requiredEnv("JINA_CONTEXT_RESET_BACKUP_ID"))) {
-    throw new Error("A verified Cloud SQL backup ID is required before schema-reset");
-  }
-
-  const current = currentTables(reset);
-  const expectedBefore = [...current, ...LEGACY_CONTEXT_TABLES].sort();
-  const client = await pool.connect();
-  try {
-    await client.query("begin");
-    await client.query("set local lock_timeout='60s'");
-    await client.query("set local statement_timeout='15min'");
-    await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
-    await assertDeploymentLease(client, true);
-    await client.query("select pg_advisory_xact_lock(hashtext('jina-context-reset'))");
-    assertExactSet(await contextTables(client), expectedBefore, "post-migration legacy Context schema");
-    assertExactSet(await contextViews(client), CURRENT_CONTEXT_VIEWS, "post-migration Context views");
-    await assertPreservedShapes(client);
-    const preservedBefore = await preservedDigests(client);
-
-    await client.query(`
-      create temporary table context_reset_acl_observations
-        on commit drop
-        as select * from jina_context.repository_acl_observations;
-      create temporary table context_reset_acl_sources
-        on commit drop
-        as
-          select observation.*
-          from jina_context.observations observation
-          where exists (
-            select 1
-            from jina_context.repository_acl_observations acl
-            where acl.tenant_id=observation.tenant_id
-              and acl.repository=observation.repository
-              and acl.source_observation_id=observation.id
-          );
-    `);
-    await client.query(
-      `truncate ${reset.REBUILDABLE_CONTEXT_TABLES.map((table) => `jina_context.${table}`).join(
-        ","
-      )} restart identity cascade`
-    );
-    await client.query(`
-      insert into jina_context.observations
-        select * from context_reset_acl_sources;
-      insert into jina_context.repository_acl_observations
-        select * from context_reset_acl_observations;
-    `);
-    // No CASCADE: any unclassified dependency makes the whole transaction fail
-    // instead of silently deleting data outside the three audited legacy tables.
-    await client.query(`drop table ${LEGACY_CONTEXT_TABLES.map((table) => `jina_context.${table}`).join(",")}`);
-
-    assertExactSet(await contextTables(client), current, "reset Context schema");
-    assertExactSet(await contextViews(client), CURRENT_CONTEXT_VIEWS, "reset Context views");
-    const preservedAfter = await preservedDigests(client);
-    if (JSON.stringify(preservedAfter) !== JSON.stringify(preservedBefore)) {
-      throw new Error("Context reset changed preserved identity or control-plane rows");
-    }
-    // The reset is atomic, so loss of the renewable release lease can still
-    // fail closed here and roll every destructive statement back.
-    await assertDeploymentLease(client, true);
-    await client.query("commit");
-    console.log(
-      JSON.stringify({
-        mode: "legacy-once",
-        backupId: process.env.JINA_CONTEXT_RESET_BACKUP_ID,
-        droppedLegacyTables: LEGACY_CONTEXT_TABLES,
-        preservedTables: reset.PRESERVED_CONTEXT_TABLES
-      })
-    );
-  } catch (error) {
-    await client.query("rollback").catch(() => undefined);
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-function currentTables(reset) {
-  return [...reset.REBUILDABLE_CONTEXT_TABLES, ...reset.PRESERVED_CONTEXT_TABLES].sort();
-}
-
-function legacyLayout(current) {
-  return [...current.filter((table) => !TABLES_ADDED_AFTER_LEGACY.includes(table)), ...LEGACY_CONTEXT_TABLES].sort();
-}
-
 async function contextTables(database) {
   const result = await database.query(
     `select table_name
@@ -943,51 +726,6 @@ async function contextViews(database) {
   return result.rows.map((row) => row.table_name);
 }
 
-async function assertPreservedShapes(database) {
-  const result = await database.query(
-    `select table_name,column_name,data_type
-     from information_schema.columns
-     where table_schema='jina_context' and table_name=any($1::text[])
-     order by table_name,ordinal_position`,
-    [Object.keys(PRESERVED_COLUMNS)]
-  );
-  const actual = Object.fromEntries(Object.keys(PRESERVED_COLUMNS).map((table) => [table, []]));
-  for (const row of result.rows) actual[row.table_name]?.push(`${row.column_name}:${row.data_type}`);
-  for (const [table, expected] of Object.entries(PRESERVED_COLUMNS)) {
-    if (JSON.stringify(actual[table]) !== JSON.stringify(expected)) {
-      throw new Error(`Preserved table jina_context.${table} has an unexpected shape`);
-    }
-  }
-}
-
-async function preservedDigests(database) {
-  const digests = {};
-  for (const table of Object.keys(PRESERVED_COLUMNS).sort()) {
-    const result = await database.query(
-      `select count(*)::text rows,
-              md5(coalesce(string_agg(to_jsonb(record)::text,E'\\n'
-                  order by to_jsonb(record)::text),'')) digest
-       from jina_context.${table} record`
-    );
-    digests[table] = result.rows[0];
-  }
-  const aclSources = await database.query(
-    `select count(*)::text rows,
-            md5(coalesce(string_agg(to_jsonb(observation)::text,E'\\n'
-                order by to_jsonb(observation)::text),'')) digest
-     from jina_context.observations observation
-     where exists (
-       select 1
-       from jina_context.repository_acl_observations acl
-       where acl.tenant_id=observation.tenant_id
-         and acl.repository=observation.repository
-         and acl.source_observation_id=observation.id
-     )`
-  );
-  digests.repository_acl_source_observations = aclSources.rows[0];
-  return digests;
-}
-
 function assertExactSet(actual, expected, label) {
   const actualSorted = [...actual].sort();
   const expectedSorted = [...expected].sort();
@@ -996,22 +734,6 @@ function assertExactSet(actual, expected, label) {
   if (missing.length > 0 || extra.length > 0) {
     throw new Error(`${label} mismatch; missing=[${missing.join(",")}], unexpected=[${extra.join(",")}]`);
   }
-}
-
-function assertNoUnexpected(actual, expected, label) {
-  const allowed = new Set(expected);
-  const extra = actual.filter((value) => !allowed.has(value));
-  if (extra.length > 0) {
-    throw new Error(`${label} mismatch; unexpected=[${extra.join(",")}]`);
-  }
-}
-
-function resetMode() {
-  const mode = process.env.JINA_CONTEXT_RESET_MODE ?? "disabled";
-  if (mode !== "disabled" && mode !== "legacy-once") {
-    throw new Error("JINA_CONTEXT_RESET_MODE must be disabled or legacy-once");
-  }
-  return mode;
 }
 
 function requiredEnv(name) {

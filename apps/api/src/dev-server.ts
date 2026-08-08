@@ -19,7 +19,6 @@ import {
   type ContextEngineStore
 } from "@jina/context-engine";
 import { createLogger, errorLogFields, startOpenTelemetry } from "@jina/observability";
-import { configuredReviewRunTopicMode } from "@jina/shared-kernel";
 import { createApiServer } from "./server.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
@@ -48,14 +47,6 @@ if (devContextMaxActiveBuilds !== undefined && !enableDevEndpoints) {
 }
 const tenancyMode = process.env.JINA_TENANCY_MODE?.trim() || "fixed";
 const requireWorkerReleaseGate = booleanEnvironment("JINA_REQUIRE_WORKER_RELEASE_GATE", false);
-const reviewRunTopicMode = configuredReviewRunTopicMode(process.env.JINA_REVIEW_RUN_TOPIC_MODE);
-const reviewBoardPipelineMode = process.env.JINA_REVIEW_BOARD_PIPELINE_MODE?.trim() || "v1";
-if (
-  (reviewBoardPipelineMode === "v2" || reviewBoardPipelineMode === "allowlist") &&
-  reviewRunTopicMode !== "relational"
-) {
-  throw new Error("JINA_REVIEW_BOARD_PIPELINE_MODE v2/allowlist requires JINA_REVIEW_RUN_TOPIC_MODE=relational");
-}
 if (requireWorkerReleaseGate && enableDevEndpoints) {
   throw new Error("JINA_REQUIRE_WORKER_RELEASE_GATE must remain disabled for local development");
 }
@@ -133,7 +124,6 @@ const server = createApiServer({
   contextStore,
   contextPhaseCheckpointStore,
   ...(relationalBoardWorkerStore ? { relationalBoardWorkerStore } : {}),
-  relationalReviewTopicEnabled: reviewRunTopicMode === "relational",
   ...(contextArtifactStore ? { contextArtifactStore } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardPublicationTransaction } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardReleaseSeedStore: contextBoardPublicationTransaction } : {}),
@@ -167,7 +157,7 @@ server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
     console.log(`jina api server: http://localhost:${port}`);
     console.log("  GET  /board  /events  /wiki/releases  /wiki/list  /wiki/read  /wiki/diff  /health");
     console.log("  POST /wiki/build  /wiki/search  /mcp");
-    console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
+    console.log("  POST /wiki/webhooks/github  (signed Context deliveries)");
     console.log("  POST /dev/webhooks/github  (unsigned local demo events)");
   }
 });

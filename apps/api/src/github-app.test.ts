@@ -926,7 +926,7 @@ test("worker lease duration rejects unsafe API configuration", () => {
   );
 });
 
-test("pull-request intake queues review work and a PR-preview context build", async () => {
+test("pull-request intake queues a PR-preview Context build", async () => {
   const delivery = await api("/dev/webhooks/github", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -939,14 +939,6 @@ test("pull-request intake queues review work and a PR-preview context build", as
   assert.equal(delivery.response.status, 202);
 
   const board = await api("/board", { headers: contextHeaders() });
-  const tasks = array(board.body.tasks)
-    .map(record)
-    .filter((task) => record(task.metadata).pullRequestNumber === 77);
-  assert.deepEqual(tasks.map((task) => task.type).sort(), ["pr_review", "review_pass"]);
-  assert.deepEqual(
-    tasks.flatMap((task) => (task.dispatchTopic ? [task.dispatchTopic] : [])),
-    ["run-review"]
-  );
   const contextBuild = array(board.body.tasks)
     .map(record)
     .find(
@@ -984,10 +976,10 @@ test("pull-request intake queues review work and a PR-preview context build", as
 });
 
 test("the unified webhook admits Context work without creating duplicate review work", async () => {
-  const relayRepository = "omlabs/v1-relay-fixture";
+  const relayRepository = "omlabs/context-relay-fixture";
   const pullRequestNumber = 79;
   const headSha = "d".repeat(40);
-  const deliveryId = "v1-context-relay-pr";
+  const deliveryId = "context-relay-pr";
   const payload = {
     action: "opened",
     repository: { full_name: relayRepository, default_branch: "main" },
@@ -1051,7 +1043,7 @@ test("the unified webhook admits Context work without creating duplicate review 
 test("feature pushes bypass Context dependencies and webhook metadata wins after a default-branch rename", async () => {
   const sharedTenant = "eff0efc9-b103-494a-b7a3-1ae7f95c2d26";
   const state = deliveryTrackingStateStore({
-    intakeState: { board: { tasks: [], dependencies: [], outbox: [], events: [] }, pullRequests: [] },
+    intakeState: { board: { tasks: [], dependencies: [], outbox: [], events: [] } },
     devDeliverySequence: 0
   });
   const quota = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
@@ -1134,8 +1126,7 @@ test("feature pushes bypass Context dependencies and webhook metadata wins after
 test("an ignored relay delivery cannot roll back work committed by another API instance", async () => {
   const sharedState = deliveryTrackingStateStore({
     intakeState: {
-      board: { tasks: [], dependencies: [], outbox: [], events: [] },
-      pullRequests: []
+      board: { tasks: [], dependencies: [], outbox: [], events: [] }
     },
     devDeliverySequence: 0
   });
@@ -1246,89 +1237,6 @@ test("a newer relayed ref build queues behind stale work without consuming anoth
   assert.equal(progress.response.status, 200);
   assert.notEqual(progress.body.status, "failed");
   assert.equal(record(progress.body.queuedFollowup).commitSha, secondHead);
-});
-
-test("generic board work is fenced by attempt, lease id, and token", async () => {
-  const delivery = await api("/dev/webhooks/github", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      repository,
-      pullRequestNumber: 78,
-      headSha: "e".repeat(40)
-    })
-  });
-  assert.equal(delivery.response.status, 202);
-  const claimed = await api("/internal/worker/claim", {
-    method: "POST",
-    headers: internalHeaders(),
-    body: JSON.stringify({ workerId: "review-worker", topics: ["run-review"] })
-  });
-  assert.equal(claimed.response.status, 200);
-  const message = record(claimed.body.message);
-  const task = record(claimed.body.task);
-  const messageId = string(message.id);
-  const taskId = string(task.id);
-  const leaseId = string(message.leaseId);
-  const attempt = Number(message.attempt);
-  const writeFenceToken = string(message.writeFenceToken);
-  assert.ok(Number.isSafeInteger(attempt) && attempt > 0);
-
-  const boardView = await api("/board", { headers: contextHeaders() });
-  const publicMessage = array(boardView.body.outbox)
-    .map(record)
-    .find((candidate) => candidate.id === messageId);
-  assert.ok(publicMessage);
-  assert.equal("leaseId" in publicMessage, false);
-  assert.equal("writeFenceToken" in publicMessage, false);
-
-  const staleRenewal = await api("/internal/worker/renew", {
-    method: "POST",
-    headers: internalHeaders(),
-    body: JSON.stringify({
-      messageId,
-      leaseId,
-      attempt,
-      writeFenceToken: "wrong-fence"
-    })
-  });
-  assert.equal(staleRenewal.response.status, 409);
-
-  const renewed = await api("/internal/worker/renew", {
-    method: "POST",
-    headers: internalHeaders(),
-    body: JSON.stringify({ messageId, leaseId, attempt, writeFenceToken })
-  });
-  assert.equal(renewed.response.status, 200);
-
-  const staleCompletion = await api("/internal/worker/complete", {
-    method: "POST",
-    headers: internalHeaders(),
-    body: JSON.stringify({
-      messageId,
-      taskId,
-      leaseId,
-      attempt: attempt + 1,
-      writeFenceToken,
-      outcome: "done"
-    })
-  });
-  assert.equal(staleCompletion.response.status, 409);
-
-  const completed = await api("/internal/worker/complete", {
-    method: "POST",
-    headers: internalHeaders(),
-    body: JSON.stringify({
-      messageId,
-      taskId,
-      leaseId,
-      attempt,
-      writeFenceToken,
-      outcome: "done",
-      result: { effect: "reviewed" }
-    })
-  });
-  assert.equal(completed.response.status, 200);
 });
 
 test("push and issue intake serialize their event-specific refs for one repository", async () => {
@@ -1445,11 +1353,11 @@ test("signed push redelivery is idempotent while rollback coalesces into the que
   assert.equal(record(progress.body.queuedFollowup).commitSha, firstHead);
 });
 
-test("malformed persisted runtime state is ignored instead of breaking unrelated API reads", async () => {
+test("invalid persisted runtime state is ignored instead of breaking unrelated API reads", async () => {
   const malformedServer = createApiServer({
     tenantId,
     enableDevEndpoints: true,
-    stateStore: readOnlyStateStore({ unrelated: "legacy snapshot" } as unknown as ApiSnapshot)
+    stateStore: readOnlyStateStore({ unrelated: "invalid snapshot" } as unknown as ApiSnapshot)
   });
   await new Promise<void>((resolve) => malformedServer.listen(0, "127.0.0.1", resolve));
   const malformedUrl = `http://127.0.0.1:${(malformedServer.address() as AddressInfo).port}`;
@@ -1459,100 +1367,6 @@ test("malformed persisted runtime state is ignored instead of breaking unrelated
     assert.deepEqual(record(await response.json()).tasks, []);
   } finally {
     await new Promise<void>((resolve, reject) => malformedServer.close((error) => (error ? reject(error) : resolve())));
-  }
-});
-
-test("active persisted tasks unsupported by the current runtime fail closed while terminal history is pruned", async () => {
-  const staleSnapshot = {
-    intakeState: {
-      board: {
-        tasks: [
-          {
-            id: "task_removed",
-            type: "removed-extension-task",
-            title: "Removed extension work",
-            status: "triage",
-            assigneeRole: "removed_worker",
-            dedupeKey: "removed:1",
-            required: true,
-            attempt: 0,
-            createdAt: "2026-07-26T00:00:00.000Z",
-            updatedAt: "2026-07-26T00:00:00.000Z",
-            metadata: {},
-            kind: "dispatchable",
-            dispatchTopic: "run-removed-extension"
-          }
-        ],
-        dependencies: [],
-        outbox: [
-          {
-            id: "message_removed",
-            taskId: "task_removed",
-            topic: "run-removed-extension",
-            idempotencyKey: "removed:1",
-            status: "pending",
-            payload: { taskId: "task_removed", attempt: 0 },
-            createdAt: "2026-07-26T00:00:00.000Z"
-          }
-        ],
-        events: [
-          {
-            id: "event_removed",
-            seq: 1,
-            type: "task.created",
-            at: "2026-07-26T00:00:00.000Z",
-            taskId: "task_removed"
-          }
-        ]
-      },
-      pullRequests: []
-    },
-    devDeliverySequence: 0
-  } as unknown as ApiSnapshot;
-  const staleServer = createApiServer({
-    tenantId,
-    enableDevEndpoints: true,
-    stateStore: readOnlyStateStore(staleSnapshot)
-  });
-  await new Promise<void>((resolve) => staleServer.listen(0, "127.0.0.1", resolve));
-  const staleUrl = `http://127.0.0.1:${(staleServer.address() as AddressInfo).port}`;
-  try {
-    const response = await fetch(`${staleUrl}/board`);
-    assert.equal(response.status, 500, await response.text());
-  } finally {
-    await new Promise<void>((resolve, reject) => staleServer.close((error) => (error ? reject(error) : resolve())));
-  }
-
-  const terminalSnapshot: ApiSnapshot = {
-    ...staleSnapshot,
-    intakeState: {
-      ...staleSnapshot.intakeState,
-      board: {
-        ...staleSnapshot.intakeState.board,
-        tasks: staleSnapshot.intakeState.board.tasks.map((task) => ({ ...task, status: "done" as const })),
-        outbox: staleSnapshot.intakeState.board.outbox.map((message) => ({
-          ...message,
-          status: "dispatched" as const,
-          dispatchedAt: "2026-07-26T00:00:01.000Z"
-        }))
-      }
-    }
-  };
-  const terminalServer = createApiServer({
-    tenantId,
-    enableDevEndpoints: true,
-    stateStore: readOnlyStateStore(terminalSnapshot)
-  });
-  await new Promise<void>((resolve) => terminalServer.listen(0, "127.0.0.1", resolve));
-  const terminalUrl = `http://127.0.0.1:${(terminalServer.address() as AddressInfo).port}`;
-  try {
-    const response = await fetch(`${terminalUrl}/board`);
-    assert.equal(response.status, 200);
-    const body = record(await response.json());
-    assert.deepEqual(body.tasks, []);
-    assert.deepEqual(body.dependencies, []);
-  } finally {
-    await new Promise<void>((resolve, reject) => terminalServer.close((error) => (error ? reject(error) : resolve())));
   }
 });
 
@@ -1630,7 +1444,7 @@ async function signedGitHubWebhook(
   event: string,
   deliveryId: string,
   payload: Readonly<Record<string, unknown>>,
-  path = "/webhooks/github"
+  path = "/wiki/webhooks/github"
 ): Promise<Response> {
   return signedGitHubWebhookAt(baseUrl, event, deliveryId, payload, path);
 }
@@ -1640,7 +1454,7 @@ async function signedGitHubWebhookAt(
   event: string,
   deliveryId: string,
   payload: Readonly<Record<string, unknown>>,
-  path = "/webhooks/github"
+  path = "/wiki/webhooks/github"
 ): Promise<Response> {
   const rawBody = JSON.stringify(payload);
   const signature = `sha256=${createHmac("sha256", githubWebhookSecret).update(rawBody).digest("hex")}`;

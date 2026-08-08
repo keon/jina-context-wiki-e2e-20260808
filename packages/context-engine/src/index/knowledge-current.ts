@@ -2,12 +2,9 @@ import { fingerprint, stableId } from "../domain/fingerprint.js";
 import type { KnowledgeDocumentRevision, KnowledgeEvidenceCitation } from "../domain/knowledge.js";
 import type { ContextDocument, CurrentKnowledgeRevision } from "../domain/projection.js";
 
-export const KNOWLEDGE_CURRENT_PROJECTOR_VERSION = "knowledge-current-v2";
-
-export class CurrentKnowledgeProjector {
+export class CurrentKnowledgeBuilder {
   project(input: {
     generationId: string;
-    projectedAt: string;
     revisions: KnowledgeDocumentRevision[];
     citations: Map<string, KnowledgeEvidenceCitation[]>;
     aclFingerprints: Map<string, string>;
@@ -75,10 +72,7 @@ export class CurrentKnowledgeProjector {
           bodyDigest: revision.bodyDigest,
           evidenceFingerprint: revision.evidenceFingerprint
         }),
-        anchors: citations.map((citation) => citation.anchor),
-        projectorName: "knowledge-current",
-        projectorVersion: KNOWLEDGE_CURRENT_PROJECTOR_VERSION,
-        projectedAt: input.projectedAt
+        anchors: citations.map((citation) => citation.anchor)
       });
     }
     return { selections, documents };

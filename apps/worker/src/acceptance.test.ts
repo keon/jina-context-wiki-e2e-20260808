@@ -50,12 +50,11 @@ test("Cloud Run candidate requests keep tagged URLs distinct from stable token a
 
 test("production acceptance has stable coarse failure categories", () => {
   assert.equal(productionAcceptanceExitCode(new Error("worker health verification failed")), 19);
-  assert.equal(productionAcceptanceExitCode(new Error("production context task index-context-release failed")), 20);
+  assert.equal(productionAcceptanceExitCode(new Error("production context task publish-context-release failed")), 20);
   assert.equal(productionAcceptanceExitCode(new Error("no published release")), 21);
   assert.equal(productionAcceptanceExitCode(new Error("context document catalog is empty")), 22);
   assert.equal(productionAcceptanceExitCode(new Error("query returned no citations")), 23);
   assert.equal(productionAcceptanceExitCode(new Error("production retrieval quality missed its target")), 23);
-  assert.equal(productionAcceptanceExitCode(new Error("context backlog is not empty")), 24);
   assert.equal(productionAcceptanceExitCode(new Error("invalid JSON")), 25);
 });
 
@@ -106,19 +105,19 @@ test("blocked task detection is dynamic and scoped to repository and ref", () =>
       [
         {
           id: "same",
-          type: "index-context-release",
+          type: "publish-context-release",
           status: "queued",
           metadata: { repository: "omlabs/repo", ref: "main" }
         },
         {
           id: "complete",
-          type: "write-context-page",
+          type: "build-context-page",
           status: "done",
           metadata: { repository: "omlabs/repo", ref: "main" }
         },
         {
           id: "other",
-          type: "research-context-subject",
+          type: "plan-context-pages",
           status: "in_progress",
           metadata: { repository: "omlabs/repo", ref: "dev" }
         }
@@ -143,7 +142,7 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
       return json({
         retryEligibility: {
           eligible: true,
-          mode: "page_remediation",
+          mode: "ordinary",
           recoverableTaskIds: ["task_page_failed"]
         }
       });
@@ -160,16 +159,15 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
       requestScope,
       attempt: 2
     }),
-    "page_remediation"
+    "checkpoint_retry"
   );
   assert.deepEqual(
     requests.map((request) => request.path),
-    ["/wiki/builds/task_build/progress", "/wiki/builds/task_build/retry"]
+    ["/wiki/builds/task_build/progress", "/wiki/builds/task_build/tasks/task_page_failed/retry"]
   );
-  assert.deepEqual(requests[1]?.body?.taskIds, ["task_page_failed"]);
   assert.equal(
     requests[1]?.body?.requestKey,
-    "production-acceptance:deploy-release-a:task_build:page-remediation:2:task_page_failed"
+    "production-acceptance:deploy-release-a:task_build:checkpoint-retry:2:task_page_failed"
   );
 
   const ineligibleFetch: typeof fetch = async () =>
@@ -186,71 +184,23 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
     undefined
   );
 
-  const gateRequests: { readonly path: string; readonly body?: Record<string, unknown> }[] = [];
-  const gateFetch: typeof fetch = async (input, init) => {
-    const url = new URL(String(input));
-    gateRequests.push({
-      path: url.pathname,
-      ...(init?.body ? { body: JSON.parse(String(init.body)) as Record<string, unknown> } : {})
-    });
-    if (url.pathname.endsWith("/progress")) {
-      return json({
-        retryEligibility: {
-          eligible: true,
-          mode: "gate_remediation",
-          recoverableTaskIds: ["task_certification"]
-        }
-      });
-    }
-    return json({ accepted: true }, 202);
-  };
-  assert.equal(
-    await requestProductionRemediation({
-      fetchImpl: gateFetch,
-      apiUrl: "https://api.example.test",
-      internalHeaders: { authorization: "Bearer internal" },
-      buildId: "task_build",
-      requestScope,
-      attempt: 3
-    }),
-    "gate_remediation"
-  );
-  assert.equal(
-    gateRequests[1]?.body?.requestKey,
-    "production-acceptance:deploy-release-a:task_build:gate-remediation:3:task_certification"
-  );
-
-  const checkpointRequests: { readonly path: string; readonly body?: Record<string, unknown> }[] = [];
-  const checkpointFetch: typeof fetch = async (input, init) => {
-    const url = new URL(String(input));
-    checkpointRequests.push({
-      path: url.pathname,
-      ...(init?.body ? { body: JSON.parse(String(init.body)) as Record<string, unknown> } : {})
-    });
-    return url.pathname.endsWith("/progress")
-      ? json({
+  await assert.rejects(
+    requestProductionRemediation({
+      fetchImpl: async () =>
+        json({
           retryEligibility: {
             eligible: true,
-            recoverableTaskIds: ["task_publication_plan"],
-            blockers: []
+            mode: "page_remediation",
+            recoverableTaskIds: ["task_retired_page"]
           }
-        })
-      : json({ accepted: true }, 202);
-  };
-  assert.equal(
-    await requestProductionRemediation({
-      fetchImpl: checkpointFetch,
+        }),
       apiUrl: "https://api.example.test",
       internalHeaders: { authorization: "Bearer internal" },
       buildId: "task_build",
       requestScope,
       attempt: 1
     }),
-    "checkpoint_retry"
-  );
-  assert.equal(
-    checkpointRequests[1]?.body?.requestKey,
-    "production-acceptance:deploy-release-a:task_build:checkpoint-retry:1:task_publication_plan"
+    /unsupported mode page_remediation/
   );
 });
 
@@ -296,18 +246,9 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
         workerRevision: contextWorkerRevision,
         topics: [
           "run-context-input-snapshot",
-          "run-context-research-plan",
-          "run-context-research",
-          "run-context-publication-plan",
-          "run-context-page-write",
-          "run-context-page-audit",
-          "run-context-page-repair",
-          "run-context-source-challenge",
-          "run-context-task-evaluation",
-          "run-context-gap-repair",
-          "run-context-certification",
-          "run-context-publication",
-          "run-context-pageindex"
+          "run-context-page-plan",
+          "run-context-page-build",
+          "run-context-publication"
         ],
         active: false,
         lastApiSuccessAt: new Date().toISOString(),
@@ -390,30 +331,22 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
             id: "graph",
             parentTaskId: "cb_acceptance",
             type: "context-build-graph",
-            status: done ? "done" : "blocked",
+            status: done ? "done" : "in_progress",
             attempt: 0,
             metadata: { repository: "omlabs/repo", ref: "main" }
           },
           {
-            id: "page",
+            id: "planner",
             parentTaskId: "cb_acceptance",
-            type: "context-page",
+            type: "plan-context-pages",
             status: done ? "done" : "blocked",
-            attempt: 0,
-            metadata: { repository: "omlabs/repo", ref: "main" }
-          },
-          {
-            id: "old-audit",
-            parentTaskId: "page",
-            type: "audit-context-page",
-            status: "superseded",
             attempt: 1,
             metadata: { repository: "omlabs/repo", ref: "main" }
           },
           {
-            id: "page-write",
-            parentTaskId: "page",
-            type: "write-context-page",
+            id: "page",
+            parentTaskId: "graph",
+            type: "build-context-page",
             status: done ? "done" : "triage",
             attempt: 1,
             metadata: { repository: "omlabs/repo", ref: "main" }
@@ -422,14 +355,6 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
             id: "publication",
             parentTaskId: "cb_acceptance",
             type: "publish-context-release",
-            status: done ? "done" : "triage",
-            attempt: 1,
-            metadata: { repository: "omlabs/repo", ref: "main" }
-          },
-          {
-            id: "pageindex",
-            parentTaskId: "cb_acceptance",
-            type: "index-context-release",
             status: done ? "done" : "triage",
             attempt: 1,
             metadata: { repository: "omlabs/repo", ref: "main" }
@@ -442,16 +367,18 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
       return json({
         buildId: "cb_acceptance",
         repository: "omlabs/repo",
-        completions: ["snapshot", "page-write", "publication", "pageindex"].map((taskId) => ({
+        completions: ["snapshot", "planner", "page", "publication"].map((taskId) => ({
           taskId,
           taskType:
             taskId === "snapshot"
               ? "snapshot-context-input"
-              : taskId === "page-write"
-                ? "write-context-page"
-                : taskId === "publication"
-                  ? "publish-context-release"
-                  : "index-context-release",
+              : taskId === "planner"
+                ? "plan-context-pages"
+                : taskId === "page"
+                  ? "build-context-page"
+                  : taskId === "publication"
+                    ? "publish-context-release"
+                    : "publish-context-release",
           attempt: 1,
           outcome: "done",
           workerReleaseId: candidateReleaseId,
@@ -624,18 +551,9 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
         authorization: "Bearer context-worker-identity",
         expectedTopics: [
           "run-context-input-snapshot",
-          "run-context-research-plan",
-          "run-context-research",
-          "run-context-publication-plan",
-          "run-context-page-write",
-          "run-context-page-audit",
-          "run-context-page-repair",
-          "run-context-source-challenge",
-          "run-context-task-evaluation",
-          "run-context-gap-repair",
-          "run-context-certification",
-          "run-context-publication",
-          "run-context-pageindex"
+          "run-context-page-plan",
+          "run-context-page-build",
+          "run-context-publication"
         ],
         expectedReleaseId: candidateReleaseId,
         expectedRevision: contextWorkerRevision
@@ -681,7 +599,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
   assert.equal(tokenRevoked, true);
   assert.equal(staleTokenRevoked, true);
   assert.equal(principalSpoofRejected, true);
-  assert.deepEqual(metricsRepositories, [null, "omlabs/repo"]);
+  assert.deepEqual(metricsRepositories, [null]);
   assert.deepEqual(requested, [
     "GET /health",
     "GET /health",
@@ -710,8 +628,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
     "POST /internal/context/tokens/atk_stale_acceptance/revoke",
     "GET /internal/context/tokens",
     "GET /wiki/releases",
-    "POST /mcp",
-    "GET /wiki/metrics"
+    "POST /mcp"
   ]);
   assert.deepEqual(requestedAuthorization, [
     "Bearer context-worker-identity",
@@ -741,8 +658,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
     "Bearer internal",
     "Bearer internal",
     `Bearer ${issuedSecret}`,
-    `Bearer ${issuedSecret}`,
-    "Bearer internal"
+    `Bearer ${issuedSecret}`
   ]);
 });
 
@@ -777,13 +693,6 @@ test("production acceptance revokes and verifies the issued token when a query a
             id: "publication",
             parentTaskId: "cb_failure_cleanup",
             type: "publish-context-release",
-            status: "done",
-            metadata: { repository: "omlabs/repo", ref: "main" }
-          },
-          {
-            id: "pageindex",
-            parentTaskId: "cb_failure_cleanup",
-            type: "index-context-release",
             status: "done",
             metadata: { repository: "omlabs/repo", ref: "main" }
           }
@@ -1245,13 +1154,6 @@ async function runTokenContractFailureScenario(mode: "invalid-json" | "missing-i
             id: "publication",
             parentTaskId: "cb_mint_cleanup",
             type: "publish-context-release",
-            status: "done",
-            metadata: { repository: "omlabs/repo", ref: "main" }
-          },
-          {
-            id: "pageindex",
-            parentTaskId: "cb_mint_cleanup",
-            type: "index-context-release",
             status: "done",
             metadata: { repository: "omlabs/repo", ref: "main" }
           }

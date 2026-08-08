@@ -12,12 +12,12 @@ test("gcloud Trigger deployment uses the API's canonical product token secret", 
   assert.match(build, /secretEnv:[\s\S]+?- INTERNAL_API_TOKEN/);
   assert.match(build, /env: INTERNAL_API_TOKEN/);
   assert.match(deploy, /internal_api_token_secret="jina-staging-internal-api-token"/);
-  assert.match(deploy, /internal_api_token_secret="jina-v1-internal-api-token"/);
+  assert.match(deploy, /internal_api_token_secret="jina-product-internal-api-token"/);
   assert.match(deploy, /_INTERNAL_API_TOKEN_SECRET=\$\{internal_api_token_secret\}/);
   assert.doesNotMatch(deploy, /internal_api_token_secret="jina-internal-api-token"/);
 });
 
-test("production deployment cannot overwrite the legacy scheduled-task project", () => {
+test("production deployment is pinned to the review-only Trigger project", () => {
   const production = deploy.slice(deploy.indexOf("  production)"), deploy.indexOf("  *)"));
   assert.match(production, /trigger_project_ref="proj_yrxsqjznkghpwsolfmjp"/);
   assert.match(production, /_TRIGGER_PROJECT_NAME=jina-review-production/);

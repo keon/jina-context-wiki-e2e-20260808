@@ -19,7 +19,7 @@ export interface ViewerTenant {
 
 /**
  * The active tenant exposed through the tenant context. `null` (absent) means
- * legacy personal behavior — the pages fall back to the viewer-scoped routes.
+ * local fixture behavior — production pages require an explicit tenant.
  */
 export interface SelectedTenant {
   tenantId: string;
@@ -36,7 +36,7 @@ export const TENANT_STORAGE_KEY = "jina.dashboard.tenant";
  * Namespace the persisted tenant selection by the viewer's GitHub user id so a
  * selection made by one account is never read back for another (after logout/login
  * as a different user). A null/undefined id (auth disabled / no viewer) uses the
- * bare key, preserving the legacy single-user behavior.
+ * bare key for the auth-disabled local fixture.
  */
 export function tenantStorageKey(viewerUserId: number | null | undefined): string {
   return viewerUserId == null ? TENANT_STORAGE_KEY : `${TENANT_STORAGE_KEY}.${viewerUserId}`;
@@ -46,7 +46,7 @@ export function tenantStorageKey(viewerUserId: number | null | undefined): strin
  * Fencing predicate for tenant-scoped async responses: a response captured for
  * `requestTenantId` may only be applied when both the still-selected tenant and
  * viewer/session scope match. The scope comparison also fences null-to-null
- * legacy requests across account transitions.
+ * local requests across account transitions.
  */
 export function isResponseForCurrentTenant(
   requestTenantId: string | null,
@@ -125,7 +125,7 @@ export function tenantRoleLabel(role: TenantRole): string {
 /**
  * Resolve which tenant the switcher should show as selected: the stored id when
  * it still matches a known tenant, otherwise the first (personal) tenant. Returns
- * null when the viewer has no tenants (degrade to legacy personal behavior).
+ * null when the viewer has no tenants.
  */
 export function resolveSelectedTenant(tenants: ViewerTenant[], storedId: string | null): ViewerTenant | null {
   if (tenants.length === 0) return null;
@@ -138,7 +138,7 @@ export function resolveSelectedTenant(tenants: ViewerTenant[], storedId: string 
 
 /**
  * Role-gate predicate for write controls (key save/disconnect, model edits,
- * top-up). Writes are allowed for legacy personal behavior (null), for personal
+ * top-up). Writes are allowed for the auth-disabled local fixture (null), for personal
  * ('User') tenants, and for org admins; org members get read-only controls. The
  * API is the real enforcer — this only decides the UI's disabled state.
  */
@@ -147,19 +147,3 @@ export function isTenantWritable(selected: SelectedTenant | null): boolean {
   if (selected.type === "User") return true;
   return selected.role === "admin";
 }
-
-/** Static options for the personal Codex harness model pill; null = Codex's own default routing.
- *  KEEP IN SYNC with api/src/codex-harness.ts HARNESS_MODELS (and trigger runtime-review HARNESS_MODELS):
- *  a slug the API accepts but this list omits is silently normalized to null (Codex default) here, so a
- *  GPT-5.6 pin saved elsewhere would display as "Codex default". */
-export const HARNESS_MODEL_OPTIONS: { value: string | null; label: string }[] = [
-  { value: null, label: "Codex default" },
-  { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-  { value: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
-  { value: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
-  { value: "gpt-5.5", label: "GPT-5.5" },
-  { value: "gpt-5.4", label: "GPT-5.4" },
-  { value: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
-];
-
-/** The concrete slugs the API accepts for codex_harness_model (null is also valid, meaning "default"). */

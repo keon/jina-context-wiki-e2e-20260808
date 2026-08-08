@@ -90,7 +90,7 @@ export type StartOpenRouterProxyOptions = {
   captureByteLimit?: number;
 };
 
-export type FlushOptions = {
+type FlushOptions = {
   /** Overall bound (ms) on how long flush() waits for in-flight requests before
    *  it destroys the stragglers and returns whatever was collected. Defaults to
    *  15s; overridable for tests. flush() must never hang the runtime result path. */
@@ -1150,7 +1150,7 @@ export function rawNumberLiteral(bodyText: string, key: string): string | undefi
 /** Lift the first string value for `key` out of a raw (possibly truncated) body
  *  without a full JSON.parse. Used to recover the response id from an oversized
  *  body so a generation-stats backfill can still run. */
-export function rawStringLiteral(bodyText: string, key: string): string | undefined {
+function rawStringLiteral(bodyText: string, key: string): string | undefined {
   const match = bodyText.match(new RegExp(`"${key}"\\s*:\\s*"([^"\\\\]*)"`));
   return match ? match[1] : undefined;
 }

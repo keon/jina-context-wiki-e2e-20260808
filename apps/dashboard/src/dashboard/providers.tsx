@@ -168,7 +168,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const viewerUserId = viewer?.user?.id ?? null;
   const viewerAuthEnabled = Boolean(viewer?.auth.enabled);
   const authRequired = Boolean(viewer?.auth.enabled && !viewer.authenticated);
-  // An authenticated dashboard must never fall back to the legacy viewer-wide feed if tenant
+  // An authenticated dashboard must never fall back to the local viewer-wide feed if tenant
   // discovery unexpectedly returns no workspace.
   const noTenantAvailable =
     tenantScope.ready && !tenantScope.tenantId && viewerAuthEnabled && !localDashboardFixtureEnabled();
@@ -242,7 +242,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
     // Removing an active query makes its observer rebuild and refetch on the next
     // render, so latch this scope off; the completion poll still retries on its
-    // ten-second cadence, which is the pre-migration behaviour.
+    // ten-second cadence.
     setAuthFailure((current) =>
       current && current.scopeVersion === scopeVersion && current.status === discardStatus
         ? current
@@ -408,14 +408,14 @@ interface TenantContextValue {
   // there is an active workspace. The menu also exposes organization creation.
   switcherVisible: boolean;
   // The active tenant, or null while tenant loading failed/unresolved or the
-  // viewer has no tenant. Authenticated pages never use a legacy viewer-wide
+  // viewer has no tenant. Authenticated pages never use a local viewer-wide
   // route merely because this is null.
   selected: SelectedTenant | null;
   // True once tenant discovery has completed for the current viewer.
   ready: boolean;
   // Only auth-disabled development and the explicit local fixture may use the
-  // backward-compatible viewer-wide review endpoints.
-  legacyReviewMode: boolean;
+  // local fixture viewer-wide review endpoints.
+  localReviewMode: boolean;
   // Actionable reason tenant discovery was denied. This remains separate from
   // `ready` so authenticated pages stay fail-closed while the shell explains
   // how to recover instead of rendering an empty dashboard.
@@ -425,7 +425,7 @@ interface TenantContextValue {
   addTenant: (tenant: ViewerTenant) => void;
   updateTenant: (tenant: ViewerTenant) => void;
   // Increments when tenant authorization is lost, invalidating in-flight page requests even if both
-  // the old and new selections use the legacy null scope.
+  // the old and new selections use the local null scope.
   fenceVersion: number;
 }
 
@@ -460,7 +460,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [tenants, setTenants] = useState<ViewerTenant[]>([]);
   // False until a successful fetch. Authenticated review reads stay blocked on failure;
-  // only explicit auth-disabled/local-fixture mode may use the legacy viewer-wide feed.
+  // only explicit auth-disabled/local-fixture mode may use the local viewer-wide feed.
   const [loaded, setLoaded] = useState(false);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [fenceVersion, setFenceVersion] = useState(0);
@@ -477,12 +477,12 @@ export function TenantProvider({ children }: { children: ReactNode }) {
   const authenticated = Boolean(viewer && !authRequired);
   const viewerUserId = viewer?.user?.id ?? null;
   const viewerAuthMode = viewer?.auth.mode ?? "disabled";
-  const legacyReviewMode = Boolean(viewer && (!viewer.auth.enabled || localDashboardFixtureEnabled()));
+  const localReviewMode = Boolean(viewer && (!viewer.auth.enabled || localDashboardFixtureEnabled()));
 
   useEffect(() => {
     if (authLoading) return;
 
-    if (legacyReviewMode) {
+    if (localReviewMode) {
       setAccessError(null);
       setTenantScope(null, true);
       return;
@@ -618,7 +618,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
   }, [
     authLoading,
     authenticated,
-    legacyReviewMode,
+    localReviewMode,
     viewerUserId,
     viewerAuthMode,
     setTenantScope,
@@ -703,10 +703,10 @@ export function TenantProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    if (viewer?.auth.enabled && !legacyReviewMode) {
+    if (viewer?.auth.enabled && !localReviewMode) {
       setTenantScope(selected?.tenantId ?? null, loaded);
     }
-  }, [legacyReviewMode, loaded, selected?.tenantId, setTenantScope, viewer?.auth.enabled]);
+  }, [localReviewMode, loaded, selected?.tenantId, setTenantScope, viewer?.auth.enabled]);
 
   const value = useMemo<TenantContextValue>(() => {
     const switcherVisible = loaded && tenants.length > 0;
@@ -714,8 +714,8 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       tenants,
       switcherVisible,
       selected,
-      ready: legacyReviewMode || loaded,
-      legacyReviewMode,
+      ready: localReviewMode || loaded,
+      localReviewMode,
       accessError,
       retryDiscovery,
       selectTenant,
@@ -724,7 +724,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       fenceVersion,
     };
   }, [
-    legacyReviewMode,
+    localReviewMode,
     loaded,
     tenants,
     selected,

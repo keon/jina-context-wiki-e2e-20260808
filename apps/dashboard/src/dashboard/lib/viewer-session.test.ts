@@ -6,7 +6,7 @@ import { invalidateViewerSession, reconcileSessionRefresh } from "./viewer-sessi
 
 function viewer(id: number, login = `viewer-${id}`): ViewerResponse {
   return {
-    auth: { mode: "github", enabled: true },
+    auth: { mode: "clerk", enabled: true },
     github_app: { installed: true },
     authenticated: true,
     user: { id, login },
@@ -17,7 +17,7 @@ function viewer(id: number, login = `viewer-${id}`): ViewerResponse {
 }
 
 const anonymous: ViewerResponse = {
-  auth: { mode: "github", enabled: true },
+  auth: { mode: "clerk", enabled: true },
   github_app: { installed: true },
   authenticated: false,
   organizations: [],

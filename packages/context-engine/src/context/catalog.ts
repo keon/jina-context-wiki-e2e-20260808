@@ -246,10 +246,9 @@ export class ContextCatalogService {
       input.tenantAdmin ||
       (await this.store.aclFingerprintsForPrincipal(input.tenantId, input.principalId, input.repository)).length > 0;
     if (!authorized) return [];
-    // Preserve store order. PostgreSQL places each ref's authoritative current
-    // pointer before historical releases; re-sorting by a preparation
-    // timestamp could otherwise make a rolled-back historical release look
-    // current to API clients that select the first release for a ref.
+    // Preserve store order. PostgreSQL places the highest sequence for each ref
+    // before its history; re-sorting by preparation time could make an older
+    // release look current to API clients that select the first release.
     return published.map(publicRelease);
   }
 
@@ -406,13 +405,7 @@ export class ContextCatalogService {
       if (!document.sourceRevisionId) throw new Error("derived context document is missing its revision");
       return document.sourceRevisionId;
     });
-    const citationsByRevision = this.store.listCitationsForRevisions
-      ? await this.store.listCitationsForRevisions(revisionIds)
-      : new Map(
-          await Promise.all(
-            revisionIds.map(async (revisionId) => [revisionId, await this.store.listCitations(revisionId)] as const)
-          )
-        );
+    const citationsByRevision = await this.store.listCitationsForRevisions(revisionIds);
     return documents.map((document, index) =>
       contextDocumentSummary(document, citationsByRevision.get(revisionIds[index]!) ?? [])
     );

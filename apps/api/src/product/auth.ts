@@ -1,28 +1,19 @@
-import { randomBytes } from "node:crypto";
 import { createClerkClient } from "@clerk/backend";
 
 import type { Context } from "hono";
-import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 
-import { dashboardOriginAllowed, type AppConfig } from "./config.js";
+import type { AppConfig } from "./config.js";
 import { ApiError } from "./errors.js";
 import {
-  clerkMembershipBootstrap,
-  completeClerkMembershipBootstrap,
-  consumeOauthState,
-  deleteSession,
   getSession,
   hasInstallationForAccounts,
   knownProjects,
   linkClerkUserIdentity,
   resolveClerkUserIdentity,
-  saveOauthState,
   saveSession,
-  syncTenantMemberships,
   syncClerkTenantMemberships,
   updateSessionIfCurrent,
   upsertGithubUserIdentity,
-  type ViewerOrgMembership,
 } from "./store.js";
 
 interface GithubUser {
@@ -93,9 +84,8 @@ interface DashboardUser {
 
 export interface DashboardSession {
   id: string;
-  /** Stable Jina user id. Absent only on pre-transition or in-memory test sessions. */
-  userId?: string;
-  accessToken?: string;
+  userId: string;
+  accessToken: string;
   user: DashboardUser;
   organizations: {
     id: number;
@@ -107,16 +97,8 @@ export interface DashboardSession {
   expiresAt: number;
   createdAt: string;
   updatedAt: string;
-  clerkUserId?: string;
+  clerkUserId: string;
   clerkOrganizationId?: string;
-  /** Membership authority used for this session during the reversible Clerk cutover. */
-  membershipAuthority?: "legacy" | "hybrid" | "clerk";
-}
-
-interface OAuthTokenResponse {
-  access_token?: string;
-  error?: string;
-  error_description?: string;
 }
 
 interface GithubSessionAccess {
@@ -144,85 +126,11 @@ export function cookieSecurity(config: AppConfig): { sameSite: AppConfig["auth"]
   return { sameSite: config.auth.cookieSameSite, secure: config.auth.cookieSecure };
 }
 
-// Sessions and OAuth login state are persisted in Postgres (see store.ts) so they
-// survive restarts and are shared across Cloud Run instances.
+// Clerk session projections are persisted in Postgres so they survive restarts
+// and are shared across Cloud Run instances.
 
 function dashboardAuthEnabled(config: AppConfig): boolean {
   return config.auth.mode !== "disabled";
-}
-
-export async function githubLogin(c: Context, config: AppConfig): Promise<Response> {
-  ensureGithubAuth(config);
-  const state = randomToken(24);
-  const callbackUrl = callbackUrlFor(c, config, "/auth/github/callback");
-  await saveOauthState(state, safeReturnUrl(config, c.req.query("return_to")), Date.now() + 10 * 60 * 1_000);
-
-  setCookie(c, config.auth.oauthStateCookieName, state, {
-    httpOnly: true,
-    maxAge: 10 * 60,
-    path: "/auth/github",
-    ...cookieSecurity(config),
-  });
-
-  const authorizeUrl = new URL("https://github.com/login/oauth/authorize");
-  authorizeUrl.searchParams.set("client_id", config.auth.githubClientId ?? "");
-  authorizeUrl.searchParams.set("redirect_uri", callbackUrl);
-  authorizeUrl.searchParams.set("scope", config.auth.githubScopes);
-  authorizeUrl.searchParams.set("state", state);
-  authorizeUrl.searchParams.set("allow_signup", "false");
-
-  return c.redirect(authorizeUrl.toString());
-}
-
-export async function githubCallback(c: Context, config: AppConfig): Promise<Response> {
-  ensureGithubAuth(config);
-  const expectedState = getCookie(c, config.auth.oauthStateCookieName);
-  const state = c.req.query("state");
-  const code = c.req.query("code");
-
-  deleteCookie(c, config.auth.oauthStateCookieName, {
-    path: "/auth/github",
-    ...cookieSecurity(config),
-  });
-
-  if (!expectedState || !state || expectedState !== state) {
-    throw new ApiError(401, "GitHub OAuth state mismatch");
-  }
-  if (!code) {
-    throw new ApiError(400, "GitHub OAuth callback is missing code");
-  }
-
-  const accessToken = await exchangeCodeForToken(config, code, callbackUrlFor(c, config, "/auth/github/callback"));
-  const session = await createGithubSession(config, accessToken);
-  const returnTo = await consumeReturnTo(config, state);
-
-  setCookie(c, config.auth.sessionCookieName, session.id, {
-    httpOnly: true,
-    maxAge: config.auth.sessionTtlSeconds,
-    path: "/",
-    ...cookieSecurity(config),
-  });
-
-  return c.redirect(returnTo);
-}
-
-export async function logout(c: Context, config: AppConfig): Promise<Response> {
-  if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
-    const session = await currentClerkSession(c, config).catch(() => undefined);
-    if (session) await deleteSession(session.id).catch(() => undefined);
-    if (config.auth.mode === "clerk") return c.json({ ok: true });
-  }
-  const sessionId = getCookie(c, config.auth.sessionCookieName);
-  if (sessionId) {
-    await deleteSession(sessionId).catch(() => undefined);
-  }
-
-  deleteCookie(c, config.auth.sessionCookieName, {
-    path: "/",
-    ...cookieSecurity(config),
-  });
-
-  return c.json({ ok: true });
 }
 
 export async function me(c: Context, config: AppConfig): Promise<Response> {
@@ -280,7 +188,7 @@ export async function requireDashboardSession(c: Context, config: AppConfig): Pr
   return session;
 }
 
-export async function visibleProjects(session: DashboardSession | undefined): Promise<DashboardProject[]> {
+async function visibleProjects(session: DashboardSession | undefined): Promise<DashboardProject[]> {
   const observedProjects = (await knownProjects()).map((project) => ({
     id: project.full_name,
     github_repo_id: project.github_repo_id,
@@ -314,45 +222,11 @@ export async function visibleProjects(session: DashboardSession | undefined): Pr
   return [...byName.values()].sort(compareProjects);
 }
 
-export function teamAllowsProject(team: DashboardTeam, projectFullName: string): boolean {
-  // Authorize strictly against the team's actual repository list. The previous
-  // org-prefix fallback over-granted access to every repo in the org, including
-  // repos the team cannot see.
-  const normalized = projectFullName.toLowerCase();
-  return team.project_full_names.some((name) => name.toLowerCase() === normalized);
-}
-
 async function currentSession(c: Context, config: AppConfig): Promise<DashboardSession | undefined> {
   if (!dashboardAuthEnabled(config)) {
     return undefined;
   }
-
-  if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
-    const clerkSession = await currentClerkSession(c, config);
-    if (clerkSession || config.auth.mode === "clerk") return clerkSession;
-  }
-
-  return currentLegacySession(c, config);
-}
-
-async function currentLegacySession(c: Context, config: AppConfig): Promise<DashboardSession | undefined> {
-  const sessionId = getCookie(c, config.auth.sessionCookieName);
-  if (!sessionId) {
-    return undefined;
-  }
-
-  let session: DashboardSession | undefined;
-  try {
-    session = await getSession(sessionId);
-  } catch {
-    return undefined;
-  }
-  if (!session || session.expiresAt <= Date.now()) {
-    await deleteSession(sessionId).catch(() => undefined);
-    return undefined;
-  }
-
-  return session;
+  return currentClerkSession(c, config);
 }
 
 async function currentClerkSession(c: Context, config: AppConfig): Promise<DashboardSession | undefined> {
@@ -375,7 +249,6 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
     cached &&
     cached.expiresAt > Date.now() &&
     !sessionAccessStale(cached) &&
-    cached.membershipAuthority === (config.auth.mode === "hybrid" ? "hybrid" : "clerk") &&
     cached.clerkOrganizationId === (auth.orgId ?? undefined)
   ) {
     return cached;
@@ -465,68 +338,11 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
     }
   }
 
-  // During the hybrid grace period, a matching unexpired Jina session supplies
-  // GitHub access until the user connects GitHub inside Clerk. The stable user
-  // id and numeric GitHub id must both match; email/name are never sufficient.
-  if ((!githubAccessToken || !organizations || !projects || !teams) && config.auth.mode === "hybrid") {
-    const legacy = await currentLegacySession(c, config);
-    if (
-      legacy?.accessToken
-      && legacy.userId === userId
-      && legacy.user.id === githubUserId
-    ) {
-      githubAccessToken = legacy.accessToken;
-      organizations = legacy.organizations;
-      projects = legacy.projects;
-      teams = legacy.teams;
-    }
-  }
   if (!githubAccessToken || !organizations || !projects || !teams) {
     throw new ApiError(403, "Connect GitHub to your Clerk profile before using Jina");
   }
 
-  let memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
-  const bootstrap = await clerkMembershipBootstrap(auth.userId, userId).catch(() => {
-    throw new ApiError(403, "This Clerk account conflicts with an existing Jina membership migration");
-  });
-  if (bootstrap.pending) {
-    let membershipByOrganization = new Map(
-      memberships.data.map((membership) => [membership.organization.id, membership]),
-    );
-    for (const desired of bootstrap.memberships) {
-      const desiredRole = desired.role === "admin" ? "org:admin" : "org:member";
-      let existing = membershipByOrganization.get(desired.organizationId);
-      if (!existing) {
-        try {
-          await clerk.organizations.createOrganizationMembership({
-            organizationId: desired.organizationId,
-            userId: auth.userId,
-            role: desiredRole,
-          });
-        } catch {
-          // A concurrent first request may have created the same membership.
-          // Refetch and require that exact principal/org pair before sealing.
-          memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
-          membershipByOrganization = new Map(
-            memberships.data.map((membership) => [membership.organization.id, membership]),
-          );
-          existing = membershipByOrganization.get(desired.organizationId);
-          if (!existing) throw new ApiError(503, "Clerk organization membership migration failed");
-        }
-      }
-      if (existing && existing.role !== desiredRole) {
-        await clerk.organizations.updateOrganizationMembership({
-          organizationId: desired.organizationId,
-          userId: auth.userId,
-          role: desiredRole,
-        });
-      }
-    }
-    // Provider writes finish before the durable seal. Partial failures leave
-    // the marker absent, so the next request retries idempotently.
-    await completeClerkMembershipBootstrap(auth.userId, userId);
-    memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
-  }
+  const memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
   const membershipSync = await syncClerkTenantMemberships({
     clerkUserId: auth.userId,
     githubUserId,
@@ -565,96 +381,9 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
     updatedAt: now,
     clerkUserId: auth.userId,
     clerkOrganizationId: auth.orgId ?? undefined,
-    membershipAuthority: config.auth.mode === "hybrid" ? "hybrid" : "clerk",
   };
   await saveSession(session);
   return session;
-}
-
-async function createGithubSession(config: AppConfig, accessToken: string): Promise<DashboardSession> {
-  const access = await loadGithubSessionAccess(accessToken);
-  const identity = await upsertGithubUserIdentity({
-    githubUserId: access.user.id,
-    githubLogin: access.user.login,
-    displayName: access.user.name,
-    avatarUrl: access.user.avatar_url,
-  });
-  const now = new Date().toISOString();
-  const session: DashboardSession = {
-    id: randomToken(32),
-    userId: identity?.userId,
-    accessToken,
-    user: githubUserForSession(access.user),
-    organizations: access.organizations.map(githubOrgForSession),
-    projects: access.repositories.map(githubRepoForSession),
-    teams: access.teams,
-    expiresAt: Date.now() + config.auth.sessionTtlSeconds * 1_000,
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  await saveSession(session);
-
-  // Persist tenant membership from the viewer's OWN token (GitHub org memberships + their personal
-  // tenant), so org tenants are first-class. A sync failure must never break login — stale membership
-  // beats a broken login — so it is logged and swallowed.
-  await syncViewerTenantMemberships(accessToken, session.user, session.userId).catch((error) => {
-    console.warn("tenant_membership_sync_failed", {
-      user: session.user.login,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
-
-  return session;
-}
-
-interface GithubOrgMembership {
-  role?: string;
-  state?: string;
-  organization?: { id?: number; login?: string };
-}
-
-/**
- * Fetch the viewer's ACTIVE org memberships from their own token (GET /user/memberships/orgs), paginated
- * (100/page, capped). Each active membership yields { organizationId, login, role } where role is 'admin'
- * for org owners/admins and 'member' otherwise. Only active memberships are requested, so pending
- * invitations never grant access.
- */
-async function fetchActiveOrgMemberships(accessToken: string): Promise<ViewerOrgMembership[]> {
-  const memberships: ViewerOrgMembership[] = [];
-  const PER_PAGE = 100;
-  const MAX_PAGES = 10;
-  for (let page = 1; page <= MAX_PAGES; page += 1) {
-    const batch = await githubJson<GithubOrgMembership[]>(
-      accessToken,
-      `/user/memberships/orgs?state=active&per_page=${PER_PAGE}&page=${page}`,
-    );
-    if (!Array.isArray(batch) || batch.length === 0) {
-      break;
-    }
-    for (const entry of batch) {
-      const id = entry.organization?.id;
-      const login = entry.organization?.login;
-      if (typeof id !== "number" || typeof login !== "string") {
-        continue;
-      }
-      memberships.push({ organizationId: id, login, role: entry.role === "admin" ? "admin" : "member" });
-    }
-    if (batch.length < PER_PAGE) {
-      break;
-    }
-  }
-  return memberships;
-}
-
-/** Sync the viewer's tenant membership rows from their fetched org memberships + personal tenant. */
-async function syncViewerTenantMemberships(
-  accessToken: string,
-  user: DashboardUser,
-  userId?: string,
-): Promise<void> {
-  const memberships = await fetchActiveOrgMemberships(accessToken);
-  await syncTenantMemberships(user.id, user.login, memberships, userId);
 }
 
 async function refreshSessionAccess(session: DashboardSession): Promise<DashboardSession | undefined> {
@@ -706,17 +435,6 @@ async function refreshSessionAccessOnce(
     if (!saved) {
       return getSession(session.id).catch(() => undefined);
     }
-    // Re-sync tenant memberships on the periodic refresh (not only at login), so a long-lived session
-    // self-heals: org tenants a user belongs to appear in their switcher within one refresh interval,
-    // without requiring a re-login. A sync failure must never break the request — swallow + log, as at
-    // login (stale membership beats a broken dashboard).
-    await syncViewerTenantMemberships(accessToken, refreshed.user, refreshed.userId).catch((error) => {
-      console.warn("tenant_membership_sync_failed", {
-        phase: "refresh",
-        user: refreshed.user.login,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
     return refreshed;
   } catch (error) {
     console.warn("dashboard_session_refresh_failed", {
@@ -846,13 +564,6 @@ async function teamsForSession(accessToken: string, teams: GithubTeam[]): Promis
   return dashboardTeams.sort((a, b) => a.id.localeCompare(b.id));
 }
 
-export function sessionAccessibleNames(session: DashboardSession | undefined): string[] | null {
-  if (!session) {
-    return null;
-  }
-  return [...accessibleProjectNames(session)];
-}
-
 function accessibleProjectNames(session: DashboardSession): Set<string> {
   const names = new Set<string>();
   for (const project of session.projects) {
@@ -865,34 +576,6 @@ function accessibleProjectNames(session: DashboardSession): Set<string> {
   }
 
   return names;
-}
-
-async function exchangeCodeForToken(config: AppConfig, code: string, redirectUri: string): Promise<string> {
-  const response = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      "user-agent": GITHUB_USER_AGENT,
-    },
-    body: JSON.stringify({
-      client_id: config.auth.githubClientId,
-      client_secret: config.auth.githubClientSecret,
-      code,
-      redirect_uri: redirectUri,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new ApiError(502, `GitHub OAuth token exchange failed: ${response.status}`);
-  }
-
-  const token = (await response.json()) as OAuthTokenResponse;
-  if (!token.access_token) {
-    throw new ApiError(401, token.error_description || token.error || "GitHub OAuth did not return an access token");
-  }
-
-  return token.access_token;
 }
 
 async function githubJson<T>(accessToken: string, path: string): Promise<T> {
@@ -913,68 +596,13 @@ async function githubJson<T>(accessToken: string, path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-function ensureGithubAuth(config: AppConfig): void {
-  if (config.auth.mode !== "github") {
-    throw new ApiError(404, "GitHub dashboard authentication is not configured");
+// OpenRouter OAuth runs only for Clerk sessions. Its callback returns through the
+// dashboard proxy, whose configured canonical origin is independent of request headers.
+export function callbackUrlFor(config: AppConfig, path: string): string {
+  if (config.auth.mode !== "clerk" || !path.startsWith("/dashboard/")) {
+    throw new ApiError(500, "dashboard OAuth requires Clerk authentication");
   }
-}
-
-// The OAuth redirect_uri MUST be stable and attacker-uncontrollable: it is sent to
-// the provider and echoed during token exchange. Derive it from the configured canonical API
-// base URL rather than client-supplied Host / X-Forwarded-* headers (which an attacker
-// can spoof to redirect the code to their own host). Fall back to the request origin only
-// when API_BASE_URL is unconfigured (local dev), where forwarded headers are not in play.
-// `path` is the provider-specific callback path (shared by GitHub login and OpenRouter OAuth).
-export function callbackUrlFor(c: Context, config: AppConfig, path: string): string {
-  if ((config.auth?.mode === "clerk" || config.auth?.mode === "hybrid") && path.startsWith("/dashboard/")) {
-    return new URL(`/api${path}`, config.dashboardUrl).toString();
-  }
-  if (config.apiBaseUrl) {
-    return new URL(path, config.apiBaseUrl).toString();
-  }
-
-  // FINDING 6b: in production the Host / X-Forwarded-* fallback is attacker-controllable and would
-  // let a spoofed Host redirect the OAuth code to another origin. Refuse to derive the callback from
-  // request headers when API_BASE_URL is unset in production; dev keeps the request-origin fallback.
-  if (process.env.NODE_ENV === "production") {
-    throw new ApiError(500, "API_BASE_URL must be configured in production to build OAuth callback URLs");
-  }
-
-  const requestUrl = new URL(c.req.url);
-  const proto = requestUrl.protocol.replace(/:$/, "");
-  const host = c.req.header("host") || requestUrl.host;
-
-  return `${proto}://${host}${path}`;
-}
-
-function randomToken(bytes: number): string {
-  return randomBytes(bytes).toString("base64url");
-}
-
-function safeReturnUrl(config: AppConfig, value: string | undefined): string {
-  if (!value) {
-    return config.dashboardUrl;
-  }
-
-  if (value.startsWith("/") && !value.startsWith("//")) {
-    return new URL(value, config.dashboardUrl).toString();
-  }
-
-  try {
-    const url = new URL(value);
-    if (dashboardOriginAllowed(config.dashboardAllowedOrigins, url.origin)) {
-      return url.toString();
-    }
-  } catch {
-    return config.dashboardUrl;
-  }
-
-  return config.dashboardUrl;
-}
-
-async function consumeReturnTo(config: AppConfig, state: string): Promise<string> {
-  const returnTo = await consumeOauthState(state);
-  return returnTo ?? config.dashboardUrl;
+  return new URL(`/api${path}`, config.dashboardUrl).toString();
 }
 
 function compareProjects(a: DashboardProject, b: DashboardProject): number {

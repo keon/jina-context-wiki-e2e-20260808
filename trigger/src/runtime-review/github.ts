@@ -1,6 +1,11 @@
 import type { PullRequestReviewCommentInput } from "../shared/github.js";
 import { reviewRunUrl } from "../review/workflow.js";
-import type { RuntimeReviewFinding, RuntimeReviewPublishedIssue, RuntimeReviewPublication, RuntimeReviewResult } from "./index.js";
+import type {
+  RuntimeReviewFinding,
+  RuntimeReviewPublishedIssue,
+  RuntimeReviewPublication,
+  RuntimeReviewResult
+} from "./index.js";
 import { parseDiffAnchors } from "../review/diff-anchors.js";
 
 export type RuntimeReviewInlineComment = PullRequestReviewCommentInput;
@@ -22,14 +27,8 @@ export function runtimeReviewMarker(headSha: string, reviewRunId?: string): stri
   return `<!-- jina-runtime-review:${headSha}${reviewRunId ? `:${reviewRunId}` : ""} -->`;
 }
 
-export function legacyRuntimeReviewMarker(headSha: string): string {
-  return `<!-- jina-issue-validation:${headSha} -->`;
-}
-
 export function runtimeReviewMarkers(headSha: string, reviewRunId?: string): string[] {
-  return reviewRunId
-    ? [runtimeReviewMarker(headSha, reviewRunId)]
-    : [runtimeReviewMarker(headSha), legacyRuntimeReviewMarker(headSha)];
+  return [runtimeReviewMarker(headSha, reviewRunId)];
 }
 
 export function buildRuntimeReviewRequest(input: {
@@ -55,7 +54,10 @@ export function buildRuntimeReviewRequest(input: {
   const publishableFindings = input.result.findings;
   const lowConfidenceFindings: RuntimeReviewFinding[] = [];
   const findingsByFingerprint = new Map(publishableFindings.map((finding) => [finding.fingerprint, finding]));
-  const publication = input.result.publication ?? fallbackPublication(input.result);
+  const publication = input.result.publication;
+  if (!publication) {
+    throw new Error("runtime review result is missing its publication artifact");
+  }
 
   for (const issue of publication.issues) {
     const finding = issue.sourceFingerprints.map((fingerprint) => findingsByFingerprint.get(fingerprint)).find(Boolean);
@@ -65,7 +67,7 @@ export function buildRuntimeReviewRequest(input: {
           reviewRunId: input.reviewRunId,
           headSha: input.headSha,
           stage: "runtime",
-          fingerprint: issue.sourceFingerprints[0] ?? finding.fingerprint,
+          fingerprint: issue.sourceFingerprints[0] ?? finding.fingerprint
         })
       : undefined;
     const anchor = bestAnchorForFinding(finding, anchors);
@@ -78,7 +80,7 @@ export function buildRuntimeReviewRequest(input: {
       path: anchor.path,
       line: anchor.line,
       side: anchor.side,
-      body: renderPublishedIssueComment(issue, reviewRunUrl(input.reviewRunId), marker),
+      body: renderPublishedIssueComment(issue, reviewRunUrl(input.reviewRunId), marker)
     });
   }
 
@@ -88,13 +90,13 @@ export function buildRuntimeReviewRequest(input: {
       result: input.result,
       publication,
       unanchoredIssues,
-      dashboardUrl: reviewRunUrl(input.reviewRunId),
+      dashboardUrl: reviewRunUrl(input.reviewRunId)
     }),
     comments,
     fileComments,
     publishableFindings,
     unanchoredFindings,
-    lowConfidenceFindings,
+    lowConfidenceFindings
   };
 }
 
@@ -114,7 +116,7 @@ function bestAnchorForFinding(finding: RuntimeReviewFinding, anchors: Set<string
 function renderPublishedIssueComment(
   issue: RuntimeReviewPublishedIssue,
   dashboardUrl?: string,
-  marker?: string,
+  marker?: string
 ): string {
   const lines = [
     ...(marker ? [marker, ""] : []),
@@ -122,7 +124,7 @@ function renderPublishedIssueComment(
     "",
     severityLabel(issue.severity, issue.severityDescription),
     "",
-    truncateText(issue.body, 1_200),
+    truncateText(issue.body, 1_200)
   ];
   if (dashboardUrl) {
     lines.push("", `[View full runtime review audit trail](${dashboardUrl})`);
@@ -141,7 +143,9 @@ function renderRuntimeReviewBody(input: {
   const readiness = input.result.readiness;
   const readinessHeading = readiness ? `Merge Readiness ${readiness.score}/5` : "Merge Readiness unavailable";
   const recommendation = cleanInlineText(readiness?.recommendation || readinessRecommendation(readiness?.score));
-  const rationaleLines = paragraphLines(readableParagraphs(readiness?.rationale || input.result.summary || defaultSummary(input.result)));
+  const rationaleLines = paragraphLines(
+    readableParagraphs(readiness?.rationale || input.result.summary || defaultSummary(input.result))
+  );
   const lines: Array<string | undefined> = [
     input.marker,
     `## Runtime Review — ${readinessHeading}`,
@@ -149,7 +153,7 @@ function renderRuntimeReviewBody(input: {
     `### ${issueCountLabel(publishableCount)} - ${recommendation}`,
     "",
     ...rationaleLines,
-    "",
+    ""
   ];
   if (publishableCount === 0) {
     lines.push("No qualifying runtime issues were reported.", "");
@@ -164,70 +168,29 @@ function renderRuntimeReviewBody(input: {
   if (input.unanchoredIssues.length > 0) {
     lines.push("", "### Issues", "");
     for (const issue of input.unanchoredIssues) {
-      lines.push(`#### ${issue.title}`, "", severityLabel(issue.severity, issue.severityDescription), "", truncateText(issue.body, 1_200), "");
+      lines.push(
+        `#### ${issue.title}`,
+        "",
+        severityLabel(issue.severity, issue.severityDescription),
+        "",
+        truncateText(issue.body, 1_200),
+        ""
+      );
     }
   }
-  lines.push("", input.dashboardUrl
-    ? `[View the full investigation report on the Jina dashboard](${input.dashboardUrl})`
-    : undefined);
+  lines.push(
+    "",
+    input.dashboardUrl ? `[View the full investigation report on the Jina dashboard](${input.dashboardUrl})` : undefined
+  );
 
-  return lines.filter((line): line is string => line !== undefined).join("\n").trim();
+  return lines
+    .filter((line): line is string => line !== undefined)
+    .join("\n")
+    .trim();
 }
 
-function fallbackPublication(result: RuntimeReviewResult): RuntimeReviewPublication {
-  return {
-    areaSummaries: result.areas.map((area) => ({
-      areaId: area.areaId,
-      title: area.title,
-      summary: truncateText(area.summary || `${area.tasks.length} task(s) completed; ${area.issues.length} issue(s) found.`, 800),
-    })),
-    issues: result.findings.map((finding) => {
-      const severity = fallbackSeverity(finding);
-      return {
-        title: finding.title,
-        body: finding.body,
-        severity,
-        severityDescription: fallbackSeverityDescription(severity),
-        sourceFingerprints: [finding.fingerprint],
-      };
-    }),
-  };
-}
-
-function severityLabel(
-  severity: RuntimeReviewPublishedIssue["severity"],
-  description?: string,
-): string {
-  return `**${severity}** · ${cleanInlineText(description || fallbackSeverityDescription(severity))}`;
-}
-
-function fallbackSeverityDescription(severity: RuntimeReviewPublishedIssue["severity"]): string {
-  switch (severity) {
-    case "P0":
-      return "Critical — Must fix before merging";
-    case "P1":
-      return "High — Should fix";
-    case "P2":
-      return "Medium — Consider fixing";
-    case "P3":
-      return "Low — Low priority";
-  }
-}
-
-function fallbackSeverity(finding: RuntimeReviewFinding): RuntimeReviewPublishedIssue["severity"] {
-  const score = riskWeight(finding.risk) + confidenceWeight(finding.confidence) + confidenceWeight(finding.likelihood ?? "medium");
-  if (score >= 9) return "P0";
-  if (score >= 7) return "P1";
-  if (score >= 5) return "P2";
-  return "P3";
-}
-
-function riskWeight(risk: RuntimeReviewFinding["risk"]): number {
-  return risk === "high" ? 3 : risk === "medium" ? 2 : 1;
-}
-
-function confidenceWeight(confidence: NonNullable<RuntimeReviewFinding["likelihood"]> | RuntimeReviewFinding["confidence"]): number {
-  return confidence === "high" ? 3 : confidence === "medium" ? 2 : 1;
+function severityLabel(severity: RuntimeReviewPublishedIssue["severity"], description: string): string {
+  return `**${severity}** · ${cleanInlineText(description)}`;
 }
 
 function readinessRecommendation(score: number | undefined): string {
@@ -253,7 +216,10 @@ function issueCountLabel(count: number): string {
 
 function readableParagraphs(value: string, maxLength = 1_200): string[] {
   const text = truncateText(cleanInlineText(value), maxLength);
-  const sentences = text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
   return sentences.length > 0 ? sentences : [text];
 }
 
@@ -270,7 +236,9 @@ function anchorKey(anchor: DiffAnchor): string {
 }
 
 function defaultSummary(result: RuntimeReviewResult): string {
-  return result.findings.length > 0 ? `${result.findings.length} runtime finding(s) reported.` : "No runtime issues were reported.";
+  return result.findings.length > 0
+    ? `${result.findings.length} runtime finding(s) reported.`
+    : "No runtime issues were reported.";
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -291,6 +259,6 @@ function reviewIssueMarker(input: {
     headSha: input.headSha,
     stage: input.stage,
     fingerprint: input.fingerprint,
-    blocking: true,
+    blocking: true
   })} -->`;
 }

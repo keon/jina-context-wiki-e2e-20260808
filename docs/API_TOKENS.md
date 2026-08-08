@@ -126,7 +126,7 @@ This is production quota accounting, not yet per-person billing:
 
 - the ledger is tenant scoped rather than keyed by API token;
 - token records track `lastUsedAt`, not consumption by operation;
-- query telemetry records a non-resolvable principal fingerprint rather than a token ID;
+- search activity is not written as per-token usage accounting;
 - build-model invocations that never emit valid completed usage cannot be recorded as exact
   token usage and therefore cancel their reservation; and
 - there is no self-service usage API.

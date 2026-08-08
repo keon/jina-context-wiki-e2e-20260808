@@ -35,15 +35,6 @@ test("normalizeBilling treats missing/malformed payloads as not configured", () 
   assert.deepEqual(normalizeBilling({ status: "weird" }), NOT_CONFIGURED);
 });
 
-test("normalizeBilling falls back to not configured for legacy payloads without a status field", () => {
-  // Pre-status payloads (only the `configured` boolean) are treated as not configured.
-  assert.deepEqual(normalizeBilling({ configured: false }), NOT_CONFIGURED);
-  assert.deepEqual(
-    normalizeBilling({ configured: true, plan_id: "startup", credits_balance: 12500, managed_ai_access: true }),
-    NOT_CONFIGURED,
-  );
-});
-
 test("normalizeBilling maps an unavailable status to the temporarily-unavailable state", () => {
   assert.deepEqual(normalizeBilling({ status: "unavailable" }), UNAVAILABLE);
   // Balance/plan fields are ignored while unavailable.
@@ -51,7 +42,6 @@ test("normalizeBilling maps an unavailable status to the temporarily-unavailable
     normalizeBilling({ status: "unavailable", plan_id: "startup", credits_balance: 12500, managed_ai_access: true }),
     UNAVAILABLE,
   );
-  assert.equal(UNAVAILABLE.configured, false);
 });
 
 test("normalizeBilling passes through an ok payload and defaults odd fields", () => {
@@ -62,11 +52,11 @@ test("normalizeBilling passes through an ok payload and defaults odd fields", ()
       credits_balance: 12500,
       managed_ai_access: true,
     }),
-    { status: "ok", configured: true, plan_id: "startup", credits_balance: 12500, managed_ai_access: true, ...EMPTY_EXTRAS },
+    { status: "ok", plan_id: "startup", credits_balance: 12500, managed_ai_access: true, ...EMPTY_EXTRAS },
   );
   assert.deepEqual(
     normalizeBilling({ status: "ok", plan_id: null, credits_balance: "x", managed_ai_access: null }),
-    { status: "ok", configured: true, plan_id: null, credits_balance: null, managed_ai_access: null, ...EMPTY_EXTRAS },
+    { status: "ok", plan_id: null, credits_balance: null, managed_ai_access: null, ...EMPTY_EXTRAS },
   );
 });
 
@@ -161,7 +151,6 @@ test("loadBilling routes a well-formed 200 payload through normalizeBilling", as
   );
   assert.deepEqual(ok, {
     status: "ok",
-    configured: true,
     plan_id: "startup",
     credits_balance: 12500,
     managed_ai_access: true,

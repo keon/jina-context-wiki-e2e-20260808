@@ -52,7 +52,7 @@ test("failed review completion is persisted only for final failed attempts befor
   );
 });
 
-test("consolidated review completion preserves legacy superseded terminal status", () => {
+test("consolidated review completion preserves superseded terminal status", () => {
   const superseded: ReviewSuperseded = {
     reason: "the pull request head changed from abc123 to def456",
     expected_head_sha: "abc123",
@@ -373,30 +373,6 @@ test("child outputs are runtime-validated before aggregation", () => {
       "failed",
     );
   }
-});
-
-test("legacy count metadata cannot invalidate canonical child findings", () => {
-  const findings = [
-    { fingerprint: "fp-1", severity: "high", category: "correctness", body: "First issue" },
-    { fingerprint: "fp-2", severity: "medium", category: "correctness", body: "Duplicate issue" },
-  ];
-  const output = {
-    ...success("runtime"),
-    findings,
-    findingsCount: 2,
-    publishableFindingsCount: 2,
-    inlineCommentCount: 1,
-    fileCommentCount: 0,
-    unanchoredFindingsCount: 0,
-  };
-
-  const normalized = normalizeChildResult(
-    { ok: true, taskIdentifier: "review-runtime", output },
-    "runtime",
-  );
-
-  assert.equal(normalized.status, "success");
-  assert.deepEqual(normalized.findings, findings);
 });
 
 function success(stage: ReviewStageName): ReviewStageResult {

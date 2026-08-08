@@ -81,7 +81,7 @@ test("collapsed publication task owns the fenced PageIndex attachment", async ()
   const capture = new PageIndexAttachmentCapture();
   const token = "context-pageindex-http-token";
   const store = mutableStateStore({
-    intakeState: { board: pageIndexBoard(), pullRequests: [] },
+    intakeState: { board: pageIndexBoard() },
     devDeliverySequence: 0
   });
   const server = createApiServer({

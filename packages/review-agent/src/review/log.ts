@@ -56,21 +56,14 @@ export function runtimeReviewLogSummary(
     changed_file_count: result.changedFiles.length,
     areas_count: result.areas.length,
     tasks_count: result.areas.reduce((sum, area) => sum + area.tasks.length, 0),
-    blocked_count: result.areas.reduce((sum, area) => sum + area.blocked.length, 0),
     findings_count: result.findings.length,
     publishable_findings_count: reviewRequest?.publishableFindings?.length ?? 0,
     inline_comment_count: reviewRequest?.comments?.length ?? 0,
     unanchored_findings_count: reviewRequest?.unanchoredFindings?.length ?? 0,
     low_confidence_findings_held_back: reviewRequest?.lowConfidenceFindings?.length ?? 0,
-    merge_score: result.readiness?.score ?? result.finalReview?.readiness.score,
-    merge_recommendation: previewOptional(
-      result.readiness?.recommendation ?? result.finalReview?.readiness.recommendation,
-      TEXT_PREVIEW_CHARS
-    ),
-    merge_rationale: previewOptional(
-      result.readiness?.rationale ?? result.finalReview?.readiness.rationale,
-      TEXT_PREVIEW_CHARS
-    ),
+    merge_score: result.readiness?.score,
+    merge_recommendation: previewOptional(result.readiness?.recommendation, TEXT_PREVIEW_CHARS),
+    merge_rationale: previewOptional(result.readiness?.rationale, TEXT_PREVIEW_CHARS),
     publication_area_count: result.publication?.areaSummaries.length ?? 0,
     publication_issue_count: result.publication?.issues.length ?? 0,
     publication_issue_severity_counts: countBy(result.publication?.issues ?? [], (issue) => issue.severity),
@@ -99,8 +92,6 @@ export function runtimeReviewArtifactLogSummary(result: RuntimeReviewResult): Re
     task_count: area.tasks.length,
     issue_count: area.issues.length,
     non_issue_count: area.nonIssues.length,
-    blocked_count: area.blocked.length,
-    tool_call_count: area.toolCalls.length,
     error: previewOptional(area.error, TEXT_PREVIEW_CHARS)
   }));
   const publicationIssues = (result.publication?.issues ?? []).slice(0, MAX_FINDINGS).map((issue) => ({
@@ -126,24 +117,18 @@ export function runtimeReviewArtifactLogSummary(result: RuntimeReviewResult): Re
       areas
     },
     summarizer: {
-      completed: Boolean(result.finalReview || result.publication || result.readiness),
-      summary: previewOptional(result.finalReviewSummary ?? result.finalReview?.summary, TEXT_PREVIEW_CHARS),
-      merge_score: result.readiness?.score ?? result.finalReview?.readiness.score,
-      merge_recommendation: previewOptional(
-        result.readiness?.recommendation ?? result.finalReview?.readiness.recommendation,
-        TEXT_PREVIEW_CHARS
-      ),
-      merge_rationale: previewOptional(
-        result.readiness?.rationale ?? result.finalReview?.readiness.rationale,
-        TEXT_PREVIEW_CHARS
-      ),
+      completed: Boolean(result.publication || result.readiness),
+      summary: previewOptional(result.summary, TEXT_PREVIEW_CHARS),
+      merge_score: result.readiness?.score,
+      merge_recommendation: previewOptional(result.readiness?.recommendation, TEXT_PREVIEW_CHARS),
+      merge_rationale: previewOptional(result.readiness?.rationale, TEXT_PREVIEW_CHARS),
       area_summary_count: result.publication?.areaSummaries.length ?? 0,
       issue_count: result.publication?.issues.length ?? 0,
       issue_severity_counts: countBy(result.publication?.issues ?? [], (issue) => issue.severity),
       dismissed_candidate_count: result.publication?.dismissedCandidates?.length ?? 0,
       issues_omitted_count: Math.max(0, (result.publication?.issues.length ?? 0) - publicationIssues.length),
       issues: publicationIssues,
-      error: previewOptional(result.finalReview?.error ?? result.error, TEXT_PREVIEW_CHARS)
+      error: previewOptional(result.error, TEXT_PREVIEW_CHARS)
     }
   };
 }

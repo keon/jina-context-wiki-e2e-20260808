@@ -1,6 +1,5 @@
 import {
   BoardPageIndexAttachmentError,
-  PAGEINDEX_OSS_SOURCE_PIN,
   canonicalJson,
   fingerprint,
   stableId,
@@ -9,16 +8,17 @@ import {
   type BoardPageIndexAttachmentRecord,
   type BoardPageIndexAttachmentTransactionPort,
   type BoardPageIndexTreeArtifactV1,
+  type ContextDocument,
   type ContextArtifactRef,
-  type EvidenceAnchor
+  type HierarchyNode
 } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { ContextDatabase, dateString } from "./database.js";
-import { refreshRepositoryAclProjection } from "./board-publication-repository.js";
+import { parseStoredContextCatalog, storedContextCatalog } from "./release-catalog.js";
 
 // Publication and attachment serialize on the same ref frontier. Publication
-// prepares immutable rows; attachment is the only operation that may advance
-// the public current pointer.
+// prepares immutable rows; attachment makes a release eligible to be selected
+// as current by its sequence.
 const REF_LOCK_PREFIX = "context-board-publication:";
 
 interface PublicationRow {
@@ -37,6 +37,7 @@ interface PublicationRow {
   pageindex_artifact: ContextArtifactRef | null;
   pageindex_metadata: PageIndexMetadata | null;
   pageindex_attached_at: Date | null;
+  catalog: unknown;
 }
 
 interface PageIndexMetadata {
@@ -51,15 +52,6 @@ interface PageIndexMetadata {
   readonly maxDepth: number;
   readonly treeDigest: string;
   readonly buildDigest: string;
-}
-
-interface DocumentRow {
-  id: string;
-  source_revision_id: string | null;
-  tenant_id: string;
-  repository: string;
-  body_length: number;
-  source_anchors: EvidenceAnchor[];
 }
 
 interface LivePageIndexLease {
@@ -91,19 +83,17 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `${REF_LOCK_PREFIX}${input.scope.tenantId}:${input.scope.repository}:${input.scope.ref}`
       ]);
-      // Keep the visibility transition atomic with evidence erasure. A
-      // prepared generation invalidated by an eraser cannot become public.
-      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
-        `context-erasure:${input.scope.tenantId}:${input.scope.repository}`
-      ]);
       const current = await client.query<{
         release_id: string;
         ref_sequence: string;
         commit_sha: string;
       }>(
         `select release_id,ref_sequence::text,commit_sha
-         from jina_context.current_context_board_releases
+         from jina_context.context_releases
          where tenant_id=$1 and repository=$2 and ref_name=$3
+           and pageindex_attached_at is not null
+         order by ref_sequence desc,release_id desc
+         limit 1
          for update`,
         [input.scope.tenantId, input.scope.repository, input.scope.ref]
       );
@@ -130,7 +120,7 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
         pageindex_attachment_input_digest: string;
       }>(
         `select release_id,pageindex_attachment_input_digest
-         from jina_context.context_board_publications
+         from jina_context.context_releases
          where tenant_id=$1 and pageindex_idempotency_key=$2
          for update`,
         [input.scope.tenantId, input.idempotencyKey]
@@ -177,78 +167,36 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
         return record;
       }
 
-      const documents = await releaseDocuments(client, input.releaseId);
+      const catalog = parseStoredContextCatalog(publication.catalog);
+      const documents = catalog.projection.documents;
       const hierarchyRows = materializeHierarchyRows(input, artifact, documents);
-      await client.query("set constraints all deferred");
-      await client.query(
-        `insert into jina_context.hierarchy_nodes
-          (id,generation_id,document_id,tenant_id,repository,parent_id,ordinal,depth,
-           preorder_start,preorder_end,title,summary,source_anchors,source_start,
-           source_end,adapter_name,adapter_version,node_fingerprint)
-         select id,generation_id,document_id,tenant_id,repository,parent_id,ordinal,depth,
-                preorder_start,preorder_end,title,summary,source_anchors,source_start,
-                source_end,adapter_name,adapter_version,node_fingerprint
-         from jsonb_to_recordset($1::jsonb) as row(
-           id text,generation_id text,document_id text,tenant_id text,repository text,
-           parent_id text,ordinal integer,depth integer,preorder_start integer,
-           preorder_end integer,title text,summary text,source_anchors jsonb,
-           source_start integer,source_end integer,adapter_name text,
-           adapter_version text,node_fingerprint text
-         )`,
-        [JSON.stringify(hierarchyRows)]
-      );
-
-      const projector = await client.query(
-        `update jina_context.generation_projectors
-         set version=$2,status='ready',output_fingerprint=$3,
-             processed_through=$4,completed_at=$4,failure=null,
-             lease_id=null,lease_owner=null,lease_expires_at=null
-         where generation_id=$1 and consumer='hierarchy'
-           and status in ('disabled','failed','skipped')
-         returning consumer`,
-        [input.releaseId, PAGEINDEX_OSS_SOURCE_PIN, artifact.metrics.treeDigest, input.attachedAt]
-      );
-      if (projector.rowCount !== 1) {
-        throw new BoardPageIndexAttachmentError(
-          "attachment_race",
-          "hierarchy projector was not in an attachable state"
-        );
-      }
-      await refreshRepositoryAclProjection(client, input.releaseId, input.scope.tenantId, input.scope.repository);
-      const generation = await client.query(
-        `update jina_context.index_generations
-         set projector_versions=jsonb_set(projector_versions,'{hierarchy}',$2::jsonb,true),
-             capabilities=jsonb_set(capabilities,'{hierarchy}','"available"'::jsonb,true),
-             status='published',
-             published_at=$7
-         where id=$1 and tenant_id=$3 and repository=$4 and ref_name=$5
-           and commit_sha=$6 and status='building' and published_at is null
-         returning id`,
-        [
-          input.releaseId,
-          JSON.stringify(PAGEINDEX_OSS_SOURCE_PIN),
-          input.scope.tenantId,
-          input.scope.repository,
-          input.scope.ref,
-          input.scope.commitSha,
-          input.attachedAt
-        ]
-      );
-      if (generation.rowCount !== 1) {
-        throw new BoardPageIndexAttachmentError(
-          "release_not_current",
-          "prepared generation does not match the PageIndex release"
-        );
-      }
+      const attachedCatalog = storedContextCatalog({
+        projection: {
+          ...catalog.projection,
+          generation: {
+            ...catalog.projection.generation,
+            status: "published",
+            capabilities: {
+              ...catalog.projection.generation.capabilities,
+              hierarchy: "available"
+            },
+            publishedAt: input.attachedAt
+          },
+          hierarchyNodes: hierarchyRows
+        },
+        revisions: catalog.revisions,
+        citations: catalog.citations
+      });
 
       const metadata = pageIndexMetadata(artifact);
       const attached = await client.query<PublicationRow>(
-        `update jina_context.context_board_publications
+        `update jina_context.context_releases
          set pageindex_idempotency_key=$2,
              pageindex_attachment_input_digest=$3,
              pageindex_artifact=$4::jsonb,
              pageindex_metadata=$5::jsonb,
-             pageindex_attached_at=$6
+             pageindex_attached_at=$6,
+             catalog=$7::jsonb
          where release_id=$1
            and pageindex_idempotency_key is null
            and pageindex_attachment_input_digest is null
@@ -259,14 +207,15 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
                    commit_sha,build_id,publication_input_digest,public_snapshot_digest,
                    release_artifact,pageindex_idempotency_key,
                    pageindex_attachment_input_digest,pageindex_artifact,
-                   pageindex_metadata,pageindex_attached_at`,
+                   pageindex_metadata,pageindex_attached_at,catalog`,
         [
           input.releaseId,
           input.idempotencyKey,
           input.attachmentInputDigest,
           JSON.stringify(input.treeArtifactRef),
           JSON.stringify(metadata),
-          input.attachedAt
+          input.attachedAt,
+          JSON.stringify(attachedCatalog)
         ]
       );
       const attachedRow = attached.rows[0];
@@ -276,46 +225,6 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
           "PageIndex release metadata changed before attachment commit"
         );
       }
-      const advanced = await client.query<{ release_id: string }>(
-        `insert into jina_context.current_context_board_releases
-          (tenant_id,repository,ref_name,ref_sequence,release_id,commit_sha,
-           public_snapshot_digest,advanced_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8)
-         on conflict (tenant_id,repository,ref_name) do update
-           set ref_sequence=excluded.ref_sequence,
-               release_id=excluded.release_id,
-               commit_sha=excluded.commit_sha,
-               public_snapshot_digest=excluded.public_snapshot_digest,
-               advanced_at=excluded.advanced_at
-         where jina_context.current_context_board_releases.ref_sequence < excluded.ref_sequence
-            or (
-              jina_context.current_context_board_releases.ref_sequence=excluded.ref_sequence
-              and jina_context.current_context_board_releases.release_id=excluded.release_id
-            )
-         returning release_id`,
-        [
-          input.scope.tenantId,
-          input.scope.repository,
-          input.scope.ref,
-          input.scope.refSequence,
-          input.releaseId,
-          input.scope.commitSha,
-          publication.public_snapshot_digest,
-          input.attachedAt
-        ]
-      );
-      if (advanced.rows[0]?.release_id !== input.releaseId) {
-        throw new BoardPageIndexAttachmentError(
-          "attachment_race",
-          "the public current release pointer changed before PageIndex attachment commit"
-        );
-      }
-      await acknowledgePublishedAccessDeliveries(
-        client,
-        input.scope.tenantId,
-        input.scope.repository,
-        input.attachedAt
-      );
       const commitLease = assertLivePageIndexLease(boardSnapshot, input, leaseFenceClockMillis);
       assertAttachmentFrontier(commitLease.latestAdmittedSequence, input.scope.refSequence, currentSequence);
       await client.query("commit");
@@ -331,39 +240,6 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
       client.release();
     }
   }
-}
-
-async function acknowledgePublishedAccessDeliveries(
-  client: PoolClient,
-  tenantId: string,
-  repository: string,
-  processedAt: string
-): Promise<void> {
-  await client.query(
-    `update jina_context.outbox delivery
-     set processed_at=$3,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
-     where delivery.tenant_id=$1 and delivery.repository=$2
-       and delivery.aggregate_type='access' and delivery.processed_at is null
-       and delivery.consumer in ('acl','retention')
-       and not exists (
-         select 1
-         from jina_context.current_context_board_releases current_release
-         cross join jina_context.current_repository_acl current_acl
-         where current_release.tenant_id=delivery.tenant_id
-           and current_release.repository=delivery.repository
-           and current_acl.tenant_id=current_release.tenant_id
-           and current_acl.repository=current_release.repository
-           and not exists (
-             select 1
-             from jina_context.repository_acl_projection projected_acl
-             where projected_acl.generation_id=current_release.release_id
-               and projected_acl.principal_id=current_acl.principal_id
-               and projected_acl.permission=current_acl.permission
-               and projected_acl.acl_fingerprint=current_acl.acl_fingerprint
-           )
-       )`,
-    [tenantId, repository, processedAt]
-  );
 }
 
 function assertLivePageIndexLease(
@@ -476,8 +352,8 @@ async function publicationForUpdate(client: PoolClient, releaseId: string): Prom
     `select release_id,tenant_id,repository,ref_name,ref_sequence::text,commit_sha,
             build_id,publication_input_digest,public_snapshot_digest,release_artifact,
             pageindex_idempotency_key,pageindex_attachment_input_digest,
-            pageindex_artifact,pageindex_metadata,pageindex_attached_at
-     from jina_context.context_board_publications
+            pageindex_artifact,pageindex_metadata,pageindex_attached_at,catalog
+     from jina_context.context_releases
      where release_id=$1
      for update`,
     [releaseId]
@@ -489,26 +365,13 @@ async function publicationForUpdate(client: PoolClient, releaseId: string): Prom
   return row;
 }
 
-async function releaseDocuments(client: PoolClient, generationId: string): Promise<DocumentRow[]> {
-  const result = await client.query<DocumentRow>(
-    `select id,source_revision_id,tenant_id,repository,
-            char_length(body)::integer body_length,source_anchors
-     from jina_context.context_documents
-     where generation_id=$1 and source_kind='knowledge'
-     order by source_revision_id,id
-     for share`,
-    [generationId]
-  );
-  return result.rows;
-}
-
 function materializeHierarchyRows(
   input: BoardPageIndexAttachCommit,
   artifact: BoardPageIndexTreeArtifactV1,
-  documents: readonly DocumentRow[]
-): Record<string, unknown>[] {
-  const documentByRevision = new Map(documents.map((document) => [document.source_revision_id, document]));
-  if (documents.length !== artifact.representedDocuments.length || documentByRevision.has(null)) {
+  documents: readonly ContextDocument[]
+): HierarchyNode[] {
+  const documentByRevision = new Map(documents.map((document) => [document.sourceRevisionId, document]));
+  if (documents.length !== artifact.representedDocuments.length || documentByRevision.has(undefined)) {
     throw new BoardPageIndexAttachmentError(
       "invalid_pageindex_attachment",
       "PageIndex represented documents do not cover the complete published catalog"
@@ -532,9 +395,9 @@ function materializeHierarchyRows(
       })
     ])
   );
-  return artifact.nodes.map((node, ordinal) => {
+  return artifact.nodes.map((node) => {
     const document = documentByRevision.get(node.documentId)!;
-    const expectedAnchors = new Set(document.source_anchors.map((anchor) => fingerprint(anchor)));
+    const expectedAnchors = new Set(document.anchors.map((anchor) => fingerprint(anchor)));
     const actualAnchors = new Set(node.anchors.map((anchor) => fingerprint(anchor)));
     if (
       expectedAnchors.size !== actualAnchors.size ||
@@ -547,34 +410,17 @@ function materializeHierarchyRows(
     }
     return {
       id: idByExternal.get(node.externalId)!,
-      generation_id: input.releaseId,
-      document_id: document.id,
-      tenant_id: document.tenant_id,
-      repository: document.repository,
-      parent_id: node.parentExternalId === undefined ? null : idByExternal.get(node.parentExternalId),
-      ordinal,
+      generationId: input.releaseId,
+      documentId: document.id,
+      ...(node.parentExternalId === undefined ? {} : { parentId: idByExternal.get(node.parentExternalId)! }),
       depth: node.depth,
-      preorder_start: node.preorderStart,
-      preorder_end: node.preorderEnd,
+      preorderStart: node.preorderStart,
+      preorderEnd: node.preorderEnd,
       title: node.title,
       summary: node.summary,
-      source_anchors: node.anchors,
-      source_start: 0,
-      source_end: document.body_length,
-      adapter_name: artifact.source.adapterName,
-      adapter_version: artifact.source.adapterVersion,
-      node_fingerprint: fingerprint({
-        releaseId: input.releaseId,
-        externalId: node.externalId,
-        documentId: document.id,
-        parentExternalId: node.parentExternalId,
-        title: node.title,
-        summary: node.summary,
-        depth: node.depth,
-        preorderStart: node.preorderStart,
-        preorderEnd: node.preorderEnd,
-        anchors: node.anchors
-      })
+      anchors: [...node.anchors],
+      adapterName: artifact.source.adapterName,
+      adapterVersion: artifact.source.adapterVersion
     };
   });
 }

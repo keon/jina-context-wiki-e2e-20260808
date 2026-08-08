@@ -74,10 +74,9 @@ export class PostgresIssueGraphRepository implements IssueGraphStore, BoardIssue
     const result = await this.database.queryAs<IssueGraphReleaseRow>(
       "jina_context_query",
       { tenantIds: [tenantId] },
-      `select release.*
-       from jina_context.current_issue_graph_releases current_release
-       join jina_context.issue_graph_releases release on release.release_id=current_release.release_id
-       where current_release.tenant_id=$1 and current_release.repository=$2 and current_release.ref_name=$3`,
+      `select * from jina_context.issue_graph_releases
+       where tenant_id=$1 and repository=$2 and ref_name=$3
+       order by ref_sequence desc,release_id desc limit 1`,
       [tenantId, normalizeRepository(repository), ref],
       "issue-graph.current"
     );
@@ -93,15 +92,14 @@ export class PostgresIssueGraphRepository implements IssueGraphStore, BoardIssue
     const result = await this.database.queryAs<IssueGraphReleaseRow>(
       "jina_context_query",
       { tenantIds: [tenantId] },
-      `select release.*
-       from jina_context.current_issue_graph_releases current_release
-       join jina_context.issue_graph_releases release on release.release_id=current_release.release_id
-       where current_release.tenant_id=$1 and current_release.repository=$2 and current_release.ref_name=$3
+      `select release.* from jina_context.issue_graph_releases release
+       where release.tenant_id=$1 and release.repository=$2 and release.ref_name=$3
          and exists (
-           select 1 from jina_context.current_repository_acl acl
-           where acl.tenant_id=current_release.tenant_id and acl.repository=current_release.repository
-             and acl.principal_id=$4 and acl.permission in ('read','write','admin')
-         )`,
+           select 1 from jina_context.repository_access access
+           where access.tenant_id=release.tenant_id and access.repository=release.repository
+             and access.principal_id=$4 and access.permission in ('read','write','admin')
+         )
+       order by release.ref_sequence desc,release.release_id desc limit 1`,
       [tenantId, normalizeRepository(repository), ref, principalId],
       "issue-graph.current-authorized"
     );
@@ -146,8 +144,10 @@ async function persistIssueGraphRelease(client: PoolClient, release: IssueGraphR
   }
   const current = await client.query<{ ref_sequence: string; release_id: string }>(
     `select ref_sequence::text,release_id
-     from jina_context.current_issue_graph_releases
+     from jina_context.issue_graph_releases
      where tenant_id=$1 and repository=$2 and ref_name=$3
+     order by ref_sequence desc,release_id desc
+     limit 1
      for update`,
     [release.tenantId, release.repository, release.ref]
   );
@@ -171,24 +171,6 @@ async function persistIssueGraphRelease(client: PoolClient, release: IssueGraphR
       release.issueCount,
       release.causalityCount,
       release.historyComplete,
-      release.publishedAt
-    ]
-  );
-  await client.query(
-    `insert into jina_context.current_issue_graph_releases
-      (tenant_id,repository,ref_name,ref_sequence,release_id,commit_sha,advanced_at)
-     values ($1,$2,$3,$4,$5,$6,$7)
-     on conflict (tenant_id,repository,ref_name) do update
-       set ref_sequence=excluded.ref_sequence,release_id=excluded.release_id,
-           commit_sha=excluded.commit_sha,advanced_at=excluded.advanced_at
-     where jina_context.current_issue_graph_releases.ref_sequence < excluded.ref_sequence`,
-    [
-      release.tenantId,
-      release.repository,
-      release.ref,
-      release.refSequence,
-      release.id,
-      release.commitSha,
       release.publishedAt
     ]
   );

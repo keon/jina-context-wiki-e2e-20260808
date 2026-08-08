@@ -21,38 +21,6 @@ export interface TaskTypeDefinition {
   readonly dispatchTopic?: TaskDispatchTopic;
 }
 
-export const taskTypeDefinitions: readonly TaskTypeDefinition[] = [
-  {
-    type: "pr_review",
-    kind: "aggregate",
-    defaultAssigneeRole: "system",
-    description: "Coordinates a pull-request review and completes when its required child tasks finish."
-  },
-  {
-    type: "review_pass",
-    kind: "dispatchable",
-    defaultAssigneeRole: "review_agent",
-    dispatchTopic: "run-review",
-    description: "Runs one focused code-review pass and records findings against a pull-request revision."
-  },
-  {
-    type: "issue_triage",
-    kind: "manual",
-    defaultAssigneeRole: "human",
-    description: "Routes a newly opened issue for human triage."
-  },
-  {
-    type: "human_decision",
-    kind: "waitpoint",
-    defaultAssigneeRole: "human",
-    description: "Pauses automated work until a human records a required decision."
-  }
-];
-
-function taskKind(type: TaskType): TaskKind {
-  return taskTypeDefinitions.find((definition) => definition.type === type)?.kind ?? "dispatchable";
-}
-
 export interface BoardTask {
   readonly id: TaskId;
   readonly type: TaskType;
@@ -99,7 +67,7 @@ export function createBoardTask(input: CreateBoardTaskInput): BoardTask {
     createdAt: input.now,
     updatedAt: input.now,
     metadata: input.metadata ?? {},
-    kind: input.kind ?? taskKind(input.type),
+    kind: input.kind ?? "dispatchable",
     ...(input.dispatchTopic ? { dispatchTopic: input.dispatchTopic } : {}),
     ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
     ...(input.epoch !== undefined ? { epoch: input.epoch } : {})

@@ -9,12 +9,10 @@ import {
   List,
   Row,
   Section,
-  SectionFlush,
   StatusDot,
   ToneDot,
 } from "../../components/ui";
 import { useDashboard } from "../../providers";
-import { scenarioPath, scenariosFromRun } from "../../lib/historical-scenarios";
 import {
   buildReviewWork,
   reviewFindingTone,
@@ -26,22 +24,15 @@ import {
 } from "../../lib/review-work";
 import {
   formatDate,
-  formatDuration,
   formatJson,
-  riskTone,
-  scenarioDisplayStatus,
-  scenarioRiskLabel,
-  scenarioSimulation,
-  scenarioStatusLabel,
   shortSha,
-  simulationStatusTone,
   statusTone,
 } from "../../lib/presentation";
 import { runResult } from "../../lib/run-result";
 import { runTitle } from "../../lib/runs";
 import { reviewMcpTelemetry } from "../../lib/mcp";
 import { useReviewRunDetail } from "../../lib/use-review-run-detail";
-import type { ReviewEvent, ReviewRun, Tone } from "../../lib/types";
+import type { ReviewEvent, ReviewRun } from "../../lib/types";
 
 function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1).replace(/_/g, " ");
@@ -91,10 +82,6 @@ function ReviewRunDetail({ run, detailError }: { run: ReviewRun; detailError: st
         <IssuesSection findings={work.findings} />
         <ReviewAppendix run={run} work={work} />
 
-        {work.hasScenarioHistory ? <HistoricalReviewSummary run={run} /> : null}
-        {work.hasScenarioHistory ? <Scenarios run={run} /> : null}
-
-        <CodexOutput run={run} />
       </div>
     </article>
   );
@@ -185,8 +172,6 @@ function RunActions({ run, work }: { run: ReviewRun; work: ReviewWork }) {
   const links: { href: string | undefined; label: string }[] = [];
   links.push({ href: run.pull_request.html_url, label: "GitHub PR" });
   links.push({ href: result?.github_comment_url, label: "PR context" });
-  links.push({ href: result?.github_check_run_url, label: "Check run" });
-  links.push({ href: work.staticReview?.githubReviewUrl, label: "Static review" });
   links.push({ href: work.runtimeReview?.githubReviewUrl, label: "Runtime review" });
   const visibleLinks = links.filter((link) => Boolean(link.href));
   if (visibleLinks.length === 0) return null;
@@ -288,16 +273,6 @@ function ChangeSummary({ work }: { work: ReviewWork }) {
   );
 }
 
-function Metric({ label, value, tone = "", sub }: { label: string; value: string | number; tone?: Tone; sub?: string }) {
-  return (
-    <div className="metric">
-      <span className="metric__label">{label}</span>
-      <span className={`metric__value${tone ? ` metric__value--${tone}` : ""}`}>{value}</span>
-      {sub ? <span className="metric__sub">{sub}</span> : null}
-    </div>
-  );
-}
-
 function ReviewNotices({ work }: { work: ReviewWork }) {
   if (work.notices.length === 0) {
     return null;
@@ -324,7 +299,7 @@ function RuntimeTasks({ review }: { review: RuntimeReviewWork | undefined }) {
   if (!review) {
     return null;
   }
-  const areas = review.areas.length > 0 ? review.areas : [{ title: "Runtime review", tasks: review.tasks, findings: [], blocked: [], nonIssues: [] }];
+  const areas = review.areas.length > 0 ? review.areas : [{ title: "Runtime review", tasks: review.tasks, findings: [], nonIssues: [] }];
   return (
     <section id="runtime-tasks" className="section">
       <div className="section__title section__title--row">
@@ -360,7 +335,7 @@ function RuntimeTasks({ review }: { review: RuntimeReviewWork | undefined }) {
 }
 
 function RuntimeIntent({ review }: { review: RuntimeReviewWork | undefined }) {
-  if (!review?.intentMarkdown && !review?.finalReviewSummary && review?.readinessScore === undefined) {
+  if (!review?.intentMarkdown && !review?.reviewSummary && review?.readinessScore === undefined) {
     return null;
   }
   return (
@@ -372,7 +347,7 @@ function RuntimeIntent({ review }: { review: RuntimeReviewWork | undefined }) {
             value={`${review.readinessScore}/5${review.readinessRationale ? ` - ${review.readinessRationale}` : ""}`}
           />
         ) : null}
-        {review.finalReviewSummary ? <FieldBlock label="Review summary" value={review.finalReviewSummary} /> : null}
+        {review.reviewSummary ? <FieldBlock label="Review summary" value={review.reviewSummary} /> : null}
       </div>
       {review.intentMarkdown ? <pre className="code-block code-block--sm">{review.intentMarkdown}</pre> : null}
     </Section>
@@ -380,24 +355,11 @@ function RuntimeIntent({ review }: { review: RuntimeReviewWork | undefined }) {
 }
 
 function RuntimeInvestigationNotes({ review }: { review: RuntimeReviewWork | undefined }) {
-  if (!review || (review.blocked.length === 0 && review.nonIssues.length === 0)) {
+  if (!review || review.nonIssues.length === 0) {
     return null;
   }
   return (
     <Section title="Runtime Investigation Notes">
-      {review.blocked.length > 0 ? (
-        <DisclosureListBlock
-          label="Blocked work"
-          items={review.blocked.map((item) => ({
-            title: item.task ?? item.areaTitle ?? "Blocked investigation",
-            details: [
-              item.areaTitle && item.areaTitle !== item.task ? `Area: ${item.areaTitle}` : undefined,
-              item.reason ? `Reason: ${item.reason}` : undefined,
-              item.fallbackUsed ? `Fallback: ${item.fallbackUsed}` : undefined,
-            ].filter((detail): detail is string => Boolean(detail)),
-          }))}
-        />
-      ) : null}
       {review.nonIssues.length > 0 ? (
         <DisclosureListBlock
           label="Non-issues"
@@ -448,7 +410,7 @@ function IssuesSection({ findings }: { findings: ReviewWorkFinding[] }) {
       </div>
       <div className="section__body">
         {findings.length === 0 ? (
-          <EmptyState>No static or runtime issues were recorded.</EmptyState>
+          <EmptyState>No runtime issues were recorded.</EmptyState>
         ) : (
           <div className="review-issue-stack">
             {findings.map((finding, index) => (
@@ -463,7 +425,6 @@ function IssuesSection({ findings }: { findings: ReviewWorkFinding[] }) {
 
 function issueRowKey(finding: ReviewWorkFinding, index: number): string {
   return [
-    finding.source,
     finding.fingerprint,
     finding.filePath,
     finding.lineNumber,
@@ -513,120 +474,9 @@ function IssueRow({ finding }: { finding: ReviewWorkFinding }) {
           </div>
         ) : null}
         {finding.evidence.length > 0 ? <ListBlock label="Evidence" items={finding.evidence} /> : null}
-        {finding.suggestedCodeChange ? (
-          <div className="review-block">
-            <span className="review-block__label">Suggested code change</span>
-            <pre className="code-block code-block--sm">{finding.suggestedCodeChange}</pre>
-          </div>
-        ) : null}
         {finding.auditTrail.length > 0 ? <AuditTrailDetails entries={finding.auditTrail} /> : null}
       </div>
     </details>
-  );
-}
-
-function HistoricalReviewSummary({ run }: { run: ReviewRun }) {
-  const result = runResult(run);
-  const simulation = result?.simulation;
-  const finalReview = result?.final_review;
-  const error = result?.error ?? run.error ?? result?.publish_error ?? simulation?.error;
-  const providerConfig = simulation?.provider_config;
-  if (!simulation && !finalReview && !error) {
-    return null;
-  }
-
-  const simTone: Tone =
-    simulation?.status === "passed" ? "ok" : simulation?.status === "failed" ? "bad" : "warn";
-  const finalTone: Tone = finalReview
-    ? finalReview.findings.length > 0
-      ? "bad"
-      : finalReview.status === "warned"
-        ? "warn"
-        : "ok"
-    : "";
-
-  const configBits = [
-    providerConfig ? `Codex ${providerConfig.codex_model ?? "default"}` : null,
-    providerConfig ? `Claude ${providerConfig.claude_model ?? "default"}` : null,
-    providerConfig ? `judge ${providerConfig.judge_provider ?? "codex"}` : null,
-    simulation?.concurrency !== undefined ? `concurrency ${simulation.concurrency}` : null,
-    simulation?.model_concurrency !== undefined ? `model concurrency ${simulation.model_concurrency}` : null,
-  ].filter(Boolean);
-
-  return (
-    <Section title="Historical Scenario Review">
-      <div className="review-summary">
-        <div className="summary-bar">
-          {simulation ? (
-            <>
-              <Metric label="Simulation" value={titleCase(simulation.status)} tone={simTone} />
-              <Metric label="Scenarios" value={simulation.counts.total} sub={`${simulation.counts.pass} pass, ${simulation.counts.fail} fail, ${simulation.counts.warn} warn`} />
-              <Metric label="Duration" value={formatDuration(simulation.duration_ms)} />
-            </>
-          ) : null}
-          {finalReview ? (
-            <Metric
-              label="Final review"
-              value={titleCase(finalReview.status)}
-              tone={finalTone}
-              sub={`${finalReview.findings.length} issue${finalReview.findings.length === 1 ? "" : "s"}`}
-            />
-          ) : null}
-        </div>
-        {configBits.length > 0 ? <p className="cell-meta">{configBits.join(" · ")}</p> : null}
-        {error ? <p className="error-text">{error}</p> : null}
-      </div>
-    </Section>
-  );
-}
-
-function Scenarios({ run }: { run: ReviewRun }) {
-  const scenarios = scenariosFromRun(run);
-  if (scenarios.length === 0) {
-    return null;
-  }
-
-  return (
-    <SectionFlush title="Scenarios" count={scenarios.length}>
-      <List>
-        {scenarios.map((scenario) => {
-          const status = scenarioDisplayStatus(scenario, run);
-          const simulation = scenarioSimulation(scenario, run);
-          const tone = simulationStatusTone(simulation?.status);
-          return (
-            <Row
-              key={scenario.id}
-              href={scenarioPath(run.review_run_id, scenario.id)}
-              leading={<span className={`dot s-${status}`} aria-hidden="true" />}
-              title={`${scenario.index}. ${scenario.title}`}
-              meta={scenario.expectedResult || scenario.steps[0] || scenario.title}
-              trailing={
-                <span className="row__badges">
-                  <Badge tone={tone}>{simulation?.status ?? scenarioStatusLabel(status)}</Badge>
-                  {simulation?.duration_ms !== undefined ? <Badge>{formatDuration(simulation.duration_ms)}</Badge> : null}
-                  <Badge tone={riskTone(scenario.risk)}>{scenarioRiskLabel(scenario.risk)} risk</Badge>
-                </span>
-              }
-            />
-          );
-        })}
-      </List>
-    </SectionFlush>
-  );
-}
-
-function CodexOutput({ run }: { run: ReviewRun }) {
-  const markdown = runResult(run)?.review_markdown;
-  if (!markdown) {
-    return null;
-  }
-  return (
-    <Section title="Codex output">
-      <details className="disclosure">
-        <summary>View raw review markdown</summary>
-        <pre className="code-block">{markdown}</pre>
-      </details>
-    </Section>
   );
 }
 

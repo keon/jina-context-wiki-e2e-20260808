@@ -54,7 +54,6 @@ function rawManifest() {
           JINA_API_URL: "https://candidate---jina-code-review-api.example.run.app",
           JINA_WORKER_CLAIM_MODE: "paused",
           WORKER_TOPICS: "run-review",
-          JINA_REVIEW_RUN_TOPIC_MODE: "relational",
           REVIEW_MODEL: "gpt-5.6-sol"
         },
         secrets: secrets(["INTERNAL_API_TOKEN", "OPENAI_API_KEY", "GITHUB_CLONE_TOKEN", "TRIGGER_SECRET_KEY"])
@@ -163,17 +162,12 @@ test("worker candidate manifest is immutable, paused, relational, and numericall
     assert.match(command, /JINA_WORKER_CLAIM_MODE=paused/);
     assert.doesNotMatch(command, /update-traffic|latest|JINA_WORKER_RELEASE_CREDENTIAL/);
   }
-  assert.match(buildWorkerCandidateDeployArgs(manifest, "task").join(" "), /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
-
   for (const mutate of [
     (copy) => {
       copy.image = "us-east1-docker.pkg.dev/jina-v2/jina/worker:latest";
     },
     (copy) => {
       copy.workers.task.environment.JINA_WORKER_CLAIM_MODE = "enabled";
-    },
-    (copy) => {
-      copy.workers.task.environment.JINA_REVIEW_RUN_TOPIC_MODE = "legacy";
     },
     (copy) => {
       copy.workers.context.secrets.INTERNAL_API_TOKEN.version = "latest";

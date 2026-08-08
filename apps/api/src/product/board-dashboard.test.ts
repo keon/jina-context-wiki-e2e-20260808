@@ -12,7 +12,7 @@ test("relational Board projection maps external waits into live dashboard progre
       {
         id: "workflow-1",
         workflow_type: "pr_review",
-        pipeline_version: "pr_review.board.v1",
+        pipeline_version: "pr_review.board.v2",
         status: "running",
         epoch: 1,
         trace_id: "a".repeat(32),
@@ -30,8 +30,8 @@ test("relational Board projection maps external waits into live dashboard progre
         id: "task-1",
         workflow_id: "workflow-1",
         parent_task_id: null,
-        task_type: "runtime-review",
-        topic: "runtime-review",
+        task_type: "run-review",
+        topic: "run-review",
         status: "waiting_external",
         attempt_count: 2,
         required: true,
@@ -60,14 +60,14 @@ test("relational Board projection maps external waits into live dashboard progre
 
   assert.deepEqual(overview.board.tasks[0], {
     id: "task-1",
-    type: "runtime-review",
-    title: "Runtime Review",
+    type: "run-review",
+    title: "Run Review",
     status: "in_progress",
     assigneeRole: "review-agent",
     attempt: 2,
     epoch: 1,
     required: true,
-    dispatchTopic: "runtime-review",
+    dispatchTopic: "run-review",
     createdAt: "2026-08-04T10:00:00.000Z",
     updatedAt: "2026-08-04T10:01:00.000Z",
     metadata: {
@@ -78,7 +78,7 @@ test("relational Board projection maps external waits into live dashboard progre
       workflowId: "workflow-1",
       workflowType: "pr_review",
       workflowStatus: "running",
-      pipelineVersion: "pr_review.board.v1",
+      pipelineVersion: "pr_review.board.v2",
       traceId: "a".repeat(32),
       pullRequestNumber: 42,
       headSha: "head-1",
@@ -102,19 +102,19 @@ test("relational Board projection maps external waits into live dashboard progre
   });
 });
 
-test("work overview merge preserves legacy Context tasks and adds relational review tasks", () => {
+test("work overview merge combines Context snapshot tasks with relational review tasks", () => {
   const merged = mergeDashboardWorkOverviews(
     {
       board: {
         tasks: [{ id: "context-1", type: "build-context", title: "Context", status: "queued", attempt: 1 }],
         dependencies: [],
-        outbox: [{ id: "legacy-outbox" }],
+        outbox: [{ id: "context-outbox" }],
       },
-      events: [{ id: "legacy-event", type: "task.created", at: "2026-08-04T09:00:00.000Z" }],
+      events: [{ id: "context-event", type: "task.created", at: "2026-08-04T09:00:00.000Z" }],
     },
     {
       board: {
-        tasks: [{ id: "review-1", type: "prepare-review", title: "Prepare Review", status: "done", attempt: 1 }],
+        tasks: [{ id: "review-1", type: "run-review", title: "Run Review", status: "done", attempt: 1 }],
         dependencies: [],
       },
       events: [{ id: "review-event", type: "task.succeeded", at: "2026-08-04T10:00:00.000Z" }],
@@ -122,6 +122,6 @@ test("work overview merge preserves legacy Context tasks and adds relational rev
   );
 
   assert.deepEqual(merged.board.tasks.map((task) => task.id), ["context-1", "review-1"]);
-  assert.deepEqual(merged.board.outbox, [{ id: "legacy-outbox" }]);
-  assert.deepEqual(merged.events.map((event) => event.id), ["review-event", "legacy-event"]);
+  assert.deepEqual(merged.board.outbox, [{ id: "context-outbox" }]);
+  assert.deepEqual(merged.events.map((event) => event.id), ["review-event", "context-event"]);
 });

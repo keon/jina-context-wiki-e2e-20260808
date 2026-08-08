@@ -60,18 +60,7 @@ try {
       create index if not exists context_issue_graph_releases_scope
         on jina_context.issue_graph_releases
         (tenant_id,repository,ref_name,ref_sequence desc,release_id);
-      create table if not exists jina_context.current_issue_graph_releases (
-        tenant_id text not null,
-        repository text not null,
-        ref_name text not null,
-        ref_sequence bigint not null check (ref_sequence > 0),
-        release_id text not null references jina_context.issue_graph_releases(release_id),
-        commit_sha text not null check (commit_sha ~ '^[0-9a-f]{40}$'),
-        advanced_at timestamptz not null,
-        primary key (tenant_id,repository,ref_name),
-        foreign key (tenant_id,repository)
-          references jina_context.repositories(tenant_id,repository)
-      );
+      drop table if exists jina_context.current_issue_graph_releases cascade;
       create schema if not exists jina_runtime;
       create table if not exists jina_runtime.causal_graph_release_control (
         id smallint primary key check (id=1),
@@ -96,21 +85,15 @@ try {
       end
       $role$;
       grant usage on schema jina_context to jina_context_issue_publish;
-      grant select on jina_context.repositories,jina_context.current_repository_acl,
-                      jina_context.issue_graph_releases,jina_context.current_issue_graph_releases
+      grant select on jina_context.repositories,jina_context.repository_access,
+                      jina_context.issue_graph_releases
         to jina_context_issue_publish;
       grant insert on jina_context.repositories to jina_context_issue_publish;
       grant insert on jina_context.issue_graph_releases to jina_context_issue_publish;
-      grant insert,update on jina_context.current_issue_graph_releases to jina_context_issue_publish;
-      grant select on jina_context.issue_graph_releases,jina_context.current_issue_graph_releases
-        to jina_context_query;
+      grant select on jina_context.issue_graph_releases to jina_context_query;
       alter table jina_context.issue_graph_releases enable row level security;
-      alter table jina_context.current_issue_graph_releases enable row level security;
       drop policy if exists context_tenant_scope on jina_context.issue_graph_releases;
       create policy context_tenant_scope on jina_context.issue_graph_releases
-        using (tenant_id=any(string_to_array(coalesce(current_setting('jina.tenant_id',true),''),chr(31))));
-      drop policy if exists context_tenant_scope on jina_context.current_issue_graph_releases;
-      create policy context_tenant_scope on jina_context.current_issue_graph_releases
         using (tenant_id=any(string_to_array(coalesce(current_setting('jina.tenant_id',true),''),chr(31))));
     `);
     await client.query(`grant jina_context_issue_publish to "${runtimeUser}" with inherit false`);

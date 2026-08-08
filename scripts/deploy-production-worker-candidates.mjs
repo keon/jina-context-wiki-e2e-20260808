@@ -230,7 +230,7 @@ function validateWorkerEnvironment(kind, environment, apiUrl) {
     JINA_WORKER_CLAIM_MODE: "paused",
     ...(kind === "context"
       ? { WORKER_TOPICS: CONTEXT_TOPICS, CONTEXT_BOARD_EXECUTOR: "daytona" }
-      : { WORKER_TOPICS: "run-review", JINA_REVIEW_RUN_TOPIC_MODE: "relational" })
+      : { WORKER_TOPICS: "run-review" })
   };
   for (const [name, expected] of Object.entries(required)) {
     if (environment[name] !== expected) fail(`workers.${kind}.environment.${name} must be ${expected}`);

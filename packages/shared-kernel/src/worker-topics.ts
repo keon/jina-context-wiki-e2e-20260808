@@ -3,30 +3,7 @@
  * deployment configuration. Keep them here so a topic cannot be renamed in
  * only one process.
  */
-export const legacyReviewWorkerTopic = "run-review" as const;
-export type ReviewRunTopicMode = "disabled" | "legacy" | "relational";
-
-export function configuredReviewRunTopicMode(
-  value: string | undefined,
-  legacyCompatibilityEnabled = false
-): ReviewRunTopicMode {
-  const normalized = value?.trim();
-  if (!normalized) return legacyCompatibilityEnabled ? "legacy" : "disabled";
-  if (normalized === "legacy" || normalized === "relational") return normalized;
-  throw new Error("JINA_REVIEW_RUN_TOPIC_MODE must be legacy or relational when set");
-}
-
-export const reviewBoardTopics = {
-  prepare: "prepare-review",
-  summary: "summary-review",
-  runtime: "runtime-review",
-  finalize: "finalize-review",
-  publish: "publish-review",
-  settle: "settle-review"
-} as const;
-
-export const reviewBoardWorkerTopics = Object.values(reviewBoardTopics);
-export type ReviewBoardWorkerTopic = (typeof reviewBoardTopics)[keyof typeof reviewBoardTopics];
+export const reviewWorkerTopic = "run-review" as const;
 
 export const controlBoardTopics = {
   githubInstallationBackfill: "github-installation-backfill",
@@ -46,7 +23,7 @@ export const contextWorkflowBoardTopics = {
 export const contextWorkflowWorkerTopics = Object.values(contextWorkflowBoardTopics);
 export type ContextWorkflowWorkerTopic = (typeof contextWorkflowBoardTopics)[keyof typeof contextWorkflowBoardTopics];
 
-/** Transitional stages run inside a durable page-oriented Context task. */
+/** Private stages embedded inside a durable page-oriented Context task. */
 export const internalContextStageTopics = {
   researchPlan: "run-context-research-plan",
   research: "run-context-research",
@@ -85,8 +62,7 @@ export const causalGraphWorkerTopics = Object.values(causalGraphBoardTopics);
 export type CausalGraphWorkerTopic = (typeof causalGraphBoardTopics)[keyof typeof causalGraphBoardTopics];
 
 export const supportedWorkerTopics = [
-  legacyReviewWorkerTopic,
-  ...reviewBoardWorkerTopics,
+  reviewWorkerTopic,
   ...controlBoardWorkerTopics,
   ...contextWorkflowWorkerTopics,
   ...causalGraphWorkerTopics

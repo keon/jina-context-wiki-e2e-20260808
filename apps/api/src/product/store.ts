@@ -1,10 +1,7 @@
-import { createHash } from "node:crypto";
-
 import type pg from "pg";
 
 import type { DashboardSession } from "./auth.js";
 import { exactDecimalSum } from "./billing-math.js";
-import { coerceStoredHarnessModel, type HarnessModel } from "./codex-harness.js";
 import { decryptSecret, encryptSecret } from "./crypto.js";
 import { databaseConfigured, query, queryOne, withTransaction } from "./db.js";
 import {
@@ -13,7 +10,6 @@ import {
   type ReviewEvent,
   type ReviewRunRecord,
 } from "./records.js";
-import { parseScenarioJson, parseScenarios, scenarioStepType, type ParsedScenario } from "./historical-scenarios.js";
 import {
   linkClerkUserIdentity as linkClerkUserIdentityWithClient,
   upsertGithubUserIdentity as upsertGithubUserIdentityWithClient,
@@ -25,14 +21,14 @@ import {
 
 export interface CreateReviewRunInput {
   triggerRunId?: string;
-  idempotencyKey?: string;
+  idempotencyKey: string;
   deliveryId?: string;
   sourceEvent?: string;
   triggerSource?: string;
   manualCommandTag?: string;
   reviewInstructions?: string;
   orchestrationPayload?: Readonly<Record<string, unknown>>;
-  installationId?: number;
+  installationId: number;
   account?: { id?: number; login?: string; type?: string };
   repository: {
     githubRepoId?: number;
@@ -55,7 +51,7 @@ export interface CreateReviewRunInput {
   };
 }
 
-export interface CreatedReviewRun {
+interface CreatedReviewRun {
   id: string;
   tenantId: string;
   created: boolean;
@@ -120,7 +116,6 @@ export async function createReviewRun(input: CreateReviewRunInput): Promise<stri
 }
 
 const REVIEW_BOARD_WORKFLOW_TYPE = "pr_review";
-const REVIEW_BOARD_V1_PIPELINE = "pr_review.board.v1";
 const REVIEW_BOARD_V2_PIPELINE = "pr_review.board.v2";
 const REVIEW_TRIGGER_EFFECT_TYPE = "trigger.review.dispatch";
 const REVIEW_TRIGGER_EFFECT_VERSION = 1;
@@ -168,38 +163,6 @@ export async function prepareReviewRun(input: CreateReviewRunInput): Promise<str
     }
 
     const triggerRunId = input.triggerRunId?.trim();
-    if (workflow.pipeline_version === REVIEW_BOARD_V1_PIPELINE) {
-      const legacyRows = await client.query<{
-        id: string;
-        trigger_run_id: string | null;
-      }>(
-        `select id,trigger_run_id
-         from review_runs
-         where idempotency_key=$1
-           and tenant_id=$2::uuid
-           and orchestrator='board'
-           and board_workflow_id=$3
-         for update`,
-        [scope.idempotencyKey, scope.tenantId, workflow.workflow_id],
-      );
-      if (legacyRows.rows.length !== 1) {
-        throw new ReviewDispatchProvenanceError(
-          `v1 Board workflow ${workflow.workflow_id} does not resolve to exactly one Board-owned review run`,
-        );
-      }
-      const legacy = legacyRows.rows[0];
-      if (legacy.trigger_run_id && triggerRunId && legacy.trigger_run_id !== triggerRunId) {
-        throw new ReviewDispatchProvenanceError(`review run ${legacy.id} belongs to another Trigger run`);
-      }
-      if (triggerRunId && !legacy.trigger_run_id) {
-        await client.query(
-          `update review_runs set trigger_run_id=$2,updated_at=now() where id=$1`,
-          [legacy.id, triggerRunId],
-        );
-      }
-      return legacy.id;
-    }
-
     if (workflow.pipeline_version !== REVIEW_BOARD_V2_PIPELINE) {
       throw new ReviewDispatchProvenanceError(
         `Board workflow ${workflow.workflow_id} does not use a supported review pipeline`,
@@ -313,7 +276,7 @@ export class ReviewDispatchProvenanceError extends Error {
   }
 }
 
-export async function createReviewRunWithClient(
+async function createReviewRunWithClient(
   client: pg.PoolClient,
   input: CreateReviewRunInput,
 ): Promise<CreatedReviewRun> {
@@ -412,10 +375,7 @@ export async function resolveReviewScopeWithClient(
     accountType: input.account?.type ?? "Organization",
   });
 
-  let installationRecordId: string | undefined;
-  if (input.installationId) {
-    installationRecordId = await upsertInstallation(client, tenantId, input.installationId, input.account);
-  }
+  const installationRecordId = await upsertInstallation(client, tenantId, input.installationId, input.account);
 
   const repositoryId = await upsertRepository(client, {
     tenantId,
@@ -450,20 +410,12 @@ export async function resolveReviewScopeWithClient(
     throw new Error("review run is missing pull request head_sha");
   }
 
-  // Prefer a caller-provided logical idempotency key. Trigger run ids are a
-  // fallback for legacy task shapes, but retryable workflows should pass a key
-  // derived from repository + PR + head so retry attempts reuse the same row.
-  const idempotencyKey =
-    input.idempotencyKey ??
-    input.triggerRunId ??
-    `review:${input.installationId ?? "none"}:${githubRepoId}:${input.pullRequest.number ?? "none"}:${headSha}:code_review`;
-
   return {
     tenantId,
     repositoryId,
     ...(pullRequestId ? { pullRequestId } : {}),
     headSha,
-    idempotencyKey,
+    idempotencyKey: input.idempotencyKey,
   };
 }
 
@@ -504,7 +456,7 @@ export async function listManualReviewRuns(scopeTag: string): Promise<{
   };
 }
 
-export async function bindReviewRunToBoardWithClient(
+async function bindReviewRunToBoardWithClient(
   client: pg.PoolClient,
   input: { reviewRunId: string; tenantId: string; workflowId: string },
 ): Promise<void> {
@@ -838,18 +790,14 @@ export async function reopenBlockedReviewRun(reviewRunId: string): Promise<boole
 
 /** Upsert a tenant + installation + the set of repositories seen during installation backfill. */
 export async function recordInstallation(input: {
-  installationId?: number;
-  account?: { id?: number; login?: string; type?: string };
+  installationId: number;
+  account: { id: number; login: string; type: string };
   /** The webhook sender who performed the installation — an org admin by definition. */
   installer?: { id?: number; login?: string };
   lifecycle?: InstallationLifecycle;
   repositories: InstallationRepository[];
   removedRepositories?: InstallationRepository[];
-}): Promise<string | undefined> {
-  if (!input.account?.id && !input.installationId) {
-    return undefined;
-  }
-
+}): Promise<string> {
   return withTransaction(async (client) => {
     const tenantId = await resolveTenantId(client, {
       installationId: input.installationId,
@@ -858,31 +806,16 @@ export async function recordInstallation(input: {
       accountType: input.account?.type ?? "Organization",
     });
 
-    const installationRecordId = input.installationId
-      ? await upsertInstallation(
-          client,
-          tenantId,
-          input.installationId,
-          input.account,
-          input.lifecycle === "suspended" || input.lifecycle === "deleted"
-            ? undefined
-            : input.installer?.id,
-          input.lifecycle,
-        )
-      : undefined;
-
-    // Grant the installing admin an org membership immediately (source 'installer'): the OAuth sync can't
-    // see orgs that restrict OAuth apps, so without this the installer gets no org switcher — and their
-    // plan/settings land on the personal tenant. Personal installs skip it (implicit admin of own tenant).
-    if (
-      input.lifecycle !== "suspended"
-      && input.lifecycle !== "deleted"
-      && (input.account?.type ?? "Organization") === "Organization"
-      && input.installer?.id
-      && input.installer.login
-    ) {
-      await upsertInstallerMembership(client, tenantId, { id: input.installer.id, login: input.installer.login });
-    }
+    const installationRecordId = await upsertInstallation(
+      client,
+      tenantId,
+      input.installationId,
+      input.account,
+      input.lifecycle === "suspended" || input.lifecycle === "deleted"
+        ? undefined
+        : input.installer?.id,
+      input.lifecycle,
+    );
 
     if (installationRecordId && input.lifecycle === "deleted") {
       await client.query(
@@ -942,7 +875,6 @@ export interface ConnectGithubInstallationInput {
   installationId: number;
   account: { id: number; login: string; type: string };
   repositories: InstallationRepository[];
-  movedByUserId?: string;
   movedByGithubUserId: number;
 }
 
@@ -954,7 +886,7 @@ const FRESH_INSTALLATION_MOVE_WINDOW_MS = 60 * 60 * 1_000;
  * This is deliberately stricter than webhook backfill. An installation with
  * review/project history cannot be silently moved because that would also
  * change the billing owner of historical work. Fresh installation shells may
- * be reassigned transactionally; every move is recorded for rollback.
+ * be reassigned transactionally.
  */
 export async function connectGithubInstallationToTenant(
   input: ConnectGithubInstallationInput,
@@ -965,9 +897,8 @@ export async function connectGithubInstallationToTenant(
   return withTransaction(async (client) => {
     const target = await client.query<{ id: string }>(
       `select id
-         from tenants
-        where id = $1
-          and merged_into_tenant_id is null
+       from tenants
+      where id = $1
         for update`,
       [input.tenantId],
     );
@@ -985,7 +916,6 @@ export async function connectGithubInstallationToTenant(
 
     let installationRecordId: string;
     let moved = false;
-    let moveId: string | undefined;
     const current = existing.rows[0];
     if (!current) {
       installationRecordId = await upsertInstallation(
@@ -1004,19 +934,6 @@ export async function connectGithubInstallationToTenant(
             "GitHub installation already belongs to an established Jina workspace; use an explicit workspace merge",
           );
         }
-        const unresolvedRepositories = await client.query<{ id: string }>(
-          `select id
-             from repositories
-            where tenant_id = $1
-              and installation_id is null
-            for update`,
-          [current.tenant_id],
-        );
-        if (unresolvedRepositories.rowCount) {
-          throw new InstallationTenantMoveConflictError(
-            "source workspace has unresolved legacy repositories; run the identity transition before moving it",
-          );
-        }
         await client.query(
           `select id
              from repositories
@@ -1032,8 +949,6 @@ export async function connectGithubInstallationToTenant(
                 and (
                   exists (select 1 from review_runs run where run.repository_id = repository.id)
                   or exists (select 1 from pull_requests pull where pull.repository_id = repository.id)
-                  or exists (select 1 from bots bot where bot.repository_id = repository.id)
-                  or exists (select 1 from scenario_lineages lineage where lineage.repository_id = repository.id)
                 )
            ) as found`,
           [installationRecordId],
@@ -1066,48 +981,25 @@ export async function connectGithubInstallationToTenant(
             input.movedByGithubUserId,
           ],
         );
-        const move = await client.query<{ id: string }>(
-          `insert into installation_tenant_moves
-             (installation_id, github_installation_id, from_tenant_id, to_tenant_id,
-              moved_by_user_id, moved_by_github_user_id)
-           values ($1, $2, $3, $4, $5, $6)
-           returning id`,
-          [
-            installationRecordId,
-            input.installationId,
-            current.tenant_id,
-            input.tenantId,
-            input.movedByUserId ?? null,
-            input.movedByGithubUserId,
-          ],
-        );
-        moveId = move.rows[0].id;
         // The webhook creates an account-derived org tenant before the setup
         // callback knows which Jina workspace the user selected. Hide that
         // temporary shell only when it owns no data or workspace settings.
-        // Keeping the row makes rollback lossless and lets reinstalls follow
-        // the explicit workspace connection.
+        // The installation remains the durable account-to-workspace binding,
+        // so the empty shell itself can be deleted.
         await client.query(
-          `update tenants source
-              set merged_into_tenant_id = $2
+          `delete from tenants source
             where source.id = $1
-              and source.merged_into_tenant_id is null
               and not exists (select 1 from installations where tenant_id = source.id)
               and not exists (select 1 from repositories where tenant_id = source.id)
               and not exists (select 1 from tenant_integrations where tenant_id = source.id)
               and not exists (select 1 from tenant_model_settings where tenant_id = source.id)
               and not exists (select 1 from tenant_billing_policy where tenant_id = source.id)
-              and not exists (select 1 from github_events where tenant_id = source.id)
-              and not exists (select 1 from bots where tenant_id = source.id)
               and not exists (select 1 from pull_requests where tenant_id = source.id)
               and not exists (select 1 from review_runs where tenant_id = source.id)
               and not exists (select 1 from review_findings where tenant_id = source.id)
-              and not exists (select 1 from scenarios where tenant_id = source.id)
-              and not exists (select 1 from simulations where tenant_id = source.id)
-              and not exists (select 1 from scenario_lineages where tenant_id = source.id)
               and not exists (select 1 from review_llm_usage where tenant_id = source.id)
               and not exists (select 1 from review_run_billing where tenant_id = source.id)`,
-          [current.tenant_id, input.tenantId],
+          [current.tenant_id],
         );
         moved = true;
       } else {
@@ -1137,36 +1029,8 @@ export async function connectGithubInstallationToTenant(
       });
     }
 
-    if (moveId) {
-      await client.query(
-        `insert into installation_tenant_move_repositories
-           (move_id, repository_id, github_repo_id)
-         select $1, repository.id, repository.github_repo_id
-           from repositories repository
-          where repository.installation_id = $2`,
-        [moveId, installationRecordId],
-      );
-    }
-
     return { tenantId: input.tenantId, moved };
   });
-}
-
-export async function recordGithubEvent(
-  deliveryId: string,
-  event: string,
-  action: string | undefined,
-  payload: unknown,
-): Promise<void> {
-  if (!databaseConfigured()) {
-    return;
-  }
-  await query(
-    `insert into github_events (github_delivery_id, github_event, action, payload_json)
-     values ($1, $2, $3, $4)
-     on conflict (github_delivery_id) do nothing`,
-    [deliveryId, event, action ?? null, jsonOrNull(payload) ?? "{}"],
-  );
 }
 
 export interface ReviewRunRecordPage {
@@ -1218,43 +1082,9 @@ export function projectDashboardRunResult(result: unknown): Record<string, unkno
     return undefined;
   }
 
-  const simulation = isObjectRecord(result.simulation) ? result.simulation : undefined;
-  const finalReview = isObjectRecord(result.final_review) ? result.final_review : undefined;
-  const reviewGate = isObjectRecord(result.review_gate) ? result.review_gate : undefined;
-
   return compactRecord({
     status: boundedText(result.status),
-    github_comment_url: boundedText(result.github_comment_url, LIST_URL_PREVIEW_LENGTH),
-    github_check_run_url: boundedText(result.github_check_run_url, LIST_URL_PREVIEW_LENGTH),
-    review_gate: reviewGate
-      ? compactRecord({
-          blocking_level: boundedText(reviewGate.blocking_level),
-          conclusion: boundedText(reviewGate.conclusion),
-          blocking: booleanValue(reviewGate.blocking),
-          blocking_count: numberValue(reviewGate.blocking_count),
-          scenario_counts: compactNumberRecord(reviewGate.scenario_counts, ["total", "high", "medium", "low", "unknown"]),
-        })
-      : undefined,
-    publish_error: boundedText(result.publish_error),
-    simulation_error: boundedText(result.simulation_error),
-    final_review_error: boundedText(result.final_review_error),
     error: boundedText(result.error),
-    simulation: simulation
-      ? compactRecord({
-          status: boundedText(simulation.status),
-          duration_ms: numberValue(simulation.duration_ms),
-          counts: compactNumberRecord(simulation.counts, ["total", "pass", "fail", "warn"]),
-          scenarios: [],
-          error: boundedText(simulation.error),
-        })
-      : undefined,
-    final_review: finalReview
-      ? compactRecord({
-          status: boundedText(finalReview.status),
-          summary: boundedText(finalReview.summary),
-          findings: [],
-        })
-      : undefined,
   });
 }
 
@@ -1273,7 +1103,6 @@ export function projectDashboardEventPayload(status: string, payload: unknown): 
       status: boundedText(payload.status),
       summary: boundedText(payload.summary),
       findings_count: numberValue(payload.findings_count),
-      comments_count: numberValue(payload.comments_count),
       publishable_findings_count: numberValue(payload.publishable_findings_count),
       inline_comment_count: numberValue(payload.inline_comment_count),
       file_comment_count: numberValue(payload.file_comment_count),
@@ -1423,73 +1252,6 @@ export async function getReviewRunRecord(options: {
   return toReviewRunRecord(row, events);
 }
 
-export async function getScenarioLineageReviewRunRecords(options: {
-  reviewRunId: string;
-  lineageKey: string;
-  tenantId?: string;
-  allowedFullNames?: string[] | null;
-  limit?: number;
-}): Promise<ReviewRunRecord[]> {
-  if (!databaseConfigured()) {
-    return [];
-  }
-
-  const allowed = options.allowedFullNames ?? null;
-  const limit = normalizeReviewRunLimit(options.limit);
-  const rows = await query<ReviewRunRow>(
-    `with current_run as (
-       select r.repository_id, pr.pr_number
-       from review_runs r
-         join repositories repo on repo.id = r.repository_id
-       left join pull_requests pr on pr.id = r.pull_request_id
-       where r.id = $1
-         and ($3::uuid is null or r.tenant_id = $3)
-         and ($4::text[] is null or lower(repo.owner || '/' || repo.name) = any($4))
-       limit 1
-     ),
-     normalized_run_ids as (
-       select distinct s.review_run_id
-       from current_run cr
-         join scenario_lineages sl on sl.repository_id = cr.repository_id
-          and sl.pr_number = cr.pr_number
-          and sl.lineage_key = $2
-         join scenarios s on s.lineage_id = sl.id
-       union
-       select distinct sim.review_run_id
-       from current_run cr
-         join scenario_lineages sl on sl.repository_id = cr.repository_id
-          and sl.pr_number = cr.pr_number
-          and sl.lineage_key = $2
-         join simulations sim on sim.lineage_id = sl.id
-     ),
-     json_run_ids as (
-       select r.id as review_run_id
-       from current_run cr
-         join review_runs r on r.repository_id = cr.repository_id
-         left join pull_requests pr on pr.id = r.pull_request_id
-       where pr.pr_number is not distinct from cr.pr_number
-         and exists (
-           select 1
-           from jsonb_array_elements(coalesce(r.result_json#>'{simulation,scenarios}', '[]'::jsonb)) scenario
-           where scenario->>'lineage_key' = $2
-         )
-     ),
-     lineage_run_ids as (
-       select review_run_id from normalized_run_ids
-       union
-       select review_run_id from json_run_ids
-     )
-     ${reviewRunSelectSql("r.result_json", "r.error")}
-       join lineage_run_ids lr on lr.review_run_id = r.id
-     where ($3::uuid is null or r.tenant_id = $3)
-     order by r.created_at desc, r.id desc
-     limit $5`,
-    [options.reviewRunId, options.lineageKey, options.tenantId ?? null, allowed, limit],
-  );
-
-  return rows.map((row) => toReviewRunRecord(row, []));
-}
-
 export async function getReviewFindingRecords(options: {
   tenantId?: string;
   allowedFullNames?: string[] | null;
@@ -1587,21 +1349,12 @@ interface CodexHarnessIntegration {
 
 export interface UserIntegrations {
   openrouter: OpenRouterIntegration;
-  // BYOK native-provider keys (tenant-scoped). openai is wired into the runtime; anthropic is stored/
-  // surfaced only for now (see 0016_byok_provider_keys.sql).
   openai: ProviderKeyIntegration;
   anthropic: ProviderKeyIntegration;
   codex_harness: CodexHarnessIntegration;
-  // The user's pinned own-harness model preference (validated HARNESS_MODELS value or null = Codex default).
-  codex_harness_model: HarnessModel | null;
 }
 
-/**
- * Legacy viewer-scoped integrations read, kept working for deploy skew. OpenRouter now lives on the
- * viewer's PERSONAL tenant (tenant_integrations, resolved via tenants.github_account_id = githubUserId);
- * the Codex harness (blob presence + model preference) stays INDIVIDUAL on user_integrations. The query
- * starts from the user id so it returns a single row whether or not either row exists.
- */
+/** Read the individual author's Codex harness status. Provider keys are tenant-scoped. */
 export async function getUserIntegrations(githubUserId: number): Promise<UserIntegrations> {
   if (!databaseConfigured()) {
     return {
@@ -1609,29 +1362,17 @@ export async function getUserIntegrations(githubUserId: number): Promise<UserInt
       openai: { configured: false },
       anthropic: { configured: false },
       codex_harness: { configured: false },
-      codex_harness_model: null,
     };
   }
   // codex_harness_auth is projected as a boolean presence flag only — the encrypted blob is never
   // pulled into the app on the dashboard read path, so it cannot leak into a GET response.
   const row = await queryOne<{
-    openrouter_api_key: string | null;
-    openrouter_key_source: string | null;
-    openrouter_key_label: string | null;
-    openrouter_connected_at: Date | string | null;
-    openai_api_key: string | null;
-    openai_connected_at: Date | string | null;
-    anthropic_api_key: string | null;
-    anthropic_connected_at: Date | string | null;
     codex_harness_configured: boolean;
     codex_harness_connected_at: Date | string | null;
     codex_harness_reconnect_required: boolean;
-    codex_harness_model: string | null;
   }>(
-    `select ti.openrouter_api_key, ti.openrouter_key_source, ti.openrouter_key_label, ti.openrouter_connected_at,
-            ti.openai_api_key, ti.openai_connected_at, ti.anthropic_api_key, ti.anthropic_connected_at,
-            (ui.codex_harness_auth is not null) as codex_harness_configured,
-            ui.codex_harness_connected_at, ui.codex_harness_model,
+    `select (ui.codex_harness_auth is not null) as codex_harness_configured,
+            ui.codex_harness_connected_at,
             exists (
               select 1
                 from pull_requests pr
@@ -1658,25 +1399,18 @@ export async function getUserIntegrations(githubUserId: number): Promise<UserInt
                  )
             ) as codex_harness_reconnect_required
        from (select $1::bigint as uid) x
-       left join tenants t on t.github_account_id = x.uid
-       left join tenant_integrations ti on ti.tenant_id = t.id
        left join user_integrations ui on ui.github_user_id = x.uid`,
     [githubUserId],
   );
   return {
-    openrouter: openRouterInfo(decryptKey(row?.openrouter_api_key), {
-      source: row?.openrouter_key_source ?? null,
-      label: row?.openrouter_key_label ?? null,
-      connectedAt: row?.openrouter_connected_at ?? null,
-    }),
-    openai: providerKeyInfo(decryptKey(row?.openai_api_key), row?.openai_connected_at ?? null),
-    anthropic: providerKeyInfo(decryptKey(row?.anthropic_api_key), row?.anthropic_connected_at ?? null),
+    openrouter: { configured: false },
+    openai: { configured: false },
+    anthropic: { configured: false },
     codex_harness: codexHarnessInfo(
       row?.codex_harness_configured ?? false,
       row?.codex_harness_connected_at ?? null,
       row?.codex_harness_reconnect_required ?? false,
     ),
-    codex_harness_model: coerceStoredHarnessModel(row?.codex_harness_model),
   };
 }
 
@@ -1684,10 +1418,6 @@ export interface SaveUserHarnessInput {
   // The Codex auth.json blob (encrypted at rest). An empty string disconnects (clears the blob and
   // connected_at); undefined leaves it unchanged. Validated by the caller before it reaches here.
   codexHarnessAuth?: string;
-  // The pinned harness model. `codexHarnessModelProvided` distinguishes an omitted field (leave
-  // unchanged) from an explicit null (reset to the Codex default). Validated by the caller.
-  codexHarnessModel?: HarnessModel | null;
-  codexHarnessModelProvided?: boolean;
   // Stamped from the dashboard session on every save when provided, so run-time author-login
   // resolution can join pull_requests.author_login to user_integrations.github_login.
   githubLogin?: string;
@@ -1696,7 +1426,7 @@ export interface SaveUserHarnessInput {
 /**
  * Persist the INDIVIDUAL (author-scoped) Codex harness fields on user_integrations. OpenRouter keys are
  * no longer written here — they are tenant-scoped (see saveTenantOpenRouterIntegration). A provided
- * field (even empty string / explicit null -> cleared) is written; an omitted field is left unchanged.
+ * auth field (including an empty string disconnect) is written; an omitted field is left unchanged.
  */
 export async function saveUserHarnessIntegration(githubUserId: number, input: SaveUserHarnessInput): Promise<void> {
   if (!databaseConfigured()) {
@@ -1707,8 +1437,6 @@ export async function saveUserHarnessIntegration(githubUserId: number, input: Sa
   // path as openrouter keys. github_login is stamped on every save when provided.
   const codexHarnessAuth = normalizeKey(input.codexHarnessAuth);
   const codexHarnessProvided = input.codexHarnessAuth !== undefined;
-  const codexHarnessModel = input.codexHarnessModel ?? null;
-  const codexHarnessModelProvided = input.codexHarnessModelProvided ?? false;
   const githubLogin = normalizeKey(input.githubLogin);
   const githubLoginProvided = input.githubLogin !== undefined;
   await query(
@@ -1717,14 +1445,13 @@ export async function saveUserHarnessIntegration(githubUserId: number, input: Sa
     // determine data type of parameter $2"). Casting pins every param's type.
     `insert into user_integrations
        (github_user_id, user_id, codex_harness_auth, codex_harness_connected_at,
-        codex_harness_model, github_login, updated_at)
+        github_login, updated_at)
      values (
        $1,
        (select user_id from user_identities where provider = 'github' and provider_user_id = $1::bigint::text),
        $2::text,
        case when $2::text is not null then now() else null end,
        $4::text,
-       $6::text,
        now()
      )
      on conflict (github_user_id) do update set
@@ -1733,15 +1460,12 @@ export async function saveUserHarnessIntegration(githubUserId: number, input: Sa
         codex_harness_connected_at =
           case when $3::boolean then (case when $2::text is not null then now() else null end)
                else user_integrations.codex_harness_connected_at end,
-        codex_harness_model = case when $5::boolean then $4::text else user_integrations.codex_harness_model end,
-        github_login = case when $7::boolean then $6::text else user_integrations.github_login end,
+        github_login = case when $5::boolean then $4::text else user_integrations.github_login end,
         updated_at = now()`,
     [
       githubUserId,
       encryptKey(codexHarnessAuth),
       codexHarnessProvided,
-      codexHarnessModel,
-      codexHarnessModelProvided,
       githubLogin,
       githubLoginProvided,
     ],
@@ -1751,10 +1475,6 @@ export async function saveUserHarnessIntegration(githubUserId: number, input: Sa
 /* --------------------------------------------- tenant membership + integrations --- */
 
 export type TenantRole = "admin" | "member";
-
-export interface GithubTenantAdminRefreshRequirement {
-  account?: { id: number; login: string; type: string };
-}
 
 /** A tenant a viewer belongs to, as surfaced to the dashboard. Personal tenants sort first. */
 export interface ViewerTenant {
@@ -1771,11 +1491,6 @@ interface ClerkOrgMembership {
   role: TenantRole;
 }
 
-export interface ClerkMembershipBootstrap {
-  pending: boolean;
-  memberships: ClerkOrgMembership[];
-}
-
 export interface ClerkMembershipSyncResult {
   linkedTenantIds: string[];
   ignoredOrganizations: { organizationId: string; name: string }[];
@@ -1787,101 +1502,6 @@ export interface ClerkMembershipSyncInput {
   githubLogin: string;
   userId: string;
   memberships: ClerkOrgMembership[];
-}
-
-/**
- * Return the legacy team memberships that must be copied on this principal's
- * first verified Clerk login. The durable marker makes this a one-time
- * migration instead of a permanent fallback to tenant_members.
- */
-export async function clerkMembershipBootstrap(
-  clerkUserId: string,
-  userId: string,
-): Promise<ClerkMembershipBootstrap> {
-  if (!databaseConfigured()) return { pending: false, memberships: [] };
-  return withTransaction((client) => clerkMembershipBootstrapWithClient(client, clerkUserId, userId));
-}
-
-export async function clerkMembershipBootstrapWithClient(
-  client: Pick<pg.PoolClient, "query">,
-  clerkUserId: string,
-  userId: string,
-): Promise<ClerkMembershipBootstrap> {
-  const marker = await client.query<{ user_id: string; clerk_user_id: string }>(
-    `select user_id, clerk_user_id
-       from clerk_membership_bootstraps
-      where user_id = $1::uuid or clerk_user_id = $2`,
-    [userId, clerkUserId],
-  );
-  if (marker.rows.some((row) => row.user_id !== userId || row.clerk_user_id !== clerkUserId)) {
-    throw new Error("Clerk membership bootstrap identity conflict");
-  }
-  if (marker.rows.length > 0) return { pending: false, memberships: [] };
-  const memberships = await client.query<{
-    organization_id: string;
-    name: string;
-    role: string;
-  }>(
-    `select t.clerk_organization_id as organization_id,
-            coalesce(nullif(btrim(t.name), ''), t.id::text) as name,
-            case when bool_or(m.role = 'admin') then 'admin' else 'member' end as role
-       from tenant_members m
-       join tenants t on t.id = m.tenant_id
-      where m.user_id = $1::uuid
-        and t.merged_into_tenant_id is null
-        and coalesce(
-              t.kind,
-              case when lower(coalesce(t.github_account_type, '')) = 'user' then 'personal' else 'team' end
-            ) = 'team'
-        and t.clerk_organization_id is not null
-      group by t.id, t.clerk_organization_id, t.name
-      order by lower(coalesce(nullif(btrim(t.name), ''), t.id::text)), t.id`,
-    [userId],
-  );
-  return {
-    pending: true,
-    memberships: memberships.rows.map((membership) => ({
-      organizationId: membership.organization_id,
-      name: membership.name,
-      role: membership.role === "admin" ? "admin" : "member",
-    })),
-  };
-}
-
-/** Seal a successful provider-side bootstrap without altering legacy rows. */
-export async function completeClerkMembershipBootstrap(
-  clerkUserId: string,
-  userId: string,
-): Promise<void> {
-  if (!databaseConfigured()) return;
-  await withTransaction((client) => completeClerkMembershipBootstrapWithClient(client, clerkUserId, userId));
-}
-
-export async function completeClerkMembershipBootstrapWithClient(
-  client: Pick<pg.PoolClient, "query">,
-  clerkUserId: string,
-  userId: string,
-): Promise<void> {
-  await client.query("select pg_advisory_xact_lock(hashtextextended('clerk-bootstrap:' || $1::text, 0))", [userId]);
-  const conflicting = await client.query<{ user_id: string; clerk_user_id: string }>(
-    `select user_id, clerk_user_id
-       from clerk_membership_bootstraps
-      where user_id = $1::uuid or clerk_user_id = $2
-      for update`,
-    [userId, clerkUserId],
-  );
-  if (conflicting.rows.some((row) => row.user_id !== userId || row.clerk_user_id !== clerkUserId)) {
-    throw new Error("Clerk membership bootstrap identity conflict");
-  }
-  const inserted = await client.query(
-    `insert into clerk_membership_bootstraps (user_id, clerk_user_id, completed_at)
-     values ($1::uuid, $2, now())
-     on conflict (user_id) do update set
-       completed_at = clerk_membership_bootstraps.completed_at
-     where clerk_membership_bootstraps.clerk_user_id = excluded.clerk_user_id`,
-    [userId, clerkUserId],
-  );
-  if (inserted.rowCount !== 1) throw new Error("Clerk membership bootstrap identity conflict");
 }
 
 /**
@@ -1907,8 +1527,7 @@ export async function syncClerkTenantMembershipsWithClient(
       ? await client.query<{ id: string; clerk_organization_id: string }>(
           `select id, clerk_organization_id
              from tenants
-            where clerk_organization_id = any($1::text[])
-              and merged_into_tenant_id is null`,
+            where clerk_organization_id = any($1::text[])`,
           [organizationIds],
         )
       : { rows: [] as { id: string; clerk_organization_id: string }[] };
@@ -1958,153 +1577,6 @@ export interface TenantGithubConnection {
 }
 
 /**
- * A GitHub org membership as returned by GET /user/memberships/orgs. `role` is GitHub's membership
- * role ('admin' for org owners, 'member' otherwise); `organizationId` is the org account id we match
- * against tenants.github_account_id.
- */
-export interface ViewerOrgMembership {
-  organizationId: number;
-  login: string;
-  role: TenantRole;
-}
-
-/** A desired tenant_members row computed by the pure membership planner. */
-export interface DesiredMembership {
-  tenantId: string;
-  githubUserId: number;
-  githubLogin: string;
-  role: TenantRole;
-}
-
-/**
- * Pure membership planner (exported for unit testing without a database): given the viewer, their
- * personal tenant id (if any), and the set of {tenantId, role} pairs their fetched org memberships
- * resolved to, produce the exact desired tenant_members rows. The viewer is always an 'admin' of their
- * OWN personal tenant when one exists; org rows carry the GitHub membership role. Duplicate tenants
- * (a personal tenant that also appears as an org — impossible in practice, but guarded) keep the
- * personal 'admin' row. This is the set the sync upserts; any existing row for this user NOT in the
- * returned set is stale and gets deleted.
- */
-export function planTenantMemberships(input: {
-  githubUserId: number;
-  githubLogin: string;
-  personalTenantId?: string;
-  orgTenants: { tenantId: string; role: TenantRole }[];
-}): DesiredMembership[] {
-  const byTenant = new Map<string, DesiredMembership>();
-  for (const org of input.orgTenants) {
-    byTenant.set(org.tenantId, {
-      tenantId: org.tenantId,
-      githubUserId: input.githubUserId,
-      githubLogin: input.githubLogin,
-      role: org.role,
-    });
-  }
-  // The viewer's own personal tenant always resolves to 'admin' and wins over any org-derived row.
-  if (input.personalTenantId) {
-    byTenant.set(input.personalTenantId, {
-      tenantId: input.personalTenantId,
-      githubUserId: input.githubUserId,
-      githubLogin: input.githubLogin,
-      role: "admin",
-    });
-  }
-  return [...byTenant.values()];
-}
-
-/**
- * Sync a viewer's tenant memberships from their own OAuth token's org list. Resolves each active org
- * membership to a tenant (only orgs we already know as tenants, matched by github_account_id), adds an
- * 'admin' self-membership for the viewer's personal tenant when one exists, upserts the desired rows,
- * and deletes this user's stale rows. Runs in one transaction. Called at login; a failure is the
- * caller's to swallow (stale membership beats a broken login).
- */
-export async function syncTenantMemberships(
-  githubUserId: number,
-  githubLogin: string,
-  orgs: ViewerOrgMembership[],
-  userId?: string,
-): Promise<void> {
-  if (!databaseConfigured()) {
-    return;
-  }
-  await withTransaction(async (client) => {
-    // Resolve fetched org ids -> known tenant ids (unknown orgs are simply skipped — we only track
-    // tenants that have onboarded). role travels with each match.
-    const orgIds = orgs.map((org) => org.organizationId);
-    const roleByOrgId = new Map(orgs.map((org) => [org.organizationId, org.role]));
-    const orgTenants: { tenantId: string; role: TenantRole }[] = [];
-    if (orgIds.length > 0) {
-      const rows = await client.query<{ id: string; github_account_id: number }>(
-        `select id, github_account_id
-           from tenants
-          where github_account_id = any($1)
-            and merged_into_tenant_id is null`,
-        [orgIds],
-      );
-      for (const row of rows.rows) {
-        const role = roleByOrgId.get(Number(row.github_account_id)) ?? "member";
-        orgTenants.push({ tenantId: row.id, role });
-      }
-    }
-    const personal = await client.query<{ id: string }>(
-      `select id
-         from tenants
-        where github_account_id = $1
-          and merged_into_tenant_id is null`,
-      [githubUserId],
-    );
-    const desired = planTenantMemberships({
-      githubUserId,
-      githubLogin,
-      personalTenantId: personal.rows[0]?.id,
-      orgTenants,
-    });
-
-    for (const membership of desired) {
-      await client.query(
-        `insert into tenant_members (tenant_id, github_user_id, github_login, user_id, role, synced_at)
-         values ($1, $2, $3, $4, $5, now())
-         on conflict (tenant_id, github_user_id) do update set
-            github_login = excluded.github_login,
-            user_id = coalesce(excluded.user_id, tenant_members.user_id),
-            role = excluded.role,
-            synced_at = now()`,
-        [membership.tenantId, membership.githubUserId, membership.githubLogin, userId ?? null, membership.role],
-      );
-    }
-    // Delete this user's stale OAUTH rows (memberships no longer in the fetched set — e.g. they left an
-    // org). Installer-derived rows are NEVER stale-deleted here: /user/orgs cannot see orgs that restrict
-    // OAuth apps, so the fetched set routinely omits orgs the user demonstrably administers (they
-    // installed the App there) — deleting those rows would hide the org switcher from its own installer.
-    const keepTenantIds = desired.map((membership) => membership.tenantId);
-    await client.query(
-      `delete from tenant_members
-        where github_user_id = $1 and source = 'oauth' and not (tenant_id = any($2::uuid[]))`,
-      [githubUserId, keepTenantIds],
-    );
-  });
-}
-
-/** Upsert the App INSTALLER's admin membership on an org tenant (source 'installer'). The webhook sender
- *  who installs on an org is definitionally an org admin, and this path works even when the org's OAuth
- *  App restrictions hide the org from /user/orgs — the gap that left installing admins without the org
- *  switcher (and subscribing on their personal tenant). */
-async function upsertInstallerMembership(
-  client: pg.PoolClient,
-  tenantId: string,
-  installer: { id: number; login: string },
-): Promise<void> {
-  await client.query(
-    `insert into tenant_members (tenant_id, github_user_id, github_login, role, source, synced_at)
-     values ($1, $2, $3, 'admin', 'installer', now())
-     on conflict (tenant_id, github_user_id) do update set
-        github_login = excluded.github_login, role = 'admin', source = 'installer', synced_at = now()`,
-    [tenantId, installer.id, installer.login],
-  );
-}
-
-/**
  * Order for the tenant switcher (exported + pure for testing): personal ('User') tenants first, then
  * organizations, each group alphabetical by login (case-insensitive). Returns a new sorted array.
  */
@@ -2119,86 +1591,8 @@ export function sortViewerTenants(tenants: ViewerTenant[]): ViewerTenant[] {
   });
 }
 
-/**
- * Create a Jina-owned organization. GitHub remains an integration: the
- * organization starts without a GitHub account and installations are attached
- * separately through connectGithubInstallationToTenant.
- */
-export async function createJinaOrganization(input: {
-  name: string;
-  creatorGithubUserId: number;
-  creatorGithubLogin: string;
-  creatorUserId?: string;
-}): Promise<ViewerTenant> {
-  if (!databaseConfigured()) {
-    throw new Error("database is not configured");
-  }
-  return withTransaction(async (client) => {
-    const tenant = await client.query<{ id: string; name: string }>(
-      `insert into tenants (kind, name)
-       values ('team', $1)
-       returning id, name`,
-      [input.name],
-    );
-    const row = tenant.rows[0];
-    await client.query(
-      `insert into tenant_members
-         (tenant_id, github_user_id, github_login, user_id, role, source, synced_at)
-       values ($1, $2, $3, $4, 'admin', 'native', now())`,
-      [
-        row.id,
-        input.creatorGithubUserId,
-        input.creatorGithubLogin,
-        input.creatorUserId ?? null,
-      ],
-    );
-    return {
-      tenant_id: row.id,
-      login: row.name,
-      type: "Organization",
-      role: "admin",
-    };
-  });
-}
-
-/** Update the human-readable name of a Jina organization without changing its tenant identity. */
-export async function updateJinaOrganizationName(
-  tenantId: string,
-  name: string,
-): Promise<ViewerTenant | undefined> {
-  if (!databaseConfigured()) {
-    throw new Error("database is not configured");
-  }
-  const row = await queryOne<{ id: string; name: string }>(
-    `update tenants
-        set name = $2
-      where id = $1
-        and merged_into_tenant_id is null
-        and coalesce(
-          kind,
-          case when lower(coalesce(github_account_type, '')) = 'user' then 'personal' else 'team' end
-        ) = 'team'
-      returning id, name`,
-    [tenantId, name],
-  );
-  return row
-    ? {
-        tenant_id: row.id,
-        login: row.name,
-        type: "Organization",
-        role: "admin",
-      }
-    : undefined;
-}
-
-export type MembershipAuthority = "legacy" | "hybrid" | "clerk";
-
 /** List the tenants a viewer belongs to, personal tenant(s) first then orgs, each alphabetical. */
-export async function listViewerTenants(
-  githubUserId: number,
-  userId?: string,
-  authority: MembershipAuthority = "legacy",
-): Promise<ViewerTenant[]> {
+export async function listViewerTenants(userId: string): Promise<ViewerTenant[]> {
   if (!databaseConfigured()) {
     return [];
   }
@@ -2211,18 +1605,8 @@ export async function listViewerTenants(
   }>(
     `with viewer_memberships as (
        select m.tenant_id, m.role
-         from tenant_members m
-        where $3::text in ('legacy', 'hybrid')
-          and (
-            ($2::uuid is not null and m.user_id = $2::uuid)
-            or (($2::uuid is null or m.user_id is null) and m.github_user_id = $1)
-          )
-       union all
-       select m.tenant_id, m.role
          from clerk_tenant_memberships m
-        where $3::text in ('clerk', 'hybrid')
-          and $2::uuid is not null
-          and m.user_id = $2::uuid
+        where m.user_id = $1::uuid
        union all
        select t.id, 'admin'::text
          from tenants t
@@ -2230,10 +1614,7 @@ export async function listViewerTenants(
                 t.kind,
                 case when lower(coalesce(t.github_account_type, '')) = 'user' then 'personal' else 'team' end
               ) = 'personal'
-          and (
-            ($2::uuid is not null and t.personal_owner_user_id = $2::uuid)
-            or ($2::uuid is null and t.github_account_id = $1)
-          )
+          and t.personal_owner_user_id = $1::uuid
      )
      select
        m.tenant_id,
@@ -2247,10 +1628,9 @@ export async function listViewerTenants(
        t.clerk_organization_id
        from viewer_memberships m
        join tenants t on t.id = m.tenant_id
-      where t.merged_into_tenant_id is null
       group by m.tenant_id, t.id, t.name, t.github_account_login, t.github_account_type,
                t.kind, t.clerk_organization_id`,
-    [githubUserId, userId ?? null, authority],
+    [userId],
   );
   return sortViewerTenants(
     rows.map((row) => ({
@@ -2298,10 +1678,8 @@ export async function listTenantGithubConnections(tenantId: string): Promise<Ten
 
 /** The viewer's role on a tenant, or undefined when they are not a member. Basis for requireTenantAccess. */
 export async function getTenantMembershipRole(
-  githubUserId: number,
+  userId: string,
   tenantId: string,
-  userId?: string,
-  authority: MembershipAuthority = "legacy",
 ): Promise<TenantRole | undefined> {
   if (!databaseConfigured()) {
     return undefined;
@@ -2309,127 +1687,26 @@ export async function getTenantMembershipRole(
   const row = await queryOne<{ role: string }>(
     `with viewer_memberships as (
        select member.role
-         from tenant_members member
-        where $4::text in ('legacy', 'hybrid')
-          and member.tenant_id = $2
-          and (
-            ($3::uuid is not null and member.user_id = $3::uuid)
-            or (($3::uuid is null or member.user_id is null) and member.github_user_id = $1)
-          )
-       union all
-       select member.role
          from clerk_tenant_memberships member
-        where $4::text in ('clerk', 'hybrid')
-          and member.tenant_id = $2
-          and $3::uuid is not null
-          and member.user_id = $3::uuid
+        where member.tenant_id = $2::uuid
+          and member.user_id = $1::uuid
+       union all
+       select 'admin'::text
+         from tenants tenant
+        where tenant.id = $2::uuid
+          and tenant.personal_owner_user_id = $1::uuid
+          and coalesce(
+                tenant.kind,
+                case when lower(coalesce(tenant.github_account_type, '')) = 'user' then 'personal' else 'team' end
+              ) = 'personal'
      )
      select case when bool_or(viewer_memberships.role = 'admin') then 'admin' else 'member' end as role
        from viewer_memberships
-       join tenants tenant on tenant.id = $2
-      where tenant.merged_into_tenant_id is null
+       join tenants tenant on tenant.id = $2::uuid
       having count(*) > 0`,
-    [githubUserId, tenantId, userId ?? null, authority],
+    [userId, tenantId],
   );
-  if (row) {
-    return row.role === "admin" ? "admin" : "member";
-  }
-  // No membership row: a user is ALWAYS implicitly admin of their OWN personal tenant — the tenant whose
-  // github_account_id is their user id. This mirrors the legacy personal routes ("the viewer is
-  // implicitly admin of their own personal tenant") and lets the tenant-scoped billing routes serve a
-  // personal tenant that predates membership backfill, so switching every page to tenant-scoped access
-  // (no more legacy personal fallback) can't 403 an existing single-tenant viewer.
-  const own = await queryOne<{ id: string }>(
-    `select id
-      from tenants
-      where id = $1
-        and merged_into_tenant_id is null
-        and (
-          ($3::uuid is not null and personal_owner_user_id = $3::uuid)
-          or (
-            personal_owner_user_id is null
-            and github_account_id = $2
-            and github_account_type = 'User'
-          )
-        )`,
-    [tenantId, githubUserId, userId ?? null],
-  );
-  return own ? "admin" : undefined;
-}
-
-/**
- * GitHub-derived admin grants expire after five minutes. Personal ownership
- * and future Jina-native memberships do not depend on GitHub and therefore do
- * not require this refresh.
- */
-export async function getGithubTenantAdminRefreshRequirement(
-  githubUserId: number,
-  tenantId: string,
-  userId?: string,
-): Promise<GithubTenantAdminRefreshRequirement | undefined> {
-  if (!databaseConfigured()) return undefined;
-  const row = await queryOne<{
-    refresh_required: boolean;
-    github_account_id: number | null;
-    github_account_login: string | null;
-    github_account_type: string | null;
-  }>(
-    `select
-       (
-         member.role = 'admin'
-         and member.source in ('oauth', 'installer')
-         and member.synced_at < now() - interval '5 minutes'
-         and not (
-           coalesce(tenant.kind, '') = 'personal'
-           and $3::uuid is not null
-           and tenant.personal_owner_user_id = $3::uuid
-         )
-       ) as refresh_required,
-       tenant.github_account_id,
-       tenant.github_account_login,
-       tenant.github_account_type
-       from tenants tenant
-       join tenant_members member on member.tenant_id = tenant.id
-      where tenant.id = $2
-        and tenant.merged_into_tenant_id is null
-        and (
-          ($3::uuid is not null and member.user_id = $3::uuid)
-          or (($3::uuid is null or member.user_id is null) and member.github_user_id = $1)
-        )
-      limit 1`,
-    [githubUserId, tenantId, userId ?? null],
-  );
-  if (!row?.refresh_required) return undefined;
-  const account = row.github_account_id
-    && row.github_account_login
-    && row.github_account_type
-    ? {
-        id: Number(row.github_account_id),
-        login: row.github_account_login,
-        type: row.github_account_type,
-      }
-    : undefined;
-  return { account };
-}
-
-export async function refreshGithubTenantAdminMembership(
-  githubUserId: number,
-  tenantId: string,
-  userId?: string,
-): Promise<void> {
-  if (!databaseConfigured()) return;
-  await query(
-    `update tenant_members
-        set synced_at = now()
-      where tenant_id = $2
-        and role = 'admin'
-        and source in ('oauth', 'installer')
-        and (
-          ($3::uuid is not null and user_id = $3::uuid)
-          or (($3::uuid is null or user_id is null) and github_user_id = $1)
-        )`,
-    [githubUserId, tenantId, userId ?? null],
-  );
+  return row ? (row.role === "admin" ? "admin" : "member") : undefined;
 }
 
 /** Stable Jina workspace identity used to name and tag its Autumn customer. */
@@ -2622,8 +1899,7 @@ export async function saveTenantProviderKey(
  *    Org tenants are first-class (admins manage the key); personal tenants are unchanged in effect.
  *  - codex harness: the PR AUTHOR's harness (own-harness billing). The author login lives on
  *    pull_requests.author_login (joined via review_runs.pull_request_id); we match it
- *    case-insensitively to the github_login stamped on user_integrations. The harness owner login and
- *    the author's pinned harness model flow back so the worker and billing can use them.
+ *    case-insensitively to the github_login stamped on user_integrations.
  * Both joins are LEFT so a run resolves whichever credential exists independently of the other.
  */
 export async function resolveIntegrationKeysForRun(reviewRunId: string): Promise<ResolvedIntegrationKeys> {
@@ -2642,9 +1918,7 @@ export async function resolveIntegrationKeysForRun(reviewRunId: string): Promise
             tms.planner_model, tms.investigation_model, tms.review_model,
             r.model_settings_snapshot,
             ui_author.codex_harness_auth,
-            ui_author.codex_harness_connected_at,
-            ui_author.github_login as harness_owner_login,
-            ui_author.codex_harness_model
+            ui_author.codex_harness_connected_at
        from review_runs r
        join tenants t on t.id = r.tenant_id
        left join tenant_integrations ti on ti.tenant_id = t.id
@@ -2769,14 +2043,11 @@ export function applyProviderPreference(
     openaiApiKey: use.openai ? keys.openaiApiKey : undefined,
     codexHarnessAuth: harness ? keys.codexHarnessAuth : undefined,
     ...(harness && codexHarnessConnectedAtMs !== undefined ? { codexHarnessConnectedAtMs } : {}),
-    harnessOwnerLogin: harness ? keys.harnessOwnerLogin : undefined,
-    codexHarnessModel: harness ? keys.codexHarnessModel : null,
   };
 }
 
-/** Provider credentials resolved for a run. codexHarnessAuth is the decrypted auth.json blob (own
- *  harness); harnessOwnerLogin is the login whose harness was used, surfaced only when a blob resolved;
- *  codexHarnessModel is the author's pinned harness model (validated value or null), tied to the blob. */
+/** Provider credentials resolved for a run. codexHarnessAuth is the decrypted auth.json blob for the
+ *  pull request author's own harness. */
 export interface ResolvedIntegrationKeys {
   openrouter?: string;
   // Tenant BYOK native OpenAI key. When present (and no harness), the run routes openai/* natively to
@@ -2785,8 +2056,6 @@ export interface ResolvedIntegrationKeys {
   codexHarnessAuth?: string;
   /** Millisecond revision of the exact harness credential returned for this run. */
   codexHarnessConnectedAtMs?: number;
-  harnessOwnerLogin?: string;
-  codexHarnessModel?: HarnessModel | null;
 }
 
 interface IntegrationKeyRow {
@@ -2796,15 +2065,11 @@ interface IntegrationKeyRow {
   model_provider?: string | null;
   codex_harness_auth?: string | null;
   codex_harness_connected_at?: Date | string | null;
-  harness_owner_login?: string | null;
-  codex_harness_model?: string | null;
 }
 
 /**
  * Pure row -> resolved-keys mapping (decrypt + shape), exported so the resolve shape is unit-testable
- * without a database. harnessOwnerLogin and codexHarnessModel are tied to the blob: they are only
- * surfaced when a harness auth blob actually resolved, so a matched author with no harness never looks
- * like an own-harness run. The stored harness model is coerced to a valid HARNESS_MODELS value or null.
+ * without a database.
  */
 export function decryptIntegrationRow(row: IntegrationKeyRow | undefined): ResolvedIntegrationKeys {
   const codexHarnessAuth = decryptKey(row?.codex_harness_auth ?? null) ?? undefined;
@@ -2816,8 +2081,6 @@ export function decryptIntegrationRow(row: IntegrationKeyRow | undefined): Resol
     openaiApiKey: decryptKey(row?.openai_api_key ?? null) ?? undefined,
     codexHarnessAuth,
     ...(codexHarnessAuth && Number.isFinite(connectedAtMs) ? { codexHarnessConnectedAtMs: connectedAtMs } : {}),
-    harnessOwnerLogin: codexHarnessAuth ? row?.harness_owner_login ?? undefined : undefined,
-    codexHarnessModel: codexHarnessAuth ? coerceStoredHarnessModel(row?.codex_harness_model) : null,
   };
 }
 
@@ -2913,82 +2176,6 @@ export const EMPTY_MODEL_SETTINGS: ModelSettings = {
   review_fallback_policy: DEFAULT_FALLBACK_POLICY,
   context_fallback_policy: DEFAULT_FALLBACK_POLICY,
 };
-
-/**
- * Per-tenant, per-stage model selection. The tenant is resolved via
- * `tenants.github_account_id = githubUserId` — the same identity mapping used for
- * user_integrations (see the comment above resolveIntegrationKeysForRun). A missing
- * settings row (or missing tenant) resolves to all-null, i.e. platform defaults.
- *
- * This is the LEGACY viewer-scoped read (personal tenant only), kept for deploy skew. Org tenants now
- * read/write model settings through the tenant-scoped route (getTenantModelSettingsById), backed by
- * tenant_members access, so the old per-user membership gap no longer applies to org-owned repos.
- */
-export async function getTenantModelSettings(githubUserId: number): Promise<ModelSettings> {
-  if (!databaseConfigured()) {
-    return { ...EMPTY_MODEL_SETTINGS };
-  }
-  const row = await queryOne<ModelSettingsRow>(
-    `select tms.*
-       from tenants t
-       left join tenant_model_settings tms on tms.tenant_id = t.id
-      where t.github_account_id = $1`,
-    [githubUserId],
-  );
-  return modelSettingsFromRow(row);
-}
-
-/**
- * Persist per-tenant model selection. A null (or empty-string) field clears the
- * override so that stage falls back to the platform default. The tenant is
- * ensured (created if absent) so settings can be saved before installation.
- */
-export async function saveTenantModelSettings(
-  githubUserId: number,
-  input: ModelSettings,
-  contextHarnessOwnerUserId?: string,
-): Promise<void> {
-  if (!databaseConfigured()) {
-    return;
-  }
-  const planner = normalizeModelValue(input.planner_model);
-  const investigation = normalizeModelValue(input.investigation_model);
-  const review = normalizeModelValue(input.review_model);
-  const context = normalizeModelValue(input.context_model);
-  await withTransaction(async (client) => {
-    const tenantId = await ensureTenantIdForUser(client, githubUserId);
-    await client.query(
-      `insert into tenant_model_settings
-         (tenant_id, planner_model, investigation_model, review_model, context_model,
-          planner_effort, investigation_effort, review_effort, context_effort,
-          review_fallback_policy, context_fallback_policy, context_harness_owner_user_id, updated_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
-       on conflict (tenant_id) do update set
-          planner_model = excluded.planner_model,
-          investigation_model = excluded.investigation_model,
-          review_model = excluded.review_model,
-          context_model = excluded.context_model,
-          planner_effort = excluded.planner_effort,
-          investigation_effort = excluded.investigation_effort,
-          review_effort = excluded.review_effort,
-          context_effort = excluded.context_effort,
-          review_fallback_policy = excluded.review_fallback_policy,
-          context_fallback_policy = excluded.context_fallback_policy,
-          context_harness_owner_user_id = coalesce(excluded.context_harness_owner_user_id, tenant_model_settings.context_harness_owner_user_id),
-          updated_at = now()`,
-      [
-        tenantId, planner, investigation, review, context,
-        normalizeReasoningEffort(input.planner_effort),
-        normalizeReasoningEffort(input.investigation_effort),
-        normalizeReasoningEffort(input.review_effort),
-        normalizeReasoningEffort(input.context_effort),
-        normalizeFallbackPolicy(input.review_fallback_policy),
-        normalizeFallbackPolicy(input.context_fallback_policy),
-        contextHarnessOwnerUserId ?? null,
-      ],
-    );
-  });
-}
 
 /** Read per-tenant model settings keyed directly by tenant id (tenant-scoped dashboard route). */
 export async function getTenantModelSettingsById(tenantId: string): Promise<ModelSettings> {
@@ -3112,7 +2299,7 @@ export async function getOrCreateContextExecutionProfile(
          left join tenant_model_settings tms on tms.tenant_id = t.id
          left join tenant_integrations ti on ti.tenant_id = t.id
          left join user_integrations ui on ui.user_id = tms.context_harness_owner_user_id
-        where t.id = $1 and t.merged_into_tenant_id is null
+        where t.id = $1
         for update of t`,
       [tenantId],
     );
@@ -3337,9 +2524,7 @@ interface ModelSettingsRow {
  *   - 'managed' (DEFAULT until the tenant selects) — always Jina managed, even when a harness/keys exist.
  *   - 'codex'   — the author's harness; PRs without a harness fall through BYOK > managed.
  *   - 'byok'    — company keys (never the harness); managed when the keys can't cover the picked models.
- *  There is no automatic priority: nothing routes above managed until a user explicitly selects it.
- *  Legacy values: 'openai'/'openrouter' collapse to 'byok'; the retired 'auto' (and null/unknown)
- *  collapse to the managed default. */
+ *  There is no automatic priority: nothing routes above managed until a user explicitly selects it. */
 export type ModelProvider = "codex" | "byok" | "managed";
 const DEFAULT_MODEL_PROVIDER: ModelProvider = "managed";
 
@@ -3347,10 +2532,6 @@ const DEFAULT_MODEL_PROVIDER: ModelProvider = "managed";
 export function normalizeModelProvider(raw: unknown): ModelProvider {
   if (raw === "codex" || raw === "byok" || raw === "managed") {
     return raw;
-  }
-  // Legacy single-key forces (pre-tri-select) collapse to the BYOK tier.
-  if (raw === "openai" || raw === "openrouter") {
-    return "byok";
   }
   return DEFAULT_MODEL_PROVIDER;
 }
@@ -3476,58 +2657,6 @@ function normalizeModelValue(value: string | null | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-/**
- * Ensure the viewer's PERSONAL tenant exists and return its id (Autumn customer id). Used by the legacy
- * viewer-scoped integrations save (which now writes tenant_integrations) and by the OpenRouter OAuth
- * default-tenant path. Undefined only when the database is unconfigured (tests).
- */
-export async function ensurePersonalTenantId(githubUserId: number, login?: string): Promise<string | undefined> {
-  if (!databaseConfigured()) {
-    return undefined;
-  }
-  return withTransaction((client) => ensureTenantIdForUser(client, githubUserId, login));
-}
-
-async function ensureTenantIdForUser(client: pg.PoolClient, githubUserId: number, login?: string): Promise<string> {
-  const trimmedLogin = login?.trim();
-  const identity = await client.query<{ user_id: string }>(
-    `select user_id
-       from user_identities
-      where provider = 'github' and provider_user_id = $1::text`,
-    [githubUserId],
-  );
-  const userId = identity.rows[0]?.user_id ?? null;
-  const existing = await client.query<{ id: string; github_account_login: string | null }>(
-    `select id, github_account_login from tenants where github_account_id = $1`,
-    [githubUserId],
-  );
-  if (existing.rows[0]) {
-    // Keep the stable account id while refreshing the current session login (including GitHub renames).
-    await client.query(
-      `update tenants
-          set github_account_login = coalesce($2, github_account_login),
-              github_account_type = 'User',
-              kind = coalesce(kind, 'personal'),
-              name = coalesce(name, $2, github_account_login),
-              personal_owner_user_id = coalesce(personal_owner_user_id, $3)
-        where id = $1`,
-      [existing.rows[0].id, trimmedLogin || null, userId],
-    );
-    return existing.rows[0].id;
-  }
-  // No installation yet — create the personal tenant with the session's login when available (the
-  // 'unknown' placeholder is a last resort for callers with no session identity).
-  const created = await client.query<{ id: string }>(
-    `insert into tenants
-       (github_account_id, github_account_login, github_account_type, kind, name, personal_owner_user_id)
-     values ($1, $2, 'User', 'personal', $2, $3)
-     on conflict (github_account_id) do update set github_account_id = excluded.github_account_id
-     returning id`,
-    [githubUserId, trimmedLogin || "unknown", userId],
-  );
-  return created.rows[0].id;
-}
-
 /** Thrown by persistReviewUsageRecords when the review run does not exist (maps to 404). */
 export class ReviewRunNotFoundError extends Error {
   constructor(public readonly reviewRunId: string) {
@@ -3563,8 +2692,7 @@ export interface ReviewUsageRecord {
  * On a BYOK route OpenRouter's `cost` is only its ~5% fee and the real model spend is in
  * upstream_inference_cost, so the basis must sum both; on a non-BYOK route `cost` is the full charge
  * and upstream merely mirrors it, so summing would double-charge — hence the conditional. Returns
- * undefined when the applicable source cost is absent (persisted as NULL; credit math falls back to
- * openrouter_cost for such rows).
+ * undefined when the applicable source cost is absent (persisted as NULL and billed as zero).
  */
 export function computeBillableCost(record: {
   cost?: string;
@@ -3820,20 +2948,26 @@ export async function saveTenantAutoReviewLimit(tenantId: string, input: AutoRev
 /** Member counts for the tenant billing overview: total members and how many have a Codex harness connected. */
 export interface TenantMemberStats { total: number; with_harness: number }
 
-/**
- * Count tenant members and how many have connected a Codex harness. tenant_members is joined to
- * user_integrations by github_user_id; codex_harness_auth presence (never the blob) is the harness signal.
- */
+/** Count current Clerk members and a personal owner with a connected Codex harness. */
 export async function getTenantMemberStats(tenantId: string): Promise<TenantMemberStats> {
   if (!databaseConfigured()) {
     return { total: 0, with_harness: 0 };
   }
   const row = await queryOne<{ total: number; with_harness: number }>(
-    `select count(*)::int as total,
+    `with members as (
+       select membership.user_id
+         from clerk_tenant_memberships membership
+        where membership.tenant_id = $1::uuid
+       union
+       select tenant.personal_owner_user_id
+         from tenants tenant
+        where tenant.id = $1::uuid
+          and tenant.personal_owner_user_id is not null
+     )
+     select count(*)::int as total,
             count(*) filter (where ui.codex_harness_auth is not null)::int as with_harness
-       from tenant_members m
-       left join user_integrations ui on ui.github_user_id = m.github_user_id
-      where m.tenant_id = $1`,
+       from members
+       left join user_integrations ui on ui.user_id = members.user_id`,
     [tenantId],
   );
   return { total: row?.total ?? 0, with_harness: row?.with_harness ?? 0 };
@@ -3951,8 +3085,8 @@ export function shapeTenantUsage(
 /**
  * Aggregate a tenant's review usage over the trailing `days` window. Four grouped queries (run-level
  * totals, model-cost sum over usage rows, per-day series, and the 20 most-recent runs) — never per-run
- * N+1. Credits come from review_run_billing; model_cost_usd sums the BYOK-aware billable_cost (fallback
- * openrouter_cost) over review_llm_usage. `days` is validated by the caller (one of 7/30/90).
+ * N+1. Credits come from review_run_billing; model_cost_usd sums the BYOK-aware billable_cost over
+ * review_llm_usage. `days` is validated by the caller (one of 7/30/90).
  */
 export async function getTenantUsageSummary(tenantId: string, days: number): Promise<TenantUsageSummary> {
   if (!databaseConfigured()) {
@@ -3978,7 +3112,7 @@ export async function getTenantUsageSummary(tenantId: string, days: number): Pro
       [tenantId, days],
     ),
     queryOne<{ model_cost_usd: string | null }>(
-      `select coalesce(sum(coalesce(u.billable_cost, u.openrouter_cost)), 0)::text as model_cost_usd
+      `select coalesce(sum(u.billable_cost), 0)::text as model_cost_usd
          from review_llm_usage u
          join review_runs r on r.id = u.review_run_id
         where r.tenant_id = $1 and r.created_at >= now() - make_interval(days => $2)`,
@@ -4245,40 +3379,6 @@ export async function getDispatchBillingContext(
   };
 }
 
-/**
- * Resolve a dashboard viewer's personal Jina tenant for legacy routes.
- *
- * New sessions authorize by the internal user id only. The GitHub lookup is
- * retained exclusively for pre-transition sessions that do not carry userId;
- * a mismatched internal id must never borrow the legacy fallback.
- */
-export async function getTenantIdForUser(
-  githubUserId: number,
-  userId?: string,
-): Promise<string | undefined> {
-  if (!databaseConfigured()) {
-    return undefined;
-  }
-  const row = await queryOne<{ id: string }>(
-    `select id
-       from tenants
-      where merged_into_tenant_id is null
-        and (
-          (
-            $2::uuid is not null
-            and personal_owner_user_id = $2::uuid
-          ) or (
-            $2::uuid is null
-            and github_account_id = $1
-          )
-        )
-      order by case when personal_owner_user_id = $2::uuid then 0 else 1 end
-      limit 1`,
-    [githubUserId, userId ?? null],
-  );
-  return row?.id;
-}
-
 export interface ReviewRunBilling {
   rate_mode: string;
   key_source: string | null;
@@ -4361,10 +3461,9 @@ export interface PendingUsageRow {
   review_run_id: string;
   tenant_id: string;
   dedupe_key: string;
-  // The BYOK-aware billing basis (is_byok ? upstream+cost : cost). NULL on pre-0014 rows — the credit
-  // math falls back to openrouter_cost for those. openrouter_cost stays the raw OpenRouter `cost` field.
+  // The BYOK-aware billing basis (is_byok ? upstream+cost : cost). NULL means no billable cost was
+  // reported and is billed as zero.
   billable_cost: string | null;
-  openrouter_cost: string | null;
   ai_credits_charged: number | null;
   // Stamped at claim time; present on rows read from a stale 'tracking' claim.
   autumn_event_id?: string | null;
@@ -4376,7 +3475,7 @@ export async function listRunUsagePendingOutcome(reviewRunId: string): Promise<P
     return [];
   }
   return query<PendingUsageRow>(
-    `select id, review_run_id, tenant_id, dedupe_key, billable_cost, openrouter_cost, ai_credits_charged
+    `select id, review_run_id, tenant_id, dedupe_key, billable_cost, ai_credits_charged
        from review_llm_usage
       where review_run_id = $1 and billing_status = 'pending_outcome'
       order by recorded_at asc`,
@@ -4482,7 +3581,7 @@ export async function listStaleTrackingUsageRows(limit: number, olderThan: Date)
     return [];
   }
   return query<PendingUsageRow>(
-    `select id, review_run_id, tenant_id, dedupe_key, billable_cost, openrouter_cost, ai_credits_charged, autumn_event_id
+    `select id, review_run_id, tenant_id, dedupe_key, billable_cost, ai_credits_charged, autumn_event_id
        from review_llm_usage
       where billing_status = 'tracking' and claimed_at < $2
       order by claimed_at asc
@@ -4732,7 +3831,7 @@ export async function listPendingUsageRows(limit: number): Promise<PendingUsageR
     return [];
   }
   return query<PendingUsageRow>(
-    `select id, review_run_id, tenant_id, dedupe_key, billable_cost, openrouter_cost, ai_credits_charged
+    `select id, review_run_id, tenant_id, dedupe_key, billable_cost, ai_credits_charged
        from review_llm_usage
       where billing_status = 'pending'
       order by recorded_at asc
@@ -4801,7 +3900,6 @@ export async function knownProjects(tenantId?: string): Promise<ProjectRecord[]>
 /* -------------------------------------------------------------- sessions --- */
 
 const memSessions = new Map<string, DashboardSession>();
-const memOauthStates = new Map<string, { returnTo: string; expiresAt: number }>();
 
 export async function upsertGithubUserIdentity(
   profile: GithubIdentityProfile,
@@ -4879,7 +3977,7 @@ export async function saveSession(session: DashboardSession): Promise<void> {
        session_json = excluded.session_json,
        expires_at = excluded.expires_at,
        user_id = excluded.user_id`,
-    [session.id, JSON.stringify(encryptSessionSecrets(session)), session.expiresAt, session.userId ?? null],
+    [session.id, JSON.stringify(encryptSessionSecrets(session)), session.expiresAt, session.userId],
   );
 }
 
@@ -4903,10 +4001,10 @@ export async function updateSessionIfCurrent(session: DashboardSession, expected
     `update dashboard_sessions
         set session_json = $2,
             expires_at = to_timestamp($3 / 1000.0),
-            user_id = coalesce($5, user_id)
+            user_id = $5
       where id = $1 and session_json ->> 'updatedAt' = $4
       returning id`,
-    [session.id, JSON.stringify(encryptSessionSecrets(session)), session.expiresAt, expectedUpdatedAt, session.userId ?? null],
+    [session.id, JSON.stringify(encryptSessionSecrets(session)), session.expiresAt, expectedUpdatedAt, session.userId],
   );
   return rows.length === 1;
 }
@@ -4915,7 +4013,7 @@ export async function getSession(id: string): Promise<DashboardSession | undefin
   if (!databaseConfigured()) {
     return memSessions.get(id);
   }
-  const row = await queryOne<{ session_json: DashboardSession; user_id: string | null }>(
+  const row = await queryOne<{ session_json: DashboardSession; user_id: string }>(
     `select session_json, user_id from dashboard_sessions where id = $1`,
     [id],
   );
@@ -4923,84 +4021,16 @@ export async function getSession(id: string): Promise<DashboardSession | undefin
     return undefined;
   }
   const session = decryptSessionSecrets(row.session_json);
-  return row.user_id ? { ...session, userId: row.user_id } : session;
+  return { ...session, userId: row.user_id };
 }
 
 // The GitHub access token is the only secret in the session blob; encrypt it at rest.
 function encryptSessionSecrets(session: DashboardSession): DashboardSession {
-  if (!session.accessToken) {
-    return session;
-  }
   return { ...session, accessToken: encryptSecret(session.accessToken) };
 }
 
 function decryptSessionSecrets(session: DashboardSession): DashboardSession {
-  if (!session.accessToken) {
-    return session;
-  }
   return { ...session, accessToken: decryptSecret(session.accessToken) };
-}
-
-export async function deleteSession(id: string): Promise<void> {
-  if (!databaseConfigured()) {
-    memSessions.delete(id);
-    return;
-  }
-  await query(`delete from dashboard_sessions where id = $1`, [id]);
-}
-
-export async function saveOauthState(state: string, returnTo: string, expiresAt: number): Promise<void> {
-  if (!databaseConfigured()) {
-    memOauthStates.set(state, { returnTo, expiresAt });
-    return;
-  }
-  await query(
-    `insert into oauth_states (state, return_to, expires_at)
-     values ($1, $2, to_timestamp($3 / 1000.0))
-     on conflict (state) do update set return_to = excluded.return_to, expires_at = excluded.expires_at`,
-    [state, returnTo, expiresAt],
-  );
-}
-
-export async function consumeOauthState(state: string): Promise<string | undefined> {
-  if (!databaseConfigured()) {
-    const entry = memOauthStates.get(state);
-    memOauthStates.delete(state);
-    return entry && entry.expiresAt > Date.now() ? entry.returnTo : undefined;
-  }
-  const row = await queryOne<{ return_to: string; expires_at: Date | string }>(
-    `delete from oauth_states where state = $1 returning return_to, expires_at`,
-    [state],
-  );
-  if (!row) {
-    return undefined;
-  }
-  return new Date(row.expires_at).getTime() > Date.now() ? row.return_to : undefined;
-}
-
-/* ----------------------------------------------- scenarios + simulations --- */
-
-interface SimScenario {
-  id?: string;
-  index?: number;
-  title?: string;
-  risk?: string;
-  status?: string;
-  final_verdict?: string;
-  confidence?: number;
-  source_files?: unknown;
-  steps?: SimStep[];
-  lineage_key?: string;
-}
-
-interface SimStep {
-  step_index?: number;
-  step_text?: string;
-  step_status?: string;
-  scenario_verdict?: string;
-  consensus_reached?: boolean;
-  predicted_output?: string;
-  confidence?: number;
 }
 
 interface RawFinding {
@@ -5058,316 +4088,6 @@ export async function persistReviewFindings(reviewRunId: string, result: unknown
   });
 }
 
-/** Persist a run's scenario plans (with steps) and any simulation instances (with steps). */
-export async function persistScenariosAndSimulations(reviewRunId: string, result: unknown): Promise<void> {
-  if (!databaseConfigured() || !result || typeof result !== "object") {
-    return;
-  }
-  const r = result as Record<string, unknown>;
-  const markdown =
-    (typeof r.review_markdown === "string" ? r.review_markdown : undefined) ??
-    (typeof r.markdown_preview === "string" ? r.markdown_preview : undefined);
-  const jsonPlans = parseScenarioJson(r.scenario_json);
-  const plans = jsonPlans.length > 0 ? jsonPlans : parseScenarios(markdown);
-  const simulation =
-    r.simulation && typeof r.simulation === "object" ? (r.simulation as Record<string, unknown>) : undefined;
-  const simScenarios: SimScenario[] = Array.isArray(simulation?.scenarios)
-    ? (simulation.scenarios as SimScenario[])
-    : [];
-
-  if (plans.length === 0 && simScenarios.length === 0) {
-    return;
-  }
-
-  // Top-level rerun/question metadata lives on the simulation object itself.
-  const simKind = typeof simulation?.kind === "string" ? simulation.kind : "review";
-  const simPrior = simulation?.prior;
-  const simPriorHash = typeof simulation?.prior_hash === "string" ? simulation.prior_hash : null;
-  const simQuestion = typeof simulation?.question === "string" ? simulation.question : null;
-  const simAnswer = typeof simulation?.answer === "string" ? simulation.answer : null;
-
-  await withTransaction(async (client) => {
-    const runRow = await client.query<{
-      tenant_id: string | null;
-      repository_id: string | null;
-      pr_number: string | number | null;
-    }>(
-      `select r.tenant_id, r.repository_id, pr.pr_number
-         from review_runs r
-         left join pull_requests pr on pr.id = r.pull_request_id
-        where r.id = $1`,
-      [reviewRunId],
-    );
-    if (runRow.rows.length === 0) {
-      return;
-    }
-    const tenantId = runRow.rows[0].tenant_id;
-    const repositoryId = runRow.rows[0].repository_id;
-    const prNumber = numberOrNull(runRow.rows[0].pr_number);
-
-    // Idempotent: clear previous scenarios for this run (cascades steps + simulations).
-    await client.query(`delete from scenarios where review_run_id = $1`, [reviewRunId]);
-
-    // Lineage key is carried per scenario on the simulation payload; index it so the
-    // persisted scenario snapshot can be linked to its durable lineage.
-    const lineageKeyByIndex = new Map<number, string>();
-    for (const sim of simScenarios) {
-      const key = typeof sim.lineage_key === "string" && sim.lineage_key.trim() ? sim.lineage_key.trim() : undefined;
-      if (key !== undefined && typeof sim.index === "number") {
-        lineageKeyByIndex.set(sim.index, key);
-      }
-    }
-
-    const scenarioIdByIndex = new Map<number, string>();
-    // Caches keyed by lineage_key so repeated scenarios in the same run reuse the rows.
-    const caches: LineageCaches = { lineageIdByKey: new Map(), versionIdByKey: new Map() };
-    const planList: ParsedScenario[] = plans.length > 0 ? plans : simScenarios.map(simToPlan);
-
-    for (const plan of planList) {
-      const lineageKey = lineageKeyByIndex.get(plan.index);
-      let lineageId: string | null = null;
-      if (lineageKey && repositoryId && prNumber !== null) {
-        ({ lineageId } = await ensureLineageAndVersion(client, plan, { tenantId, repositoryId, prNumber, lineageKey }, caches));
-      }
-
-      const scenarioId = await insertScenario(client, tenantId, reviewRunId, plan, lineageId, lineageKey ?? null);
-      scenarioIdByIndex.set(plan.index, scenarioId);
-      for (let i = 0; i < plan.steps.length; i += 1) {
-        await client.query(
-          `insert into scenario_steps (scenario_id, step_index, text, step_type) values ($1, $2, $3, $4)`,
-          [scenarioId, i + 1, plan.steps[i], scenarioStepType(plan.steps[i] ?? "")],
-        );
-      }
-    }
-
-    for (const sim of simScenarios) {
-      const index = typeof sim.index === "number" ? sim.index : undefined;
-      const lineageKey =
-        typeof sim.lineage_key === "string" && sim.lineage_key.trim() ? sim.lineage_key.trim() : undefined;
-      let scenarioId = index !== undefined ? scenarioIdByIndex.get(index) : undefined;
-      let lineageId = lineageKey ? caches.lineageIdByKey.get(lineageKey) ?? null : null;
-      let scenarioVersionId = lineageKey ? caches.versionIdByKey.get(lineageKey) ?? null : null;
-      if (!scenarioId) {
-        const plan = simToPlan(sim);
-        if (lineageKey && repositoryId && prNumber !== null && lineageId === null) {
-          ({ lineageId, versionId: scenarioVersionId } = await ensureLineageAndVersion(
-            client,
-            plan,
-            { tenantId, repositoryId, prNumber, lineageKey },
-            caches,
-          ));
-        }
-        scenarioId = await insertScenario(client, tenantId, reviewRunId, plan, lineageId, lineageKey ?? null);
-        scenarioIdByIndex.set(plan.index, scenarioId);
-      }
-
-      const simRow = await client.query<{ id: string }>(
-        `insert into simulations
-           (tenant_id, scenario_id, review_run_id, mode, status, final_verdict, confidence, commit, completed_at, raw_json,
-            lineage_id, scenario_version_id, prior_state, prior_hash, kind, question, answer)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) returning id`,
-        [
-          tenantId,
-          scenarioId,
-          reviewRunId,
-          typeof simulation?.mode === "string" ? simulation.mode : null,
-          String(sim.status ?? "unknown"),
-          sim.final_verdict ?? null,
-          numberOrNull(sim.confidence),
-          typeof simulation?.commit === "string" ? simulation.commit : null,
-          typeof simulation?.completed_at === "string" ? simulation.completed_at : null,
-          JSON.stringify(sim),
-          lineageId,
-          scenarioVersionId,
-          jsonOrNull(simPrior),
-          simPriorHash,
-          simKind,
-          simQuestion,
-          simAnswer,
-        ],
-      );
-      const simulationId = simRow.rows[0].id;
-
-      const steps = Array.isArray(sim.steps) ? sim.steps : [];
-      for (let i = 0; i < steps.length; i += 1) {
-        const step = steps[i] ?? {};
-        await client.query(
-          `insert into simulation_steps
-             (simulation_id, step_index, step_text, step_status, scenario_verdict, consensus_reached, predicted_output, confidence, raw_json)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [
-            simulationId,
-            typeof step.step_index === "number" ? step.step_index : i + 1,
-            step.step_text ?? null,
-            step.step_status ?? null,
-            step.scenario_verdict ?? null,
-            typeof step.consensus_reached === "boolean" ? step.consensus_reached : null,
-            step.predicted_output ?? null,
-            numberOrNull(step.confidence),
-            JSON.stringify(step),
-          ],
-        );
-      }
-    }
-  });
-}
-
-async function insertScenario(
-  client: pg.PoolClient,
-  tenantId: string | null,
-  reviewRunId: string,
-  plan: ParsedScenario,
-  lineageId: string | null,
-  fingerprint: string | null,
-): Promise<string> {
-  const rows = await client.query<{ id: string }>(
-    `insert into scenarios
-       (tenant_id, review_run_id, scenario_key, scenario_index, title, risk, intent, justification, relevant_paths, markdown, lineage_id, fingerprint)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-     on conflict (review_run_id, scenario_key) do update set
-        title = excluded.title, risk = excluded.risk, intent = excluded.intent,
-        justification = excluded.justification, relevant_paths = excluded.relevant_paths, markdown = excluded.markdown,
-        lineage_id = excluded.lineage_id, fingerprint = excluded.fingerprint
-     returning id`,
-    [
-      tenantId,
-      reviewRunId,
-      plan.id,
-      plan.index,
-      plan.title,
-      plan.risk,
-      plan.expectedResult ?? null,
-      plan.context ?? null,
-      JSON.stringify(plan.relevantPaths ?? []),
-      plan.markdown ?? null,
-      lineageId,
-      fingerprint,
-    ],
-  );
-  return rows.rows[0].id;
-}
-
-interface LineageContext { tenantId: string | null; repositoryId: string; prNumber: number; lineageKey: string }
-interface LineageCaches { lineageIdByKey: Map<string, string>; versionIdByKey: Map<string, string> }
-
-/** Upsert the lineage + its current version (course) for a scenario, caching both
- *  by lineage_key so the plan and simulation passes reuse the rows. */
-async function ensureLineageAndVersion(
-  client: pg.PoolClient,
-  plan: ParsedScenario,
-  ctx: LineageContext,
-  caches: LineageCaches,
-): Promise<{ lineageId: string; versionId: string }> {
-  const lineageId = await upsertScenarioLineage(client, {
-    tenantId: ctx.tenantId,
-    repositoryId: ctx.repositoryId,
-    prNumber: ctx.prNumber,
-    lineageKey: ctx.lineageKey,
-    title: plan.title,
-    risk: plan.risk,
-    relevantPaths: plan.relevantPaths ?? [],
-  });
-  caches.lineageIdByKey.set(ctx.lineageKey, lineageId);
-  const versionId = await upsertScenarioVersion(client, {
-    lineageId,
-    steps: plan.steps,
-    markdown: plan.markdown ?? null,
-    origin: "generated",
-  });
-  caches.versionIdByKey.set(ctx.lineageKey, versionId);
-  return { lineageId, versionId };
-}
-
-/** Upsert a durable scenario lineage keyed by (repository_id, pr_number, lineage_key). */
-async function upsertScenarioLineage(
-  client: pg.PoolClient,
-  input: {
-    tenantId: string | null;
-    repositoryId: string;
-    prNumber: number;
-    lineageKey: string;
-    title: string;
-    risk: string;
-    relevantPaths: string[];
-  },
-): Promise<string> {
-  const rows = await client.query<{ id: string }>(
-    `insert into scenario_lineages
-       (tenant_id, repository_id, pr_number, lineage_key, title, risk, relevant_paths)
-     values ($1,$2,$3,$4,$5,$6,$7)
-     on conflict (repository_id, pr_number, lineage_key) do update set
-        title = excluded.title, risk = excluded.risk, relevant_paths = excluded.relevant_paths
-     returning id`,
-    [
-      input.tenantId,
-      input.repositoryId,
-      input.prNumber,
-      input.lineageKey,
-      input.title,
-      input.risk,
-      JSON.stringify(input.relevantPaths ?? []),
-    ],
-  );
-  return rows.rows[0].id;
-}
-
-/**
- * Upsert a scenario version (a concrete course) keyed by (lineage_id, version_hash).
- * version_index is the count of existing versions + 1 on insert; an identical course
- * (same normalized steps) is reused rather than duplicated.
- */
-async function upsertScenarioVersion(
-  client: pg.PoolClient,
-  input: {
-    lineageId: string;
-    steps: string[];
-    markdown: string | null;
-    origin: string;
-    createdBy?: string | null;
-  },
-): Promise<string> {
-  const versionHash = scenarioVersionHash(input.steps);
-  const rows = await client.query<{ id: string }>(
-    `insert into scenario_versions
-       (lineage_id, version_index, version_hash, steps, markdown, origin, created_by)
-     values (
-        $1,
-        (select count(*) from scenario_versions where lineage_id = $1) + 1,
-        $2, $3, $4, $5, $6
-     )
-     on conflict (lineage_id, version_hash) do update set markdown = coalesce(excluded.markdown, scenario_versions.markdown)
-     returning id`,
-    [
-      input.lineageId,
-      versionHash,
-      JSON.stringify(input.steps ?? []),
-      input.markdown,
-      input.origin,
-      input.createdBy ?? null,
-    ],
-  );
-  return rows.rows[0].id;
-}
-
-/** Content hash of a normalized steps array (sha256 hex, first 12 chars). */
-function scenarioVersionHash(steps: string[]): string {
-  const normalized = (steps ?? []).map((step) => (typeof step === "string" ? step.trim() : String(step ?? "")));
-  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex").slice(0, 12);
-}
-
-function simToPlan(sim: SimScenario): ParsedScenario {
-  const index = typeof sim.index === "number" ? sim.index : 0;
-  return {
-    id: sim.id ?? `scenario-${index}`,
-    index,
-    risk: (sim.risk as ParsedScenario["risk"]) ?? "unknown",
-    title: sim.title ?? `Scenario ${index}`,
-    steps: Array.isArray(sim.steps) ? sim.steps.map((step) => step.step_text ?? "").filter(Boolean) : [],
-    relevantPaths: Array.isArray(sim.source_files) ? (sim.source_files as string[]) : [],
-    markdown: "",
-  };
-}
-
 function extractFindings(result: object): {
   fingerprint: string;
   file_path?: string;
@@ -5377,14 +4097,7 @@ function extractFindings(result: object): {
   body: string;
 }[] {
   const record = result as Record<string, unknown>;
-  const finalReview = record.final_review && typeof record.final_review === "object" && !Array.isArray(record.final_review)
-    ? (record.final_review as Record<string, unknown>)
-    : undefined;
-  const rawFindings = Array.isArray(finalReview?.findings)
-    ? finalReview.findings
-    : Array.isArray(record.findings)
-      ? record.findings
-      : [];
+  const rawFindings = Array.isArray(record.findings) ? record.findings : [];
 
   return rawFindings.map(normalizeFinding).filter((finding): finding is NonNullable<ReturnType<typeof normalizeFinding>> => Boolean(finding));
 }
@@ -5424,33 +4137,37 @@ function normalizeFinding(value: unknown): {
   };
 }
 
-function numberOrNull(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 /* ----------------------------------------------------------------- internals -- */
 
 async function resolveTenantId(
   client: pg.PoolClient,
-  input: { installationId?: number; accountId?: number; accountLogin?: string; accountType?: string },
+  input: { installationId: number; accountId?: number; accountLogin?: string; accountType?: string },
 ): Promise<string> {
-  if (input.installationId) {
-    const existing = await client.query<{ tenant_id: string }>(
-      `select tenant_id from installations where github_installation_id = $1`,
-      [input.installationId],
-    );
-    // Once a GitHub installation is connected, that explicit Jina workspace
-    // binding is authoritative. Account metadata may describe any one of the
-    // tenant's GitHub orgs and must never pull the installation back to the
-    // legacy account-derived tenant.
-    if (existing.rows[0]) {
-      return existing.rows[0].tenant_id;
-    }
+  const existing = await client.query<{ tenant_id: string }>(
+    `select tenant_id from installations where github_installation_id = $1`,
+    [input.installationId],
+  );
+  // Once a GitHub installation is connected, that explicit Jina workspace
+  // binding is authoritative. Account metadata cannot change its owner.
+  if (existing.rows[0]) {
+    return existing.rows[0].tenant_id;
   }
 
-  const accountId = input.accountId ?? input.installationId;
-  if (!accountId) {
-    throw new Error("cannot resolve tenant without an account or installation id");
+  if (!input.accountId || !input.accountLogin || !input.accountType) {
+    throw new Error("a new GitHub installation requires its complete account identity");
+  }
+  const accountId = input.accountId;
+
+  const connected = await client.query<{ tenant_id: string }>(
+    `select tenant_id
+       from installations
+      where github_account_id = $1
+      order by (deleted_at is null) desc, created_at desc
+      limit 1`,
+    [accountId],
+  );
+  if (connected.rows[0]) {
+    return connected.rows[0].tenant_id;
   }
 
   const rows = await client.query<{ id: string }>(
@@ -5477,7 +4194,7 @@ async function resolveTenantId(
             kind = coalesce(tenants.kind, excluded.kind),
             name = coalesce(tenants.name, excluded.name),
             personal_owner_user_id = coalesce(tenants.personal_owner_user_id, excluded.personal_owner_user_id)
-     returning coalesce(tenants.merged_into_tenant_id, tenants.id) as id`,
+     returning tenants.id`,
     [accountId, input.accountLogin ?? "unknown", input.accountType ?? "Organization"],
   );
   return rows.rows[0].id;
@@ -5543,7 +4260,7 @@ async function upsertRepository(
   client: pg.PoolClient,
   input: {
     tenantId: string;
-    installationRecordId?: string;
+    installationRecordId: string;
     githubRepoId: number;
     owner: string;
     name: string;
@@ -5557,7 +4274,7 @@ async function upsertRepository(
      values ($1, $2, $3, $4, $5, coalesce($6, 'main'), coalesce($7, true))
      on conflict (github_repo_id) do update set
         tenant_id = repositories.tenant_id,
-        installation_id = coalesce(excluded.installation_id, repositories.installation_id),
+        installation_id = excluded.installation_id,
         owner = excluded.owner,
         name = excluded.name,
         default_branch = coalesce($6, repositories.default_branch),
@@ -5566,7 +4283,7 @@ async function upsertRepository(
      returning id, tenant_id`,
     [
       input.tenantId,
-      input.installationRecordId ?? null,
+      input.installationRecordId,
       input.githubRepoId,
       input.owner,
       input.name,
@@ -5816,18 +4533,6 @@ function boundedText(value: unknown, maxLength = LIST_ERROR_PREVIEW_LENGTH): str
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function booleanValue(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
-}
-
-function compactNumberRecord(value: unknown, keys: string[]): Record<string, unknown> | undefined {
-  if (!isObjectRecord(value)) {
-    return undefined;
-  }
-  const compact = compactRecord(Object.fromEntries(keys.map((key) => [key, numberValue(value[key])])));
-  return Object.keys(compact).length > 0 ? compact : undefined;
 }
 
 function normalizeReviewRunLimit(value: number | undefined): number {

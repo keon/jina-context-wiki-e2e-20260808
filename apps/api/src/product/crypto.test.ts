@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 
-import { decryptSecret, encryptSecret, isEncryptedEnvelope } from "./crypto.js";
+import { decryptSecret, isEncryptedEnvelope } from "./crypto.js";
 
 test("round-trips a secret when an encryption key is configured", async () => {
   const previous = process.env.SECRETS_ENCRYPTION_KEY;
@@ -25,11 +25,7 @@ test("round-trips a secret when an encryption key is configured", async () => {
   }
 });
 
-test("returns plaintext unchanged when no key is configured", () => {
-  assert.equal(encryptSecret("plain"), "plain");
+test("rejects plaintext values", () => {
   assert.equal(isEncryptedEnvelope("plain"), false);
-});
-
-test("treats legacy non-envelope values as plaintext on decrypt", () => {
-  assert.equal(decryptSecret("legacy-plaintext-key"), "legacy-plaintext-key");
+  assert.throws(() => decryptSecret("plain"), /not an encrypted envelope/);
 });

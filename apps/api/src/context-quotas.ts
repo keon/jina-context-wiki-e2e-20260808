@@ -196,8 +196,7 @@ export interface ContextQuotaServiceOptions {
  *   `completeBuild` on every terminal board outcome;
  * - call `startModelTask` immediately before a model-backed worker stage and
  *   `finishModelTask` or `cancelModelTask` in its terminal path;
- * - reserve storage before upload, commit only after immutable persistence,
- *   and delete accounting during authoritative erasure.
+ * - reserve storage before upload and commit only after immutable persistence.
  */
 export class ContextQuotaService {
   readonly #store: ContextQuotaStore;
@@ -866,42 +865,6 @@ export class ContextQuotaService {
     });
   }
 
-  async deleteArtifactStorage(input: {
-    readonly tenantId: string;
-    readonly operationId: string;
-    readonly artifactId: string;
-    readonly at?: string;
-  }): Promise<ContextQuotaSnapshot> {
-    const tenantId = tenant(input.tenantId);
-    const operationId = resourceId(input.operationId, "operationId");
-    const artifactId = resourceId(input.artifactId, "artifactId");
-    const now = this.#time(input.at);
-    const limits = await this.#limits(tenantId);
-    return this.#store.transact(tenantId, (current) => {
-      const state = currentState(current, tenantId, now, limits);
-      const completed = state.artifactDeletionOperations[operationId];
-      if (completed) {
-        if (completed.artifactId !== artifactId) throw conflict("artifact deletion operation changed target");
-        return { state, result: quotaSnapshot(state, limits, now) };
-      }
-      const artifact = state.artifacts[artifactId];
-      if (!artifact) throw notReserved("accounted artifact not found");
-      const artifacts = { ...state.artifacts };
-      delete artifacts[artifactId];
-      const next = {
-        ...state,
-        artifacts,
-        artifactBytes: Math.max(0, state.artifactBytes - artifact.bytes),
-        artifactDeletionOperations: {
-          ...state.artifactDeletionOperations,
-          [operationId]: { artifactId }
-        },
-        updatedAt: now.iso
-      };
-      return { state: next, result: quotaSnapshot(next, limits, now) };
-    });
-  }
-
   async snapshot(tenantIdValue: string, at?: string): Promise<ContextQuotaSnapshot> {
     const tenantId = tenant(tenantIdValue);
     const now = this.#time(at);
@@ -1023,7 +986,6 @@ function emptyState(tenantId: string, now: QuotaTime, limits: ContextQuotaLimits
     artifactReservations: {},
     artifacts: {},
     artifactBytes: 0,
-    artifactDeletionOperations: {},
     modelMonth: emptyModelMonth(monthKey(now.date)),
     denials: {},
     updatedAt: now.iso

@@ -250,7 +250,7 @@ test("a question is sent as a repository-scoped context query", async () => {
           ],
         },
       ],
-      coverage: { status: "partial", missing: ["dense retrieval"] },
+      coverage: { status: "partial", missing: ["runtime evidence"] },
     }),
   );
   const client = new GraphApiClient(CONFIG, fetchImpl);
@@ -286,7 +286,7 @@ test("a question is sent as a repository-scoped context query", async () => {
       ],
     },
   ]);
-  assert.deepEqual(result.notes, ["Coverage gap: dense retrieval"]);
+  assert.deepEqual(result.notes, ["Coverage gap: runtime evidence"]);
 });
 
 test("a question about a repository outside the tenant set never reaches the engine", async () => {
@@ -1001,7 +1001,7 @@ test("a revoked delegated token is dropped and re-minted once rather than failin
   assert.equal(minted.length, 2);
 });
 
-test("without an internal credential the static token is still used, unchanged", async () => {
+test("static-token mode uses its configured tenant credential", async () => {
   let seen: Headers | undefined;
   const { fetchImpl, urls } = mintingGraph(async (_input, init) => {
     seen = new Headers(init?.headers);
@@ -1018,11 +1018,10 @@ test("without an internal credential the static token is still used, unchanged",
   );
 });
 
-test("a graph service that cannot mint falls back to the static token rather than failing", async () => {
+test("a graph service that cannot mint fails closed", async () => {
   let seen: Headers | undefined;
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    // What an older graph service answers: the route is not reachable.
     if (url.endsWith("/internal/context/tokens"))
       return new Response("{}", { status: 404 });
     seen = new Headers(init?.headers);
@@ -1030,11 +1029,11 @@ test("a graph service that cannot mint falls back to the static token rather tha
   }) as typeof fetch;
   const client = new GraphApiClient(DELEGATING_CONFIG, fetchImpl);
 
-  await client.listGraphs(CONTEXT);
-
-  // Deployable in either order: behaviour is exactly today's until both sides
-  // are in place, and no request fails because minting is unavailable.
-  assert.equal(seen?.get("authorization"), "Bearer token");
+  await assert.rejects(
+    () => client.listGraphs(CONTEXT),
+    (error: unknown) => error instanceof ApiError && error.status === 503,
+  );
+  assert.equal(seen, undefined);
 });
 
 test("a delegated token carries context:build, so graph builds are not refused", async () => {
@@ -1092,12 +1091,11 @@ test("the board plane keeps the service credential, because a scoped token canno
   );
 });
 
-test("a mint that consumes the whole timeout still leaves the request its own deadline", async () => {
+test("a delegated-token mint timeout fails closed", async () => {
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.endsWith("/internal/context/tokens")) {
-      // Longer than the configured timeout: minting gives up and the caller
-      // falls back. A shared deadline would have left nothing for the request.
+      // Longer than the configured timeout: minting gives up.
       await new Promise((resolve) => setTimeout(resolve, 60));
       return new Response("{}", { status: 504 });
     }
@@ -1113,9 +1111,10 @@ test("a mint that consumes the whole timeout still leaves the request its own de
     fetchImpl,
   );
 
-  // Succeeds on the static credential rather than returning 504.
-  const result = await client.listGraphs(CONTEXT);
-  assert.deepEqual(result.graphs, []);
+  await assert.rejects(
+    () => client.listGraphs(CONTEXT),
+    (error: unknown) => error instanceof ApiError && error.status === 503,
+  );
 });
 
 test("a 401 arriving late still gets a retry with a live signal", async () => {

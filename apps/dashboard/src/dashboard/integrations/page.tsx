@@ -77,10 +77,8 @@ function mergeIntegrations(data: unknown): Integrations {
   };
 }
 
-function integrationsUrl(selected: SelectedTenant | null): string {
-  return selected
-    ? apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`)
-    : apiUrl("/dashboard/integrations");
+function integrationsUrl(selected: SelectedTenant): string {
+  return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}/integrations`);
 }
 
 function githubConnectionsUrl(selected: SelectedTenant): string {
@@ -106,16 +104,19 @@ export default function IntegrationsPage() {
   const providersQuery = useQuery<Integrations>({
     queryKey: providersKey,
     queryFn: async ({ signal }) => {
-      const response = await fetch(integrationsUrl(selected), { credentials: "include", signal });
+      const response = await fetch(integrationsUrl(selected!), { credentials: "include", signal });
       if (!response.ok) {
         throw new DashboardRequestError(response.status, `Integrations returned ${response.status}`);
       }
       return mergeIntegrations(await response.json());
     },
+    enabled: Boolean(selected),
     staleTime: CONFIG_STALE_TIME_MS,
   });
   const providers = providersQuery.data ?? EMPTY_INTEGRATIONS;
-  const providerState: LoadState = providersQuery.isError
+  const providerState: LoadState = !selected
+    ? "loaded"
+    : providersQuery.isError
     ? "unavailable"
     : providersQuery.data === undefined
       ? "loading"
@@ -231,7 +232,9 @@ export default function IntegrationsPage() {
       </IntegrationGroup>
 
       <IntegrationGroup title="Model providers">
-        {providerState === "loading" ? (
+        {!selected ? (
+          <CompactState title="Select a workspace to manage model providers" />
+        ) : providerState === "loading" ? (
           <CompactState title="Loading providers" />
         ) : providerState === "unavailable" ? (
           <CompactState
@@ -396,6 +399,7 @@ function ProviderRow({
   }, [selected?.tenantId]);
 
   const saveKey = async (key: string, mode: "save" | "disconnect") => {
+    if (!selected) return;
     const requestTenantId = selected?.tenantId ?? null;
     setBusy(mode);
     setMessage(null);
@@ -425,16 +429,15 @@ function ProviderRow({
   };
 
   const connectOAuth = async () => {
+    if (!selected) return;
     const requestTenantId = selected?.tenantId ?? null;
     setBusy("oauth");
     setMessage(null);
     try {
-      const startUrl = selected
-        ? apiUrl(
-            "/dashboard/integrations/openrouter/oauth/start",
-            new URLSearchParams({ tenant_id: selected.tenantId }),
-          )
-        : apiUrl("/dashboard/integrations/openrouter/oauth/start");
+      const startUrl = apiUrl(
+        "/dashboard/integrations/openrouter/oauth/start",
+        new URLSearchParams({ tenant_id: selected.tenantId }),
+      );
       const response = await fetch(startUrl, { method: "POST", credentials: "include" });
       if (response.status === 403) throw new Error("Only workspace admins can change this connection.");
       if (!response.ok) throw new Error("OpenRouter could not be opened.");

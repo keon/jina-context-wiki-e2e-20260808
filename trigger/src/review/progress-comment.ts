@@ -1,31 +1,16 @@
 import { logger } from "@trigger.dev/sdk";
 
-import {
-  createIssueComment,
-  listIssueComments,
-  updateIssueComment,
-  type GitHubRepository,
-} from "../shared/github.js";
-import {
-  postReviewEvent,
-  reviewRunUrl,
-  type ReviewStagePayload,
-  type ReviewStageResult,
-} from "./workflow.js";
+import { createIssueComment, listIssueComments, updateIssueComment, type GitHubRepository } from "../shared/github.js";
+import { postReviewEvent, reviewRunUrl, type ReviewStagePayload, type ReviewStageResult } from "./workflow.js";
 import { errorMessage } from "../shared/utils.js";
 
-export type ReviewProgressStatus = "Queued" | "In progress" | "Completed" | "Skipped" | "Blocked";
-export type ReviewFindingsStatus =
-  | "Pending"
-  | "Issues found"
-  | "No issues found"
-  | "Unavailable"
-  | "Insufficient credits";
+type ReviewProgressStatus = "Queued" | "In progress" | "Completed" | "Skipped" | "Blocked";
+type ReviewFindingsStatus = "Pending" | "Issues found" | "No issues found" | "Unavailable" | "Insufficient credits";
 
-export type ReviewProgressNotice = {
+type ReviewProgressNotice = {
   kind: "provider_failure";
   category: "quota" | "authentication" | "model" | "availability";
-  provider: "codex" | "byok" | "unknown";
+  provider: "codex" | "byok";
   quotaReason?: "exhausted" | "rate_limit";
 };
 
@@ -46,9 +31,9 @@ export type ReviewProgressUpdate = {
   notice?: ReviewProgressNotice;
 };
 
-const SUMMARY_MARKER_PREFIX = "jina-simulation:review-summary";
-const PROGRESS_STATE_MARKER = "jina-simulation:review-progress";
-const PROGRESS_STATE_RE = /<!--\s*jina-simulation:review-progress\s+({[\s\S]*?})\s*-->/;
+const SUMMARY_MARKER_PREFIX = "jina:review-summary";
+const PROGRESS_STATE_MARKER = "jina:review-progress";
+const PROGRESS_STATE_RE = /<!--\s*jina:review-progress\s+({[\s\S]*?})\s*-->/;
 
 export function reviewProgressCommentMarker(headSha: string, reviewRunId: string): string {
   return `<!-- ${SUMMARY_MARKER_PREFIX}:${headSha}:${reviewRunId} -->`;
@@ -60,7 +45,7 @@ export function initialReviewProgressState(reviewRunId: string, headSha: string)
     reviewRunId,
     headSha,
     status: "Queued",
-    findings: "Pending",
+    findings: "Pending"
   };
 }
 
@@ -91,7 +76,7 @@ export function parseReviewProgressCommentState(body: string | undefined): Revie
       headSha,
       status,
       findings,
-      ...(notice ? { notice } : {}),
+      ...(notice ? { notice } : {})
     };
   } catch {
     return undefined;
@@ -100,20 +85,18 @@ export function parseReviewProgressCommentState(body: string | undefined): Revie
 
 export function mergeReviewProgressState(
   existing: ReviewProgressCommentState | undefined,
-  update: ReviewProgressUpdate,
+  update: ReviewProgressUpdate
 ): ReviewProgressCommentState {
   const current = existing?.reviewRunId === update.reviewRunId ? existing : undefined;
   const terminalDowngrade =
-    current &&
-    isTerminalStatus(current.status) &&
-    (!update.status || !isTerminalStatus(update.status));
+    current && isTerminalStatus(current.status) && (!update.status || !isTerminalStatus(update.status));
   return {
     ...(current ?? initialReviewProgressState(update.reviewRunId, update.headSha)),
     reviewRunId: update.reviewRunId,
     headSha: update.headSha,
-    status: terminalDowngrade ? current.status : update.status ?? current?.status ?? "Queued",
-    findings: terminalDowngrade ? current.findings : update.findings ?? current?.findings ?? "Pending",
-    ...(update.notice ?? current?.notice ? { notice: update.notice ?? current?.notice } : {}),
+    status: terminalDowngrade ? current.status : (update.status ?? current?.status ?? "Queued"),
+    findings: terminalDowngrade ? current.findings : (update.findings ?? current?.findings ?? "Pending"),
+    ...((update.notice ?? current?.notice) ? { notice: update.notice ?? current?.notice } : {})
   };
 }
 
@@ -124,7 +107,7 @@ export function renderReviewProgressComment(state: ReviewProgressCommentState): 
     "## Jina Review",
     "",
     statusMessage(state),
-    "",
+    ""
   ];
   const dashboardUrl = isTerminalStatus(state.status) ? reviewRunUrl(state.reviewRunId) : undefined;
   if (dashboardUrl) {
@@ -133,12 +116,7 @@ export function renderReviewProgressComment(state: ReviewProgressCommentState): 
   if (state.notice) {
     lines.push(...providerFailureNotice(state.notice), "");
   }
-  lines.push(
-    "| Item | Status |",
-    "| --- | --- |",
-    `| Review | ${state.status} |`,
-    `| Findings | ${state.findings} |`,
-  );
+  lines.push("| Item | Status |", "| --- | --- |", `| Review | ${state.status} |`, `| Findings | ${state.findings} |`);
   return lines.join("\n").trim();
 }
 
@@ -153,11 +131,11 @@ export function reviewProgressUpdateForStageResults(input: {
     reviewRunId: input.reviewRunId,
     headSha: input.headSha,
     status: reviewStatusForStageResults(input),
-    findings: findingsStatusForStageResults(input.stageResults, input.failed, input.superseded),
+    findings: findingsStatusForStageResults(input.stageResults, input.failed, input.superseded)
   };
 }
 
-export async function upsertReviewProgressComment(input: {
+async function upsertReviewProgressComment(input: {
   token: string;
   repository: GitHubRepository;
   pullRequestNumber: number;
@@ -168,7 +146,7 @@ export async function upsertReviewProgressComment(input: {
   const comments = await listIssueComments({
     token: input.token,
     repository: input.repository,
-    issueNumber: input.pullRequestNumber,
+    issueNumber: input.pullRequestNumber
   });
   const existing = comments.find((comment) => {
     const state = parseReviewProgressCommentState(comment.body);
@@ -190,7 +168,7 @@ export async function upsertReviewProgressComment(input: {
       token: input.token,
       repository: input.repository,
       commentId: existing.id,
-      body,
+      body
     });
     return { id: updated.id, html_url: updated.html_url, reused: true, state };
   }
@@ -199,7 +177,7 @@ export async function upsertReviewProgressComment(input: {
     token: input.token,
     repository: input.repository,
     issueNumber: input.pullRequestNumber,
-    body,
+    body
   });
   return { id: created.id, html_url: created.html_url, reused: false, state };
 }
@@ -220,9 +198,9 @@ export async function safeUpsertReviewProgressComment(input: {
       update: {
         reviewRunId: input.payload.review_run_id,
         headSha: input.payload.head_sha,
-        ...input.update,
+        ...input.update
       },
-      createIfMissing: input.createIfMissing,
+      createIfMissing: input.createIfMissing
     });
     if (!comment) {
       logger.info("github_review_progress_comment_publish_skipped", {
@@ -232,7 +210,7 @@ export async function safeUpsertReviewProgressComment(input: {
         pull_request_number: input.payload.pull_request_number,
         head_sha: input.payload.head_sha,
         attempted_status: input.status,
-        reason: "progress comment does not exist and createIfMissing is false",
+        reason: "progress comment does not exist and createIfMissing is false"
       });
       return undefined;
     }
@@ -248,8 +226,8 @@ export async function safeUpsertReviewProgressComment(input: {
         github_comment_url: comment.html_url,
         reused_existing_comment: comment.reused,
         progress_status: comment.state.status,
-        progress_findings: comment.state.findings,
-      },
+        progress_findings: comment.state.findings
+      }
     });
     logger.info("github_review_progress_comment_published", {
       review_run_id: input.payload.review_run_id,
@@ -262,7 +240,7 @@ export async function safeUpsertReviewProgressComment(input: {
       github_comment_id: comment.id,
       github_comment_url: comment.html_url,
       progress_status: comment.state.status,
-      progress_findings: comment.state.findings,
+      progress_findings: comment.state.findings
     });
     return comment;
   } catch (error) {
@@ -274,7 +252,7 @@ export async function safeUpsertReviewProgressComment(input: {
       pull_request_number: input.payload.pull_request_number,
       head_sha: input.payload.head_sha,
       status: input.status,
-      error: message,
+      error: message
     });
     await postReviewEvent({
       reviewRunId: input.payload.review_run_id,
@@ -285,8 +263,8 @@ export async function safeUpsertReviewProgressComment(input: {
         pull_request_number: input.payload.pull_request_number,
         head_sha: input.payload.head_sha,
         attempted_status: input.status,
-        error: message,
-      },
+        error: message
+      }
     });
     return undefined;
   }
@@ -312,7 +290,7 @@ function reviewStatusForStageResults(input: {
 function findingsStatusForStageResults(
   stageResults: ReviewStageResult[],
   failed: boolean,
-  superseded: boolean,
+  superseded: boolean
 ): ReviewFindingsStatus {
   if (failed || superseded) {
     return "Unavailable";
@@ -382,25 +360,21 @@ function reviewProgressNotice(value: unknown): ReviewProgressNotice | undefined 
   ) {
     return undefined;
   }
-  const provider =
-    notice.provider === "codex" || notice.provider === "byok"
-      ? notice.provider
-      : "unknown";
+  if (notice.provider !== "codex" && notice.provider !== "byok") {
+    return undefined;
+  }
   const quotaReason =
-    notice.quotaReason === "exhausted" || notice.quotaReason === "rate_limit"
-      ? notice.quotaReason
-      : undefined;
+    notice.quotaReason === "exhausted" || notice.quotaReason === "rate_limit" ? notice.quotaReason : undefined;
   return {
     kind: notice.kind,
     category: notice.category,
-    provider,
-    ...(quotaReason ? { quotaReason } : {}),
+    provider: notice.provider,
+    ...(quotaReason ? { quotaReason } : {})
   };
 }
 
 function providerFailureNotice(notice: ReviewProgressNotice): string[] {
-  const provider =
-    notice.provider === "codex" ? "Codex" : "The selected model provider";
+  const provider = notice.provider === "codex" ? "Codex" : "The selected model provider";
   const reason = {
     quota:
       notice.provider === "codex"
@@ -412,7 +386,7 @@ function providerFailureNotice(notice: ReviewProgressNotice): string[] {
         : `${provider} has no available quota, credits, or rate-limit capacity.`,
     authentication: `${provider} rejected its credentials.`,
     model: `The selected model is unavailable or unsupported by ${notice.provider === "codex" ? "Codex" : "its provider"}.`,
-    availability: `${provider} is currently unavailable.`,
+    availability: `${provider} is currently unavailable.`
   }[notice.category];
   const action = {
     quota:
@@ -420,20 +394,18 @@ function providerFailureNotice(notice: ReviewProgressNotice): string[] {
         ? "Wait for the limit to reset, choose another provider, or enable managed fallback."
         : notice.provider === "byok"
           ? "Add credits, raise the provider limit, or wait for its rate limit to reset, then retry."
-          : "Check the provider's credits and limits or wait for its rate limit to reset, then retry.",
+          : "Add credits, raise the provider limit, or wait for its rate limit to reset, then retry.",
     authentication:
-      notice.provider === "codex"
-        ? "Reconnect Codex, then retry."
-        : "Update the provider API key, then retry.",
+      notice.provider === "codex" ? "Reconnect Codex, then retry." : "Update the provider API key, then retry.",
     model: "Choose a supported model, then retry.",
-    availability: "Retry later, choose another provider, or enable managed fallback.",
+    availability: "Retry later, choose another provider, or enable managed fallback."
   }[notice.category];
   return [
     "### Model provider action required",
     "",
     `${reason} Managed fallback is disabled, so Jina stopped without running the review.`,
     "",
-    `${action} [Update model settings](${modelSettingsUrl()}).`,
+    `${action} [Update model settings](${modelSettingsUrl()}).`
   ];
 }
 

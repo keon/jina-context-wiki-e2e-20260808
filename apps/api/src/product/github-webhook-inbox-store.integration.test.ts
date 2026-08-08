@@ -23,12 +23,12 @@ const productMigration = fileURLToPath(new URL("./migrate.js", import.meta.url))
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
 test(
-  "Postgres GitHub inbox deduplicates, orders, fences leases, and filters canaries",
+  "Postgres GitHub inbox deduplicates, orders, and fences leases",
   { skip: !databaseUrl },
   async () => {
-    const previousProductUrl = process.env.JINA_PRODUCT_DATABASE_URL;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
     const previousProductMode = process.env.JINA_PRODUCT_DATABASE_MODE;
-    process.env.JINA_PRODUCT_DATABASE_URL = databaseUrl;
+    process.env.DATABASE_URL = databaseUrl;
     process.env.JINA_PRODUCT_DATABASE_MODE = "url";
     const control = new Pool({
       connectionString: databaseUrl,
@@ -96,36 +96,20 @@ test(
       assert.equal(retainedProviderId.rows[0]?.provider_delivery_id, "3835545665537048577");
 
       await repository.capture(capture("delivery-2", "c".repeat(64), 42));
-      const captureOnly = await repository.claim({
-        leaseMs: 120_000,
-        canaryRepositories: new Set(["omxyz/private-repo"]),
-      });
-      assert.equal(captureOnly, undefined);
-
-      const captureOnlyControl = (await repository.snapshot()).control;
-      const processControl = await repository.transitionMode({
-        expectedGeneration: captureOnlyControl.generation,
-        mode: "capture_and_process",
-        updatedBy: "integration-test",
-      });
       const firstLease = await repository.claim({
         leaseMs: 120_000,
-        canaryRepositories: new Set(),
       });
       assert.equal(firstLease?.deliveryId, "delivery-1");
-      assert.equal(firstLease?.leaseGeneration, processControl.generation);
       assert.equal(
         await repository.claim({
           deliveryId: "delivery-2",
           leaseMs: 120_000,
-          canaryRepositories: new Set(),
         }),
         undefined,
       );
       await repository.complete({ lease: firstLease, processedWorkflowId: "workflow-1" });
       const secondLease = await repository.claim({
         leaseMs: 120_000,
-        canaryRepositories: new Set(),
       });
       assert.equal(secondLease?.deliveryId, "delivery-2");
 
@@ -137,7 +121,6 @@ test(
       const replacementLease = await repository.claim({
         deliveryId: "delivery-2",
         leaseMs: 120_000,
-        canaryRepositories: new Set(),
       });
       assert.equal(replacementLease?.deliveryId, "delivery-2");
       assert.notEqual(replacementLease?.leaseId, secondLease?.leaseId);
@@ -147,33 +130,10 @@ test(
       );
       await repository.complete({ lease: replacementLease, processedWorkflowId: "workflow-2" });
 
-      await repository.capture(capture("delivery-non-canary", "d".repeat(64), 100, "acme/other"));
-      await repository.capture(capture("delivery-canary", "e".repeat(64), 101));
-      const beforeCanary = (await repository.snapshot()).control;
-      await repository.transitionMode({
-        expectedGeneration: beforeCanary.generation,
-        mode: "canary_only",
-        updatedBy: "integration-test",
-      });
-      const canaryLease = await repository.claim({
-        leaseMs: 120_000,
-        canaryRepositories: new Set(["OMXYZ/PRIVATE-REPO"]),
-      });
-      assert.equal(canaryLease?.deliveryId, "delivery-canary");
-      await repository.complete({ lease: canaryLease });
-      assert.equal(
-        await repository.claim({
-          leaseMs: 120_000,
-          canaryRepositories: new Set(["omxyz/private-repo"]),
-        }),
-        undefined,
-      );
-
       await repository.capture(capture("delivery-poison", "f".repeat(64), 202));
       await repository.capture(capture("delivery-after-poison", "1".repeat(64), 202));
       const poisonLease = await repository.claim({
         leaseMs: 120_000,
-        canaryRepositories: new Set(["omxyz/private-repo"]),
       });
       assert.equal(poisonLease?.deliveryId, "delivery-poison");
       await repository.deadLetter({
@@ -182,15 +142,14 @@ test(
       });
       const successorLease = await repository.claim({
         leaseMs: 120_000,
-        canaryRepositories: new Set(["omxyz/private-repo"]),
       });
       assert.equal(successorLease?.deliveryId, "delivery-after-poison");
       await repository.complete({ lease: successorLease });
 
       const snapshot = await repository.snapshot();
-      assert.equal(snapshot.pending, 1);
+      assert.equal(snapshot.pending, 0);
       assert.equal(snapshot.leased, 0);
-      assert.equal(snapshot.completed, 4);
+      assert.equal(snapshot.completed, 3);
       assert.equal(snapshot.deadLetter, 1);
       assert.deepEqual(snapshot.deadLetterByErrorCode, {
         webhook_inbox_ciphertext_invalid: 1,
@@ -217,12 +176,11 @@ test(
           },
         ],
       );
-      assert.equal(snapshot.priorGenerationLeases, 0);
-      assert.deepEqual(snapshot.activeKeyVersions, { "7": 1 });
+      assert.deepEqual(snapshot.activeKeyVersions, {});
       assert.deepEqual(snapshot.deadLetterKeyVersions, { "7": 1 });
     } finally {
       await getPool().end().catch(() => undefined);
-      restoreEnvironment("JINA_PRODUCT_DATABASE_URL", previousProductUrl);
+      restoreEnvironment("DATABASE_URL", previousDatabaseUrl);
       restoreEnvironment("JINA_PRODUCT_DATABASE_MODE", previousProductMode);
       await control.end();
     }
@@ -254,7 +212,6 @@ async function migrateDatabase(url: string): Promise<void> {
     ...process.env,
     DATABASE_URL: url,
     TEST_DATABASE_URL: url,
-    JINA_PRODUCT_DATABASE_URL: url,
     JINA_PRODUCT_DATABASE_MODE: "url",
   };
   await execFileAsync(process.execPath, [runtimeMigration], { env: environment });

@@ -10,25 +10,17 @@ import {
   productDatabaseConnectionString,
 } from "./db.js";
 
-test("the absorbed product database uses its namespaced URL instead of the Context database URL", () => {
+test("local product processes use the shared DATABASE_URL", () => {
   assert.equal(
     productDatabaseConnectionString({
-      JINA_PRODUCT_DATABASE_URL: "postgresql://product.example/jina_product",
-      DATABASE_URL: "postgresql://context.example/jina_context",
+      DATABASE_URL: "postgresql://database.example/jina",
     }),
-    "postgresql://product.example/jina_product",
-  );
-});
-
-test("the product database keeps DATABASE_URL as a local migration compatibility fallback", () => {
-  assert.equal(
-    productDatabaseConnectionString({ DATABASE_URL: "postgresql://localhost/jina_product" }),
-    "postgresql://localhost/jina_product",
+    "postgresql://database.example/jina",
   );
   assert.equal(productDatabaseConnectionString({}), undefined);
 });
 
-test("shared mode uses the v2 socket credentials and ignores legacy product URLs", () => {
+test("shared mode uses socket credentials and ignores URL configuration", () => {
   assert.deepEqual(
     productDatabaseConfig({
       JINA_PRODUCT_DATABASE_MODE: "shared",
@@ -36,7 +28,7 @@ test("shared mode uses the v2 socket credentials and ignores legacy product URLs
       DB_USER: "jina_v2_staging_app",
       DB_PASS: "secret",
       DB_NAME: "jina_staging",
-      JINA_PRODUCT_DATABASE_URL: "postgresql://jina_v1_staging_app@legacy/jina_staging",
+      DATABASE_URL: "postgresql://ignored.example/jina",
     }),
     {
       host: "/cloudsql/staging:us-east1:jina-db-staging",

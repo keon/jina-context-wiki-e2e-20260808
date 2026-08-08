@@ -1,16 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyCommand, createEmptyBoardState, supersedeEpochTasks, type BoardState } from "@jina/board";
-import { createContextBoardBuild } from "@jina/context-engine";
-import { compactTerminalContextBuildHistory, compactTerminalEpochHistory } from "./context-board-compaction.js";
-import { applyPrReviewPlan, planPrReview } from "./legacy-review-pipeline.js";
+import { applyCommand, createEmptyBoardState, type BoardState } from "@jina/board";
+import {
+  CONTEXT_WORKFLOW_CONTRACT,
+  CONTEXT_WORKFLOW_SCHEMA_REVISION,
+  createContextWorkflowBoardBuild
+} from "@jina/context-engine";
+import { compactTerminalContextBuildHistory } from "./context-board-compaction.js";
+
+const workflowMetadata = {
+  contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+  contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+  promptContractVersion: "context-page-workflow-1",
+  validatorVersion: "context-page-validator-1",
+  pageIndexVersion: "pageindex-local-1",
+  executionProfileDigest: "a".repeat(64)
+} as const;
 
 test("compaction retains active builds and only the newest terminal history per tenant", () => {
   let state = createEmptyBoardState();
   const roots: string[] = [];
   for (let index = 0; index < 4; index += 1) {
     const at = `2026-08-02T00:00:0${index}.000Z`;
-    const created = createContextBoardBuild(state, {
+    const created = createContextWorkflowBoardBuild(state, {
+      ...workflowMetadata,
       tenantId: "tenant-a",
       repository: "acme/repo",
       ref: `refs/heads/build-${index}`,
@@ -45,7 +58,8 @@ test("compaction retains active builds and only the newest terminal history per 
     }
     if (index < 3) state = terminal(state, created.buildTaskId, at);
   }
-  const otherTenant = createContextBoardBuild(state, {
+  const otherTenant = createContextWorkflowBoardBuild(state, {
+    ...workflowMetadata,
     tenantId: "tenant-b",
     repository: "acme/repo",
     ref: "main",
@@ -131,57 +145,3 @@ function terminal(state: BoardState, taskId: string, now: string): BoardState {
   assert.equal(result.accepted, true);
   return result.state;
 }
-
-test("terminal epoch history compaction drops settled review subtrees but keeps roots and live epochs", () => {
-  const planAt = "2026-07-01T00:00:00.000Z";
-  let state = createEmptyBoardState();
-  const supersededPlan = planPrReview({
-    tenantId: "tenant-a",
-    repository: "acme/app",
-    pullRequestNumber: 7,
-    headSha: "a".repeat(40),
-    epoch: 1,
-    needsExternalContext: false
-  });
-  state = applyPrReviewPlan(state, supersededPlan, {
-    actor: { type: "system", id: "test" },
-    now: planAt
-  });
-  const activePlan = planPrReview({
-    tenantId: "tenant-a",
-    repository: "acme/app",
-    pullRequestNumber: 7,
-    headSha: "b".repeat(40),
-    epoch: 2,
-    needsExternalContext: false
-  });
-  state = applyPrReviewPlan(state, activePlan, {
-    actor: { type: "system", id: "test" },
-    now: planAt
-  });
-  state = supersedeEpochTasks(state, 2, planAt, (task) => task.metadata.repository === "acme/app");
-
-  const supersededChildIds = state.tasks
-    .filter((task) => task.parentTaskId === supersededPlan.rootTaskId)
-    .map((task) => task.id);
-  assert.ok(supersededChildIds.length > 0);
-
-  // Inside the retention window nothing is pruned.
-  const early = compactTerminalEpochHistory(state, "2026-07-02T00:00:00.000Z");
-  assert.equal(early.prunedBuilds, 0);
-
-  const compacted = compactTerminalEpochHistory(state, "2026-07-31T00:00:00.000Z");
-  assert.equal(compacted.prunedBuilds, 1);
-  const retainedIds = new Set(compacted.state.tasks.map((task) => task.id));
-  // The superseded root survives as an idempotency tombstone; its subtree is gone.
-  assert.ok(retainedIds.has(supersededPlan.rootTaskId));
-  for (const childId of supersededChildIds) assert.ok(!retainedIds.has(childId));
-  // The active epoch is untouched.
-  assert.ok(retainedIds.has(activePlan.rootTaskId));
-  assert.ok(compacted.state.tasks.some((task) => task.parentTaskId === activePlan.rootTaskId));
-  assert.ok(compacted.state.outbox.every((message) => retainedIds.has(message.taskId)));
-  assert.equal(
-    compacted.state.events.some((event) => event.taskId !== undefined && !retainedIds.has(event.taskId)),
-    false
-  );
-});

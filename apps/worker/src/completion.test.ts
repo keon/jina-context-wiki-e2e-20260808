@@ -22,6 +22,7 @@ test("paused drain workers stay healthy without issuing Board claims", async (co
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       JINA_WORKER_CLAIM_MODE: "paused",
       WORKER_POLL_INTERVAL_MS: "20"
@@ -66,6 +67,7 @@ test("Context quota claim backpressure remains healthy and poll-cadenced", async
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "40",
       WORKER_API_TIMEOUT_MS: "1000"
@@ -117,6 +119,7 @@ test("claim errors other than Context quota backpressure remain health failures"
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "40",
       WORKER_API_TIMEOUT_MS: "1000"
@@ -185,8 +188,8 @@ test("malformed relational review claims are fenced terminally instead of leakin
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       TRIGGER_SECRET_KEY: "tr_dev_test",
-      JINA_REVIEW_RUN_TOPIC_MODE: "relational",
       WORKER_TOPICS: "run-review",
       WORKER_POLL_INTERVAL_MS: "20",
       WORKER_API_TIMEOUT_MS: "1000"
@@ -267,6 +270,7 @@ test("a failed Context completion releases exactly its own lease", async (contex
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "20",
       WORKER_HEARTBEAT_INTERVAL_MS: "1000",
@@ -339,6 +343,7 @@ test("a stale completion fence is an expected lease loss and does not poison wor
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "20",
       WORKER_HEARTBEAT_INTERVAL_MS: "1000",
@@ -398,13 +403,7 @@ test("Board context API timeout requests a bounded retry with diagnostics", asyn
             commitSha: "a".repeat(40),
             contextBuildId: "cb_completion_timeout",
             planArtifact: artifact("publication-plan"),
-            dependencyResults: [
-              {
-                taskId: "certification",
-                taskType: "certify-context-release",
-                result: { version: 1, outputArtifact: artifact("certification") }
-              }
-            ]
+            dependencyResults: []
           }
         }
       });
@@ -434,6 +433,7 @@ test("Board context API timeout requests a bounded retry with diagnostics", asyn
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "10",
       WORKER_API_TIMEOUT_MS: "40",
@@ -494,13 +494,7 @@ test("a worker voluntarily releases a Context lease after renewal rejects it", a
             commitSha: "a".repeat(40),
             contextBuildId: "cb_lease_loss",
             planArtifact: artifact("publication-plan"),
-            dependencyResults: [
-              {
-                taskId: "certification",
-                taskType: "certify-context-release",
-                result: { version: 1, outputArtifact: artifact("certification") }
-              }
-            ]
+            dependencyResults: []
           }
         }
       });
@@ -536,6 +530,7 @@ test("a worker voluntarily releases a Context lease after renewal rejects it", a
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "10",
       WORKER_HEARTBEAT_INTERVAL_MS: "20",
@@ -601,6 +596,7 @@ test("SIGTERM keeps the worker alive until its fenced Context lease release sett
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "10",
       WORKER_HEARTBEAT_INTERVAL_MS: "1000",
@@ -679,6 +675,7 @@ test("SIGTERM drains a delayed successful claim without executing it and release
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${mockPort}`,
       INTERNAL_API_TOKEN: "test-token",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "test-product-token",
       WORKER_TOPICS: "run-context-publication",
       WORKER_POLL_INTERVAL_MS: "10",
       WORKER_API_TIMEOUT_MS: "2000",
@@ -811,13 +808,7 @@ function publicationWork(taskId: string): Record<string, unknown> {
         commitSha: "a".repeat(40),
         contextBuildId: `cb_${taskId}`,
         planArtifact: artifact("publication-plan"),
-        dependencyResults: [
-          {
-            taskId: `certification_${taskId}`,
-            taskType: "certify-context-release",
-            result: { version: 1, outputArtifact: artifact("certification") }
-          }
-        ]
+        dependencyResults: []
       }
     }
   };

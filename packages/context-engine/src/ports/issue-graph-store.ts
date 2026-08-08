@@ -40,7 +40,7 @@ export interface BoardIssueGraphPublicationCommit {
   };
 }
 
-/** Production fence: durable Board authority and the current pointer commit together. */
+/** Production fence: durable Board authority and immutable release commit together. */
 export interface BoardIssueGraphPublicationTransactionPort {
   publishIssueGraphAtomically(input: BoardIssueGraphPublicationCommit): Promise<IssueGraphRelease>;
 }

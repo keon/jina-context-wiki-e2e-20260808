@@ -378,7 +378,6 @@ export async function runReviewRuntimeStage(
         status: result.status,
         summary: result.summary,
         findings_count: result.findings.length,
-        comments_count: result.commentsCount ?? result.comments?.length ?? 0,
         publishable_findings_count: reviewRequest.publishableFindings.length,
         inline_comment_count: reviewRequest.comments.length,
         file_comment_count: reviewRequest.fileComments.length,
@@ -386,7 +385,6 @@ export async function runReviewRuntimeStage(
         low_confidence_findings_held_back: reviewRequest.lowConfidenceFindings.length,
         areas_count: result.areas.length,
         tasks_count: result.areas.reduce((sum, area) => sum + area.tasks.length, 0),
-        blocked_count: result.areas.reduce((sum, area) => sum + area.blocked.length, 0),
         changed_files: result.changedFiles,
         diff_stat: result.diffStat,
         runtime_review: runtimeReviewEventPayload(result, reviewRequest),
@@ -441,8 +439,8 @@ export async function runReviewRuntimeStage(
     // Harness runs (source: "harness") run native Codex on the author's ChatGPT
     // subscription with no capture proxy, so result.usage_records is empty and
     // postRuntimeUsage short-circuits (nothing is posted). key_source is therefore
-    // never reconciled server-side for harness runs -- acceptable for v1 since
-    // those runs are billed infra-only, not per-usage-row.
+    // never reconciled server-side for harness runs; those runs are billed
+    // infra-only, not per-usage-row.
     const usageFallback = await postRuntimeUsage({
       reviewRunId: payload.review_run_id,
       triggerRunId,
@@ -948,13 +946,6 @@ function runtimeReviewEventPayload(
       areaTitle: area.title
     }))
   );
-  const blocked = result.areas.flatMap((area) =>
-    area.blocked.map((item) => ({
-      ...item,
-      areaId: area.areaId,
-      areaTitle: area.title
-    }))
-  );
   const nonIssues = result.areas.flatMap((area) =>
     area.nonIssues.map((item) => ({
       ...item,
@@ -971,10 +962,7 @@ function runtimeReviewEventPayload(
     // (up to 12MB), CodeGraph dump, raw PR-thread bodies, and transient sandbox paths -- none
     // of which any consumer reads. The dashboard's only needs (commit/changedFiles/diffStat)
     // are already emitted top-level below.
-    intent: result.intent,
     plan: result.plan,
-    investigations: result.investigations ?? result.areas,
-    finalReview: result.finalReview,
     readiness: result.readiness,
     publication: result.publication,
     jinaConfiguration: result.jinaConfiguration,
@@ -984,19 +972,15 @@ function runtimeReviewEventPayload(
     areas: result.areas,
     tasks,
     findings: result.findings,
-    comments: result.comments ?? [],
-    blocked,
     nonIssues,
     areasCount: result.areas.length,
     tasksCount: tasks.length,
     findingsCount: result.findings.length,
-    commentsCount: result.commentsCount ?? result.comments?.length ?? 0,
     publishableFindingsCount: reviewRequest.publishableFindings.length,
     inlineCommentCount: reviewRequest.comments.length,
     fileCommentCount: reviewRequest.fileComments.length,
     unanchoredFindingsCount: reviewRequest.unanchoredFindings.length,
     lowConfidenceFindingsHeldBack: reviewRequest.lowConfidenceFindings.length,
-    blockedCount: blocked.length,
     nonIssuesCount: nonIssues.length,
     error: result.error
   };
@@ -1018,8 +1002,8 @@ function publicationPlanLog(
   reviewRequest: ReturnType<typeof buildRuntimeReviewRequest>
 ): Record<string, unknown> {
   return {
-    merge_score: result.readiness?.score ?? result.finalReview?.readiness.score,
-    merge_recommendation: result.readiness?.recommendation ?? result.finalReview?.readiness.recommendation,
+    merge_score: result.readiness?.score,
+    merge_recommendation: result.readiness?.recommendation,
     summarized_issue_count: result.publication?.issues.length ?? 0,
     summarized_area_count: result.publication?.areaSummaries.length ?? 0,
     raw_finding_count: result.findings.length,

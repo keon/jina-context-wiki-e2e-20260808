@@ -1,271 +1,168 @@
-# Data models
+# Current database model
 
-This document describes the active Context model. Executable definitions in
-`packages/board`, `apps/api/src/context-workflow-runtime.ts`,
-`packages/context-engine/src/workflow/context-workflow.ts`, and
-`packages/db/src/context/schema.ts` are authoritative.
+This document describes the effective schema after the ordered migration tail,
+not every table that appeared in historical migration files. The authoritative
+sources are:
 
-## Runtime workflow
+- product migrations in `apps/api/product-migrations`;
+- runtime and relational Board DDL in `packages/db/src`;
+- Context DDL and roles in `packages/db/src/context`.
 
-The durable task board records one `build-context` aggregate, one manual graph latch,
-and four dispatchable task types: input snapshot, page planning, per-page construction,
-and publication. The root carries tenant/repository/ref/request identity and monotonic
-`refSequence`. Dispatchable children carry only bounded orchestration metadata, content
-digests, and immutable artifact references. Research, writing, audit, repair, and
-PageIndex construction are checkpointed phases inside those durable tasks rather than
-separate queue routes.
+Migration `0037_collapse_context_schema.sql` is intentionally destructive. It
+removes the pre-Board Context ingestion/projector database and does not preserve
+a mixed-schema or pre-migration runtime.
 
-The fresh PostgreSQL schema does not contain the legacy `pipeline_builds`,
-`pipeline_stages`, `derivation_progress`, or `derivation_orchestration` tables. Their
-rebuildable data has no compatibility contract. The reviewed reset must still be run
-against the intended production database before rollout.
+## Inventory
 
-For each tenant/repository/ref:
+A fresh PostgreSQL 17 migration smoke test produces **39 application tables**:
 
-- sequences are allocated under an advisory lock;
-- only the newest admitted sequence may become current;
-- every worker claim is fenced by task ID, attempt, lease ID, expiry, and an unguessable
-  write-fence token;
-- a delayed older checkpoint cannot publish over a newer one; and
-- dependency-ready tasks are claimable concurrently.
+| Schema         | Count | Purpose                                                                         |
+| -------------- | ----: | ------------------------------------------------------------------------------- |
+| `public`       |    21 | product identity, GitHub intake, reviews, settings, and billing                 |
+| `jina_runtime` |    11 | relational Board, Context snapshot Board, delivery dedupe, and release controls |
+| `jina_context` |     7 | current Context catalogs, causal releases, ACL, checkpoints, quotas, and tokens |
 
-Board rows never contain prompts, page bodies, evidence bundles, transcripts, reports,
-or audit payloads. Those values are immutable GCS objects under the same build scope.
-The dashboard projection removes active lease IDs and fence tokens.
+### `public` (21)
 
-The hot Board snapshot retains every active Context graph and the 20 most recently
-updated terminal Context graphs per tenant. Older execution children are rebuildable
-operational history and are removed with their dependencies, outbox, and task events.
-Their lightweight terminal roots remain as request-idempotency and monotonic-ref-sequence
-tombstones. This retention does not remove published releases, current documents,
-immutable GCS artifacts, phase checkpoints, quota ledgers, or query indexes. Bounding
-the hot history prevents unrelated tenants and current worker leases from paying an
-ever-growing serialization cost for obsolete failed and canceled builds.
+`clerk_tenant_memberships`, `context_execution_profiles`, `dashboard_sessions`,
+`github_webhook_inbox`, `github_webhook_redelivery_requests`,
+`installations`, `pull_requests`,
+`repositories`, `review_findings`, `review_llm_usage`, `review_run_billing`,
+`review_run_events`, `review_runs`, `schema_migrations`,
+`tenant_billing_policy`, `tenant_integrations`,
+`tenant_model_settings`, `tenants`, `user_identities`, `user_integrations`, and
+`users`.
 
-Snapshot mutations use a ten-second advisory-lock timeout. Contention therefore returns
-the stable `board_busy` retry signal instead of waiting long enough to invalidate a
-worker lease. Worker release identity is still checked inside the same transaction after
-the lock is acquired.
+### `jina_runtime` (11)
 
-## Canonical context records
+`api_state`, `board_attempts`, `board_dependencies`, `board_effect_receipts`,
+`board_events`, `board_tasks`, `board_workflows`,
+`causal_graph_release_control`, `github_deliveries`, `release_control`, and
+`schema_migrations`.
 
-### Evidence
+### `jina_context` (7)
 
-`evidence_records` stores immutable citable bodies. An evidence anchor contains:
+| Table                       | Current responsibility                                                                        |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| `repositories`              | Context repository identity and default ref                                                   |
+| `repository_access`         | direct principal permission; replaces observation and ACL projection tables                   |
+| `context_releases`          | one validated catalog JSON document per Board release, plus its one-time PageIndex attachment |
+| `issue_graph_releases`      | immutable causal graph release artifacts                                                      |
+| `context_phase_checkpoints` | durable artifacts for phases embedded inside current page-oriented tasks                      |
+| `context_quota_ledgers`     | one quota ledger per tenant                                                                   |
+| `api_tokens`                | hashed tenant API-token credentials and revocation state                                      |
 
-```text
-tenant + repository + source type + source ID + content digest
+There are no `jina_context` views. “Current” Context and causal releases are
+derived by ordering immutable releases by `ref_sequence`; no mutable current
+pointer table exists.
+
+## Entity relationships
+
+### Product identity, GitHub, and review
+
+```mermaid
+erDiagram
+    USERS ||--o{ USER_IDENTITIES : has
+    USERS ||--o{ USER_INTEGRATIONS : connects
+    USERS ||--o{ DASHBOARD_SESSIONS : opens
+    USERS ||--o{ CLERK_TENANT_MEMBERSHIPS : joins_via_clerk
+    USERS ||--o| TENANTS : owns_personal_tenant
+
+    TENANTS ||--o{ CLERK_TENANT_MEMBERSHIPS : contains
+    TENANTS ||--o{ TENANT_INTEGRATIONS : configures
+    TENANTS ||--o| TENANT_MODEL_SETTINGS : configures
+    TENANTS ||--o| TENANT_BILLING_POLICY : bills_by
+    TENANTS ||--o{ INSTALLATIONS : owns
+    TENANTS ||--o{ CONTEXT_EXECUTION_PROFILES : executes
+
+    INSTALLATIONS ||--o{ REPOSITORIES : grants
+    REPOSITORIES ||--o{ PULL_REQUESTS : contains
+    PULL_REQUESTS ||--o{ REVIEW_RUNS : reviewed_by
+    REPOSITORIES ||--o{ REVIEW_RUNS : runs
+    TENANTS ||--o{ REVIEW_RUNS : scopes
+
+    BOARD_WORKFLOWS ||--o| REVIEW_RUNS : orchestrates
+    REVIEW_RUNS ||--o{ REVIEW_FINDINGS : produces
+    REVIEW_RUNS ||--o{ REVIEW_LLM_USAGE : consumes
+    REVIEW_RUNS ||--o| REVIEW_RUN_BILLING : bills
+    REVIEW_RUNS ||--o{ REVIEW_RUN_EVENTS : records
 ```
 
-It may also carry:
+`repositories` also has a composite `(tenant_id, installation_id)` relationship
+to `installations`, preventing a repository from crossing installation tenants.
+Inbox and redelivery rows are logically joined by their delivery identifiers;
+they deliberately do not own the workflow graph. The inbox is always processed
+by the current Board workflow; there is no cutover-mode control table.
 
-```text
-commit SHA + path/URL + line range + JSON pointer + observation time
+### Relational Board
+
+```mermaid
+erDiagram
+    BOARD_WORKFLOWS ||--o{ BOARD_TASKS : contains
+    BOARD_TASKS o|--o{ BOARD_TASKS : parent_of
+    BOARD_WORKFLOWS ||--o{ BOARD_DEPENDENCIES : scopes
+    BOARD_TASKS ||--o{ BOARD_DEPENDENCIES : task
+    BOARD_TASKS ||--o{ BOARD_DEPENDENCIES : prerequisite
+    BOARD_TASKS ||--o{ BOARD_ATTEMPTS : attempts
+    BOARD_ATTEMPTS ||--o{ BOARD_EFFECT_RECEIPTS : records_external_effect
+    BOARD_WORKFLOWS ||--o{ BOARD_EVENTS : emits
+    BOARD_TASKS o|--o{ BOARD_EVENTS : emits
+    BOARD_ATTEMPTS o|--o{ BOARD_EVENTS : emits
 ```
 
-`evidence_checkpoints` binds a selected evidence set to an exact ref, commit,
-`ref_sequence`, provider frontier, ACL fingerprint, and explicit complete/partial source
-state.
+All Board child relationships carry tenant and workflow keys as composite
+foreign keys. This makes it impossible to connect tasks, dependencies, attempts,
+receipts, or events across tenants or workflows. `api_state` remains the single
+transactional JSON Board snapshot used by Context workflows. `release_control`
+and `causal_graph_release_control` fence deployments and worker generations;
+`github_deliveries` deduplicates non-product webhook intake.
 
-`evidence_checkpoint_records` and `evidence_checkpoint_manifest` record checkpoint
-membership. The manifest maps repository paths to Git blob SHAs, content digests, entry
-types, and content availability.
+### Context and causal graph
 
-Git objects and GitHub observations are normalized for storage and citation validation,
-but they do not form a public retrieval corpus.
-
-### Derived context
-
-`derivation_runs` records the model, prompt/schema versions, cache identity, raw result,
-status, and diagnostics.
-
-`knowledge_documents` provides stable logical identities. Despite the historical table
-name, these rows are repository context documents. `knowledge_document_revisions` stores
-immutable Markdown revisions for one exact ref and commit.
-`knowledge_revision_evidence` stores each revision's ordered original-evidence citations.
-
-Every published revision has:
-
-- a logical ID and kind;
-- title, summary, and Markdown body;
-- ref, commit, and grounded scope;
-- generator, model, prompt, and schema identity;
-- confidence and a body digest; and
-- at least one citation that resolves at its checkpoint.
-
-Generated context never cites another generated revision as evidence. Citations terminate
-at blobs, commits, issues, pull requests, documents, or immutable observations.
-
-`knowledge_revision_events` is an append-only governance log. Rejection, invalidation,
-supersession, redaction, or erasure excludes a revision from later releases. Context body
-editing is not supported.
-
-### Derivation checkpoints
-
-Board tasks and immutable artifacts are the checkpoint model. One
-`build-context-page` dispatchable task owns page writing, source-aware audit, and at
-most one repair/replacement-audit cycle. Board rows store status, dependencies,
-attempts, leases, fences, bounded digests, and artifact references. Page bodies,
-diagnostics, audit reports, research plans, publication plans, and repair drafts are
-immutable artifacts under the build scope.
-
-`context_phase_checkpoints` is the fine-grained retry index for those artifacts. Its
-tenant/task/phase/input-digest primary key makes recording first-writer-wins; the build
-index serves dashboard progress and recovery without reading or locking the global Board
-snapshot. Each row stores only scope, attempt, immutable artifact reference, and
-timestamp. The current Board lease remains the authority that may create a row.
-
-A valid page artifact is resumable but private. Replaying identical inputs and output
-digest is idempotent; a repair creates a new attempt/pass artifact instead of overwriting
-the previous bytes. Dependency results carry the latest-pass references forward.
-
-Research and publication plans contain evidence-backed subjects, maintenance questions,
-stable page IDs, deterministic repository-area coverage, and question-to-page mappings.
-Page results contain an accepted or omitted disposition and immutable evidence and
-generation fingerprints. The API validates every result envelope, artifact scope, and
-dependency reference before completing a Board task or expanding the graph. Independent
-artifact storage is intentional: plans, research, valid sibling pages, and audits
-survive worker or sandbox loss even when the build never publishes.
-
-Phase checkpoints resume retries of the same Board task. Ref-level durability is a
-separate scheduler concern: after a default-ref build has started, a newer push, issue,
-or manual request is stored as a `context.build_followup_requested` event on that build.
-The latest request is promoted only after the predecessor becomes terminal, using its
-published release as the next build's incremental seed. PR heads remain freshness-first
-and cancel stale previews. This division keeps checkpoint identity immutable while
-preventing ordinary default-branch movement from repeatedly restarting a cold build.
-
-## Immutable releases and disposable projections
-
-`index_generations` stores immutable release metadata: tenant, repository, ref, commit,
-checkpoint, publication state, capability state, input fingerprints, timestamps, and
-failure data.
-
-Verified page checkpoints may appear in build progress as they arrive, but they do not
-create queryable releases. One fenced publication task resolves all page dispositions,
-validates the complete snapshot, builds PageIndex, and atomically makes that release
-current. Current selection is the newest authorized completed release for a ref.
-
-Active derived-only projections are:
-
-| Projection                    | Purpose                                             |
-| ----------------------------- | --------------------------------------------------- |
-| `current_knowledge_revisions` | One eligible revision per logical context document  |
-| `context_documents`           | Derived document retrieval envelopes                |
-| `context_fragments`           | Chunked derived Markdown for lexical excerpt search |
-| `exact_index`                 | Exact titles, logical IDs, paths, and terms         |
-| `hierarchy_nodes`             | PageIndex-derived document/heading tree             |
-| `ref_manifest`                | Release-local citation/path metadata                |
-
-Dense retrieval and structural relations are disabled. The fresh schema contains only
-the active derived-context projections; no public API, MCP tool, index coordinator, or
-dashboard reads raw-source, provider, structural, dense, or answer-synthesis rows.
-
-## Artifact model
-
-Large immutable artifacts use a shared key function:
-
-```text
-context/tenants/<tenant>/repositories/<repository>/builds/<build>/<kind>/<name>
+```mermaid
+erDiagram
+    CONTEXT_REPOSITORIES ||--o{ REPOSITORY_ACCESS : authorizes
+    CONTEXT_REPOSITORIES ||--o{ CONTEXT_RELEASES : publishes
+    CONTEXT_REPOSITORIES ||--o{ ISSUE_GRAPH_RELEASES : publishes
 ```
 
-Kinds include:
+Those three relationships use the composite `(tenant_id, repository)` key.
+`context_phase_checkpoints` and `context_quota_ledgers` are tenant-scoped control
+records without a repository foreign key because checkpoints can be written
+before repository publication and quota rows cover all repositories in a tenant.
+`api_tokens` are tenant-scoped credentials but do not depend on a product user;
+the principal is stored as a normalized string so service principals remain
+valid.
 
-- `evidence-snapshot`;
-- `derivation-checkpoint` (research, plan, page, audit, repair, and publication objects);
-- `context-release`; and
-- `pageindex-tree`.
+## Current happy-path lifecycle
 
-The filesystem implementation is for local development. The GCS implementation uses
-create-only object generation preconditions, CRC32C transport validation, SHA-256 object
-metadata, and optional generation-pinned reads.
+1. Product GitHub intake persists the delivery and admits one relational
+   `board_workflow`; the product `review_runs` row references that workflow.
+2. The Board owns tasks, attempts, dependency resolution, effect receipts, and
+   events. Product result tables own review findings, usage, and billing.
+3. The Context JSON Board validates and certifies page-oriented output.
+4. Publication inserts one `context_releases` row containing the full query
+   catalog. PageIndex attaches once by updating that same row.
+5. Query reads select the latest attached release and hydrate its catalog in memory.
+6. Causal publication inserts an immutable `issue_graph_releases` row; current
+   state is the highest release sequence for the ref.
 
-## API tokens and ACLs
+## Removed storage
 
-`api_tokens` stores:
+Migration `0037_collapse_context_schema.sql` drops:
 
-```text
-id
-tenant_id
-principal_id
-name
-secret_hash
-scopes
-created_at
-created_by
-expires_at
-last_used_at
-revoked_at
-revoked_by
-```
+- the unused product `bots` table (dashboard bot status is derived from review runs)
+  and the completed one-time Clerk membership bootstrap ledger;
+- the retired scenario lineage, scenario version/step, simulation, and
+  simulation-step tables;
+- mutable current-release pointer tables and publication staging tables;
+- Context ingestion observations, Git object mirrors, structural/identity tables,
+  evidence and knowledge normalization tables;
+- projector queues, generations, checkpoints, outbox, materialized query tables,
+  ACL projections, and compatibility views;
+- capability roles used only by that deleted pipeline.
 
-The plaintext `jina_atk_…` token is returned only once. Verification hashes the presented
-token, resolves its tenant and principal from the row, rejects expired/revoked rows, and
-then enforces route scope and repository ACL.
-
-Repository access is represented by `repository_acl_observations` and disposable ACL
-projections. Every release persists the repository-access fingerprint used to build it.
-The fingerprint is rechecked during publication and authorization.
-
-## Invariants
-
-- Repository-owned keys and foreign keys include tenant scope.
-- Full commit SHAs and content digests are validated.
-- Evidence bodies are immutable.
-- Line ranges require a repository path and valid inclusive bounds.
-- JSON pointers are RFC 6901 selectors over captured provider JSON.
-- A citation claim must occur in its exact selected evidence.
-- A page with any invalid evidence link is withheld.
-- Raw evidence is never returned by public retrieval.
-- A current revision must match the target checkpoint's source identities and digests.
-- Required ACL fingerprints are checked before candidate generation and hydration.
-- Projection-input and repository-access fingerprints are rechecked under locks before
-  publication.
-- Erasure and terminal revision events invalidate affected releases.
-- Exact, lexical, hierarchy, and manifest projections are rebuildable.
-
-## Reset classes
-
-Preserved:
-
-- repository and tenant registrations;
-- GitHub repository mappings;
-- ACL observations and the source observations they reference;
-- API token hashes;
-- erasure filters; and
-- audit events; and
-- GitHub webhook delivery identity.
-
-Deleted and rebuilt:
-
-- persisted Board build/stage state;
-- evidence snapshots and Git materialization;
-- derivation progress, runs, revisions, and citations;
-- releases and projections;
-- outbox/checkpoint state; and
-- retrieval telemetry and quota ledgers.
-
-With database configuration present, the dry run reports the exact deletable
-row count for every target without mutating it. Without database configuration,
-it prints the static target list:
-
-```sh
-pnpm --filter @jina/db reset-context
-```
-
-Execution requires:
-
-```sh
-JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context \
-pnpm --filter @jina/db reset-context -- --execute
-```
-
-## Capability roles
-
-Focused roles include coordinator, ingest, derive, manifest, current-context, lexical,
-hierarchy, ACL, retention, query, token, and tenant-admin capabilities. The runtime login
-is `NOINHERIT` and is not a member of the wildcard administration role.
-
-`jina_context_tokens` is the only capability permitted to resolve a token across tenants;
-that lookup is necessary because the token row itself identifies the tenant. Subsequent
-operations return to strict tenant and principal scope.
+The product migration runs from the exact API image through
+`dist/product/migrate-all.js --install-roles`. Staging and main use this same
+ordered migration tail before candidate traffic starts. No separate reset,
+cutover database, or pre-migration compatibility job remains.

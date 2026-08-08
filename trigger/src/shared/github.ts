@@ -1,41 +1,12 @@
 import { createSign } from "node:crypto";
 
 import { requiredEnv } from "./api.js";
-import { errorMessage } from "./utils.js";
 
 export type GitHubRepository = {
   owner: string;
   name: string;
   fullName: string;
 };
-
-export type CheckRun = {
-  id: number;
-  html_url?: string;
-};
-
-export type JinaIssueMarker = {
-  reviewRunId?: string;
-  headSha?: string;
-  stage?: "summary" | "static" | "runtime" | string;
-  fingerprint?: string;
-  blocking?: boolean;
-};
-
-export type JinaReviewThread = {
-  id: string;
-  isResolved: boolean;
-  path?: string;
-  firstCommentDatabaseId?: number;
-  firstCommentUrl?: string;
-  marker: JinaIssueMarker;
-};
-
-export type Deployment = {
-  id: number;
-};
-
-export type DeploymentState = "in_progress" | "success" | "failure" | "error" | "inactive";
 
 export type InstallationAccessToken = {
   token: string;
@@ -86,35 +57,6 @@ export type PullRequestState = {
     ref?: string;
   };
 };
-
-type GitHubIssueLike = {
-  number?: number;
-  title?: string;
-  state?: string;
-  user?: {
-    login?: string;
-  };
-  html_url?: string;
-  pull_request?: unknown;
-};
-
-type GraphqlCommentNode = {
-  id?: string;
-  databaseId?: number;
-  url?: string;
-  body?: string;
-};
-
-type GraphqlReviewThreadNode = {
-  id?: string;
-  isResolved?: boolean;
-  path?: string;
-  comments?: {
-    nodes?: Array<GraphqlCommentNode | null> | null;
-  } | null;
-};
-
-const ISSUE_MARKER_RE = /<!--\s*jina:issue\s+({[\s\S]*?})\s*-->/g;
 
 export function parseRepository(fullName: string | undefined): GitHubRepository {
   const [owner, name, extra] = (fullName ?? "").split("/");
@@ -179,268 +121,6 @@ export async function probeRepositoryAccess(input: {
     private: typeof body?.private === "boolean" ? body.private : undefined,
     default_branch: typeof body?.default_branch === "string" ? body.default_branch : undefined,
   };
-}
-
-export async function createCheckRun(input: {
-  token: string;
-  repository: GitHubRepository;
-  headSha: string;
-  name: string;
-  detailsUrl?: string;
-}): Promise<CheckRun> {
-  return githubJson<CheckRun>({
-    token: input.token,
-    method: "POST",
-    path: `/repos/${input.repository.fullName}/check-runs`,
-    body: {
-      name: input.name,
-      head_sha: input.headSha,
-      status: "in_progress",
-      started_at: new Date().toISOString(),
-      details_url: input.detailsUrl,
-    },
-  });
-}
-
-export async function completeCheckRun(input: {
-  token: string;
-  repository: GitHubRepository;
-  checkRunId: number;
-  conclusion: "success" | "failure" | "neutral" | "action_required";
-  title: string;
-  summary: string;
-  text?: string;
-}): Promise<void> {
-  await githubJson({
-    token: input.token,
-    method: "PATCH",
-    path: `/repos/${input.repository.fullName}/check-runs/${input.checkRunId}`,
-    body: {
-      status: "completed",
-      conclusion: input.conclusion,
-      completed_at: new Date().toISOString(),
-      output: {
-        title: input.title,
-        summary: truncate(input.summary, 4_000),
-        text: input.text ? truncate(input.text, 60_000) : undefined,
-      },
-    },
-  });
-}
-
-export async function listUnresolvedJinaBlockingThreads(input: {
-  token: string;
-  repository: GitHubRepository;
-  pullRequestNumber: number;
-}): Promise<JinaReviewThread[]> {
-  const blockers: JinaReviewThread[] = [];
-  let cursor: string | undefined;
-  let hasNextPage = true;
-
-  while (hasNextPage) {
-    const data = await githubGraphql<{
-      repository?: {
-        pullRequest?: {
-          reviewThreads?: {
-            nodes?: Array<GraphqlReviewThreadNode | null> | null;
-            pageInfo?: {
-              hasNextPage?: boolean;
-              endCursor?: string | null;
-            } | null;
-          } | null;
-        } | null;
-      } | null;
-    }>(
-      input.token,
-      `query JinaReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
-        repository(owner: $owner, name: $name) {
-          pullRequest(number: $number) {
-            reviewThreads(first: 100, after: $after) {
-              nodes {
-                id
-                isResolved
-                path
-                comments(first: 100) {
-                  nodes {
-                    id
-                    databaseId
-                    url
-                    body
-                  }
-                }
-              }
-              pageInfo {
-                hasNextPage
-                endCursor
-              }
-            }
-          }
-        }
-      }`,
-      {
-        owner: input.repository.owner,
-        name: input.repository.name,
-        number: input.pullRequestNumber,
-        after: cursor,
-      },
-    );
-
-    const page = data.repository?.pullRequest?.reviewThreads;
-    for (const thread of page?.nodes ?? []) {
-      if (!thread?.id || thread.isResolved) {
-        continue;
-      }
-      const comments = (thread.comments?.nodes ?? []).filter((comment): comment is GraphqlCommentNode => Boolean(comment));
-      const commentWithMarker = comments.find((comment) => {
-        const marker = parseJinaIssueMarker(comment.body);
-        return marker?.blocking !== false;
-      });
-      const marker = parseJinaIssueMarker(commentWithMarker?.body);
-      if (!marker || marker.blocking === false) {
-        continue;
-      }
-      blockers.push({
-        id: thread.id,
-        isResolved: Boolean(thread.isResolved),
-        path: thread.path,
-        firstCommentDatabaseId: comments[0]?.databaseId,
-        firstCommentUrl: comments[0]?.url,
-        marker,
-      });
-    }
-
-    hasNextPage = Boolean(page?.pageInfo?.hasNextPage);
-    cursor = page?.pageInfo?.endCursor ?? undefined;
-    if (hasNextPage && !cursor) {
-      throw new Error("GitHub reviewThreads pagination did not include an end cursor");
-    }
-  }
-
-  return blockers;
-}
-
-export async function resolveReviewThread(input: { token: string; threadId: string }): Promise<void> {
-  await githubGraphql(
-    input.token,
-    `mutation ResolveReviewThread($threadId: ID!) {
-      resolveReviewThread(input: { threadId: $threadId }) {
-        thread {
-          id
-          isResolved
-        }
-      }
-    }`,
-    { threadId: input.threadId },
-  );
-}
-
-export async function replyToReviewComment(input: {
-  token: string;
-  repository: GitHubRepository;
-  pullRequestNumber: number;
-  commentId: number;
-  body: string;
-}): Promise<void> {
-  await githubJson({
-    token: input.token,
-    method: "POST",
-    path: `/repos/${input.repository.fullName}/pulls/${input.pullRequestNumber}/comments/${input.commentId}/replies`,
-    body: {
-      body: truncate(input.body, 16_000),
-    },
-  });
-}
-
-export async function getCollaboratorPermission(input: {
-  token: string;
-  repository: GitHubRepository;
-  username: string;
-}): Promise<string | undefined> {
-  const response = await githubJson<{ permission?: string }>({
-    token: input.token,
-    method: "GET",
-    path: `/repos/${input.repository.fullName}/collaborators/${encodeURIComponent(input.username)}/permission`,
-  });
-  return response.permission;
-}
-
-export function parseJinaIssueMarker(body: string | undefined): JinaIssueMarker | undefined {
-  if (!body) {
-    return undefined;
-  }
-
-  ISSUE_MARKER_RE.lastIndex = 0;
-  const match = ISSUE_MARKER_RE.exec(body);
-  if (!match?.[1]) {
-    return undefined;
-  }
-
-  try {
-    const parsed = JSON.parse(match[1]) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return undefined;
-    }
-    const marker = parsed as Record<string, unknown>;
-    return {
-      reviewRunId: typeof marker.reviewRunId === "string" ? marker.reviewRunId : undefined,
-      headSha: typeof marker.headSha === "string" ? marker.headSha : undefined,
-      stage: typeof marker.stage === "string" ? marker.stage : undefined,
-      fingerprint: typeof marker.fingerprint === "string" ? marker.fingerprint : undefined,
-      blocking: typeof marker.blocking === "boolean" ? marker.blocking : undefined,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-// Creates a GitHub Deployment, which renders in the PR timeline as a
-// "deployed to <environment>" event (like the Vercel preview event). This is a
-// status surface for the review run, not a real deploy: required_contexts is
-// empty so it never waits on other checks, and the environment is transient.
-export async function createDeployment(input: {
-  token: string;
-  repository: GitHubRepository;
-  ref: string;
-  environment: string;
-  description?: string;
-}): Promise<Deployment> {
-  return githubJson<Deployment>({
-    token: input.token,
-    method: "POST",
-    path: `/repos/${input.repository.fullName}/deployments`,
-    body: {
-      ref: input.ref,
-      environment: input.environment,
-      required_contexts: [],
-      auto_merge: false,
-      transient_environment: true,
-      description: input.description ? input.description.slice(0, 140) : undefined,
-    },
-  });
-}
-
-// Posts a status to a deployment, driving the timeline event's state and the
-// "View deployment" link (environment_url).
-export async function createDeploymentStatus(input: {
-  token: string;
-  repository: GitHubRepository;
-  deploymentId: number;
-  state: DeploymentState;
-  environmentUrl?: string;
-  logUrl?: string;
-  description?: string;
-}): Promise<void> {
-  await githubJson({
-    token: input.token,
-    method: "POST",
-    path: `/repos/${input.repository.fullName}/deployments/${input.deploymentId}/statuses`,
-    body: {
-      state: input.state,
-      environment_url: input.environmentUrl,
-      log_url: input.logUrl,
-      description: input.description ? input.description.slice(0, 140) : undefined,
-    },
-  });
 }
 
 export async function createIssueComment(input: {
@@ -583,34 +263,6 @@ export async function getPullRequestState(input: {
   });
 }
 
-export async function recentRepositoryHistory(input: {
-  token: string;
-  repository: GitHubRepository;
-}): Promise<string> {
-  const [pulls, issues] = await Promise.all([
-    githubJson<GitHubIssueLike[]>({
-      token: input.token,
-      method: "GET",
-      path: `/repos/${input.repository.fullName}/pulls?state=all&sort=updated&direction=desc&per_page=8`,
-    }).catch((error: unknown) => [`Unable to load recent pull requests: ${errorMessage(error)}`]),
-    githubJson<GitHubIssueLike[]>({
-      token: input.token,
-      method: "GET",
-      path: `/repos/${input.repository.fullName}/issues?state=all&sort=updated&direction=desc&per_page=8`,
-    })
-      .then((items) => items.filter((item) => !item.pull_request))
-      .catch((error: unknown) => [`Unable to load recent issues: ${errorMessage(error)}`]),
-  ]);
-
-  return [
-    "Recent pull requests:",
-    ...formatHistoryItems(pulls),
-    "",
-    "Recent issues:",
-    ...formatHistoryItems(issues),
-  ].join("\n");
-}
-
 function createAppJwt(): string {
   const now = Math.floor(Date.now() / 1000);
   const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
@@ -665,27 +317,6 @@ async function githubPaginatedJson<T>(input: {
   }
 }
 
-async function githubGraphql<T = unknown>(
-  token: string,
-  query: string,
-  variables: Record<string, unknown>,
-): Promise<T> {
-  const response = await fetch("https://api.github.com/graphql", {
-    method: "POST",
-    headers: githubHeaders(token),
-    body: JSON.stringify({ query, variables }),
-  });
-  const body = (await response.json().catch(() => undefined)) as { data?: T; errors?: unknown } | undefined;
-
-  if (!response.ok || body?.errors) {
-    throw new Error(`GitHub GraphQL request failed: ${response.status} ${JSON.stringify(body?.errors ?? body)}`);
-  }
-  if (!body || body.data === undefined) {
-    throw new Error("GitHub GraphQL response did not include data");
-  }
-  return body.data;
-}
-
 function githubHeaders(token: string): HeadersInit {
   return {
     "accept": "application/vnd.github+json",
@@ -694,22 +325,6 @@ function githubHeaders(token: string): HeadersInit {
     "user-agent": "jina-code-review",
     "x-github-api-version": "2022-11-28",
   };
-}
-
-function formatHistoryItems(items: Array<GitHubIssueLike | string>): string[] {
-  if (items.length === 0) {
-    return ["- None found."];
-  }
-
-  return items.map((item) => {
-    if (typeof item === "string") {
-      return `- ${item}`;
-    }
-
-    return `- #${item.number ?? "?"} ${item.state ?? "unknown"}: ${item.title ?? "Untitled"} by ${
-      item.user?.login ?? "unknown"
-    }`;
-  });
 }
 
 function base64Url(input: string | Buffer): string {

@@ -83,22 +83,12 @@ durable time-series store.
 Tenant administrators can call `GET /wiki/metrics`. The response is backed by context
 storage and includes:
 
-- `outboxDepthByConsumer` and `oldestPendingAt`;
 - published context release count;
-- knowledge-document, fragment, hierarchy-node, and embedding counts;
-- projector name, status, version, checkpoint, and backlog;
-- query count, p95 duration, citation-verification failure count, and surfaced conflict
-  count.
+- context-document, fragment, and hierarchy-node counts;
+- quota limits and current usage.
 
-`embeddingCount` remains zero while dense retrieval is disabled. Hierarchy nodes come
-from the pinned PageIndex OSS Markdown worker when it is healthy; projector status and
-release artifacts identify a fallback or failed hierarchy build.
-
-Query runs persist bounded telemetry: tenant/repository, principal and request
-fingerprints, selected release, task kind, selected routes, coverage, degraded
-capabilities, duration, citation failures, and conflict count. Search telemetry records
-selection, not a model-written answer; bounded operational records follow retention
-policy.
+Hierarchy nodes come from the pinned PageIndex OSS Markdown worker when it is healthy;
+the Board build stream identifies a fallback or failed hierarchy build.
 
 Every failed or retried worker stage appends its bounded diagnostic and stable failure
 category to the task's Board event stream. Tenant-facing build summaries expose the
@@ -133,36 +123,28 @@ A production context dashboard should show:
 - repository/ref ingestion freshness and latest published release age;
 - valid/pending/invalid private-checkpoint rate plus Git history count/root status, GitHub pagination
   completion/reason, and omitted-body count from the observation frontier;
-- outbox depth and oldest age by manifest, knowledge-current, lexical, dense, hierarchy,
-  structural, identity, ACL, and retention consumer;
-- release build time and degraded/disabled projection capabilities;
-- query count and p95, route contribution, coverage status, conflict count, and citation
-  verification failures;
-- lexical-tree search count, retrieved/no-context rate for the maintained real-query
-  corpus, and exact-title acceptance hit rate;
+- release build time and degraded/disabled release capabilities;
+- HTTP and MCP search request rate, latency, and error rate from platform request
+  telemetry;
 - Cloud Run request/instance health and Cloud SQL connections/latency.
-
-Do not combine all projector backlog into one number; ACL/retention lag is more severe
-than an optional dense or hierarchy lag.
 
 ## Alerts
 
 Page immediately when:
 
-- an ACL or erasure projector is behind a query-serving release;
-- citation verification failure count becomes nonzero outside a short diagnostic window;
-- a required projector cannot publish or no release exists for a current ref;
+- repository access verification fails for a query-serving release;
+- a required Board publication cannot publish or no release exists for a current ref;
 - authoritative-head/commit acceptance or MCP citation verification fails.
 
 Alert at an operational threshold when:
 
-- required outbox age exceeds the freshness SLO;
+- release publication age exceeds the freshness SLO;
 - stage failure/repair rates change materially;
 - pending/invalid checkpoint rate or a repeated Git/GitHub/body-omission frontier regresses;
 - derivation latency/cost or validation failures move materially;
-- query p95 or insufficient coverage regresses;
+- search request latency or error rate regresses;
 - rebuild fingerprints diverge for identical input;
-- an optional projector degrades query latency.
+- hierarchy generation degrades query latency.
 
 Notification channels are configured in Cloud Monitoring, not in application source.
 
@@ -190,12 +172,7 @@ Each release must retain:
 - acceptance build/stage IDs;
 - published repository/ref/commit and release ID;
 - HTTP and real MCP citation counts;
-- final outbox depth;
-- per-question coverage report produced by `pnpm evaluate:questions` for the maintained
-  engineering-question corpus.
-
-The retained `context-board-quality-v2` report is historical compatibility evidence,
-not required page-oriented release evidence until its artifact parser is updated.
+- final immutable release and citation counts.
 
 The acceptance job output is a release gate, not a substitute for ongoing SLO monitoring.
 

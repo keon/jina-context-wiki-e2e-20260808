@@ -153,20 +153,20 @@ export async function getRelationalBoardDashboardOverview(tenantId: string): Pro
 }
 
 export function mergeDashboardWorkOverviews(
-  legacy: DashboardWorkOverview,
+  snapshot: DashboardWorkOverview,
   relational: DashboardWorkOverview,
 ): DashboardWorkOverview {
   return {
     board: {
-      tasks: mergeById(legacy.board.tasks, relational.board.tasks),
+      tasks: mergeById(snapshot.board.tasks, relational.board.tasks),
       dependencies: mergeByKey(
-        legacy.board.dependencies,
+        snapshot.board.dependencies,
         relational.board.dependencies,
         (dependency) => `${dependency.taskId}:${dependency.dependsOnTaskId}`,
       ),
-      ...(legacy.board.outbox ? { outbox: legacy.board.outbox } : {}),
+      ...(snapshot.board.outbox ? { outbox: snapshot.board.outbox } : {}),
     },
-    events: mergeById(legacy.events, relational.events).sort((left, right) => right.at.localeCompare(left.at)),
+    events: mergeById(snapshot.events, relational.events).sort((left, right) => right.at.localeCompare(left.at)),
   };
 }
 

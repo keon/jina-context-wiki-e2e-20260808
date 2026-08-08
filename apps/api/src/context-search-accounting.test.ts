@@ -4,7 +4,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { contextProjectionConsumers, type ContextEngineStore, type GenerationProjection } from "@jina/context-engine";
+import type { ContextEngineStore, GenerationProjection } from "@jina/context-engine";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
 import { createApiServer } from "./server.js";
 
@@ -132,8 +132,8 @@ async function withServer(
     async getGeneration(generationId: string) {
       return generationId === value.generation.id ? structuredClone(value) : undefined;
     },
-    async listCitations() {
-      return [];
+    async listCitationsForRevisions() {
+      return new Map();
     },
     async close() {
       return undefined;
@@ -177,27 +177,18 @@ function headers(requestId?: string): Record<string, string> {
 }
 
 function projection(withHierarchy: boolean): GenerationProjection {
-  const projectorVersions = Object.fromEntries(contextProjectionConsumers.map((consumer) => [consumer, "v1"]));
-  const projectorStatuses = Object.fromEntries(
-    contextProjectionConsumers.map((consumer) => [consumer, consumer === "dense" ? "disabled" : "ready"])
-  );
   return {
     generation: {
       id: "release-1",
       tenantId,
       repository,
-      repositoryAccessFingerprint: "access",
-      projectionInputFingerprint: "input",
       ref: "main",
       commitSha: "1".repeat(40),
       checkpointId: "checkpoint-1",
       status: "published",
-      projectorVersions: projectorVersions as GenerationProjection["generation"]["projectorVersions"],
-      projectorStatuses: projectorStatuses as GenerationProjection["generation"]["projectorStatuses"],
       capabilities: {
         sourceCompleteness: "complete",
         derivedKnowledge: "available",
-        dense: "disabled",
         hierarchy: withHierarchy ? "available" : "disabled"
       },
       fingerprint: "release-fingerprint",
@@ -225,10 +216,7 @@ function projection(withHierarchy: boolean): GenerationProjection {
         authorityClass: "derived",
         effectiveAclFingerprint: "access",
         sourceFingerprint: "document-fingerprint",
-        anchors: [],
-        projectorName: "knowledge",
-        projectorVersion: "v1",
-        projectedAt: "2026-07-29T00:00:01.000Z"
+        anchors: []
       }
     ],
     fragments: [

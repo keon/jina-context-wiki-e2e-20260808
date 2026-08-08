@@ -46,7 +46,7 @@ interface TenantState {
   switcherVisible: boolean;
   selected: SelectedTenant | null;
   ready: boolean;
-  legacyReviewMode: boolean;
+  localReviewMode: boolean;
   accessError: string | null;
   fenceVersion: number;
 }
@@ -56,7 +56,7 @@ const INITIAL_TENANT: TenantState = {
   switcherVisible: false,
   selected: null,
   ready: true,
-  legacyReviewMode: true,
+  localReviewMode: true,
   accessError: null,
   fenceVersion: 0
 };

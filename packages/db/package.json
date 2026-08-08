@@ -13,7 +13,6 @@
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
     "migrate": "pnpm build && node dist/migrate.js",
-    "reset-context": "pnpm build && node dist/reset-context-data.js",
     "test": "pnpm build && node --test --test-concurrency=1 dist/*.test.js"
   },
   "dependencies": {

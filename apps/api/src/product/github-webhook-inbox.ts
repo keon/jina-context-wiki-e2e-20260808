@@ -10,7 +10,6 @@ import {
 import {
   GithubWebhookDeliveryConflictError,
   type GithubWebhookInboxLease,
-  type GithubWebhookInboxMode,
   type GithubWebhookInboxRepository,
   type GithubWebhookInboxSnapshot,
   PostgresGithubWebhookInboxRepository,
@@ -35,7 +34,6 @@ interface GithubWebhookProcessInput {
 export interface GithubWebhookProcessResult {
   readonly deliveryId: string;
   readonly disposition: "not_claimed" | "completed" | "retry_wait" | "dead_letter";
-  readonly mode?: Exclude<GithubWebhookInboxMode, "capture_only">;
   readonly response?: WebhookResponse;
 }
 
@@ -45,11 +43,9 @@ export type GithubWebhookProcessor = (
 
 export class GithubWebhookInboxService {
   constructor(
-    private readonly appConfig: Pick<AppConfig, "githubWebhookSecret" | "reviewBoardPipeline">,
+    private readonly appConfig: Pick<AppConfig, "githubWebhookSecret">,
     private readonly inboxConfig: GithubWebhookInboxConfig,
-    private readonly repository: GithubWebhookInboxRepository =
-      new PostgresGithubWebhookInboxRepository(),
-    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly repository: GithubWebhookInboxRepository = new PostgresGithubWebhookInboxRepository(),
   ) {}
 
   async capture(headers: Headers, rawBody: Buffer): Promise<CapturedGithubWebhook> {
@@ -118,28 +114,22 @@ export class GithubWebhookInboxService {
     const lease = await this.repository.claim({
       deliveryId,
       leaseMs: this.inboxConfig.leaseMs,
-      canaryRepositories: this.appConfig.reviewBoardPipeline.v2Repositories,
     });
     if (!lease) return { deliveryId, disposition: "not_claimed" };
 
     try {
       const rawBody = this.decryptLease(lease);
-      let response: WebhookResponse | undefined;
-      if (lease.mode === "legacy_forward") {
-        response = await this.forwardLegacy(lease, rawBody);
-      } else {
-        response = await processor({
-          deliveryId: lease.deliveryId,
-          event: lease.event,
+      const response = await processor({
+        deliveryId: lease.deliveryId,
+        event: lease.event,
+        rawBody,
+        headers: processingHeaders(
+          this.appConfig.githubWebhookSecret,
+          lease.deliveryId,
+          lease.event,
           rawBody,
-          headers: processingHeaders(
-            this.appConfig.githubWebhookSecret,
-            lease.deliveryId,
-            lease.event,
-            rawBody,
-          ),
-        });
-      }
+        ),
+      });
       await this.repository.complete({
         lease,
         ...(response?.workflow_id || response?.run_id
@@ -149,8 +139,7 @@ export class GithubWebhookInboxService {
       return {
         deliveryId,
         disposition: "completed",
-        mode: lease.mode,
-        ...(response ? { response } : {}),
+        response,
       };
     } catch (error) {
       const disposition = await this.settleProcessingFailure(lease, error);
@@ -159,11 +148,10 @@ export class GithubWebhookInboxService {
         : "github_webhook_inbox_processing_deferred", {
         delivery_id: lease.deliveryId,
         event: lease.event,
-        mode: lease.mode,
         attempt_count: lease.attemptCount,
         error_code: processingErrorCode(error),
       });
-      return { deliveryId, disposition, mode: lease.mode };
+      return { deliveryId, disposition };
     }
   }
 
@@ -176,23 +164,11 @@ export class GithubWebhookInboxService {
     for (let index = 0; index < boundedLimit; index += 1) {
       const lease = await this.repository.claim({
         leaseMs: this.inboxConfig.leaseMs,
-        canaryRepositories: this.appConfig.reviewBoardPipeline.v2Repositories,
       });
       if (!lease) break;
       results.push(await this.processLease(lease, processor));
     }
     return results;
-  }
-
-  async transitionMode(input: {
-    readonly expectedGeneration: number;
-    readonly mode: GithubWebhookInboxMode;
-    readonly updatedBy: string;
-  }) {
-    if (input.mode === "legacy_forward" && !this.inboxConfig.legacyForwardUrl) {
-      throw new ApiError(409, "legacy_forward target is not configured");
-    }
-    return this.repository.transitionMode(input);
   }
 
   snapshot(): Promise<GithubWebhookInboxSnapshot> {
@@ -205,19 +181,17 @@ export class GithubWebhookInboxService {
   ): Promise<GithubWebhookProcessResult> {
     try {
       const rawBody = this.decryptLease(lease);
-      const response = lease.mode === "legacy_forward"
-        ? await this.forwardLegacy(lease, rawBody)
-        : await processor({
-            deliveryId: lease.deliveryId,
-            event: lease.event,
-            rawBody,
-            headers: processingHeaders(
-              this.appConfig.githubWebhookSecret,
-              lease.deliveryId,
-              lease.event,
-              rawBody,
-            ),
-          });
+      const response = await processor({
+        deliveryId: lease.deliveryId,
+        event: lease.event,
+        rawBody,
+        headers: processingHeaders(
+          this.appConfig.githubWebhookSecret,
+          lease.deliveryId,
+          lease.event,
+          rawBody,
+        ),
+      });
       await this.repository.complete({
         lease,
         ...(response.workflow_id || response.run_id
@@ -227,7 +201,6 @@ export class GithubWebhookInboxService {
       return {
         deliveryId: lease.deliveryId,
         disposition: "completed",
-        mode: lease.mode,
         response,
       };
     } catch (error) {
@@ -235,7 +208,6 @@ export class GithubWebhookInboxService {
       return {
         deliveryId: lease.deliveryId,
         disposition,
-        mode: lease.mode,
       };
     }
   }
@@ -283,39 +255,6 @@ export class GithubWebhookInboxService {
     return rawBody;
   }
 
-  private async forwardLegacy(
-    lease: GithubWebhookInboxLease,
-    rawBody: Buffer,
-  ): Promise<WebhookResponse> {
-    const target = this.inboxConfig.legacyForwardUrl;
-    if (!target) throw new Error("legacy_forward_target_unavailable");
-    const response = await this.fetchImpl(target, {
-      method: "POST",
-      redirect: "error",
-      signal: AbortSignal.timeout(20_000),
-      headers: {
-        "content-type": "application/json",
-        "x-github-delivery": lease.deliveryId,
-        "x-github-event": lease.event,
-        "x-hub-signature-256": githubSignature(this.appConfig.githubWebhookSecret, rawBody),
-        "x-jina-inbox-forward-generation": String(lease.leaseGeneration),
-      },
-      body: Uint8Array.from(rawBody).buffer,
-    });
-    if (!response.ok) throw new Error(`legacy_forward_http_${response.status}`);
-    const body = await response.json().catch(() => ({})) as Partial<WebhookResponse>;
-    return {
-      accepted: body.accepted === true,
-      event: typeof body.event === "string" ? body.event : lease.event,
-      ...(typeof body.action === "string" ? { action: body.action } : {}),
-      ...(typeof body.task_id === "string" ? { task_id: body.task_id } : {}),
-      ...(typeof body.run_id === "string" ? { run_id: body.run_id } : {}),
-      ...(typeof body.workflow_id === "string" ? { workflow_id: body.workflow_id } : {}),
-      ...(typeof body.ignored_reason === "string"
-        ? { ignored_reason: body.ignored_reason }
-        : {}),
-    };
-  }
 }
 
 function parseObjectPayload(rawBody: Buffer): Record<string, unknown> {
@@ -417,9 +356,7 @@ function processingErrorCode(error: unknown): string {
   if (
     error instanceof Error &&
     (
-      /^legacy_forward_http_[1-5][0-9]{2}$/.test(error.message) ||
       [
-        "legacy_forward_target_unavailable",
         "webhook_inbox_key_version_unavailable",
         "webhook_inbox_ciphertext_invalid",
         "webhook_inbox_payload_digest_mismatch",

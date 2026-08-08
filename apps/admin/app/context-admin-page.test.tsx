@@ -67,22 +67,11 @@ const DOCUMENT = {
   citations: []
 };
 
-const PROJECTOR = {
-  name: "context-index",
-  status: "healthy",
-  checkpoint: "chk_9",
-  version: "v3",
-  backlog: 0
-};
-
 /** Metrics with every counter measured, several of them measured at zero. */
 const MEASURED_METRICS = {
-  outboxDepthByConsumer: {},
   publishedGenerationCount: 0,
   fragmentCount: 0,
   hierarchyNodeCount: 0,
-  embeddingCount: 0,
-  projectors: [PROJECTOR],
   quotas: { active: { builds: 0, modelTasks: 0 } }
 };
 
@@ -145,7 +134,6 @@ const EVERY_STAT = [
   "Wiki releases",
   "Repositories",
   "Derived context docs",
-  "Projection backlog",
   "Active builds",
   "Active model tasks",
   "Verified checkpoints",
@@ -183,7 +171,7 @@ test("a counter measured at zero still renders 0", async () => {
     builds: { builds: [] }
   });
 
-  // The distinction the whole page turns on: these eight were all measured, and
+  // The distinction the whole page turns on: these were all measured, and
   // every one of them measured zero.
   for (const label of EVERY_STAT) {
     assert.equal(stat(container, label).value, "0", `${label} should report its measured zero`);
@@ -196,7 +184,7 @@ test("a section that loaded reports its measured counters and its unmeasured one
   // The shipped failure this guards: a `finiteNumber(x, 0)` in the parser, or a
   // `?? 0` in the page, turning "the API sent no quota telemetry" into "no
   // capacity is in use". The metrics read succeeds here — it simply does not
-  // carry an outbox map or quotas.
+  // carry quota telemetry.
   const { container } = await renderPage({
     releases: { releases: [RELEASE] },
     metrics: { publishedGenerationCount: 4, hierarchyNodeCount: 11 },
@@ -207,7 +195,7 @@ test("a section that loaded reports its measured counters and its unmeasured one
   assert.equal(stat(container, "Wiki releases").value, "4");
   assert.equal(stat(container, "Hierarchy nodes").value, "11");
   // Absent telemetry, from a read that otherwise succeeded.
-  for (const label of ["Projection backlog", "Active builds", "Active model tasks"] as const) {
+  for (const label of ["Active builds", "Active model tasks"] as const) {
     assert.equal(stat(container, label).value, UNMEASURED, `${label} was not reported and is not zero`);
   }
   // The prose under "Wiki index health" holds the same line.
@@ -361,7 +349,7 @@ test("every data table keeps an accessible name and column-scoped headers", asyn
   });
 
   const tables = Array.from(container.querySelectorAll("table.context-table"));
-  assert.equal(tables.length, 4, "releases, builds, index health and derived context each render a table");
+  assert.equal(tables.length, 3, "releases, builds, and derived context each render a table");
 
   for (const table of tables) {
     const caption = table.querySelector("caption");
@@ -389,7 +377,7 @@ test("every data table keeps an accessible name and column-scoped headers", asyn
 
   assert.deepEqual(
     tables.map((table) => table.querySelector("caption")?.getAttribute("id")),
-    ["releases-table-caption", "builds-table-caption", "health-table-caption", "documents-table-caption"]
+    ["releases-table-caption", "builds-table-caption", "documents-table-caption"]
   );
 });
 
@@ -423,7 +411,7 @@ test("a page assembled from sparse and malformed rows renders no formatter place
   // budget with no consumption reported against it.
   const { container } = await renderPage({
     releases: { releases: [{ ...RELEASE, commitSha: undefined, publishedAt: undefined }] },
-    metrics: { projectors: [{ name: "context-index", status: "unknown", checkpoint: "chk", version: "v1" }] },
+    metrics: {},
     builds: {
       builds: [
         build({
@@ -457,8 +445,8 @@ test("a page assembled from sparse and malformed rows renders no formatter place
   });
 
   assertNoLeakedValues(container, "ContextAdminPage");
-  // The two figures the API never reported stay unmeasured rather than reading
-  // as untouched headroom / a healthy, caught-up projection.
+  // Figures the API never reported stay unmeasured rather than reading as
+  // untouched headroom or a healthy index.
   assert.match(textOf(container, "#builds tbody tr td:nth-child(5)"), /—/);
-  assert.match(textOf(container, "#health tbody tr td:nth-child(3)"), /—/);
+  assert.match(textOf(container, "#health .muted"), /—/);
 });

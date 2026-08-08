@@ -4,7 +4,7 @@
  *   - "unavailable"   -> Autumn/upstream is down; account IS billed, balances are
  *                        temporarily unreadable (show a "temporarily unavailable" panel).
  *   - "not_configured"-> no plan attached yet.
- * Any malformed/absent/legacy payload (no `status` field) or fetch failure is
+ * Any malformed/absent payload or fetch failure is
  * treated as "not configured" rather than a broken page.
  *
  * The overview payload also carries several optional sub-objects the rebuilt page
@@ -48,8 +48,6 @@ interface BillingActivity {
 
 export interface Billing {
   status: BillingStatus;
-  // Convenience mirror of `status === "ok"`; true only when balances are live.
-  configured: boolean;
   plan_id: string | null;
   credits_balance: number | null;
   managed_ai_access: boolean | null;
@@ -71,7 +69,6 @@ const EMPTY_LIMITS: BillingLimits = { enabled: false, limit_credits: null };
 
 export const NOT_CONFIGURED: Billing = {
   status: "not_configured",
-  configured: false,
   plan_id: null,
   credits_balance: null,
   managed_ai_access: null,
@@ -83,7 +80,6 @@ export const NOT_CONFIGURED: Billing = {
 
 export const UNAVAILABLE: Billing = {
   status: "unavailable",
-  configured: false,
   plan_id: null,
   credits_balance: null,
   managed_ai_access: null,
@@ -159,8 +155,8 @@ function normalizeActivity(raw: unknown): BillingActivity[] {
  * Coerce an arbitrary payload into a Billing shape.
  *   - status "ok"          -> parse plan/balance/sub-object fields.
  *   - status "unavailable" -> temporarily-unavailable state (no live balances).
- *   - anything else (status "not_configured", an unknown status, a legacy payload
- *     with no `status` field, or a malformed value) -> not configured.
+ *   - anything else (status "not_configured", an unknown status, or a malformed value)
+ *     -> not configured.
  */
 export function normalizeBilling(raw: unknown): Billing {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -175,7 +171,6 @@ export function normalizeBilling(raw: unknown): Billing {
   }
   return {
     status: "ok",
-    configured: true,
     plan_id: typeof record.plan_id === "string" ? record.plan_id : null,
     credits_balance: numberOrNull(record.credits_balance),
     managed_ai_access: typeof record.managed_ai_access === "boolean" ? record.managed_ai_access : null,

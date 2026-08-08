@@ -65,7 +65,7 @@ test("listIssueComments paginates issue comments", async () => {
     return jsonResponse(
       calls.length === 1
         ? Array.from({ length: 100 }, (_, index) => ({ id: index + 1, body: `issue-comment-${index + 1}` }))
-        : [{ id: 101, body: "<!-- jina-simulation:review-progress {} -->" }]
+        : [{ id: 101, body: "<!-- jina:review-progress {} -->" }]
     );
   };
 

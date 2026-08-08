@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
 
 import { ApiError } from "./errors.js";
+import { encryptSecret } from "./crypto.js";
 import { parseUsageRequestBody } from "./internal.js";
 import {
   callbackFlowMatchesBinding,
@@ -183,7 +184,7 @@ test("parseUsageRequestBody accepts valid decimals, integer tokens, and absent o
   assert.equal(record.total_tokens, undefined);
 });
 
-test("parseUsageRequestBody treats an empty-string cost as absent (backward compatible)", () => {
+test("parseUsageRequestBody treats an empty-string cost as absent", () => {
   const parsed = parseUsageRequestBody(withRecord({ cost: "" }));
   assert.equal(parsed.usage_records[0].cost, undefined);
 });
@@ -441,14 +442,14 @@ test("getOpenRouterCatalog treats an empty-list 200 as a failure and does not ca
 /* --------------------------------------------- PKCE user binding (FINDING 6a) --- */
 
 test("encode/decode verifier binding round-trips and exposes the bound github_user_id", () => {
-  const binding = { code_verifier: generateCodeVerifier(), github_user_id: 4242, nonce: "n" };
+  const binding = { code_verifier: generateCodeVerifier(), github_user_id: 4242, nonce: "n", tenant_id: "tenant-9" };
   const decoded = decodeVerifierBinding(encodeVerifierBinding(binding));
   assert.ok(decoded);
   assert.equal(decoded.github_user_id, 4242);
   assert.equal(decoded.code_verifier, binding.code_verifier);
 });
 
-test("verifier binding round-trips an optional tenant_id (tenant-scoped OpenRouter connect)", () => {
+test("verifier binding round-trips the required tenant_id", () => {
   const binding = { code_verifier: generateCodeVerifier(), github_user_id: 4242, nonce: "n", tenant_id: "tenant-9" };
   const decoded = decodeVerifierBinding(encodeVerifierBinding(binding));
   assert.ok(decoded);
@@ -456,11 +457,9 @@ test("verifier binding round-trips an optional tenant_id (tenant-scoped OpenRout
   assert.equal(decoded.github_user_id, 4242);
 });
 
-test("verifier binding without a tenant_id decodes with tenant_id undefined (personal-tenant default)", () => {
-  const binding = { code_verifier: generateCodeVerifier(), github_user_id: 7, nonce: "n" };
-  const decoded = decodeVerifierBinding(encodeVerifierBinding(binding));
-  assert.ok(decoded);
-  assert.equal(decoded.tenant_id, undefined);
+test("verifier binding without a tenant_id is rejected", () => {
+  const raw = encryptSecret(JSON.stringify({ code_verifier: generateCodeVerifier(), github_user_id: 7, nonce: "n" }));
+  assert.equal(decodeVerifierBinding(raw), undefined);
 });
 
 test("decodeVerifierBinding rejects a tampered/garbage cookie", () => {
@@ -469,9 +468,7 @@ test("decodeVerifierBinding rejects a tampered/garbage cookie", () => {
   assert.equal(decodeVerifierBinding("enc:v1:AAAAAAAAAAAAAAAAAAAAAAAA"), undefined);
 });
 
-// FINDING 4b: decryptSecret has a legacy plaintext passthrough, so a WELL-FORMED plaintext JSON
-// binding would previously decode successfully — an attacker without the encryption key could forge
-// { github_user_id: <victim> }. The decode path must require an encryption envelope outright.
+// A well-formed plaintext JSON binding must not bypass authenticated encryption.
 test("decodeVerifierBinding rejects a well-formed but PLAINTEXT (non-envelope) binding cookie (FINDING 4b)", () => {
   const forged = JSON.stringify({ code_verifier: generateCodeVerifier(), github_user_id: 999, nonce: "n" });
   assert.equal(decodeVerifierBinding(forged), undefined, "plaintext binding must never be accepted");
@@ -483,7 +480,7 @@ test("decodeVerifierBinding rejects a well-formed but PLAINTEXT (non-envelope) b
 // whose nonce it was stamped with, else an older callback could exchange its code under a newer binding
 // (including its authorized tenant_id). callbackFlowMatchesBinding is the guard.
 test("callbackFlowMatchesBinding accepts a query nonce that equals the binding nonce (match)", () => {
-  const binding = { code_verifier: generateCodeVerifier(), github_user_id: 1, nonce: "flow-abc" };
+  const binding = { code_verifier: generateCodeVerifier(), github_user_id: 1, nonce: "flow-abc", tenant_id: "t-1" };
   assert.equal(callbackFlowMatchesBinding("flow-abc", binding), true);
 });
 
@@ -495,7 +492,7 @@ test("callbackFlowMatchesBinding rejects a query nonce from a different flow (mi
 });
 
 test("callbackFlowMatchesBinding rejects an absent or blank query nonce", () => {
-  const binding = { code_verifier: generateCodeVerifier(), github_user_id: 1, nonce: "flow-abc" };
+  const binding = { code_verifier: generateCodeVerifier(), github_user_id: 1, nonce: "flow-abc", tenant_id: "t-1" };
   assert.equal(callbackFlowMatchesBinding(undefined, binding), false);
   assert.equal(callbackFlowMatchesBinding("", binding), false);
 });
@@ -618,7 +615,6 @@ test("getUserIntegrations returns an openrouter section", async () => {
       openai: { configured: false },
       anthropic: { configured: false },
       codex_harness: { configured: false },
-      codex_harness_model: null,
     });
   } finally {
     if (previous !== undefined) {

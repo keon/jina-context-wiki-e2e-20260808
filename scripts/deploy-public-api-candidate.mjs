@@ -26,12 +26,12 @@ const FIXED_INBOX_KEY = Object.freeze({
 const REQUIRED_LITERAL_ENV = Object.freeze({
   API_BASE_URL: "https://api.usejina.com",
   DASHBOARD_URL: "https://app.usejina.com",
+  DASHBOARD_AUTH_MODE: "clerk",
   DASHBOARD_COOKIE_SAMESITE: "None",
   DASHBOARD_COOKIE_SECURE: "true",
   GITHUB_APP_ID: "4040260",
   GITHUB_APP_SLUG: "jina-review-bot",
   GITHUB_APP_INSTALL_URL: "https://github.com/apps/jina-review-bot/installations/new",
-  GITHUB_OAUTH_CLIENT_ID: "Ov23lix0k1McZctAzJu0",
   JINA_PRODUCT_API_ENABLED: "true",
   JINA_PRODUCT_DATABASE_MODE: "shared",
   JINA_TENANCY_MODE: "shared-db",
@@ -43,17 +43,15 @@ const REQUIRED_LITERAL_ENV = Object.freeze({
   JINA_GITHUB_WEBHOOK_INBOX_ENABLED: "true",
   JINA_SCHEDULER_OIDC_AUDIENCE: FIXED_SCHEDULER.oidcAudience,
   JINA_SCHEDULER_OIDC_EMAIL: FIXED_SCHEDULER.oidcServiceAccount,
-  JINA_REVIEW_BOARD_PIPELINE_MODE: "v2",
   JINA_BILLING_ENFORCE: "on"
 });
-
-const SUPPORTED_DASHBOARD_AUTH_MODES = Object.freeze(new Set(["github", "clerk"]));
 
 const REQUIRED_SECRET_ENV = Object.freeze([
   "DB_PASS",
   "GITHUB_WEBHOOK_SECRET",
   "GITHUB_APP_PRIVATE_KEY",
-  "GITHUB_OAUTH_CLIENT_SECRET",
+  "CLERK_PUBLISHABLE_KEY",
+  "CLERK_SECRET_KEY",
   "INTERNAL_API_TOKEN",
   "JINA_PRODUCT_INTERNAL_API_TOKEN",
   "SECRETS_ENCRYPTION_KEY",
@@ -64,7 +62,7 @@ const REQUIRED_SECRET_ENV = Object.freeze([
 ]);
 const REQUIRED_ACCEPTANCE_CHECKS = Object.freeze([
   "health",
-  "github_oauth",
+  "clerk_auth",
   "read_only_product",
   "encrypted_integration",
   "internal_callback",
@@ -96,19 +94,13 @@ export function validatePublicApiCandidateManifest(value) {
     "manifest"
   );
   if (manifest.schema_version !== 1) fail("schema_version must be 1");
-  if (manifest.mode !== "monorepo-candidate" && manifest.mode !== "old-rollback-clone") {
-    fail("mode must be monorepo-candidate or old-rollback-clone");
-  }
+  if (manifest.mode !== "monorepo-candidate") fail("mode must be monorepo-candidate");
   const releaseId = matchingString(manifest.release_id, /^[a-z0-9][a-z0-9-]{2,40}$/, "release_id");
   const sourceSha = matchingString(manifest.source_sha, /^[0-9a-f]{40}$/, "source_sha");
   const image = matchingString(manifest.image, /@sha256:[0-9a-f]{64}$/, "image must be digest-pinned");
   const monorepoPrefix = "us-east1-docker.pkg.dev/jina-v2/jina/api@sha256:";
-  const oldImage = /^us-east1-docker\.pkg\.dev\/jina-463721\/[a-z0-9._-]+\/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/;
-  if (manifest.mode === "monorepo-candidate" && !image.startsWith(monorepoPrefix)) {
+  if (!image.startsWith(monorepoPrefix)) {
     fail("monorepo-candidate image must come from jina-v2/jina/api by digest");
-  }
-  if (manifest.mode === "old-rollback-clone" && !oldImage.test(image)) {
-    fail("old-rollback-clone image must come from the recorded jina-463721 repository by digest");
   }
 
   const target = object(manifest.target, "target");
@@ -168,9 +160,6 @@ export function validatePublicApiCandidateManifest(value) {
   for (const [name, expected] of Object.entries(REQUIRED_LITERAL_ENV)) {
     if (environment[name] !== expected) fail(`environment.${name} must be ${expected}`);
   }
-  if (!SUPPORTED_DASHBOARD_AUTH_MODES.has(environment.DASHBOARD_AUTH_MODE)) {
-    fail("environment.DASHBOARD_AUTH_MODE must be github or clerk");
-  }
   for (const [name, value] of Object.entries(environment)) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(name)) fail(`invalid environment name ${name}`);
     if (/[~\0\r\n]/.test(value)) fail(`environment.${name} contains a forbidden delimiter`);
@@ -218,11 +207,6 @@ export function validatePublicApiCandidateManifest(value) {
   }
   for (const name of REQUIRED_SECRET_ENV) {
     if (!secrets[name]) fail(`secrets.${name} is required`);
-  }
-  if (environment.DASHBOARD_AUTH_MODE === "clerk") {
-    for (const name of ["CLERK_PUBLISHABLE_KEY", "CLERK_SECRET_KEY"]) {
-      if (!secrets[name]) fail(`secrets.${name} is required in Clerk auth mode`);
-    }
   }
   if (environment.GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION !== secrets.GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY.version) {
     fail(
@@ -446,31 +430,27 @@ export async function validatePublicApiCandidateState(manifest, runner = runComm
   );
   if (!certificateReady) fail("api.usejina.com certificate is not ready");
 
-  if (manifest.mode === "monorepo-candidate") {
-    const projectNumber = matchingString(
-      (
-        await runner("gcloud", ["projects", "describe", manifest.target.project, "--format=value(projectNumber)"])
-      ).trim(),
-      /^[1-9][0-9]*$/,
-      "target project number"
-    );
-    const serviceAgent = `serviceAccount:service-${projectNumber}@serverless-robot-prod.iam.gserviceaccount.com`;
-    const repositoryPolicy = JSON.parse(
-      await runner("gcloud", [
-        "artifacts",
-        "repositories",
-        "get-iam-policy",
-        "jina",
-        "--project=jina-v2",
-        "--location=us-east1",
-        "--format=json"
-      ])
-    );
-    const canPull = repositoryPolicy.bindings?.some(
-      (binding) => binding.role === "roles/artifactregistry.reader" && binding.members?.includes(serviceAgent)
-    );
-    if (!canPull) fail("production Cloud Run service agent cannot pull the monorepo image");
-  }
+  const projectNumber = matchingString(
+    (await runner("gcloud", ["projects", "describe", manifest.target.project, "--format=value(projectNumber)"])).trim(),
+    /^[1-9][0-9]*$/,
+    "target project number"
+  );
+  const serviceAgent = `serviceAccount:service-${projectNumber}@serverless-robot-prod.iam.gserviceaccount.com`;
+  const repositoryPolicy = JSON.parse(
+    await runner("gcloud", [
+      "artifacts",
+      "repositories",
+      "get-iam-policy",
+      "jina",
+      "--project=jina-v2",
+      "--location=us-east1",
+      "--format=json"
+    ])
+  );
+  const canPull = repositoryPolicy.bindings?.some(
+    (binding) => binding.role === "roles/artifactregistry.reader" && binding.members?.includes(serviceAgent)
+  );
+  if (!canPull) fail("production Cloud Run service agent cannot pull the monorepo image");
   return { service, servingRevision };
 }
 
@@ -497,8 +477,7 @@ export async function deployPublicApiCandidate(manifest, dependencies = {}) {
     (target) => target.tag === manifest.candidate.tag && target.revisionName === candidateRevision(manifest)
   );
   if (!tagged?.url) fail("candidate tag does not resolve to the expected revision");
-  const healthPath = manifest.mode === "old-rollback-clone" ? "/v1/healthz" : "/health";
-  await probe(`${tagged.url}${healthPath}`);
+  await probe(`${tagged.url}/health`);
   return { revision: candidateRevision(manifest), taggedUrl: tagged.url };
 }
 
@@ -865,7 +844,7 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
         "--format=json"
       ])
     );
-    const servingInboxWriter = validateServingInboxWriterKey(servingState, manifest);
+    validateServingInboxWriterKey(servingState, manifest);
     const loadInboxSnapshot = dependencies.loadInboxSnapshot ?? defaultLoadInboxSnapshot;
     validateInboxKeyCompatibility(await loadInboxSnapshot(manifest, acceptance.taggedUrl, runner), manifest);
     const transition = await ensureProductionInboxSchedulerPaused(manifest, acceptance.taggedUrl, runner);
@@ -924,18 +903,6 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
           { cause: error }
         );
       }
-      let inboxTransition;
-      try {
-        inboxTransition = await (dependencies.fenceInboxProcessor ?? defaultFenceInboxProcessor)(
-          manifest,
-          acceptance.taggedUrl,
-          runner
-        );
-      } catch (fenceError) {
-        throw new Error(
-          `candidate activation failed and inbox generation fencing failed; traffic was not rolled back: ${errorMessage(error)}; fence: ${errorMessage(fenceError)}`
-        );
-      }
       try {
         const paused = await pauseProductionInboxScheduler(manifest, runner);
         validateSchedulerJob(paused, manifest, transition.endpoint, "PAUSED");
@@ -946,7 +913,7 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
       }
       if (!candidateTrafficOwnership) {
         throw new Error(
-          `candidate activation failed after an ambiguous traffic request; scheduler and inbox remain fenced because no release-owned service etag was returned: ${errorMessage(error)}`,
+          `candidate activation failed after an ambiguous traffic request; scheduler remains paused because no release-owned service etag was returned: ${errorMessage(error)}`,
           { cause: error }
         );
       }
@@ -964,7 +931,7 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
       } catch (trafficError) {
         if (trafficError instanceof PublicApiTrafficPreconditionError) {
           throw new Error(
-            `candidate activation failed and traffic ownership changed; scheduler and inbox remain fenced and no newer traffic decision was overwritten: ${errorMessage(error)}; traffic: ${errorMessage(trafficError)}`,
+            `candidate activation failed and traffic ownership changed; scheduler remains paused and no newer traffic decision was overwritten: ${errorMessage(error)}; traffic: ${errorMessage(trafficError)}`,
             { cause: trafficError }
           );
         }
@@ -979,20 +946,6 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
           `candidate activation failed and traffic was restored to ${before.servingRevision}, but prior scheduler state could not be restored: ${errorMessage(error)}; scheduler: ${errorMessage(restoreError)}`
         );
       }
-      if (servingInboxWriter.enabled) {
-        try {
-          await (dependencies.restoreInboxProcessor ?? defaultRestoreInboxProcessor)(
-            manifest,
-            acceptance.taggedUrl,
-            inboxTransition,
-            runner
-          );
-        } catch (restoreError) {
-          throw new Error(
-            `candidate activation failed and prior traffic/scheduler were restored, but the prior inbox mode could not be restored: ${errorMessage(error)}; inbox: ${errorMessage(restoreError)}`
-          );
-        }
-      }
       throw new Error(
         `candidate activation failed; traffic and scheduler restored to their prior state: ${errorMessage(error)}`
       );
@@ -1003,18 +956,10 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
   const tagged = before.service.status?.traffic?.find(
     (target) => target.tag === manifest.candidate.tag && target.revisionName === candidate
   );
-  if (!tagged?.url) fail("rollback requires the recorded candidate tagged URL for inbox fencing");
-  const fenceInboxProcessor = dependencies.fenceInboxProcessor ?? defaultFenceInboxProcessor;
-  const restoreInboxProcessor = dependencies.restoreInboxProcessor ?? defaultRestoreInboxProcessor;
-  const inboxTransition = await fenceInboxProcessor(manifest, tagged.url, runner);
+  if (!tagged?.url) fail("rollback requires the recorded candidate tagged URL");
   const previousJob = await describeProductionInboxScheduler(manifest, runner);
   if (previousJob) validateOwnedSchedulerJob(previousJob, manifest);
-  try {
-    if (previousJob) await pauseProductionInboxScheduler(manifest, runner);
-  } catch (error) {
-    await restoreInboxProcessor(manifest, tagged.url, inboxTransition, runner);
-    throw error;
-  }
+  if (previousJob) await pauseProductionInboxScheduler(manifest, runner);
   try {
     await setPublicApiTrafficWithEtag(
       manifest,
@@ -1028,12 +973,12 @@ export async function updatePublicApiTraffic(manifest, revision, dependencies = 
   } catch (error) {
     if (error instanceof PublicApiTrafficPreconditionError) {
       throw new Error(
-        `rollback aborted because traffic ownership changed; scheduler and inbox remain fenced and no newer traffic decision was overwritten: ${errorMessage(error)}`,
+        `rollback aborted because traffic ownership changed; scheduler remains paused and no newer traffic decision was overwritten: ${errorMessage(error)}`,
         { cause: error }
       );
     }
     throw new Error(
-      `rollback outcome is ambiguous; scheduler and inbox remain fenced for explicit recovery: ${errorMessage(error)}`,
+      `rollback outcome is ambiguous; scheduler remains paused for explicit recovery: ${errorMessage(error)}`,
       { cause: error }
     );
   }
@@ -1067,82 +1012,6 @@ async function loadInboxSnapshotWithToken(taggedUrl, token) {
   });
   if (!response.ok) fail(`candidate inbox snapshot failed with HTTP ${response.status}`);
   return response.json();
-}
-
-async function transitionInboxModeWithToken(taggedUrl, token, expectedGeneration, mode) {
-  const response = await fetch(`${taggedUrl}/internal/github-webhook-inbox/mode`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "x-jina-principal-id": "production-cutover"
-    },
-    body: JSON.stringify({ expected_generation: expectedGeneration, mode }),
-    signal: AbortSignal.timeout(15_000)
-  });
-  if (!response.ok) fail(`candidate inbox mode transition failed with HTTP ${response.status}`);
-  return response.json();
-}
-
-async function defaultFenceInboxProcessor(manifest, taggedUrl, runner) {
-  const token = await loadProductInternalToken(manifest, runner);
-  const before = validateInboxFenceSnapshot(await loadInboxSnapshotWithToken(taggedUrl, token));
-  const transition = {
-    previousMode: before.control.mode,
-    changed: before.control.mode !== "capture_only"
-  };
-  if (transition.changed) {
-    await transitionInboxModeWithToken(taggedUrl, token, before.control.generation, "capture_only");
-  }
-  for (let attempt = 0; attempt < 45; attempt += 1) {
-    const snapshot = validateInboxFenceSnapshot(await loadInboxSnapshotWithToken(taggedUrl, token));
-    if (isInboxFenceComplete(snapshot)) {
-      return { ...transition, fencedGeneration: snapshot.control.generation };
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-  }
-  fail("inbox did not reach capture_only with zero active/prior-generation leases within 45 seconds");
-}
-
-async function defaultRestoreInboxProcessor(manifest, taggedUrl, transition, runner) {
-  if (!transition?.changed || transition.previousMode === "capture_only") return;
-  const token = await loadProductInternalToken(manifest, runner);
-  validateInboxRestoreSnapshot(await loadInboxSnapshotWithToken(taggedUrl, token), transition);
-  await transitionInboxModeWithToken(taggedUrl, token, transition.fencedGeneration, transition.previousMode);
-}
-
-export function validateInboxRestoreSnapshot(snapshotValue, transitionValue) {
-  const snapshot = validateInboxFenceSnapshot(snapshotValue);
-  const transition = object(transitionValue, "inbox fence transition");
-  const fencedGeneration = integer(transition.fencedGeneration, 1, Number.MAX_SAFE_INTEGER, "inbox fenced generation");
-  if (snapshot.control.generation !== fencedGeneration) {
-    fail(`inbox mode compensation generation changed from ${fencedGeneration} to ${snapshot.control.generation}`);
-  }
-  if (snapshot.control.mode !== "capture_only" || snapshot.leased !== 0 || snapshot.priorGenerationLeases !== 0) {
-    fail("inbox mode compensation requires a capture_only zero-lease fence");
-  }
-  return snapshot;
-}
-
-export function validateInboxFenceSnapshot(snapshotValue) {
-  const snapshot = object(snapshotValue, "GitHub webhook inbox fence snapshot");
-  const control = object(snapshot.control, "GitHub webhook inbox fence control");
-  const modes = new Set(["capture_only", "canary_only", "capture_and_process", "legacy_forward"]);
-  if (!modes.has(control.mode)) fail("GitHub webhook inbox fence mode is invalid");
-  const generation = integer(control.generation, 1, Number.MAX_SAFE_INTEGER, "inbox fence generation");
-  const leased = integer(snapshot.leased, 0, Number.MAX_SAFE_INTEGER, "inbox fence leased");
-  const priorGenerationLeases = integer(
-    snapshot.priorGenerationLeases,
-    0,
-    Number.MAX_SAFE_INTEGER,
-    "inbox fence priorGenerationLeases"
-  );
-  return { control: { mode: control.mode, generation }, leased, priorGenerationLeases };
-}
-
-export function isInboxFenceComplete(snapshotValue) {
-  const snapshot = validateInboxFenceSnapshot(snapshotValue);
-  return snapshot.control.mode === "capture_only" && snapshot.leased === 0 && snapshot.priorGenerationLeases === 0;
 }
 
 class PublicApiTrafficPreconditionError extends Error {

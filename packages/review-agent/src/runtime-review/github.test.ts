@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  buildRuntimeReviewRequest,
-  legacyRuntimeReviewMarker,
-  runtimeReviewMarker,
-  runtimeReviewMarkers
-} from "./github.js";
+import { buildRuntimeReviewRequest, runtimeReviewMarker, runtimeReviewMarkers } from "./github.js";
 import type { RuntimeReviewResult } from "./index.js";
 
 const diffPatch = `diff --git a/src/app.ts b/src/app.ts
@@ -26,7 +21,7 @@ test("buildRuntimeReviewRequest creates inline comments and concise body", () =>
   process.env.DASHBOARD_URL = "https://jina.example";
   try {
     const result: RuntimeReviewResult = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "issues_found",
       summary: "Runtime review found request parsing issues.",
       readiness: {
@@ -35,13 +30,43 @@ test("buildRuntimeReviewRequest creates inline comments and concise body", () =>
         rationale:
           "A medium-risk request parsing issue remains accepted. This can affect normal API usage until it is fixed."
       },
-      finalReviewSummary:
-        "The investigation exercised request parsing and found three issues; the JSON parse crash must be addressed before merge.",
+      publication: {
+        areaSummaries: [
+          {
+            areaId: "request-body",
+            title: "Request body parsing",
+            summary: "Ran a focused handler probe and found invalid JSON can throw before a response is created."
+          }
+        ],
+        issues: [
+          {
+            title: "Invalid JSON can crash the handler",
+            body: "The changed handler awaits req.json() without catching parse errors, so malformed JSON throws instead of returning a controlled 400 response.",
+            severity: "P1",
+            severityDescription: "High — Should fix",
+            sourceFingerprints: ["request-json-throw"]
+          },
+          {
+            title: "Follow-up response contract issue",
+            body: "The response shape no longer includes the field expected by an unchanged caller.",
+            severity: "P2",
+            severityDescription: "Medium — Consider fixing",
+            sourceFingerprints: ["unanchored"]
+          },
+          {
+            title: "Speculative low-confidence issue",
+            body: "Low-confidence findings should be held back.",
+            severity: "P3",
+            severityDescription: "Low — Low priority",
+            sourceFingerprints: ["low"]
+          }
+        ]
+      },
       commit: "abc123",
       diffStat: "src/app.ts | 3 ++-",
       changedFiles: ["src/app.ts"],
       diffPatch,
-      plan: { schemaVersion: 1, areas: [] },
+      plan: { schemaVersion: 2, areas: [] },
       markdown: "",
       areas: [
         {
@@ -72,9 +97,7 @@ test("buildRuntimeReviewRequest creates inline comments and concise body", () =>
             }
           ],
           issues: [],
-          nonIssues: [],
-          blocked: [],
-          toolCalls: []
+          nonIssues: []
         }
       ],
       findings: [
@@ -104,13 +127,13 @@ test("buildRuntimeReviewRequest creates inline comments and concise body", () =>
           category: "data",
           file_path: "src/app.ts",
           line_number: 99,
-          body: "The response shape no longer includes the legacy field expected by an unchanged caller.",
+          body: "The response shape no longer includes the field expected by an unchanged caller.",
           root_cause: "The handler response contract changed without updating the caller.",
           why_it_matters: "The caller may render stale or missing state.",
-          evidence: ["mental_trace followed the caller response path."],
-          reproduction_or_trace: "mental_trace of caller response handling.",
+          evidence: ["Source trace followed the caller response path."],
+          reproduction_or_trace: "Source trace of caller response handling.",
           validation_method: "hybrid",
-          audit_trail: ["Read caller source.", "Ran mental_trace."]
+          audit_trail: ["Read caller source.", "Traced the response path."]
         },
         {
           fingerprint: "low",
@@ -126,10 +149,7 @@ test("buildRuntimeReviewRequest creates inline comments and concise body", () =>
           validation_method: "source_trace",
           audit_trail: []
         }
-      ],
-      // No stage creates review comments any more.
-      comments: [],
-      commentsCount: 0
+      ]
     };
 
     const request = buildRuntimeReviewRequest({
@@ -181,7 +201,7 @@ test("buildRuntimeReviewRequest creates inline comments and concise body", () =>
 
 test("buildRuntimeReviewRequest publishes a body even with no findings", () => {
   const result: RuntimeReviewResult = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "passed",
     summary: "Runtime review found no publishable issues.",
     readiness: {
@@ -193,9 +213,10 @@ test("buildRuntimeReviewRequest publishes a body even with no findings", () => {
     diffStat: "src/app.ts | 1 +",
     changedFiles: ["src/app.ts"],
     diffPatch,
-    plan: { schemaVersion: 1, areas: [] },
+    plan: { schemaVersion: 2, areas: [] },
     areas: [],
     findings: [],
+    publication: { areaSummaries: [], issues: [] },
     markdown: ""
   };
 
@@ -229,6 +250,7 @@ test("buildRuntimeReviewRequest uses the current merge-confidence label when rec
     plan: { schemaVersion: 2, areas: [] },
     areas: [],
     findings: [],
+    publication: { areaSummaries: [], issues: [] },
     markdown: ""
   };
 
@@ -237,7 +259,7 @@ test("buildRuntimeReviewRequest uses the current merge-confidence label when rec
   assert.match(request.body, /### 0 issues found - Merge is okay, fixes recommended/);
 });
 
-test("buildRuntimeReviewRequest accepts schema v2 runtime payload aliases", () => {
+test("buildRuntimeReviewRequest accepts the current schema v2 runtime payload", () => {
   const result: RuntimeReviewResult = {
     schemaVersion: 2,
     status: "issues_found",
@@ -261,12 +283,9 @@ test("buildRuntimeReviewRequest accepts schema v2 runtime payload aliases", () =
       threadItems: [],
       partialFailures: []
     },
-    intent: {
-      markdown: "The PR intends to parse request JSON safely.",
-      metadata: { generatedAt: "2026-07-03T00:00:00.000Z", ambiguous: false }
-    },
     plan: {
       schemaVersion: 2,
+      intentSummary: "The PR intends to parse request JSON safely.",
       areas: [
         {
           id: "request-json",
@@ -284,36 +303,7 @@ test("buildRuntimeReviewRequest accepts schema v2 runtime payload aliases", () =
         }
       ]
     },
-    investigations: [],
     areas: [],
-    finalReview: {
-      summary: "Accepted one v2 candidate.",
-      acceptedIssues: [
-        {
-          fingerprint: "v2-json",
-          title: "Invalid JSON can crash the handler",
-          risk: "medium",
-          confidence: "high",
-          category: "correctness",
-          file_path: "src/app.ts",
-          line_number: 3,
-          body: "The handler awaits req.json() without catching parse failures.",
-          root_cause: "Parsing is unguarded.",
-          why_it_matters: "Malformed requests bypass API error handling.",
-          evidence: ["Probe reproduced the throw."],
-          reproduction_or_trace: "pnpm exec tsx probe.ts",
-          validation_method: "execution",
-          audit_trail: ["Ran probe."]
-        }
-      ],
-      comments: [],
-      dismissedCandidates: [],
-      readiness: {
-        score: 2,
-        recommendation: "Do not merge until addressed",
-        rationale: "A real runtime issue remains."
-      }
-    },
     readiness: { score: 2, recommendation: "Do not merge until addressed", rationale: "A real runtime issue remains." },
     commit: "abc123",
     diffStat: "src/app.ts | 1 +",
@@ -337,6 +327,18 @@ test("buildRuntimeReviewRequest accepts schema v2 runtime payload aliases", () =
         audit_trail: ["Ran probe."]
       }
     ],
+    publication: {
+      areaSummaries: [],
+      issues: [
+        {
+          title: "Invalid JSON can crash the handler",
+          body: "The handler awaits req.json() without catching parse failures.",
+          severity: "P1",
+          severityDescription: "High — Should fix",
+          sourceFingerprints: ["v2-json"]
+        }
+      ]
+    },
     markdown: ""
   };
 
@@ -350,14 +352,14 @@ test("buildRuntimeReviewRequest accepts schema v2 runtime payload aliases", () =
 
 test("buildRuntimeReviewRequest reports only actual file-level comments", () => {
   const result: RuntimeReviewResult = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "issues_found",
     summary: "Runtime review found a pathless issue.",
     commit: "abc123",
     diffStat: "",
     changedFiles: [],
     diffPatch: "",
-    plan: { schemaVersion: 1, areas: [] },
+    plan: { schemaVersion: 2, areas: [] },
     areas: [],
     markdown: "",
     findings: [
@@ -375,7 +377,19 @@ test("buildRuntimeReviewRequest reports only actual file-level comments", () => 
         validation_method: "execution",
         audit_trail: ["Ran probe."]
       }
-    ]
+    ],
+    publication: {
+      areaSummaries: [],
+      issues: [
+        {
+          title: "Pathless runtime issue",
+          body: "The runtime behavior fails but is not tied to a file.",
+          severity: "P1",
+          severityDescription: "High — Should fix",
+          sourceFingerprints: ["pathless"]
+        }
+      ]
+    }
   };
 
   const request = buildRuntimeReviewRequest({
@@ -397,14 +411,14 @@ test("buildRuntimeReviewRequest reports only actual file-level comments", () => 
 
 test("buildRuntimeReviewRequest keeps unpathed findings in the main review body", () => {
   const result: RuntimeReviewResult = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "issues_found",
     summary: "Runtime review found a cross-file issue.",
     commit: "abc123",
     diffStat: "src/app.ts | 1 +",
     changedFiles: ["src/app.ts"],
     diffPatch,
-    plan: { schemaVersion: 1, areas: [] },
+    plan: { schemaVersion: 2, areas: [] },
     areas: [],
     markdown: "",
     findings: [
@@ -423,7 +437,19 @@ test("buildRuntimeReviewRequest keeps unpathed findings in the main review body"
         validation_method: "execution",
         audit_trail: ["Ran probe."]
       }
-    ]
+    ],
+    publication: {
+      areaSummaries: [],
+      issues: [
+        {
+          title: "Cross-file runtime issue",
+          body: "The runtime behavior fails across files.",
+          severity: "P1",
+          severityDescription: "High — Should fix",
+          sourceFingerprints: ["cross-file"]
+        }
+      ]
+    }
   };
 
   const request = buildRuntimeReviewRequest({
@@ -442,14 +468,14 @@ test("buildRuntimeReviewRequest keeps unpathed findings in the main review body"
 
 test("buildRuntimeReviewRequest keeps outside-diff findings in the main review body", () => {
   const result: RuntimeReviewResult = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "issues_found",
     summary: "Runtime review found a cross-file issue.",
     commit: "abc123",
     diffStat: "src/app.ts | 1 +",
     changedFiles: ["src/app.ts"],
     diffPatch,
-    plan: { schemaVersion: 1, areas: [] },
+    plan: { schemaVersion: 2, areas: [] },
     areas: [],
     markdown: "",
     findings: [
@@ -470,7 +496,19 @@ test("buildRuntimeReviewRequest keeps outside-diff findings in the main review b
         validation_method: "execution",
         audit_trail: ["Ran probe."]
       }
-    ]
+    ],
+    publication: {
+      areaSummaries: [],
+      issues: [
+        {
+          title: "Runtime issue in a downstream file",
+          body: "The runtime behavior fails in a file that was not directly changed.",
+          severity: "P1",
+          severityDescription: "High — Should fix",
+          sourceFingerprints: ["non-diff-file"]
+        }
+      ]
+    }
   };
 
   const request = buildRuntimeReviewRequest({
@@ -490,14 +528,14 @@ test("buildRuntimeReviewRequest keeps outside-diff findings in the main review b
 
 test("buildRuntimeReviewRequest reports unanchored issues in the main review body", () => {
   const result: RuntimeReviewResult = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "issues_found",
     summary: "Runtime review found an unanchored issue.",
     commit: "abc123",
     diffStat: "src/app.ts | 1 +",
     changedFiles: ["src/app.ts"],
     diffPatch,
-    plan: { schemaVersion: 1, areas: [] },
+    plan: { schemaVersion: 2, areas: [] },
     areas: [],
     readiness: {
       score: 3,
@@ -623,10 +661,7 @@ test("buildRuntimeReviewRequest publishes every reviewer-validated severity", ()
   assert.match(request.body, /### 2 issues found/);
 });
 
-test("runtimeReviewMarkers include legacy issue-validation marker for dedupe", () => {
-  assert.deepEqual(runtimeReviewMarkers("abc123"), [
-    runtimeReviewMarker("abc123"),
-    legacyRuntimeReviewMarker("abc123")
-  ]);
+test("runtimeReviewMarkers use the current per-run marker", () => {
+  assert.deepEqual(runtimeReviewMarkers("abc123"), [runtimeReviewMarker("abc123")]);
   assert.deepEqual(runtimeReviewMarkers("abc123", "run-1"), [runtimeReviewMarker("abc123", "run-1")]);
 });

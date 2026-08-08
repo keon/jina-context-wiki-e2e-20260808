@@ -89,12 +89,6 @@ export default async function ContextAdminPage({
   const shownBuilds = visibleBuilds.slice(0, BUILD_ROW_LIMIT);
   const shownDocuments = documents.slice(0, DOCUMENT_ROW_LIMIT);
   const progressByBuild = new Map(buildProgress.map((progress) => [progress.buildId, progress]));
-  // A total is only a total when every part of it was measured. An absent
-  // outbox map is not an empty one, and absent quota telemetry is not idle
-  // capacity: both stay `undefined` so the stat renders “—”.
-  const outboxDepth = metrics.outboxDepthByConsumer;
-  const pending =
-    outboxDepth === undefined ? undefined : Object.values(outboxDepth).reduce((sum, count) => sum + count, 0);
   const activeBuilds = metrics.quotas?.active?.builds;
   const activeModelTasks = metrics.quotas?.active?.modelTasks;
   const currentDocuments = new Map(
@@ -145,7 +139,6 @@ export default async function ContextAdminPage({
         <Stat label="Wiki releases" value={metricsKnown ? metrics.publishedGenerationCount : undefined} />
         <Stat label="Repositories" value={repository ? 1 : repositoriesKnown ? repositories.length : undefined} />
         <Stat label="Derived context docs" value={isLoaded(documentsSection) ? currentDocuments : undefined} />
-        <Stat label="Projection backlog" value={metricsKnown ? pending : undefined} />
         <Stat label="Active builds" value={metricsKnown ? activeBuilds : undefined} />
         <Stat label="Active model tasks" value={metricsKnown ? activeModelTasks : undefined} />
         <Stat label="Verified checkpoints" value={isLoaded(buildProgressSection) ? verifiedCheckpoints : undefined} />
@@ -419,47 +412,7 @@ export default async function ContextAdminPage({
         <p className="muted">
           {metricsKnown ? indexHealthSummary(metrics) : "Index counts could not be read, so none are shown."}
         </p>
-        {!metricsKnown ? (
-          <SectionError section={metricsSection} />
-        ) : (metrics.projectors?.length ?? 0) > 0 ? (
-          <TableScroll
-            id="health-table"
-            caption={`${HEADINGS.health}: ${rowCountLabel(metrics.projectors!.length, metrics.projectors!.length, "immutable projector checkpoints")}.`}
-          >
-            <thead>
-              <tr>
-                <th scope="col">Projection</th>
-                <th scope="col">Status</th>
-                <th scope="col">Backlog</th>
-                <th scope="col">Version</th>
-                <th scope="col">Release checkpoint</th>
-              </tr>
-            </thead>
-            <tbody>
-              {metrics.projectors!.map((projector) => (
-                <tr key={projector.name}>
-                  <td>{projector.name}</td>
-                  <td data-tone={statusTone(projector.status)}>{projector.status}</td>
-                  <td>
-                    {projector.backlog === undefined ? (
-                      <Unmeasured title="No backlog was reported for this projection, so its lag is unknown" />
-                    ) : (
-                      projector.backlog.toLocaleString("en-US")
-                    )}
-                  </td>
-                  <td>
-                    <code>{projector.version}</code>
-                  </td>
-                  <td className="summary-cell">
-                    <code>{projector.checkpoint}</code>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </TableScroll>
-        ) : (
-          <EmptyState>No published Wiki index checkpoint is available.</EmptyState>
-        )}
+        {!metricsKnown ? <SectionError section={metricsSection} /> : null}
       </section>
 
       <section id="documents" className="context-admin-section admin-data-section">
@@ -635,14 +588,10 @@ function countText(value: number | undefined): string {
  * mistaken for an empty, healthy index.
  */
 function indexHealthSummary(metrics: AdminContextMetrics): string {
-  const embeddings =
-    metrics.embeddingCount === undefined
-      ? "The dense embedding count was not reported."
-      : `Dense embeddings remain disabled (${countText(metrics.embeddingCount)} stored).`;
   const unmeasured = [metrics.fragmentCount, metrics.hierarchyNodeCount].some((count) => count === undefined)
     ? " Counts shown as “—” were never measured and are not zero."
     : "";
-  return `${countText(metrics.fragmentCount)} lexical fragments and ${countText(metrics.hierarchyNodeCount)} hierarchy nodes. ${embeddings}${unmeasured}`;
+  return `${countText(metrics.fragmentCount)} lexical fragments and ${countText(metrics.hierarchyNodeCount)} hierarchy nodes.${unmeasured}`;
 }
 
 function shortRef(ref: string): string {

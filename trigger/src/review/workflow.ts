@@ -41,7 +41,7 @@ export type ReviewPayload = {
 
 /** Per-tenant, per-stage model selection resolved at dispatch. `null`/absent
  *  means the platform default for that stage. */
-export type ReviewModelSettings = {
+type ReviewModelSettings = {
   planner_model?: string | null;
   investigation_model?: string | null;
   review_model?: string | null;
@@ -106,7 +106,7 @@ type ManualReviewRun = {
 
 const MANUAL_COMMAND_TAG_PATTERN = /^manual-command:(\d+):(issue_comment|pull_request_review_comment):(\d+)$/;
 
-export type ReviewFindingPayload = {
+type ReviewFindingPayload = {
   fingerprint: string;
   file_path?: string;
   line_number?: number;
@@ -206,10 +206,6 @@ export function failedRepositoryAccess(error: unknown): RepositoryAccessProbe {
     status: 0,
     message: `repo access probe failed: ${errorMessage(error)}`,
   };
-}
-
-export function supersededReason(current: PullRequestState, expectedHeadSha: string): string | undefined {
-  return supersededDetails(current, expectedHeadSha)?.reason;
 }
 
 export function supersededDetails(current: PullRequestState, expectedHeadSha: string): ReviewSuperseded | undefined {

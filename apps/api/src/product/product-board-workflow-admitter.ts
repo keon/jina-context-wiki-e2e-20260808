@@ -4,23 +4,16 @@ import {
   INSTALLATION_BACKFILL_TASK_ID,
 } from "./installation-board-admission.js";
 import {
-  admitConfiguredBoardReview,
-  ReviewAdmissionPausedError,
+  admitBoardReview,
   type BoardReviewAdmissionResult,
-  type BoardReviewV2AdmissionResult,
   type ReviewBoardArrival,
-  type ReviewBoardPipelineSelection,
 } from "./review-board-admission.js";
 import { REVIEW_TASK_ID } from "./review-task-routing.js";
 import type { CreateReviewRunInput } from "./store.js";
 import type { BoardWorkflowAdmitter, DispatchOptions } from "./board-admission-contract.js";
 
 interface ReviewDispatcherDependencies {
-  readonly admit?: (input: CreateReviewRunInput) => Promise<BoardReviewAdmissionResult>;
-  readonly admitReview?: (
-    arrival: ReviewBoardArrival,
-    selection: ReviewBoardPipelineSelection,
-  ) => Promise<BoardReviewAdmissionResult | BoardReviewV2AdmissionResult>;
+  readonly admitReview?: (arrival: ReviewBoardArrival) => Promise<BoardReviewAdmissionResult>;
   readonly admitInstallationBackfill?: (
     payload: unknown,
     options: DispatchOptions,
@@ -28,27 +21,19 @@ interface ReviewDispatcherDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ReviewDispatcherDependencies = {
-  admitReview: admitConfiguredBoardReview,
+  admitReview: admitBoardReview,
   admitInstallationBackfill,
 };
 
 interface ReviewDispatcherOptions {
-  readonly pipeline: ReviewBoardPipelineSelection;
   readonly dependencies?: ReviewDispatcherDependencies;
 }
 
 export class ProductBoardWorkflowAdmitter implements BoardWorkflowAdmitter {
   private readonly dependencies: ReviewDispatcherDependencies;
-  private readonly pipeline: ReviewBoardPipelineSelection;
 
-  constructor(options: ReviewDispatcherDependencies | ReviewDispatcherOptions = DEFAULT_DEPENDENCIES) {
-    if ("pipeline" in options) {
-      this.pipeline = options.pipeline;
-      this.dependencies = options.dependencies ?? DEFAULT_DEPENDENCIES;
-    } else {
-      this.pipeline = { mode: "v1", v2Repositories: new Set() };
-      this.dependencies = options;
-    }
+  constructor(options: ReviewDispatcherOptions = {}) {
+    this.dependencies = options.dependencies ?? DEFAULT_DEPENDENCIES;
   }
 
   async admitBoardWorkflow(
@@ -66,24 +51,12 @@ export class ProductBoardWorkflowAdmitter implements BoardWorkflowAdmitter {
       throw new ApiError(400, `Unsupported Board workflow: ${taskIdentifier}`);
     }
     const input = reviewBoardInputFromArrival(payload, options);
-    try {
-      const admitted = this.dependencies.admit
-        ? await this.dependencies.admit(input)
-        : await (this.dependencies.admitReview ?? admitConfiguredBoardReview)(
-            {
-              input,
-              triggerPayload: objectValue(payload, "review payload"),
-              triggerOptions: options,
-            },
-            this.pipeline,
-          );
-      return { id: admitted.workflowId };
-    } catch (error) {
-      if (error instanceof ReviewAdmissionPausedError) {
-        throw new ApiError(503, "Review admission is temporarily paused for a workflow cutover");
-      }
-      throw error;
-    }
+    const admitted = await (this.dependencies.admitReview ?? admitBoardReview)({
+      input,
+      triggerPayload: objectValue(payload, "review payload"),
+      triggerOptions: options,
+    });
+    return { id: admitted.workflowId };
   }
 }
 

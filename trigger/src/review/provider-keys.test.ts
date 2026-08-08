@@ -35,7 +35,6 @@ test("resolveProviderKeys prefers a Codex harness auth blob over an OpenRouter k
         JSON.stringify({
           codex_harness_auth: '{"tokens":{"access_token":"a"}}',
           codex_harness_connected_at_ms: 1_784_000_000_123,
-          harness_owner_login: "author",
           openrouter_api_key: "or-user-key",
         }),
         { status: 200 },
@@ -47,20 +46,6 @@ test("resolveProviderKeys prefers a Codex harness auth blob over an OpenRouter k
     codexHarnessConnectedAtMs: 1_784_000_000_123,
     source: "harness",
   });
-});
-
-test("resolveProviderKeys ignores the deprecated codex_harness_model field", async () => {
-  // The per-author model pin is gone (per-stage models drive harness runs); a legacy API response
-  // still carrying the field must not leak it into the resolved keys.
-  stubFetch(
-    () =>
-      new Response(
-        JSON.stringify({ codex_harness_auth: '{"tokens":{"access_token":"a"}}', codex_harness_model: "gpt-5.4-mini" }),
-        { status: 200 },
-      ),
-  );
-  const keys = await resolveProviderKeys(42, "run-1");
-  assert.deepEqual(keys, { codexHarnessAuth: '{"tokens":{"access_token":"a"}}', source: "harness" });
 });
 
 test("resolveProviderKeys falls back to the OpenRouter key when no harness is connected", async () => {

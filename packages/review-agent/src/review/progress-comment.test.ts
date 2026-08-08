@@ -14,8 +14,8 @@ import type { ReviewStageName, ReviewStageResult } from "./workflow.js";
 test("progress comment renders queued review state separately from findings state", () => {
   const body = renderReviewProgressComment(initialReviewProgressState("run-1", "abc123"));
 
-  assert.match(body, /<!-- jina-simulation:review-summary:abc123:run-1 -->/);
-  assert.match(body, /<!-- jina-simulation:review-progress /);
+  assert.match(body, /<!-- jina:review-summary:abc123:run-1 -->/);
+  assert.match(body, /<!-- jina:review-progress /);
   assert.match(body, /Jina is working on this PR\./);
   assert.match(body, /\| Review \| Queued \|/);
   assert.match(body, /\| Findings \| Pending \|/);
@@ -146,25 +146,6 @@ test("final progress reconciliation preserves a provider failure notice", () => 
     category: "authentication",
     provider: "byok"
   });
-});
-
-test("legacy provider failure notices remain visible with safe generic copy", () => {
-  const legacyBody = [
-    reviewProgressCommentMarker("abc123", "run-1"),
-    '<!-- jina-simulation:review-progress {"v":1,"reviewRunId":"run-1","headSha":"abc123","status":"Blocked","findings":"Unavailable","notice":{"kind":"provider_failure","category":"quota"}} -->',
-    "## Jina Review"
-  ].join("\n");
-
-  const parsed = parseReviewProgressCommentState(legacyBody);
-  assert.deepEqual(parsed?.notice, {
-    kind: "provider_failure",
-    category: "quota",
-    provider: "unknown"
-  });
-  assert.match(
-    renderReviewProgressComment(parsed!),
-    /selected model provider has no available quota, credits, or rate-limit capacity/i
-  );
 });
 
 test("progress state parsing and merging preserves existing fields", () => {

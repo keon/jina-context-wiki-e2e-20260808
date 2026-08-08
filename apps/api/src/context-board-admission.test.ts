@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyCommand, createEmptyBoardState, findTask, transitionBoardTask } from "@jina/board";
-import { contextBoardTaskTypes, createContextBoardBuild } from "@jina/context-engine";
+import {
+  CONTEXT_WORKFLOW_CONTRACT,
+  CONTEXT_WORKFLOW_SCHEMA_REVISION,
+  contextWorkflowBoardTaskTypes,
+  createContextWorkflowBoardBuild
+} from "@jina/context-engine";
 import { parseGitHubWebhook, type GitHubWebhookEvent } from "@jina/github";
 import { admitContextBoardBuild, latestContextBoardFollowup } from "./context-board-admission.js";
 
@@ -31,7 +36,7 @@ test("manual admission creates the board root atomically with authoritative scop
   assert.equal(admitted.scope.refSequence, 1);
   assert.equal(admitted.scope.repository, "omxyz/jina");
   const build = findTask(admitted.state, admitted.build.buildTaskId)!;
-  assert.equal(build.type, contextBoardTaskTypes.build);
+  assert.equal(build.type, contextWorkflowBoardTaskTypes.build);
   assert.deepEqual(
     {
       tenantId: build.metadata.tenantId,
@@ -376,7 +381,7 @@ test("an invested default-ref build retains only the newest follow-up until it b
   assert.equal(second.outcome, "deferred");
   assert.equal(second.activeBuildTaskId, first.build.buildTaskId);
   assert.equal(findTask(second.state, first.build.buildTaskId)?.status, "in_progress");
-  assert.equal(second.state.tasks.filter((task) => task.type === contextBoardTaskTypes.build).length, 1);
+  assert.equal(second.state.tasks.filter((task) => task.type === contextWorkflowBoardTaskTypes.build).length, 1);
 
   const newest = github(second.state, pushEvent("9".repeat(40)), "delivery-push-newest");
   assert.equal(newest.outcome, "deferred");
@@ -446,7 +451,7 @@ test("a recoverable failed build retains its follow-up until checkpoint repair p
   const newer = github(failed, pushEvent("9".repeat(40)), "delivery-repair-newer-followup");
   assert.equal(newer.outcome, "deferred");
   assert.equal(newer.activeBuildTaskId, first.build.buildTaskId);
-  assert.equal(newer.state.tasks.filter((task) => task.type === contextBoardTaskTypes.build).length, 1);
+  assert.equal(newer.state.tasks.filter((task) => task.type === contextWorkflowBoardTaskTypes.build).length, 1);
   assert.equal(
     newer.state.events.filter((event) => event.type === "context.build_followup_requested").length,
     1,
@@ -468,7 +473,13 @@ test("a completed newer build retires an older recoverable failure for the same 
     LATER
   );
   const failed = transitionBoardTask(failedSnapshot, first.build.buildTaskId, "failed", LATER);
-  const newer = createContextBoardBuild(failed, {
+  const newer = createContextWorkflowBoardBuild(failed, {
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-page-workflow-1",
+    validatorVersion: "context-page-validator-1",
+    pageIndexVersion: "pageindex-local-1",
+    executionProfileDigest: "a".repeat(64),
     tenantId: TENANT,
     repository: "omxyz/jina",
     ref: "main",
@@ -530,7 +541,7 @@ test("a deadline-interrupted build retains its follow-up even though its resume 
   const newer = github(failed, pushEvent("9".repeat(40)), "delivery-deadline-newer");
   assert.equal(newer.outcome, "deferred");
   assert.equal(newer.activeBuildTaskId, first.build.buildTaskId);
-  assert.equal(newer.state.tasks.filter((task) => task.type === contextBoardTaskTypes.build).length, 1);
+  assert.equal(newer.state.tasks.filter((task) => task.type === contextWorkflowBoardTaskTypes.build).length, 1);
 });
 
 test("a new delivery after predecessor completion stays queued until promotion binds the published seed", () => {

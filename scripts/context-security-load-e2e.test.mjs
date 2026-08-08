@@ -391,11 +391,6 @@ async function withFakeContextServer(configuration, run) {
             id: "publication",
             type: "publish-context-release",
             status: "done"
-          },
-          {
-            id: "index",
-            type: "index-context-release",
-            status: "done"
           }
         ]
       });

@@ -24,11 +24,8 @@ import {
 import { type SelectedTenant } from "../lib/tenants";
 import { useTenant, useTenantQueryScope } from "../providers";
 
-function tenantScopedUrl(selected: SelectedTenant | null, suffix: string, params?: URLSearchParams): string {
-  const path = selected
-    ? `/dashboard/tenants/${encodeURIComponent(selected.tenantId)}${suffix}`
-    : `/dashboard${suffix}`;
-  return apiUrl(path, params);
+function tenantScopedUrl(selected: SelectedTenant, suffix: string, params?: URLSearchParams): string {
+  return apiUrl(`/dashboard/tenants/${encodeURIComponent(selected.tenantId)}${suffix}`, params);
 }
 
 export default function UsagePage() {
@@ -38,13 +35,15 @@ export default function UsagePage() {
   const usageQuery = useQuery<Usage>({
     queryKey: tenantQueryKey("usage", scope, days),
     queryFn: () =>
-      loadUsage(() => fetch(tenantScopedUrl(selected, "/usage", usageParams(days)), { credentials: "include" })),
+      loadUsage(() => fetch(tenantScopedUrl(selected!, "/usage", usageParams(days)), { credentials: "include" })),
+    enabled: Boolean(selected),
     staleTime: CONFIG_STALE_TIME_MS,
     retry: false,
   });
   const billingQuery = useQuery<Billing>({
     queryKey: tenantQueryKey("billing", scope),
-    queryFn: () => loadBilling(() => fetch(tenantScopedUrl(selected, "/billing"), { credentials: "include" })),
+    queryFn: () => loadBilling(() => fetch(tenantScopedUrl(selected!, "/billing"), { credentials: "include" })),
+    enabled: Boolean(selected),
     staleTime: CONFIG_STALE_TIME_MS,
     retry: false,
   });
@@ -57,6 +56,15 @@ export default function UsagePage() {
     void usageQuery.refetch();
     void billingQuery.refetch();
   };
+
+  if (!selected) {
+    return (
+      <div className="usage-v2">
+        <header className="usage-page__header"><h1>Usage</h1></header>
+        <div className="usage-alert" role="status">Select a workspace to view usage.</div>
+      </div>
+    );
+  }
 
   return (
     <div className="usage-v2">

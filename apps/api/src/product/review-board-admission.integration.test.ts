@@ -9,15 +9,7 @@ import { Pool } from "pg";
 
 import { getPool } from "./db.js";
 import { admitScheduledBillingRetry } from "./billing-board-admission.js";
-import {
-  GithubWebhookInboxEpochError,
-  PostgresGithubWebhookInboxRepository,
-} from "./github-webhook-inbox-store.js";
-import {
-  admitBoardReview,
-  admitBoardReviewV2,
-  admitConfiguredBoardReview,
-} from "./review-board-admission.js";
+import { admitBoardReview } from "./review-board-admission.js";
 import {
   prepareReviewRun,
   reconcileBoardReviewTerminal,
@@ -35,9 +27,9 @@ test(
   "product review and relational Board workflow share one commit, replay, and rollback boundary",
   { skip: !databaseUrl },
   async () => {
-    const previousProductUrl = process.env.JINA_PRODUCT_DATABASE_URL;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
     const previousProductMode = process.env.JINA_PRODUCT_DATABASE_MODE;
-    process.env.JINA_PRODUCT_DATABASE_URL = databaseUrl;
+    process.env.DATABASE_URL = databaseUrl;
     process.env.JINA_PRODUCT_DATABASE_MODE = "url";
     const control = new Pool({
       connectionString: databaseUrl,
@@ -47,106 +39,20 @@ test(
       await resetDatabase(control);
       await migrateDatabase(databaseUrl!);
 
-      const first = await admitBoardReview(reviewInput("head-sha-1"));
-      const replay = await admitBoardReview(reviewInput("head-sha-1"));
-      assert.equal(first.replayed, false);
-      assert.equal(replay.replayed, true);
-      assert.equal(replay.reviewRunId, first.reviewRunId);
-      assert.equal(replay.workflowId, first.workflowId);
-      const v1PreparedReviewRunId = await prepareReviewRun({
-        ...reviewInput("head-sha-1"),
-        triggerRunId: "run_v1_drain",
-      });
-      assert.equal(v1PreparedReviewRunId, first.reviewRunId);
-      const v1Prepared = await control.query<{
-        orchestrator: string;
-        board_workflow_id: string;
-        trigger_run_id: string;
-      }>(
-        `select orchestrator,board_workflow_id,trigger_run_id
-         from review_runs where id=$1`,
-        [first.reviewRunId],
-      );
-      assert.deepEqual(v1Prepared.rows[0], {
-        orchestrator: "board",
-        board_workflow_id: first.workflowId,
-        trigger_run_id: "run_v1_drain",
-      });
-      const v1ReplayAfterV2Selection = await admitConfiguredBoardReview(
-        reviewArrival("head-sha-1"),
-        { mode: "v2", v2Repositories: new Set() },
-      );
-      assert.equal(v1ReplayAfterV2Selection.replayed, true);
-      assert.equal(v1ReplayAfterV2Selection.workflowId, first.workflowId);
-
-      const bound = await control.query<{
-        orchestrator: string;
-        board_workflow_id: string;
-        workflow_count: string;
-        task_count: string;
-      }>(
-        `select review.orchestrator,review.board_workflow_id,
-                (select count(*)::text from jina_runtime.board_workflows) workflow_count,
-                (select count(*)::text from jina_runtime.board_tasks) task_count
-         from review_runs review
-         where review.id=$1`,
-        [first.reviewRunId],
-      );
-      assert.deepEqual(bound.rows[0], {
-        orchestrator: "board",
-        board_workflow_id: first.workflowId,
-        workflow_count: "1",
-        task_count: "6",
-      });
-
-      await assert.rejects(
-        admitBoardReview(reviewInput("head-sha-rollback"), new FailingBoardRepository()),
-        /injected Board admission failure/,
-      );
-      const rolledBack = await control.query<{ reviews: string; workflows: string }>(`
-        select
-          (select count(*)::text from review_runs where head_sha='head-sha-rollback') reviews,
-          (select count(*)::text from jina_runtime.board_workflows
-            where subject_id like '%:head-sha-rollback') workflows
-      `);
-      assert.deepEqual(rolledBack.rows[0], { reviews: "0", workflows: "0" });
-
-      const inboxRepository = new PostgresGithubWebhookInboxRepository();
-      assert.equal((await inboxRepository.snapshot()).control.firstV2WorkflowId, undefined);
-
-      const v2First = await admitBoardReviewV2(reviewArrival("head-sha-v2"));
-      const v2Replay = await admitBoardReviewV2(reviewArrival("head-sha-v2"));
+      const v2First = await admitBoardReview(reviewArrival("head-sha-v2"));
+      const v2Replay = await admitBoardReview(reviewArrival("head-sha-v2"));
       assert.equal(v2First.replayed, false);
       assert.equal(v2Replay.replayed, true);
       assert.equal(v2Replay.workflowId, v2First.workflowId);
-      const firstV2Epoch = (await inboxRepository.snapshot()).control;
-      assert.equal(firstV2Epoch.firstV2WorkflowId, v2First.workflowId);
-      await assert.rejects(
-        inboxRepository.transitionMode({
-          expectedGeneration: firstV2Epoch.generation,
-          mode: "legacy_forward",
-          updatedBy: "integration-test",
-        }),
-        (error: unknown) => error instanceof GithubWebhookInboxEpochError,
-      );
-      const v2ReplayAfterV1Selection = await admitConfiguredBoardReview(
-        reviewArrival("head-sha-v2"),
-        { mode: "v1", v2Repositories: new Set() },
-      );
-      assert.equal(v2ReplayAfterV1Selection.replayed, true);
-      assert.equal(v2ReplayAfterV1Selection.workflowId, v2First.workflowId);
       const changedRedelivery = reviewArrival("head-sha-v2-redelivered-after-push");
-      const immutableReplay = await admitConfiguredBoardReview(
-        {
-          ...changedRedelivery,
-          input: { ...changedRedelivery.input, idempotencyKey: reviewInput("head-sha-v2").idempotencyKey },
-          triggerOptions: {
-            ...changedRedelivery.triggerOptions,
-            idempotencyKey: reviewInput("head-sha-v2").idempotencyKey,
-          },
+      const immutableReplay = await admitBoardReview({
+        ...changedRedelivery,
+        input: { ...changedRedelivery.input, idempotencyKey: reviewInput("head-sha-v2").idempotencyKey },
+        triggerOptions: {
+          ...changedRedelivery.triggerOptions,
+          idempotencyKey: reviewInput("head-sha-v2").idempotencyKey,
         },
-        { mode: "v1", v2Repositories: new Set() },
-      );
+      });
       assert.equal(immutableReplay.replayed, true);
       assert.equal(immutableReplay.workflowId, v2First.workflowId);
       const v2State = await control.query<{
@@ -261,12 +167,12 @@ test(
         }),
         ReviewDispatchProvenanceError,
       );
-      const postPrepareReplay = await admitBoardReviewV2(reviewArrival("head-sha-v2"));
+      const postPrepareReplay = await admitBoardReview(reviewArrival("head-sha-v2"));
       assert.equal(postPrepareReplay.replayed, true);
       assert.equal(postPrepareReplay.workflowId, v2First.workflowId);
 
       await assert.rejects(
-        admitBoardReviewV2(reviewArrival("head-sha-v2-rollback"), new FailingBoardRepository()),
+        admitBoardReview(reviewArrival("head-sha-v2-rollback"), new FailingBoardRepository()),
         /injected Board admission failure/,
       );
       const v2RolledBack = await control.query<{ reviews: string; workflows: string }>(`
@@ -277,7 +183,7 @@ test(
       `);
       assert.deepEqual(v2RolledBack.rows[0], { reviews: "0", workflows: "0" });
 
-      const decoyAdmission = await admitBoardReviewV2(reviewArrival("head-sha-v2-decoy"));
+      const decoyAdmission = await admitBoardReview(reviewArrival("head-sha-v2-decoy"));
       const decoyTask = await control.query<{ task_id: string; request_digest: string }>(
         `select id task_id,metadata->>'request_digest' request_digest
          from jina_runtime.board_tasks where workflow_id=$1`,
@@ -309,7 +215,7 @@ test(
       );
       assert.equal(decoyProductRows.rows[0]?.count, "0");
 
-      const prePrepareAdmission = await admitBoardReviewV2(reviewArrival("head-sha-v2-preprepare"));
+      const prePrepareAdmission = await admitBoardReview(reviewArrival("head-sha-v2-preprepare"));
       const prePrepareTask = await control.query<{ task_id: string; request_digest: string }>(
         `select id task_id,metadata->>'request_digest' request_digest
          from jina_runtime.board_tasks where workflow_id=$1`,
@@ -362,7 +268,7 @@ test(
       );
       assert.equal(prePrepareProductRows.rows[0]?.count, "0");
 
-      const raceAdmission = await admitBoardReviewV2(reviewArrival("head-sha-v2-race"));
+      const raceAdmission = await admitBoardReview(reviewArrival("head-sha-v2-race"));
       const raceTask = await control.query<{ task_id: string; request_digest: string }>(
         `select id task_id,metadata->>'request_digest' request_digest
          from jina_runtime.board_tasks where workflow_id=$1`,
@@ -459,7 +365,7 @@ test(
       await resetDatabase(control);
       await migrateDatabase(databaseUrl!);
       await control.end();
-      restoreEnvironment("JINA_PRODUCT_DATABASE_URL", previousProductUrl);
+      restoreEnvironment("DATABASE_URL", previousDatabaseUrl);
       restoreEnvironment("JINA_PRODUCT_DATABASE_MODE", previousProductMode);
     }
   },
@@ -529,7 +435,6 @@ async function migrateDatabase(url: string): Promise<void> {
     ...process.env,
     DATABASE_URL: url,
     TEST_DATABASE_URL: url,
-    JINA_PRODUCT_DATABASE_URL: url,
     JINA_PRODUCT_DATABASE_MODE: "url",
   };
   await execFileAsync(process.execPath, [runtimeMigration], { env: environment });

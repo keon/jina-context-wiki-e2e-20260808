@@ -153,7 +153,7 @@ test("a context query maps onto claims, highlights, and coverage notes", () => {
     ],
     conflicts: [{ subject: "ownership", description: "two owners claimed" }],
     ambiguities: ["ambiguous ref"],
-    coverage: { status: "partial", missing: ["dense retrieval"] }
+    coverage: { status: "partial", missing: ["runtime evidence"] }
   });
 
   assert.equal(result.graphId, "ig_9");
@@ -169,7 +169,7 @@ test("a context query maps onto claims, highlights, and coverage notes", () => {
   assert.deepEqual(result.highlightedNodeIds, ["src/server.ts"]);
   assert.deepEqual(result.notes, [
     "ambiguous ref",
-    "Coverage gap: dense retrieval",
+    "Coverage gap: runtime evidence",
     "Conflict on ownership: two owners claimed"
   ]);
 });

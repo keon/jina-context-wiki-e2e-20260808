@@ -1,5 +1,5 @@
 import { boardOperatorRetryEligibility, type BoardState, type BoardTask, type TaskId } from "@jina/board";
-import { MAX_CONTEXT_OPERATOR_REMEDIATION_PASS, contextBoardTaskTypes } from "@jina/context-engine";
+import { contextWorkflowBoardTaskTypes } from "@jina/context-engine";
 
 export function contextBuildBoardState(state: BoardState, buildTaskId: TaskId): BoardState {
   const tasks = state.tasks.filter((task) => task.id === buildTaskId || task.metadata.contextBuildId === buildTaskId);
@@ -27,7 +27,7 @@ function contextLimitInterruptedTaskIds(
   build: BoardTask,
   failureEventType: "context.build_time_budget_exceeded.failed" | "context.build_token_budget_exceeded.failed"
 ): readonly TaskId[] {
-  if (build.type !== contextBoardTaskTypes.build || build.status !== "failed") return [];
+  if (build.type !== contextWorkflowBoardTaskTypes.build || build.status !== "failed") return [];
   const latestReopen = [...state.events]
     .reverse()
     .find((event) => event.taskId === build.id && event.type === "task.operator_reopened");
@@ -59,68 +59,8 @@ function contextLimitInterruptedTaskIds(
     .sort((left, right) => left.localeCompare(right));
 }
 
-export function contextPageRemediationTaskIds(state: BoardState, build: BoardTask): readonly TaskId[] {
-  return state.tasks
-    .filter(
-      (task) =>
-        task.parentTaskId === build.id &&
-        task.type === contextBoardTaskTypes.page &&
-        task.status === "failed" &&
-        hasCurrentExhaustion(state, task.id, "context.page_repair_exhausted")
-    )
-    .filter((page) => {
-      const latestPass = state.tasks
-        .filter(
-          (task) =>
-            task.parentTaskId === page.id &&
-            task.type === contextBoardTaskTypes.pageAudit &&
-            task.status === "done" &&
-            Number.isSafeInteger(task.metadata.pass)
-        )
-        .reduce((maximum, task) => Math.max(maximum, Number(task.metadata.pass)), 0);
-      return latestPass >= 1 && latestPass < MAX_CONTEXT_OPERATOR_REMEDIATION_PASS;
-    })
-    .map((page) => page.id)
-    .sort((left, right) => left.localeCompare(right));
-}
-
-export function contextGateRemediationTaskId(state: BoardState, build: BoardTask): TaskId | undefined {
-  const certification = state.tasks.find(
-    (task) =>
-      task.parentTaskId === build.id && task.type === contextBoardTaskTypes.certification && task.status === "canceled"
-  );
-  const exhaustion = certification
-    ? [...state.events]
-        .reverse()
-        .find((event) => event.taskId === certification.id && event.type === "context.gate_repair_exhausted")
-    : undefined;
-  return certification &&
-    isAfterLatestOperatorReopen(state, certification.id, exhaustion?.seq) &&
-    Number.isSafeInteger(exhaustion?.payload?.pass) &&
-    Number(exhaustion?.payload?.pass) < MAX_CONTEXT_OPERATOR_REMEDIATION_PASS
-    ? certification.id
-    : undefined;
-}
-
-function hasCurrentExhaustion(
-  state: BoardState,
-  taskId: TaskId,
-  eventType: "context.page_repair_exhausted" | "context.gate_repair_exhausted"
-): boolean {
-  const exhaustion = [...state.events].reverse().find((event) => event.taskId === taskId && event.type === eventType);
-  return isAfterLatestOperatorReopen(state, taskId, exhaustion?.seq);
-}
-
-function isAfterLatestOperatorReopen(state: BoardState, taskId: TaskId, eventSequence: number | undefined): boolean {
-  if (eventSequence === undefined) return false;
-  const latestReopen = [...state.events]
-    .reverse()
-    .find((event) => event.taskId === taskId && event.type === "task.operator_reopened");
-  return !latestReopen || eventSequence > latestReopen.seq;
-}
-
 export function contextBuildHasOperatorRecovery(state: BoardState, build: BoardTask, now: string): boolean {
-  if (build.type !== contextBoardTaskTypes.build || build.status !== "failed") return false;
+  if (build.type !== contextWorkflowBoardTaskTypes.build || build.status !== "failed") return false;
   if (
     state.events.some(
       (event) => event.taskId === build.id && event.type === "context.build_operator_recovery_abandoned"
@@ -132,8 +72,6 @@ export function contextBuildHasOperatorRecovery(state: BoardState, build: BoardT
   return (
     boardOperatorRetryEligibility(buildState, { buildTaskId: build.id, now }).eligible ||
     contextDeadlineInterruptedTaskIds(buildState, build).length > 0 ||
-    contextTokenInterruptedTaskIds(buildState, build).length > 0 ||
-    contextPageRemediationTaskIds(buildState, build).length > 0 ||
-    contextGateRemediationTaskId(buildState, build) !== undefined
+    contextTokenInterruptedTaskIds(buildState, build).length > 0
   );
 }

@@ -6,7 +6,6 @@ test("routes product, review, billing, auth, and GitHub endpoints to the absorbe
   for (const path of [
     "/dashboard/me",
     "/dashboard/tenants/tenant-1/review-runs",
-    "/auth/github/callback",
     "/webhooks/github",
     "/internal/reviews/prepare",
     "/internal/reviews/run-1/complete",

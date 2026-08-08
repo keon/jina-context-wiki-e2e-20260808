@@ -45,19 +45,6 @@ export interface SharedTenantSummary {
   readonly githubConnections: readonly SharedTenantGithubConnection[];
 }
 
-export interface ResolveSharedTenantMemberInput {
-  readonly tenantId: string;
-  readonly githubUserId: number;
-}
-
-export interface SharedTenantMember {
-  readonly tenantId: string;
-  readonly githubUserId: string;
-  readonly githubLogin?: string;
-  readonly role: string;
-  readonly syncedAt: string;
-}
-
 interface SharedRepositoryIdentityRow {
   readonly tenant_id: string;
   readonly github_account_id: string | number;
@@ -68,14 +55,6 @@ interface SharedRepositoryIdentityRow {
   readonly repository_owner: string;
   readonly repository_name: string;
   readonly default_branch: string;
-}
-
-interface SharedTenantMemberRow {
-  readonly tenant_id: string;
-  readonly github_user_id: string | number;
-  readonly github_login: string | null;
-  readonly role: string;
-  readonly synced_at: Date | string;
 }
 
 interface SharedTenantSummaryRow {
@@ -117,7 +96,6 @@ const RESOLVE_REPOSITORY_SQL = `
    and i.tenant_id = r.tenant_id
   where
     r.enabled = true
-    and t.merged_into_tenant_id is null
     and i.suspended_at is null
     and i.deleted_at is null
     and (
@@ -137,20 +115,6 @@ const RESOLVE_REPOSITORY_SQL = `
     r.created_at desc
   limit 1`;
 
-const RESOLVE_TENANT_MEMBER_SQL = `
-  select
-    tm.tenant_id::text as tenant_id,
-    tm.github_user_id::text as github_user_id,
-    tm.github_login,
-    tm.role,
-    tm.synced_at
-  from public.tenant_members tm
-  join public.tenants t on t.id = tm.tenant_id
-  where tm.tenant_id = $1::uuid
-    and tm.github_user_id = $2::bigint
-    and t.merged_into_tenant_id is null
-  limit 1`;
-
 const RESOLVE_TENANT_REPOSITORIES_SQL = `
   select
     r.owner as repository_owner,
@@ -162,7 +126,6 @@ const RESOLVE_TENANT_REPOSITORIES_SQL = `
    and i.tenant_id = r.tenant_id
   where r.tenant_id = $1::uuid
     and r.enabled = true
-    and t.merged_into_tenant_id is null
     and i.suspended_at is null
     and i.deleted_at is null
     and (
@@ -182,7 +145,6 @@ const LIST_ACTIVE_TENANT_IDS_SQL = `
    and i.tenant_id = r.tenant_id
    and i.suspended_at is null
    and i.deleted_at is null
-  where t.merged_into_tenant_id is null
   order by tenant_id`;
 
 const LIST_TENANTS_SQL = `
@@ -210,14 +172,13 @@ const LIST_TENANTS_SQL = `
   left join public.repositories repository
     on repository.tenant_id = tenant.id
    and repository.installation_id = installation.id
-  where tenant.merged_into_tenant_id is null
   group by tenant.id, installation.id
   order by lower(coalesce(tenant.name, tenant.github_account_login, tenant.id::text)),
            installation.github_installation_id`;
 
 /**
  * Read-only access to identity and tenancy records owned by the original Jina
- * deployment. Use a database role with SELECT grants only on the four public
+ * deployment. Use a database role with SELECT grants only on the three public
  * tables referenced here; the read-only connection option is defense in depth,
  * not a replacement for those grants.
  */
@@ -244,21 +205,6 @@ export class PostgresSharedIdentityStore {
     const result = await this.pool.query<SharedRepositoryIdentityRow>(query.text, [...query.values]);
     const row = result.rows[0];
     return row ? normalizeSharedRepositoryIdentityRow(row) : undefined;
-  }
-
-  async resolveTenantMember(input: ResolveSharedTenantMemberInput): Promise<SharedTenantMember | undefined> {
-    const tenantId = requiredText(input.tenantId, "tenantId");
-    const githubUserId = githubId(input.githubUserId, "githubUserId");
-    const result = await this.pool.query<SharedTenantMemberRow>(RESOLVE_TENANT_MEMBER_SQL, [tenantId, githubUserId]);
-    const row = result.rows[0];
-    if (!row) return undefined;
-    return {
-      tenantId: requiredText(row.tenant_id, "tenant_id"),
-      githubUserId: decimalId(row.github_user_id, "github_user_id"),
-      ...(row.github_login ? { githubLogin: row.github_login } : {}),
-      role: requiredText(row.role, "role"),
-      syncedAt: row.synced_at instanceof Date ? row.synced_at.toISOString() : requiredText(row.synced_at, "synced_at")
-    };
   }
 
   async resolveTenantRepositories(input: ResolveSharedTenantRepositoriesInput): Promise<readonly string[]> {

@@ -57,7 +57,7 @@ export type RuntimeReviewInput = {
 };
 
 export type RuntimeReviewPlan = {
-  schemaVersion: 1 | 2;
+  schemaVersion: 2;
   areas: RuntimeReviewArea[];
   /** Concise PR intent inferred by the planner (the former intent stage is
    *  absorbed into planning); carried into later prompts, not published. */
@@ -128,28 +128,6 @@ export type RuntimeReviewPrContext = {
   partialFailures: string[];
 };
 
-/** Retained for result-shape compatibility: the standalone intent stage is gone
- *  (the planner absorbs intent inference), so `RuntimeReviewResult.intent` is
- *  never set by new runs but old persisted results still carry it. */
-type RuntimeReviewIntent = {
-  markdown: string;
-  metadata: {
-    generatedAt: string;
-    ambiguous: boolean;
-  };
-};
-
-/** Retained for result-shape compatibility: the mental_trace tool protocol is
- *  gone, so `toolCalls` is always [] on new runs but old persisted results still
- *  carry entries. */
-type RuntimeReviewToolResult = {
-  id?: string;
-  tool: string;
-  input: unknown;
-  output: unknown;
-  error?: string;
-};
-
 type RuntimeReviewTask = {
   id: string;
   title: string;
@@ -165,8 +143,7 @@ type RuntimeReviewTask = {
     detail: string;
     evidence: string[];
   }>;
-  /** Tasks are a retrospective record of work performed; they are never
-   *  "blocked" (legacy verdicts normalize to "inconclusive"). */
+  /** Tasks are a retrospective record of work performed. */
   verdict: "issue_found" | "no_issue" | "inconclusive";
   confidence: ConfidenceLevel;
   candidateIssueFingerprints?: string[];
@@ -195,8 +172,6 @@ export type RuntimeReviewFinding = {
   /** Captured output from running the reproduction (execution-backed findings). */
   observed_output?: string;
   suggested_fix?: string;
-  recommended_fix?: string;
-  /** Legacy "mental_trace" values normalize to "source_trace". */
   validation_method: "execution" | "source_trace" | "hybrid";
   validation_notes?: string;
   related_area_id?: string;
@@ -206,14 +181,6 @@ export type RuntimeReviewFinding = {
 
 /** Reviewer adjudication metadata. Raw investigation findings remain unchanged;
  *  this shape records proof for publication-only dismissals. */
-type RuntimeReviewComment = {
-  title: string;
-  body: string;
-  evidence: string[];
-  sourceFingerprints?: string[];
-  relatedFiles?: string[];
-};
-
 type RuntimeReviewDismissedCandidate = {
   hypothesis: string;
   whyDismissed: string;
@@ -225,7 +192,7 @@ type RuntimeReviewDismissedCandidate = {
 export type RuntimeReviewAreaResult = {
   areaId: string;
   title: string;
-  status: "completed" | "warned" | "blocked" | "failed";
+  status: "completed" | "warned" | "failed";
   summary: string;
   tasks: RuntimeReviewTask[];
   issues: RuntimeReviewFinding[];
@@ -234,36 +201,15 @@ export type RuntimeReviewAreaResult = {
     whyDismissed: string;
     evidence: string[];
   }>;
-  blocked: Array<{
-    task: string;
-    reason: string;
-    fallbackUsed: string;
-  }>;
-  toolCalls: RuntimeReviewToolResult[];
-  error?: string;
-};
-
-/** Result-shape-compatible wrapper retained for the dashboard's raw investigation
- *  view. Publication-only adjudication lives on `RuntimeReviewPublication`. */
-type RuntimeFinalReviewArtifact = {
-  summary: string;
-  acceptedIssues: RuntimeReviewFinding[];
-  comments: RuntimeReviewComment[];
-  dismissedCandidates: RuntimeReviewDismissedCandidate[];
-  readiness: RuntimeReadinessReview;
   error?: string;
 };
 
 export type RuntimeReviewResult = {
-  schemaVersion: 1 | 2;
-  status: "passed" | "issues_found" | "warned" | "blocked";
+  schemaVersion: 2;
+  status: "passed" | "issues_found" | "warned";
   summary: string;
   context?: RuntimeReviewPrContext;
-  intent?: RuntimeReviewIntent;
-  investigations?: RuntimeReviewAreaResult[];
-  finalReview?: RuntimeFinalReviewArtifact;
   readiness?: RuntimeReadinessReview;
-  finalReviewSummary?: string;
   /** Concise, deduplicated reviewer output used only for GitHub publication. */
   publication?: RuntimeReviewPublication;
   /** Auditable policy and repository-instruction metadata used for this run. */
@@ -276,9 +222,6 @@ export type RuntimeReviewResult = {
   areas: RuntimeReviewAreaResult[];
   /** Every issue every investigation agent found. Nothing filters this list. */
   findings: RuntimeReviewFinding[];
-  /** Always [] / 0 on new runs (no stage creates review comments any more). */
-  comments?: RuntimeReviewComment[];
-  commentsCount?: number;
   markdown: string;
   error?: string;
   /** Per-response OpenRouter usage captured by the sandbox proxy (managed + BYOH).
@@ -580,7 +523,6 @@ export async function runRuntimeReview(input: RuntimeReviewInput): Promise<Runti
       status: "warned",
       summary: "Runtime review could not complete.",
       context: prContext,
-      investigations,
       commit,
       diffStat,
       changedFiles,
@@ -588,8 +530,6 @@ export async function runRuntimeReview(input: RuntimeReviewInput): Promise<Runti
       plan,
       areas: investigations,
       findings: [],
-      comments: [],
-      commentsCount: 0,
       jinaConfiguration,
       markdown: "",
       error: message,
@@ -712,13 +652,13 @@ async function runInvestigationAgent(
         tracker: context.modelCalls
       });
       const parsed = response.parsed;
-      return normalizeAreaResult(parsed.final ?? parsed, area, []);
+      return normalizeAreaResult(parsed.final ?? parsed, area);
     } catch (error) {
       lastError = errorMessage(error);
     }
   }
   return {
-    ...warningAreaResult(area, [], "Runtime investigation agent failed."),
+    ...warningAreaResult(area, "Runtime investigation agent failed."),
     status: "failed",
     error: lastError
   };
@@ -1026,12 +966,10 @@ function cleanThreadBody(value: string): string {
 
 // A clean 5/5 pass must require that investigations actually ran and completed. If the
 // planner produced no usable areas (any parseable-but-off-schema output collapses to
-// areas: []), or every area was blocked, the review validated nothing and must not be
-// reported as a confident clean pass — it warns/blocks and readiness is not assessable.
+// areas: []), the review validated nothing and must not be reported as a confident clean pass.
 export function deriveRuntimeReviewOutcome(input: {
   investigationCount: number;
   publishableCount: number;
-  blockedCount: number;
   failedCount: number;
   warnedCount: number;
   finalReadiness: RuntimeReadinessReview;
@@ -1041,41 +979,28 @@ export function deriveRuntimeReviewOutcome(input: {
   status: RuntimeReviewResult["status"];
   readiness: RuntimeReadinessReview;
   noInvestigation: boolean;
-  fullyBlocked: boolean;
 } {
-  const {
-    investigationCount,
-    publishableCount,
-    blockedCount,
-    failedCount,
-    warnedCount,
-    finalReadiness,
-    scopeSkipped,
-    finalError
-  } = input;
+  const { investigationCount, publishableCount, failedCount, warnedCount, finalReadiness, scopeSkipped, finalError } =
+    input;
   const noInvestigation = investigationCount === 0 && !scopeSkipped;
-  const fullyBlocked = investigationCount > 0 && blockedCount >= investigationCount;
-  const validated = Boolean(scopeSkipped) || (investigationCount > 0 && !fullyBlocked);
+  const validated = Boolean(scopeSkipped) || investigationCount > 0;
   const readiness: RuntimeReadinessReview = validated
     ? finalReadiness
     : {
         score: 3,
         recommendation: "Unable to assess",
-        rationale: noInvestigation
-          ? "Runtime review produced no investigation areas, so no validation was performed and merge readiness could not be assessed."
-          : "All runtime investigation areas were blocked, so merge readiness could not be assessed."
+        rationale:
+          "Runtime review produced no investigation areas, so no validation was performed and merge readiness could not be assessed."
       };
   const status: RuntimeReviewResult["status"] =
     publishableCount > 0
       ? "issues_found"
-      : fullyBlocked
-        ? "blocked"
-        : noInvestigation
+      : noInvestigation
+        ? "warned"
+        : failedCount > 0 || warnedCount > 0 || Boolean(finalError)
           ? "warned"
-          : failedCount > 0 || warnedCount > 0 || blockedCount > 0 || Boolean(finalError)
-            ? "warned"
-            : "passed";
-  return { status, readiness, noInvestigation, fullyBlocked };
+          : "passed";
+  return { status, readiness, noInvestigation };
 }
 
 /** The collated investigation output IS the result. The summarizer contributes a
@@ -1087,13 +1012,11 @@ function aggregateRuntimeReviewResult(
   reviewSummary: RuntimeReviewSummary
 ): RuntimeReviewResult {
   const findings = allInvestigationFindings(investigations);
-  const blockedCount = investigations.reduce((sum, area) => sum + area.blocked.length, 0);
   const failedCount = investigations.filter((area) => area.status === "failed").length;
   const warnedCount = investigations.filter((area) => area.status === "warned").length;
   const { status, readiness, noInvestigation } = deriveRuntimeReviewOutcome({
     investigationCount: investigations.length,
     publishableCount: findings.length,
-    blockedCount,
     failedCount,
     warnedCount,
     finalReadiness: reviewSummary.readiness,
@@ -1103,8 +1026,6 @@ function aggregateRuntimeReviewResult(
   let baseSummary: string;
   if (findings.length > 0) {
     baseSummary = `${findings.length} runtime issue(s) found.`;
-  } else if (status === "blocked") {
-    baseSummary = "Runtime review was blocked.";
   } else if (plan.scopeDecision === "skip") {
     baseSummary = plan.scopeRationale
       ? `Runtime review scope was intentionally skipped by repository policy: ${plan.scopeRationale}`
@@ -1123,15 +1044,6 @@ function aggregateRuntimeReviewResult(
     status,
     summary,
     context: context.prContext,
-    investigations,
-    finalReview: {
-      summary: reviewSummary.summary,
-      acceptedIssues: findings,
-      comments: [],
-      dismissedCandidates: [],
-      readiness,
-      error: reviewSummary.error
-    },
     commit: context.commit,
     diffStat: context.diffStat,
     changedFiles: context.changedFiles,
@@ -1139,10 +1051,7 @@ function aggregateRuntimeReviewResult(
     plan,
     areas: investigations,
     findings,
-    comments: [],
-    commentsCount: 0,
     readiness,
-    finalReviewSummary: reviewSummary.summary,
     publication: reviewSummary.publication,
     jinaConfiguration: context.jinaConfiguration,
     markdown: "",
@@ -1154,7 +1063,6 @@ function aggregateRuntimeReviewResult(
 
 function runtimeReviewMarkdown(result: RuntimeReviewResult): string {
   const findings = result.findings;
-  const reviewComments = result.comments ?? [];
   const taskCount = result.areas.reduce((sum, area) => sum + area.tasks.length, 0);
   const lines = [
     "## Runtime Review",
@@ -1188,22 +1096,6 @@ function runtimeReviewMarkdown(result: RuntimeReviewResult): string {
     lines.push("");
   }
 
-  if (reviewComments.length > 0) {
-    lines.push("### Review Comments", "");
-    for (const comment of reviewComments) {
-      lines.push(`- ${comment.title}: ${comment.body}`);
-      if (comment.evidence.length > 0) {
-        lines.push(
-          `  Evidence: ${comment.evidence
-            .slice(0, 3)
-            .map((item) => truncateText(item, 180))
-            .join("; ")}`
-        );
-      }
-    }
-    lines.push("");
-  }
-
   lines.push("### Validation Work Performed", "");
   if (result.areas.length === 0) {
     lines.push(
@@ -1232,13 +1124,6 @@ function runtimeReviewMarkdown(result: RuntimeReviewResult): string {
     }
     if (area.issues.length === 0) {
       lines.push("No actionable issue was reported for this area.", "");
-    }
-    if (area.blocked.length > 0) {
-      lines.push(
-        "Blocked validations:",
-        ...area.blocked.map((item) => `- ${item.task}: ${item.reason}. Fallback: ${item.fallbackUsed}`),
-        ""
-      );
     }
   }
 
@@ -1854,11 +1739,9 @@ export function harnessModelForStageSlug(slug: string | undefined): string | und
   return HARNESS_MODELS.has(bare) ? bare : undefined;
 }
 
-/** Resolve the --model for a harness stage. The harness FOLLOWS the per-stage model (the decoupling): a
- *  harness run applies the tenant's per-stage model when the subscription can run it (an OpenAI-family
- *  model in HARNESS_MODELS), else the subscription default (undefined -> Codex omits --model). The old
- *  per-author pin (JINA_HARNESS_MODEL) is deprecated and no longer consulted — model selection lives in
- *  one place (the dashboard's per-stage Review defaults), so there is no separate harness-model override. */
+/** Resolve the --model for a harness stage. A harness run applies the tenant's per-stage model when the
+ *  subscription can run it (an OpenAI-family model in HARNESS_MODELS), otherwise Codex uses the
+ *  subscription default. */
 export function harnessStageModel(stageSlug: string | undefined): string | undefined {
   return harnessModelForStageSlug(stageSlug);
 }
@@ -2076,31 +1959,20 @@ export function normalizePlan(
   options: { allowRepositoryScopeOverride?: boolean } = {}
 ): RuntimeReviewPlan {
   const raw = objectValue(value);
-  const candidates = Array.isArray(raw.areas)
-    ? raw.areas
-    : Array.isArray(raw.investigationAreas)
-      ? raw.investigationAreas
-      : Array.isArray(raw.investigation_areas)
-        ? raw.investigation_areas
-        : [];
+  const candidates = Array.isArray(raw.areas) ? raw.areas : [];
   const areas = candidates
     .map((area, index) => normalizeArea(area, index))
     .filter((area): area is RuntimeReviewArea => Boolean(area))
     .slice(0, maxAreas);
   const scopeSkipped =
-    options.allowRepositoryScopeOverride === true &&
-    (raw.scopeDecision === "skip" || raw.scope_decision === "skip") &&
-    areas.length === 0;
+    options.allowRepositoryScopeOverride === true && raw.scopeDecision === "skip" && areas.length === 0;
   return {
     schemaVersion: 2,
-    intentSummary: truncateText(stringOr(raw.intentSummary ?? raw.intent_summary, ""), 8_000) || undefined,
+    intentSummary: truncateText(stringOr(raw.intentSummary, ""), 8_000) || undefined,
     scopeDecision: scopeSkipped ? "skip" : "investigate",
     scopeRationale: scopeSkipped
       ? truncateText(
-          stringOr(
-            raw.scopeRationale ?? raw.scope_rationale,
-            "Repository instructions excluded all runtime investigation areas."
-          ),
+          stringOr(raw.scopeRationale, "Repository instructions excluded all runtime investigation areas."),
           500
         )
       : undefined,
@@ -2132,8 +2004,8 @@ export function normalizeReplanAreas(value: unknown, usedIds: Set<string>, round
       id,
       round,
       kind,
-      parentAreaId: stringOr(rawArea.parentAreaId ?? rawArea.parent_area_id, "") || undefined,
-      carriedContext: truncateText(stringOr(rawArea.carriedContext ?? rawArea.carried_context, ""), 14_000) || undefined
+      parentAreaId: stringOr(rawArea.parentAreaId, "") || undefined,
+      carriedContext: truncateText(stringOr(rawArea.carriedContext, ""), 14_000) || undefined
     });
   }
   return areas;
@@ -2141,51 +2013,34 @@ export function normalizeReplanAreas(value: unknown, usedIds: Set<string>, round
 
 function normalizeArea(value: unknown, index: number): RuntimeReviewArea | undefined {
   const raw = objectValue(value);
-  const title = stringOr(raw.title ?? raw.surface, `Investigation area ${index + 1}`);
+  const title = stringOr(raw.title, `Investigation area ${index + 1}`);
   const id = safeId(stringOr(raw.id, title));
-  const expectations = stringArray(
-    raw.expectations ??
-      raw.expectedBehaviors ??
-      raw.expected_behaviors ??
-      raw.expectedSafeBehavior ??
-      raw.expected_safe_behavior
-  );
-  const potentialFailureModes = stringArray(
-    raw.potentialFailureModes ??
-      raw.potential_failure_modes ??
-      raw.failureModes ??
-      raw.failure_modes ??
-      raw.runtimeHypotheses ??
-      raw.riskHypotheses
-  );
-  const expectedSafeBehavior = stringArray(raw.expectedSafeBehavior ?? raw.expected_safe_behavior);
+  const expectations = stringArray(raw.expectations);
+  const potentialFailureModes = stringArray(raw.potentialFailureModes);
+  const expectedSafeBehavior = stringArray(raw.expectedSafeBehavior);
   return {
     id,
     title,
     priority: normalizeRisk(raw.priority),
     expectations,
     potentialFailureModes,
-    changedBehavior: stringOr(raw.changedBehavior ?? raw.changed_behavior, "") || undefined,
+    changedBehavior: stringOr(raw.changedBehavior, "") || undefined,
     whyWorthExploring: stringOr(raw.whyWorthExploring, ""),
-    runtimeHypotheses:
-      potentialFailureModes.length > 0
-        ? potentialFailureModes
-        : stringArray(raw.runtimeHypotheses ?? raw.riskHypotheses),
+    runtimeHypotheses: potentialFailureModes.length > 0 ? potentialFailureModes : stringArray(raw.runtimeHypotheses),
     expectedSafeBehavior: expectedSafeBehavior.length > 0 ? expectedSafeBehavior : expectations,
     files: stringArray(raw.files)
       .map(normalizeRepoPathForOutput)
       .filter((file): file is string => Boolean(file)),
     symbols: stringArray(raw.symbols),
-    routesOrEntrypoints: stringArray(raw.routesOrEntrypoints ?? raw.routes_or_entrypoints ?? raw.entrypoints),
-    groundingEvidence: stringArray(raw.groundingEvidence ?? raw.grounding_evidence ?? raw.evidence),
-    executionPlan: stringArray(raw.executionPlan ?? raw.execution_plan)
+    routesOrEntrypoints: stringArray(raw.routesOrEntrypoints),
+    groundingEvidence: stringArray(raw.groundingEvidence),
+    executionPlan: stringArray(raw.executionPlan)
   };
 }
 
 function normalizeAreaResult(
   value: Partial<RuntimeReviewAreaResult> | undefined,
-  area: RuntimeReviewArea,
-  toolCalls: RuntimeReviewToolResult[]
+  area: RuntimeReviewArea
 ): RuntimeReviewAreaResult {
   const raw = objectValue(value);
   return {
@@ -2199,28 +2054,16 @@ function normalizeAreaResult(
     issues: Array.isArray(raw.issues)
       ? raw.issues.map(normalizeFinding).filter((finding): finding is RuntimeReviewFinding => Boolean(finding))
       : [],
-    nonIssues:
-      Array.isArray(raw.nonIssues) || Array.isArray(raw.non_issues)
-        ? (Array.isArray(raw.nonIssues) ? raw.nonIssues : (raw.non_issues as unknown[])).map((item) => {
-            const obj = objectValue(item);
-            return {
-              hypothesis: stringOr(obj.hypothesis, ""),
-              whyDismissed: stringOr(obj.whyDismissed ?? obj.why_dismissed, ""),
-              evidence: stringArray(obj.evidence)
-            };
-          })
-        : [],
-    blocked: Array.isArray(raw.blocked)
-      ? raw.blocked.map((item) => {
+    nonIssues: Array.isArray(raw.nonIssues)
+      ? raw.nonIssues.map((item) => {
           const obj = objectValue(item);
           return {
-            task: stringOr(obj.task, ""),
-            reason: stringOr(obj.reason, ""),
-            fallbackUsed: stringOr(obj.fallbackUsed, "")
+            hypothesis: stringOr(obj.hypothesis, ""),
+            whyDismissed: stringOr(obj.whyDismissed, ""),
+            evidence: stringArray(obj.evidence)
           };
         })
       : [],
-    toolCalls,
     error: typeof raw.error === "string" ? raw.error : undefined
   };
 }
@@ -2230,80 +2073,62 @@ function normalizeTask(value: unknown): RuntimeReviewTask | undefined {
   const title = stringOr(raw.title, "");
   if (!title) return undefined;
   const method = stringOr(raw.method, "source_trace");
-  const verdict = stringOr(raw.verdict, "warning");
+  const verdict = stringOr(raw.verdict, "inconclusive");
   const confidence = stringOr(raw.confidence, "low");
   return {
     id: safeId(stringOr(raw.id, title)),
     title,
-    goal: stringOr(raw.goal ?? raw.taskGoal ?? raw.task_goal, "") || undefined,
+    goal: stringOr(raw.goal, "") || undefined,
     hypothesis: stringOr(raw.hypothesis, "") || undefined,
-    whyChosen: stringOr(raw.whyChosen ?? raw.why_chosen, "") || undefined,
+    whyChosen: stringOr(raw.whyChosen, "") || undefined,
     purpose: stringOr(raw.purpose, "") || stringOr(raw.hypothesis, ""),
-    // Legacy "mental_trace" tasks (old persisted runs) fall into the source_trace fallback.
     method: ["source_trace", "codegraph", "execution", "hybrid"].includes(method)
       ? (method as RuntimeReviewTask["method"])
       : "source_trace",
-    actionsTaken: stringArray(raw.actionsTaken ?? raw.actions_taken),
-    whatWasLearned: stringOr(raw.whatWasLearned ?? raw.what_was_learned, ""),
-    auditTrail:
-      Array.isArray(raw.auditTrail) || Array.isArray(raw.audit_trail)
-        ? (Array.isArray(raw.auditTrail) ? raw.auditTrail : (raw.audit_trail as unknown[])).map((item) => {
-            const audit = objectValue(item);
-            const rawType = stringOr(audit.type, "reasoning");
-            // Normalize the ambiguous pre-ContextGraph name from persisted results.
-            const type = rawType === "graph_query" ? "context_graph_query" : rawType;
-            return {
-              type: ["file_read", "codegraph_cli", "context_graph_query", "command", "reasoning"].includes(type)
-                ? (type as RuntimeReviewTask["auditTrail"][number]["type"])
-                : "reasoning",
-              detail: stringOr(audit.detail, ""),
-              evidence: stringArray(audit.evidence)
-            };
-          })
-        : [],
-    // Tasks are retrospective records; legacy "warning"/"blocked"/"invalid_probe"
-    // verdicts normalize to "inconclusive".
+    actionsTaken: stringArray(raw.actionsTaken),
+    whatWasLearned: stringOr(raw.whatWasLearned, ""),
+    auditTrail: Array.isArray(raw.auditTrail)
+      ? raw.auditTrail.map((item) => {
+          const audit = objectValue(item);
+          const rawType = stringOr(audit.type, "reasoning");
+          return {
+            type: ["file_read", "codegraph_cli", "context_graph_query", "command", "reasoning"].includes(rawType)
+              ? (rawType as RuntimeReviewTask["auditTrail"][number]["type"])
+              : "reasoning",
+            detail: stringOr(audit.detail, ""),
+            evidence: stringArray(audit.evidence)
+          };
+        })
+      : [],
     verdict: ["issue_found", "no_issue", "inconclusive"].includes(verdict)
       ? (verdict as RuntimeReviewTask["verdict"])
       : "inconclusive",
     confidence: normalizeConfidence(confidence),
-    candidateIssueFingerprints: stringArray(raw.candidateIssueFingerprints ?? raw.candidate_issue_fingerprints)
+    candidateIssueFingerprints: stringArray(raw.candidateIssueFingerprints)
   };
 }
 
 export function normalizeFinding(value: unknown): RuntimeReviewFinding | undefined {
   const raw = objectValue(value);
   const title = stringOr(raw.title, "");
-  const body = stringOr(raw.body ?? raw.description, "");
+  const body = stringOr(raw.body, "");
   if (!title || !body) return undefined;
-  const filePath =
-    typeof raw.file_path === "string"
-      ? normalizeRepoPathForOutput(raw.file_path)
-      : typeof raw.file === "string"
-        ? normalizeRepoPathForOutput(raw.file)
-        : undefined;
+  const filePath = typeof raw.file_path === "string" ? normalizeRepoPathForOutput(raw.file_path) : undefined;
   const lineNumber =
     typeof raw.line_number === "number" && Number.isFinite(raw.line_number)
       ? Math.max(1, Math.trunc(raw.line_number))
-      : typeof raw.line === "number" && Number.isFinite(raw.line)
-        ? Math.max(1, Math.trunc(raw.line))
-        : undefined;
-  const rawValidationMethod = stringOr(raw.validation_method ?? raw.validationMethod, "hybrid");
-  // Legacy "mental_trace" findings normalize to source_trace.
+      : undefined;
+  const rawValidationMethod = stringOr(raw.validation_method, "hybrid");
   const validationMethod: RuntimeReviewFinding["validation_method"] =
-    rawValidationMethod === "execution" || rawValidationMethod === "source_trace"
-      ? rawValidationMethod
-      : rawValidationMethod === "mental_trace"
-        ? "source_trace"
-        : "hybrid";
-  const observedOutput = stringOr(raw.observed_output ?? raw.observedOutput, "") || undefined;
+    rawValidationMethod === "execution" || rawValidationMethod === "source_trace" ? rawValidationMethod : "hybrid";
+  const observedOutput = stringOr(raw.observed_output, "") || undefined;
   const confidence = normalizeConfidence(raw.confidence);
   // Mechanical calibration, not just prompt text: high confidence is reserved for
   // execution-grounded evidence. Source-trace-only findings cap at medium.
   const executionGrounded = validationMethod === "execution" || validationMethod === "hybrid";
   const cappedConfidence: ConfidenceLevel = confidence === "high" && !executionGrounded ? "medium" : confidence;
   const finding: RuntimeReviewFinding = {
-    fingerprint: stringOr(raw.fingerprint ?? raw.id, "") || fingerprintFinding({ title, body, filePath, lineNumber }),
+    fingerprint: stringOr(raw.fingerprint, "") || fingerprintFinding({ title, body, filePath, lineNumber }),
     title,
     risk: normalizeRisk(raw.risk),
     confidence: cappedConfidence,
@@ -2312,23 +2137,20 @@ export function normalizeFinding(value: unknown): RuntimeReviewFinding | undefin
     file_path: filePath,
     line_number: lineNumber,
     body,
-    root_cause: stringOr(raw.root_cause ?? raw.rootCause, ""),
-    why_it_matters: stringOr(raw.why_it_matters ?? raw.whyItMatters, ""),
-    system_impact: stringOr(raw.system_impact ?? raw.systemImpact, "") || undefined,
+    root_cause: stringOr(raw.root_cause, ""),
+    why_it_matters: stringOr(raw.why_it_matters, ""),
+    system_impact: stringOr(raw.system_impact, "") || undefined,
     evidence: stringArray(raw.evidence),
-    reproduction_or_trace: stringOr(raw.reproduction_or_trace ?? raw.reproductionOrTrace, ""),
-    failure_scenario: stringOr(raw.failure_scenario ?? raw.failureScenario, "") || undefined,
-    reproduction_command: stringOr(raw.reproduction_command ?? raw.reproductionCommand, "") || undefined,
+    reproduction_or_trace: stringOr(raw.reproduction_or_trace, ""),
+    failure_scenario: stringOr(raw.failure_scenario, "") || undefined,
+    reproduction_command: stringOr(raw.reproduction_command, "") || undefined,
     observed_output: observedOutput,
-    suggested_fix:
-      stringOr(raw.suggested_fix ?? raw.suggestedFix ?? raw.recommended_fix ?? raw.recommendedFix, "") || undefined,
-    recommended_fix:
-      stringOr(raw.recommended_fix ?? raw.recommendedFix ?? raw.suggested_fix ?? raw.suggestedFix, "") || undefined,
+    suggested_fix: stringOr(raw.suggested_fix, "") || undefined,
     validation_method: validationMethod,
-    validation_notes: stringOr(raw.validation_notes ?? raw.validationNotes, "") || undefined,
-    related_area_id: stringOr(raw.related_area_id ?? raw.relatedAreaId, "") || undefined,
-    related_expectation: stringOr(raw.related_expectation ?? raw.relatedExpectation, "") || undefined,
-    audit_trail: stringArray(raw.audit_trail ?? raw.auditTrail)
+    validation_notes: stringOr(raw.validation_notes, "") || undefined,
+    related_area_id: stringOr(raw.related_area_id, "") || undefined,
+    related_expectation: stringOr(raw.related_expectation, "") || undefined,
+    audit_trail: stringArray(raw.audit_trail)
   };
   return finding;
 }
@@ -2345,7 +2167,7 @@ export function normalizeRuntimeReviewSummary(
 ): RuntimeReviewSummary {
   const raw = objectValue(value);
   const fallback = fallbackReadinessReview(input.findings);
-  const rawScore = raw.mergeScore ?? raw.merge_score ?? raw.readiness ?? raw;
+  const rawScore = raw.mergeScore ?? raw;
   const readiness = normalizeReadinessReview(rawScore, fallback);
   // Raw findings are never filtered from the dashboard artifact, so a clean run
   // means the investigation found nothing. Guard the clean floor unless
@@ -2381,7 +2203,7 @@ function normalizeRuntimeReviewPublication(
   const candidateIssues = Array.isArray(raw.issues) ? raw.issues : [];
   const issues = candidateIssues.flatMap((value) => {
     const item = objectValue(value);
-    const sourceFingerprints = stringArray(item.sourceFingerprints ?? item.source_fingerprints).filter(
+    const sourceFingerprints = stringArray(item.sourceFingerprints).filter(
       (fingerprint) => findingsByFingerprint.has(fingerprint) && !classifiedFingerprints.has(fingerprint)
     );
     if (sourceFingerprints.length === 0) return [];
@@ -2394,25 +2216,18 @@ function normalizeRuntimeReviewPublication(
     return [
       {
         title: truncateText(stringOr(item.title, primary.title), 240),
-        body: truncateSentences(stringOr(item.body ?? item.summary, primary.body), 3, 1_200),
+        body: truncateSentences(stringOr(item.body, primary.body), 3, 1_200),
         severity,
-        severityDescription: normalizeDisplayLabel(
-          item.severityDescription ?? item.severity_description,
-          defaultSeverityDescription(severity)
-        ),
+        severityDescription: normalizeDisplayLabel(item.severityDescription, defaultSeverityDescription(severity)),
         sourceFingerprints: [...new Set(sourceFingerprints)]
       }
     ];
   });
-  const rawDismissed = Array.isArray(raw.dismissedCandidates)
-    ? raw.dismissedCandidates
-    : Array.isArray(raw.dismissed_candidates)
-      ? raw.dismissed_candidates
-      : [];
+  const rawDismissed = Array.isArray(raw.dismissedCandidates) ? raw.dismissedCandidates : [];
   const dismissalFingerprintClaims = new Map<string, number>();
   rawDismissed.forEach((value) => {
     const item = objectValue(value);
-    stringArray(item.sourceFingerprints ?? item.source_fingerprints).forEach((fingerprint) => {
+    stringArray(item.sourceFingerprints).forEach((fingerprint) => {
       if (findingsByFingerprint.has(fingerprint)) {
         dismissalFingerprintClaims.set(fingerprint, (dismissalFingerprintClaims.get(fingerprint) ?? 0) + 1);
       }
@@ -2420,10 +2235,10 @@ function normalizeRuntimeReviewPublication(
   });
   const dismissedCandidates = rawDismissed.flatMap((value) => {
     const item = objectValue(value);
-    const requestedFingerprints = stringArray(item.sourceFingerprints ?? item.source_fingerprints);
+    const requestedFingerprints = stringArray(item.sourceFingerprints);
     const sourceFingerprints = requestedFingerprints.filter((fingerprint) => findingsByFingerprint.has(fingerprint));
-    const whyDismissed = stringOr(item.whyDismissed ?? item.why_dismissed ?? item.rationale, "").trim();
-    const evidence = stringArray(item.evidence ?? item.proof);
+    const whyDismissed = stringOr(item.whyDismissed, "").trim();
+    const evidence = stringArray(item.evidence);
     const allFingerprintsRecognized =
       requestedFingerprints.length > 0 && sourceFingerprints.length === requestedFingerprints.length;
     const fingerprintsClaimedOnce = sourceFingerprints.every(
@@ -2435,7 +2250,7 @@ function normalizeRuntimeReviewPublication(
     return [
       {
         hypothesis: truncateText(
-          stringOr(item.hypothesis ?? item.title, relatedFindings.map((finding) => finding.title).join("; ")),
+          stringOr(item.hypothesis, relatedFindings.map((finding) => finding.title).join("; ")),
           240
         ),
         whyDismissed: truncateSentences(whyDismissed, 3, 1_200),
@@ -2455,7 +2270,7 @@ function normalizeRuntimeReviewPublication(
   const validatedIssues = [...issues, ...unclassifiedIssues];
   const areaSummaries = (Array.isArray(raw.areaSummaries) ? raw.areaSummaries : []).flatMap((value) => {
     const item = objectValue(value);
-    const areaId = stringOr(item.areaId ?? item.area_id, "");
+    const areaId = stringOr(item.areaId, "");
     const area = areas.find((candidate) => candidate.areaId === areaId);
     if (!area) return [];
     return [{ areaId, title: area.title, summary: truncateSentences(stringOr(item.summary, area.summary), 2, 800) }];
@@ -2517,10 +2332,7 @@ function normalizeReadinessReview(value: unknown, fallback: RuntimeReadinessRevi
   const score = clampScore(raw.score, fallback.score);
   return {
     score,
-    recommendation: normalizeDisplayLabel(
-      raw.recommendation ?? raw.recommendationLabel ?? raw.recommendation_label ?? raw.label,
-      defaultReadinessRecommendation(score)
-    ),
+    recommendation: normalizeDisplayLabel(raw.recommendation, defaultReadinessRecommendation(score)),
     rationale: truncateSentences(stringOr(raw.rationale, fallback.rationale), 3, 500)
   };
 }
@@ -2606,11 +2418,7 @@ function fallbackReadinessReview(findings: RuntimeReviewFinding[]): RuntimeReadi
   };
 }
 
-function warningAreaResult(
-  area: RuntimeReviewArea,
-  toolCalls: RuntimeReviewToolResult[],
-  summary: string
-): RuntimeReviewAreaResult {
+function warningAreaResult(area: RuntimeReviewArea, summary: string): RuntimeReviewAreaResult {
   return {
     areaId: area.id,
     title: area.title,
@@ -2618,9 +2426,7 @@ function warningAreaResult(
     summary,
     tasks: [],
     issues: [],
-    nonIssues: [],
-    blocked: [],
-    toolCalls
+    nonIssues: []
   };
 }
 
@@ -2717,7 +2523,7 @@ function normalizeCategory(value: unknown): RuntimeReviewFinding["category"] {
 }
 
 function normalizeAreaStatus(value: unknown): RuntimeReviewAreaResult["status"] {
-  return value === "completed" || value === "warned" || value === "blocked" || value === "failed" ? value : "warned";
+  return value === "completed" || value === "warned" || value === "failed" ? value : "warned";
 }
 
 function clampScore(value: unknown, fallback: number): number {

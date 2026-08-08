@@ -164,7 +164,6 @@ const LOCAL_REVIEW_RUN: ReviewRun = {
       "The fixture is frontend-only and exists to exercise review work rendering.",
     ].join("\n"),
     github_comment_url: "https://github.com/local/review-work-fixture/pull/101#issuecomment-local",
-    github_check_run_url: "https://github.com/local/review-work-fixture/actions/runs/local",
   },
   events: [
     event(0, "review_context_completed", {
@@ -172,66 +171,7 @@ const LOCAL_REVIEW_RUN: ReviewRun = {
       diff_stat: "2 files changed, 15 insertions(+), 7 deletions(-)",
       codegraph_context: "CheckoutButton submits to createCheckoutSession.",
     }),
-    event(1, "static_review_completed", {
-      runner: "local-fixture",
-      repository: LOCAL_PROJECT.full_name,
-      pull_request_number: 101,
-      head_sha: "4f6d2a190c3e7b8a9d1e2f3a4b5c6d7e8f9a0b1c",
-      status: "issues_found",
-      summary: "Static review found a checkout authorization regression.",
-      findings_count: 1,
-      publishable_findings_count: 1,
-      inline_comment_count: 1,
-      unanchored_findings_count: 0,
-      changed_files: ["src/api/checkout.ts", "src/ui/CheckoutButton.tsx"],
-      diff_stat: "2 files changed, 15 insertions(+), 7 deletions(-)",
-      static_review: {
-        status: "issues_found",
-        summary: "Static review found a checkout authorization regression.",
-        commit: "4f6d2a190c3e7b8a9d1e2f3a4b5c6d7e8f9a0b1c",
-        changedFiles: ["src/api/checkout.ts", "src/ui/CheckoutButton.tsx"],
-        diffStat: "2 files changed, 15 insertions(+), 7 deletions(-)",
-        findingsCount: 1,
-        publishableFindingsCount: 1,
-        inlineCommentCount: 1,
-        unanchoredFindingsCount: 0,
-        findings: [
-          {
-            fingerprint: "local-static-checkout-owner",
-            file_path: "src/api/checkout.ts",
-            line_number: 42,
-            risk: "high",
-            confidence: "high",
-            category: "auth",
-            title: "Checkout session can be created before ownership is verified",
-            body: "The changed checkout path applies a promo code and creates the session before confirming that the cart belongs to the authenticated user.",
-            root_cause: "The authorization check moved below the new promo-code branch.",
-            why_it_matters: "A signed-in user could create sessions against another user's cart and expose pricing or payment state.",
-            reproduction_or_trace: "Call createCheckoutSession with a cart id owned by a different user and a valid promo code.",
-            suggested_fix: "Move the cart ownership check before promo-code lookup and session creation.",
-            suggested_change: "await assertCartOwner(cartId, user.id);\nconst promo = await resolvePromoCode(input.promoCode);",
-            evidence_files: ["src/api/checkout.ts"],
-            evidence_symbols: ["createCheckoutSession", "assertCartOwner"],
-          },
-        ],
-      },
-      findings: [
-        {
-          fingerprint: "local-static-checkout-owner",
-          file_path: "src/api/checkout.ts",
-          line_number: 42,
-          severity: "high",
-          category: "auth",
-          body: "Checkout session can be created before ownership is verified.",
-        },
-      ],
-    }),
-    event(2, "github_static_review_published", {
-      github_review_url: "https://github.com/local/review-work-fixture/pull/101#pullrequestreview-static",
-      inline_comment_count: 1,
-      publishable_findings_count: 1,
-    }),
-    event(3, "runtime_review_completed", {
+    event(1, "runtime_review_completed", {
       runner: "local-fixture",
       repository: LOCAL_PROJECT.full_name,
       pull_request_number: 101,
@@ -244,11 +184,10 @@ const LOCAL_REVIEW_RUN: ReviewRun = {
       unanchored_findings_count: 0,
       areas_count: 1,
       tasks_count: 1,
-      blocked_count: 0,
       changed_files: ["src/api/checkout.ts", "src/ui/CheckoutButton.tsx"],
       diff_stat: "2 files changed, 15 insertions(+), 7 deletions(-)",
       runtime_review: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "issues_found",
         summary: "Runtime review reproduced the cross-cart checkout path.",
         commit: "4f6d2a190c3e7b8a9d1e2f3a4b5c6d7e8f9a0b1c",
@@ -260,7 +199,6 @@ const LOCAL_REVIEW_RUN: ReviewRun = {
         publishableFindingsCount: 1,
         inlineCommentCount: 1,
         unanchoredFindingsCount: 0,
-        blockedCount: 0,
         nonIssuesCount: 1,
         areas: [
           {
@@ -304,8 +242,6 @@ const LOCAL_REVIEW_RUN: ReviewRun = {
                 evidence: ["Invalid promo path returned PROMO_NOT_FOUND for the owned cart."],
               },
             ],
-            blocked: [],
-            toolCalls: [],
           },
         ],
         tasks: [
@@ -352,7 +288,6 @@ const LOCAL_REVIEW_RUN: ReviewRun = {
             audit_trail: ["Created local checkout probe.", "Ran cross-cart promo checkout probe.", "Observed session creation before owner validation."],
           },
         ],
-        blocked: [],
         nonIssues: [
           {
             areaId: "checkout-ownership",
@@ -374,7 +309,7 @@ const LOCAL_REVIEW_RUN: ReviewRun = {
         },
       ],
     }),
-    event(4, "github_runtime_review_published", {
+    event(2, "github_runtime_review_published", {
       github_review_url: "https://github.com/local/review-work-fixture/pull/101#pullrequestreview-runtime",
       inline_comment_count: 1,
       publishable_findings_count: 1,

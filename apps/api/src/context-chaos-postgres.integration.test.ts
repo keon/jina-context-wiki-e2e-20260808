@@ -518,7 +518,7 @@ function snapshotFor(type: string, topic: string, suffix: string): ApiSnapshot {
     }
   });
   return {
-    intakeState: { board: reduceBoard(board, NOW), pullRequests: [] },
+    intakeState: { board: reduceBoard(board, NOW) },
     devDeliverySequence: 0
   };
 }

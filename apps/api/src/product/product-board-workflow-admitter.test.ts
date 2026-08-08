@@ -42,34 +42,12 @@ const PAYLOAD = {
   trigger: "webhook",
 };
 
-test("durably admits a review to Board", async () => {
+test("review admission receives the exact normalized arrival and Trigger options", async () => {
   const admitted: unknown[] = [];
   const dispatcher = new ProductBoardWorkflowAdmitter({
-    admit: async (input) => {
-      admitted.push(input);
-      return {
-        reviewRunId: "review-run-1",
-        tenantId: "tenant-1",
-        workflowId: "board-workflow-1",
-        traceId: "a".repeat(32),
-        replayed: false,
-        taskIds: [],
-      };
-    },
-  });
-  assert.deepEqual(await dispatcher.admitBoardWorkflow(REVIEW_TASK_ID, PAYLOAD, OPTIONS), {
-    id: "board-workflow-1",
-  });
-  assert.equal(admitted.length, 1);
-});
-
-test("configured v2 admission receives the exact normalized arrival and Trigger options", async () => {
-  const admitted: unknown[] = [];
-  const dispatcher = new ProductBoardWorkflowAdmitter({
-    pipeline: { mode: "v2", v2Repositories: new Set() },
     dependencies: {
-      admitReview: async (arrival, selection) => {
-        admitted.push({ arrival, selection });
+      admitReview: async (arrival) => {
+        admitted.push(arrival);
         return {
           tenantId: "tenant-1",
           workflowId: "board-workflow-v2",
@@ -83,24 +61,19 @@ test("configured v2 admission receives the exact normalized arrival and Trigger 
   assert.deepEqual(await dispatcher.admitBoardWorkflow(REVIEW_TASK_ID, PAYLOAD, OPTIONS), {
     id: "board-workflow-v2",
   });
-  const entry = admitted[0] as {
-    arrival: { triggerPayload: unknown; triggerOptions: unknown };
-    selection: { mode: string };
-  };
-  assert.strictEqual(entry.arrival.triggerPayload, PAYLOAD);
-  assert.strictEqual(entry.arrival.triggerOptions, OPTIONS);
-  assert.equal(entry.selection.mode, "v2");
+  const entry = admitted[0] as { triggerPayload: unknown; triggerOptions: unknown };
+  assert.strictEqual(entry.triggerPayload, PAYLOAD);
+  assert.strictEqual(entry.triggerOptions, OPTIONS);
 });
 
 test("admits installation backfill to Board", async () => {
   const admitted: unknown[] = [];
   const dispatcher = new ProductBoardWorkflowAdmitter({
-    admit: async () => {
-      throw new Error("unexpected review admission");
-    },
-    admitInstallationBackfill: async (payload, options) => {
-      admitted.push({ payload, options });
-      return { id: "installation-workflow-1" };
+    dependencies: {
+      admitInstallationBackfill: async (payload, options) => {
+        admitted.push({ payload, options });
+        return { id: "installation-workflow-1" };
+      },
     },
   });
   const payload = {

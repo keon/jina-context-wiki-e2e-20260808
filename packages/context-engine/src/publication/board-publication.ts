@@ -101,8 +101,8 @@ export interface BoardContextPublicationScope {
  * A successful call creates an immutable prepared release. Prepared releases
  * are intentionally unavailable to list/read/search/diff, including explicit
  * release-ID access. The independently resumable PageIndex attachment
- * transaction is the only operation allowed to mark the projection published
- * and advance the ref's public current pointer.
+ * transaction is the only operation allowed to mark the projection published;
+ * the highest attached sequence is current.
  */
 export interface BoardContextPublicationCommit {
   readonly scope: BoardContextPublicationScope;

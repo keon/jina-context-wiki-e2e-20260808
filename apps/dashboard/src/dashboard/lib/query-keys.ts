@@ -44,7 +44,7 @@ export interface TenantQueryScope {
   readonly viewerUserId: number | null;
   /** Increments when tenant authorization is lost, invalidating every prior key. */
   readonly fenceVersion: number;
-  /** The selected tenant, or null for the legacy viewer-wide routes. */
+  /** The selected tenant, or null for the auth-disabled local fixture. */
   readonly tenantId: string | null;
 }
 
