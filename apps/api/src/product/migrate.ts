@@ -38,9 +38,33 @@ try {
     .filter((file) => file.endsWith(".sql"))
     .sort();
 
+  // 0001_baseline.sql squashes the legacy 0001_initial..0037_collapse chain.
+  // A database that finished that chain records the baseline without running
+  // it; a database stopped mid-chain has schema state the baseline can neither
+  // reproduce nor skip, so it must finish the legacy chain first.
+  const BASELINE = "0001_baseline.sql";
+  const BASELINE_TERMINAL = "0037_collapse_context_schema.sql";
+
   for (const file of files) {
     const sql = readFileSync(resolve(migrationsDir, file), "utf8");
     const checksum = createHash("sha256").update(sql, "utf8").digest("hex");
+
+    if (file === BASELINE && !applied.has(BASELINE)) {
+      const legacyRows = [...applied.keys()].filter((name) => name !== BASELINE);
+      if (applied.has(BASELINE_TERMINAL)) {
+        await pool.query("insert into schema_migrations (name, checksum) values ($1, $2)", [file, checksum]);
+        applied.set(file, checksum);
+        console.log(`skip ${file} (legacy chain already applied; baseline recorded)`);
+        continue;
+      }
+      if (legacyRows.length > 0) {
+        throw new Error(
+          `${file} squashes the legacy chain through ${BASELINE_TERMINAL}, but this database ` +
+            `stopped mid-chain (${legacyRows.length} legacy migrations recorded without ${BASELINE_TERMINAL}). ` +
+            `Apply the pre-squash migration chain to completion first, then rerun.`,
+        );
+      }
+    }
 
     if (applied.has(file)) {
       const stored = applied.get(file);

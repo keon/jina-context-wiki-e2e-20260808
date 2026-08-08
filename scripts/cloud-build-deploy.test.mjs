@@ -602,7 +602,7 @@ test("production uses the exact API image to apply runtime and product migration
   assert.match(migrationDeployment, /--args=dist\/product\/migrate-all\.js,--install-roles/);
   assert.doesNotMatch(migrationDeployment, /node_modules\/@jina\/db\/dist\/migrate\.js/);
   assert.match(apiDockerfile, /test -f \/out\/dist\/product\/migrate-all\.js/);
-  assert.match(apiDockerfile, /test -f \/out\/product-migrations\/0037_collapse_context_schema\.sql/);
+  assert.match(apiDockerfile, /test -f \/out\/product-migrations\/0001_baseline\.sql/);
 });
 
 test("owner migration is bound to the live coordinated deployment lease", () => {

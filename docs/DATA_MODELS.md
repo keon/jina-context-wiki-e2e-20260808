@@ -8,9 +8,17 @@ sources are:
 - runtime and relational Board DDL in `packages/db/src`;
 - Context DDL and roles in `packages/db/src/context`.
 
-Migration `0037_collapse_context_schema.sql` is intentionally destructive. It
-removes the pre-Board Context ingestion/projector database and does not preserve
-a mixed-schema or pre-migration runtime.
+The legacy product chain (`0001_initial.sql` through
+`0037_collapse_context_schema.sql`) is squashed into `0001_baseline.sql`,
+generated with `pg_dump` from a database that ran the full chain and verified
+schema-identical to it. Databases that finished the legacy chain record the
+baseline without executing it; a database stopped mid-chain must complete the
+legacy chain (from pre-squash history) before upgrading.
+
+The final legacy migration, `0037_collapse_context_schema.sql`, was
+intentionally destructive. It removed the pre-Board Context
+ingestion/projector database and did not preserve a mixed-schema or
+pre-migration runtime.
 
 ## Inventory
 
