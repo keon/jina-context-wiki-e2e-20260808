@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   CONTEXT_API_CONTROL_TIMEOUT_MS,
+  CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS,
   CONTEXT_API_STAGE_TIMEOUT_MS,
   ContextWikiApiClient,
   ContextWikiApiError,
@@ -10,6 +11,7 @@ import {
 } from "./api.js";
 import {
   canonicalSha256,
+  type AuditWikiCompletedOutputV1,
   type AuditWikiPayloadV1,
   type GenerateWikiPayloadV1,
   type WikiTriggerCompletedOutputV1,
@@ -76,8 +78,13 @@ const auditPayload: AuditWikiPayloadV1 = {
 test("claimBuild uses only the bootstrap credential and exact attempt-scoped contract", async () => {
   let capturedUrl = "";
   let capturedInit: RequestInit | undefined;
+  const deadlines: number[] = [];
   const client = new ContextWikiApiClient({
     env,
+    timeoutSignal: (timeoutMs) => {
+      deadlines.push(timeoutMs);
+      return new AbortController().signal;
+    },
     fetch: async (url, init) => {
       capturedUrl = String(url);
       capturedInit = init;
@@ -92,6 +99,7 @@ test("claimBuild uses only the bootstrap credential and exact attempt-scoped con
   assert.equal(claimed.request.boardBuildId, "task_build-1");
   assert.equal(capturedUrl, "https://api.example.test/internal/context/wiki/executions/claim");
   assert.equal((capturedInit?.headers as Record<string, string>).authorization, "Bearer bootstrap-secret");
+  assert.deepEqual(deadlines, [CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS]);
   assert.deepEqual(JSON.parse(String(capturedInit?.body)), {
     kind: "build",
     boardBuildId: "task_build-1",
@@ -100,6 +108,118 @@ test("claimBuild uses only the bootstrap credential and exact attempt-scoped con
     dispatchNonce: "n".repeat(32),
     attempt: 2
   });
+});
+
+test("audit claim and terminal completion use the durable mutation deadline", async () => {
+  const deadlines: number[] = [];
+  const calls: { url: string; body: unknown }[] = [];
+  const client = new ContextWikiApiClient({
+    env,
+    timeoutSignal: (timeoutMs) => {
+      deadlines.push(timeoutMs);
+      return new AbortController().signal;
+    },
+    fetch: async (url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ url: String(url), body });
+      if (String(url).endsWith("/executions/claim")) {
+        return Response.json({
+          executionGrant: "g".repeat(32),
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          request: auditPayload.request
+        });
+      }
+      return Response.json({ accepted: true, replay: false });
+    }
+  });
+
+  const claim = await client.claimAudit({ payload: auditPayload, triggerParentRunId: "run-audit-1" });
+  const result = {
+    schemaVersion: 1,
+    status: "completed",
+    auditId: auditPayload.request.auditId,
+    releaseId: auditPayload.request.releaseId,
+    auditInputDigest: auditPayload.request.auditInputDigest,
+    outcome: "passed",
+    reportArtifact: {
+      version: 1,
+      uri: "gs://wiki/audit.json",
+      key: "audit.json",
+      contentType: "application/json",
+      bytes: 10,
+      sha256: "e".repeat(64),
+      objectGeneration: "1",
+      tenantId: auditPayload.request.tenantId,
+      repository: auditPayload.request.repository,
+      auditId: auditPayload.request.auditId,
+      releaseId: auditPayload.request.releaseId,
+      auditInputDigest: auditPayload.request.auditInputDigest
+    },
+    findingsDigest: "f".repeat(64),
+    completedAt: "2026-08-08T12:00:00.000Z"
+  } satisfies AuditWikiCompletedOutputV1;
+  await client.completeAudit({
+    auditId: auditPayload.request.auditId,
+    executionGrant: claim.executionGrant,
+    operationId: "audit-complete-1",
+    result
+  });
+
+  assert.deepEqual(deadlines, [CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS, CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS]);
+  assert.equal(calls[0]?.url, "https://api.example.test/internal/context/wiki/executions/claim");
+  assert.deepEqual(calls[0]?.body, {
+    kind: "audit",
+    auditId: auditPayload.request.auditId,
+    releaseId: auditPayload.request.releaseId,
+    auditInputDigest: auditPayload.request.auditInputDigest,
+    triggerParentRunId: "run-audit-1",
+    dispatchNonce: auditPayload.dispatchNonce,
+    request: auditPayload.request
+  });
+  assert.equal(calls[1]?.url, "https://api.example.test/internal/context/wiki/audits/wa_manual/complete");
+});
+
+test("a timed-out build claim is surfaced for task retry and replays the exact authority", async () => {
+  const deadlines: number[] = [];
+  const bodies: string[] = [];
+  let fetchAttempt = 0;
+  const client = new ContextWikiApiClient({
+    env,
+    timeoutSignal: (timeoutMs) => {
+      deadlines.push(timeoutMs);
+      const controller = new AbortController();
+      if (deadlines.length === 1) controller.abort();
+      return controller.signal;
+    },
+    fetch: async (_url, init) => {
+      bodies.push(String(init?.body));
+      if (fetchAttempt++ === 0) {
+        const error = new Error("connection continued after caller deadline");
+        error.name = "AbortError";
+        throw error;
+      }
+      return Response.json({
+        executionGrant: "g".repeat(32),
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        request
+      });
+    }
+  });
+
+  await assert.rejects(
+    () => client.claimBuild({ payload, triggerParentRunId: "run-1" }),
+    (error: unknown) => {
+      assert.ok(error instanceof ContextWikiApiTimeoutError);
+      assert.equal(error.timeoutMs, CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS);
+      return true;
+    }
+  );
+  const replay = await client.claimBuild({ payload, triggerParentRunId: "run-1" });
+
+  assert.equal(replay.request.boardBuildId, payload.request.boardBuildId);
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1], bodies[0]);
+  assert.deepEqual(deadlines, [CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS, CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS]);
 });
 
 test("runStage uses the scoped grant and central stage route", async () => {
@@ -128,7 +248,7 @@ test("runStage uses the scoped grant and central stage route", async () => {
   assert.equal(result.operationId, "operation-1");
 });
 
-test("long stage requests use the task-aware deadline while bootstrap calls stay short", async () => {
+test("API routes select control, durable mutation, and stage deadlines exactly", async () => {
   const deadlines: number[] = [];
   const client = new ContextWikiApiClient({
     env,
@@ -137,6 +257,7 @@ test("long stage requests use the task-aware deadline while bootstrap calls stay
       return new AbortController().signal;
     },
     fetch: async (url) => {
+      if (String(url).includes("reconciliation/due")) return Response.json({ executions: [] });
       if (String(url).endsWith("/executions/claim")) {
         return Response.json({
           executionGrant: "g".repeat(32),
@@ -147,6 +268,11 @@ test("long stage requests use the task-aware deadline while bootstrap calls stay
       return Response.json({ operationId: "operation-long", status: "completed", output: {} });
     }
   });
+  await client.getDueBuildReconciliations({
+    limit: 1,
+    timestamp: "2026-08-08T12:00:00.000Z",
+    scheduleId: "deadline-test"
+  });
   await client.claimBuild({ payload, triggerParentRunId: "run-1" });
   await client.runStage({
     authorityId: request.boardBuildId,
@@ -155,7 +281,12 @@ test("long stage requests use the task-aware deadline while bootstrap calls stay
     operationId: "operation-long",
     stageInput: {}
   });
-  assert.deepEqual(deadlines, [CONTEXT_API_CONTROL_TIMEOUT_MS, CONTEXT_API_STAGE_TIMEOUT_MS]);
+  assert.deepEqual(deadlines, [
+    CONTEXT_API_CONTROL_TIMEOUT_MS,
+    CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS,
+    CONTEXT_API_STAGE_TIMEOUT_MS
+  ]);
+  assert.equal(CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS, 120_000);
   assert.ok(CONTEXT_API_STAGE_TIMEOUT_MS > 30_000);
   assert.ok(CONTEXT_API_STAGE_TIMEOUT_MS < 30 * 60_000);
 });
@@ -192,8 +323,13 @@ test("request timeout classification is stable and does not expose transport dia
 test("completeBuild uses the scoped grant and requires an exact callback receipt", async () => {
   let capturedUrl = "";
   let capturedInit: RequestInit | undefined;
+  const deadlines: number[] = [];
   const client = new ContextWikiApiClient({
     env,
+    timeoutSignal: (timeoutMs) => {
+      deadlines.push(timeoutMs);
+      return new AbortController().signal;
+    },
     fetch: async (url, init) => {
       capturedUrl = String(url);
       capturedInit = init;
@@ -227,6 +363,7 @@ test("completeBuild uses the scoped grant and requires an exact callback receipt
   );
   assert.equal(capturedUrl, "https://api.example.test/internal/context/wiki/executions/task_build-1/complete");
   assert.equal((capturedInit?.headers as Record<string, string>).authorization, "Bearer scoped-grant");
+  assert.deepEqual(deadlines, [CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS]);
   assert.deepEqual(JSON.parse(String(capturedInit?.body)), { result });
 
   const invalid = new ContextWikiApiClient({
@@ -241,8 +378,13 @@ test("completeBuild uses the scoped grant and requires an exact callback receipt
 
 test("failure and reconciliation APIs preserve run-bound scoped credentials", async () => {
   const calls: { url: string; authorization: string; body?: unknown }[] = [];
+  const deadlines: number[] = [];
   const client = new ContextWikiApiClient({
     env,
+    timeoutSignal: (timeoutMs) => {
+      deadlines.push(timeoutMs);
+      return new AbortController().signal;
+    },
     fetch: async (url, init) => {
       calls.push({
         url: String(url),
@@ -289,6 +431,7 @@ test("failure and reconciliation APIs preserve run-bound scoped credentials", as
   assert.equal(due.executions[0]?.triggerParentRunId, "run-1");
   assert.equal(calls[1]?.authorization, "Bearer bootstrap-secret");
   assert.match(calls[1]?.url ?? "", /\/internal\/context\/wiki\/executions\/reconciliation\/due\?/);
+  assert.deepEqual(deadlines, [CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS, CONTEXT_API_CONTROL_TIMEOUT_MS]);
 });
 
 test("API failures expose bounded status/code without response secrets", async () => {
@@ -358,8 +501,13 @@ test("due-audit selection sends configured policy without storage credentials", 
 
 test("manual dispatch and audit failure/reconciliation APIs preserve canonical policy and run authority", async () => {
   const calls: { url: string; authorization: string; body?: unknown }[] = [];
+  const deadlines: number[] = [];
   const client = new ContextWikiApiClient({
     env,
+    timeoutSignal: (timeoutMs) => {
+      deadlines.push(timeoutMs);
+      return new AbortController().signal;
+    },
     fetch: async (url, init) => {
       calls.push({
         url: String(url),
@@ -446,4 +594,10 @@ test("manual dispatch and audit failure/reconciliation APIs preserve canonical p
   });
   assert.equal(improvements.audits[0]?.executionGrant, "i".repeat(32));
   assert.equal(calls[3]?.authorization, "Bearer bootstrap-secret");
+  assert.deepEqual(deadlines, [
+    CONTEXT_API_CONTROL_TIMEOUT_MS,
+    CONTEXT_API_DURABLE_MUTATION_TIMEOUT_MS,
+    CONTEXT_API_CONTROL_TIMEOUT_MS,
+    CONTEXT_API_CONTROL_TIMEOUT_MS
+  ]);
 });
