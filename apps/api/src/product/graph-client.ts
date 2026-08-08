@@ -195,6 +195,18 @@ interface RequestContext {
   repositories: readonly GraphRepositoryAccess[];
 }
 
+/** Public token shape returned by the graph service; never carries the secret. */
+export interface TenantApiToken {
+  id: string;
+  name: string;
+  principalId: string;
+  scopes: string[];
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+}
+
 export interface DashboardGraphBuildInput {
   repository: string;
   ref?: string;
@@ -392,6 +404,76 @@ export class GraphApiClient {
       accessToken: result.secret,
       expiresAt: result.token.expiresAt,
     };
+  }
+
+  /** The public MCP endpoint issued tokens authenticate against. */
+  mcpEndpoint(): string | undefined {
+    if (!this.config) return undefined;
+    return new URL("/mcp", `${this.config.apiUrl}/`).toString();
+  }
+
+  /**
+   * Tenant-facing API tokens, managed for the dashboard. These are minted as
+   * the tenant principal — the same shape as this client's own delegated
+   * reader — so a token works across every repository the tenant owns without
+   * per-repository access rows. Scope still gates each route.
+   */
+  async listTenantApiTokens(tenantId: string): Promise<TenantApiToken[]> {
+    if (!this.config?.internalToken) {
+      throw new ApiError(503, "API token management is not configured");
+    }
+    const result = await this.request<{ tokens: TenantApiToken[] }>(
+      "/internal/context/tokens",
+      { tenantId, repositories: [] },
+      { internalCredential: true },
+    );
+    return result.tokens;
+  }
+
+  async mintTenantApiToken(
+    tenantId: string,
+    input: { name: string; scopes: readonly string[]; expiresInMinutes: number },
+  ): Promise<{ secret: string; token: TenantApiToken }> {
+    if (!this.config?.internalToken) {
+      throw new ApiError(503, "API token management is not configured");
+    }
+    return this.request<{ secret: string; token: TenantApiToken }>(
+      "/internal/context/tokens",
+      { tenantId, repositories: [] },
+      {
+        method: "POST",
+        internalCredential: true,
+        body: {
+          principalId: tenantPrincipal(tenantId),
+          name: input.name,
+          scopes: [...input.scopes],
+          expiresInMinutes: input.expiresInMinutes,
+          administrator: true,
+        },
+      },
+    );
+  }
+
+  async revokeTenantApiToken(
+    tenantId: string,
+    tokenId: string,
+  ): Promise<TenantApiToken> {
+    if (!this.config?.internalToken) {
+      throw new ApiError(503, "API token management is not configured");
+    }
+    try {
+      const result = await this.request<{ token: TenantApiToken }>(
+        `/internal/context/tokens/${encodeURIComponent(tokenId)}/revoke`,
+        { tenantId, repositories: [] },
+        { method: "POST", internalCredential: true },
+      );
+      return result.token;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        throw new ApiError(404, "API token not found");
+      }
+      throw error;
+    }
   }
 
   /**

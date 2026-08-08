@@ -22,6 +22,8 @@ type NavKey =
   | WorkspaceNavKey
   | "models"
   | "integrations"
+  | "tokens"
+  | "mcp"
   | "organization-settings"
   | "organization"
   | "billing"
@@ -54,7 +56,9 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     label: "Configure",
     items: [
       { key: "integrations", label: "Integrations", href: "/integrations", icon: IntegrationsIcon },
-      { key: "models", label: "Models", href: "/models", icon: ModelsIcon }
+      { key: "models", label: "Models", href: "/models", icon: ModelsIcon },
+      { key: "tokens", label: "API Tokens", href: "/tokens", icon: TokensIcon },
+      { key: "mcp", label: "MCP", href: "/mcp", icon: McpIcon }
     ]
   }
 ];
@@ -90,6 +94,8 @@ const SECTION_TITLE: Record<NavKey, string> = {
   "causal-graph": "Causal Graph",
   models: "Models",
   integrations: "Integrations",
+  tokens: "API Tokens",
+  mcp: "MCP",
   "organization-settings": "Org Settings",
   organization: "Members & Access",
   usage: "Usage",
@@ -109,6 +115,8 @@ function sectionForPath(pathname: string | null): NavKey {
   }
   if (path.startsWith("/models")) return "models";
   if (path.startsWith("/integrations")) return "integrations";
+  if (path.startsWith("/tokens")) return "tokens";
+  if (path.startsWith("/mcp")) return "mcp";
   if (path.startsWith("/organization/settings")) return "organization-settings";
   if (path.startsWith("/organization")) return "organization";
   if (path.startsWith("/usage")) return "usage";
@@ -961,6 +969,35 @@ function IntegrationsIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function TokensIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="6" cy="6.5" r="3.25" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M8.4 8.9 13 13.5m-2.5-1 1.5-1.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function McpIcon() {
+  return (
+    <svg className="nav__icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M8 2.75v2.5m0 5.5v2.5M2.75 8h2.5m5.5 0h2.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.3" />
     </svg>
   );
 }

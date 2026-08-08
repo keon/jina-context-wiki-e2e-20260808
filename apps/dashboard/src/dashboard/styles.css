@@ -2135,6 +2135,16 @@ button.nav__item:hover {
   gap: 7px;
 }
 
+.checkbox-row {
+  display: block;
+  font-size: 13px;
+}
+
+.checkbox-row__hint {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
 .settings-field > span {
   color: var(--ink-muted);
   font-size: 12px;

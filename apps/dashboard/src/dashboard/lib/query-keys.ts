@@ -25,6 +25,7 @@ export type TenantScopedResource =
   | "model-config"
   | "integrations"
   | "github-installations"
+  | "tokens"
   | "poll";
 
 const TENANT_SCOPED_RESOURCES: ReadonlySet<string> = new Set<TenantScopedResource>([
@@ -35,6 +36,7 @@ const TENANT_SCOPED_RESOURCES: ReadonlySet<string> = new Set<TenantScopedResourc
   "model-config",
   "integrations",
   "github-installations",
+  "tokens",
   "poll"
 ]);
 
