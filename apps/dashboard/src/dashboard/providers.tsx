@@ -40,6 +40,11 @@ import {
   type ViewerTenant,
 } from "./lib/tenants";
 import { invalidateViewerSession, reconcileSessionRefresh } from "./lib/viewer-session";
+import {
+  tenantAuthorizationErrorMessage,
+  WORKSPACE_DISCOVERY_ERROR_MESSAGE,
+  WORKSPACE_SESSION_ERROR_MESSAGE,
+} from "./lib/tenant-access-error";
 
 interface DashboardContextValue {
   data: DashboardResponse | null;
@@ -48,6 +53,7 @@ interface DashboardContextValue {
   loading: boolean;
   authLoading: boolean;
   authRequired: boolean;
+  sessionError: string | null;
   filters: DashboardFilters;
   setFilters: (filters: DashboardFilters) => void;
   reload: () => void;
@@ -71,6 +77,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [viewer, setViewer] = useState<ViewerResponse | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [filters, setFilters] = useState<DashboardFilters>(emptyFilters);
   const [tenantScope, setTenantScopeState] = useState<DashboardTenantScope>(initialTenantScope);
@@ -108,6 +115,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         if (!current()) return;
         setViewer(localViewer);
         setViewerError(null);
+        setSessionError(null);
         return;
       }
       const response = await fetch(apiUrl("/dashboard/me"), {
@@ -124,6 +132,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           projects: [],
         });
         setViewerError(null);
+        setSessionError(WORKSPACE_SESSION_ERROR_MESSAGE);
         return;
       }
       if (!response.ok) {
@@ -133,12 +142,14 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       if (!current()) return;
       setViewer(nextViewer);
       setViewerError(null);
+      setSessionError(null);
     } catch (loadError) {
       if (!current()) return;
       const fixture = localViewerFixture();
       if (fixture) {
         setViewer(fixture);
         setViewerError(null);
+        setSessionError(null);
         return;
       }
       setViewerError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -354,13 +365,26 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       loading,
       authLoading,
       authRequired,
+      sessionError,
       filters,
       setFilters,
       reload: () => void reload(),
       reloadViewer: () => void reloadViewer(),
       setTenantScope,
     }),
-    [data, viewer, error, loading, authLoading, authRequired, filters, reload, reloadViewer, setTenantScope],
+    [
+      data,
+      viewer,
+      error,
+      loading,
+      authLoading,
+      authRequired,
+      sessionError,
+      filters,
+      reload,
+      reloadViewer,
+      setTenantScope,
+    ],
   );
 
   return <DashboardContext.Provider value={value}>{children}</DashboardContext.Provider>;
@@ -392,6 +416,11 @@ interface TenantContextValue {
   // Only auth-disabled development and the explicit local fixture may use the
   // backward-compatible viewer-wide review endpoints.
   legacyReviewMode: boolean;
+  // Actionable reason tenant discovery was denied. This remains separate from
+  // `ready` so authenticated pages stay fail-closed while the shell explains
+  // how to recover instead of rendering an empty dashboard.
+  accessError: string | null;
+  retryDiscovery: () => void;
   selectTenant: (tenantId: string) => void;
   addTenant: (tenant: ViewerTenant) => void;
   updateTenant: (tenant: ViewerTenant) => void;
@@ -435,6 +464,10 @@ export function TenantProvider({ children }: { children: ReactNode }) {
   const [loaded, setLoaded] = useState(false);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
   const [fenceVersion, setFenceVersion] = useState(0);
+  const [accessError, setAccessError] = useState<string | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const loadedRef = useRef(loaded);
+  loadedRef.current = loaded;
   // The viewer id the current tenants/selection belong to; null before any fetch or after sign-out.
   const fetchedForUserRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -443,12 +476,14 @@ export function TenantProvider({ children }: { children: ReactNode }) {
 
   const authenticated = Boolean(viewer && !authRequired);
   const viewerUserId = viewer?.user?.id ?? null;
+  const viewerAuthMode = viewer?.auth.mode ?? "disabled";
   const legacyReviewMode = Boolean(viewer && (!viewer.auth.enabled || localDashboardFixtureEnabled()));
 
   useEffect(() => {
     if (authLoading) return;
 
     if (legacyReviewMode) {
+      setAccessError(null);
       setTenantScope(null, true);
       return;
     }
@@ -456,6 +491,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
     // Sign-out / unauthenticated: drop the previous viewer's tenants and selection so a different
     // account signing in later can never read or write against them (FINDING 2).
     if (!authenticated || viewerUserId == null) {
+      setAccessError(null);
       setTenantScope(null, false);
       if (fetchedForUserRef.current !== null) {
         fetchedForUserRef.current = null;
@@ -477,6 +513,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       setTenants([]);
       setLoaded(false);
       setSelectedTenantId(readStoredTenantId(viewerUserId));
+      setAccessError(null);
       setTenantScope(null, false);
     }
 
@@ -493,6 +530,21 @@ export function TenantProvider({ children }: { children: ReactNode }) {
         });
         if (response.status === 401) {
           if (controller.signal.aborted || fetchedForUserRef.current !== viewerUserId) return;
+          const authorizationError = tenantAuthorizationErrorMessage(401, viewerAuthMode);
+          if (authorizationError) {
+            accessDenied = true;
+            // Clerk still owns navigation, but its API session is temporarily
+            // inconsistent. Fail closed and give the user explicit recovery
+            // controls instead of replacing the viewer and loading forever.
+            evictTenantScopedQueries(queryClient);
+            setTenants([]);
+            setLoaded(false);
+            setSelectedTenantId(null);
+            setAccessError(authorizationError);
+            setFenceVersion((version) => version + 1);
+            setTenantScope(null, false);
+            return;
+          }
           fetchedForUserRef.current = null;
           // SECURITY: the session is gone. Remove the cached tenant payloads rather
           // than invalidating them — invalidation leaves them readable until a
@@ -501,12 +553,15 @@ export function TenantProvider({ children }: { children: ReactNode }) {
           setTenants([]);
           setLoaded(false);
           setSelectedTenantId(null);
+          setAccessError(null);
           setFenceVersion((version) => version + 1);
           setTenantScope(null, false);
           reloadViewerRef.current();
           return;
         }
         if (response.status === 403) {
+          if (controller.signal.aborted || fetchedForUserRef.current !== viewerUserId) return;
+          const payload = (await response.json().catch(() => undefined)) as unknown;
           if (controller.signal.aborted || fetchedForUserRef.current !== viewerUserId) return;
           accessDenied = true;
           // SECURITY: tenant authorization was revoked; the data read under it must
@@ -515,6 +570,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
           setTenants([]);
           setLoaded(false);
           setSelectedTenantId(null);
+          setAccessError(tenantAuthorizationErrorMessage(403, viewerAuthMode, payload));
           setFenceVersion((version) => version + 1);
           setTenantScope(null, false);
           return;
@@ -542,11 +598,13 @@ export function TenantProvider({ children }: { children: ReactNode }) {
         // discovery succeeds again, restore this viewer's last explicit selection when possible.
         setSelectedTenantId((current) => current ?? readStoredTenantId(viewerUserId));
         setLoaded(true);
+        setAccessError(null);
       } catch {
         if (controller.signal.aborted || fetchedForUserRef.current !== viewerUserId) return;
         // 401/403 responses are handled above and fail closed. Keep the last
         // successful workspace across transient API/network failures so a
         // background membership refresh cannot blank the dashboard.
+        if (!loadedRef.current) setAccessError(WORKSPACE_DISCOVERY_ERROR_MESSAGE);
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
       }
@@ -557,7 +615,21 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       polling.stop();
       abortRef.current?.abort();
     };
-  }, [authLoading, authenticated, legacyReviewMode, viewerUserId, setTenantScope, queryClient]);
+  }, [
+    authLoading,
+    authenticated,
+    legacyReviewMode,
+    viewerUserId,
+    viewerAuthMode,
+    setTenantScope,
+    queryClient,
+    refreshVersion,
+  ]);
+
+  const retryDiscovery = useCallback(() => {
+    setAccessError(null);
+    setRefreshVersion((version) => version + 1);
+  }, []);
 
   const selectTenant = useCallback(
     (tenantId: string) => {
@@ -644,12 +716,25 @@ export function TenantProvider({ children }: { children: ReactNode }) {
       selected,
       ready: legacyReviewMode || loaded,
       legacyReviewMode,
+      accessError,
+      retryDiscovery,
       selectTenant,
       addTenant,
       updateTenant,
       fenceVersion,
     };
-  }, [legacyReviewMode, loaded, tenants, selected, selectTenant, addTenant, updateTenant, fenceVersion]);
+  }, [
+    legacyReviewMode,
+    loaded,
+    tenants,
+    selected,
+    accessError,
+    retryDiscovery,
+    selectTenant,
+    addTenant,
+    updateTenant,
+    fenceVersion,
+  ]);
 
   return <TenantContext.Provider value={value}>{children}</TenantContext.Provider>;
 }

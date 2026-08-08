@@ -25,7 +25,9 @@ interface DeveloperModeContextValue {
 
 const DeveloperModeContext = createContext<DeveloperModeContextValue | null>(null);
 const DEVELOPER_MODE_STORAGE_KEY = "jina.developer-mode";
-export const dashboardUsesGithubAuth = process.env.NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE === "github";
+const dashboardAuthMode = process.env.NEXT_PUBLIC_JINA_DASHBOARD_AUTH_MODE;
+export const dashboardUsesGithubAuth = dashboardAuthMode === "github";
+const dashboardUsesHybridAuth = dashboardAuthMode === "hybrid";
 
 interface AppAuthContextValue {
   readonly ready: boolean;
@@ -91,12 +93,33 @@ export function AppAuthProvider({
   if (dashboardUsesGithubAuth) return <GithubAuthAdapter>{children}</GithubAuthAdapter>;
   return (
     <ClerkProvider {...clerkOptions}>
-      <ClerkAuthAdapter>{children}</ClerkAuthAdapter>
+      {dashboardUsesHybridAuth ? (
+        <HybridAuthAdapter>{children}</HybridAuthAdapter>
+      ) : (
+        <ClerkAuthAdapter>{children}</ClerkAuthAdapter>
+      )}
     </ClerkProvider>
   );
 }
 
-function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
+/**
+ * Clerk is primary in hybrid mode, but a browser carrying an unexpired Jina
+ * GitHub session remains signed in. This prevents a flag change from becoming
+ * a fleet-wide logout while users link their Clerk accounts naturally.
+ */
+function HybridAuthAdapter({ children }: { readonly children: ReactNode }) {
+  const { isSignedIn, isLoaded } = useAuth();
+  if (isLoaded && !isSignedIn) return <GithubAuthAdapter>{children}</GithubAuthAdapter>;
+  return <ClerkAuthAdapter clearLegacySession>{children}</ClerkAuthAdapter>;
+}
+
+function ClerkAuthAdapter({
+  children,
+  clearLegacySession = false
+}: {
+  readonly children: ReactNode;
+  readonly clearLegacySession?: boolean;
+}) {
   const { user, isLoaded } = useUser();
   const { isSignedIn } = useAuth();
   const { organization } = useOrganization();
@@ -166,7 +189,17 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
         ...(user?.imageUrl ? { imageUrl: user.imageUrl } : {}),
         githubConnected: Boolean(user?.externalAccounts.some((account) => account.provider === "github")),
         openSettings: () => clerk.openUserProfile(),
-        signOut: () => signOut({ redirectUrl: "/signin" })
+        signOut: async () => {
+          // In hybrid mode a surviving legacy GitHub session would sign the
+          // browser straight back in, so clear it before Clerk signs out.
+          if (clearLegacySession) {
+            await fetch(apiUrl("/auth/logout"), {
+              method: "POST",
+              credentials: "include"
+            }).catch(() => undefined);
+          }
+          return signOut({ redirectUrl: "/signin" });
+        }
       },
       onboarding: {
         progress: currentProgress,
@@ -194,6 +227,7 @@ function ClerkAuthAdapter({ children }: { readonly children: ReactNode }) {
     }),
     [
       begin,
+      clearLegacySession,
       clerk,
       clearOnboardingError,
       complete,

@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   createApp,
   DEFAULT_GRAPH_HISTORY_LIMIT,
+  githubAdminRevalidationRequired,
   MAX_GRAPH_HISTORY_LIMIT,
   parseGraphHistoryLimit,
   parseJinaOrganizationName,
@@ -586,6 +587,31 @@ test("POST graph indexing applies dashboard origin and JSON guards before authen
   assert.equal(noSession.status, 401);
 });
 
+test("POST causal graph builds apply dashboard origin and JSON guards before authentication", async () => {
+  const app = createApp(testConfig());
+  const path = "/dashboard/tenants/tenant-a/causal-graph/build";
+  const crossOrigin = await app.request(path, {
+    method: "POST",
+    headers: { origin: "https://evil.example", ...JSON_HEADERS },
+    body: JSON.stringify({ repository: "omxyz/a", ref: "main" }),
+  });
+  assert.equal(crossOrigin.status, 403);
+
+  const wrongContentType = await app.request(path, {
+    method: "POST",
+    headers: { origin: "https://dash.example", "content-type": "text/plain" },
+    body: "{}",
+  });
+  assert.equal(wrongContentType.status, 415);
+
+  const noSession = await app.request(path, {
+    method: "POST",
+    headers: { origin: "https://dash.example", ...JSON_HEADERS },
+    body: JSON.stringify({ repository: "omxyz/a", ref: "main" }),
+  });
+  assert.equal(noSession.status, 401);
+});
+
 test("POST tenant creation applies dashboard origin and JSON guards before authentication", async () => {
   const app = createApp(testConfig());
   const crossOrigin = await app.request("/dashboard/tenants", {
@@ -668,6 +694,13 @@ test("tenantAccessDenial: a member may read but not write", () => {
 test("tenantAccessDenial: an admin may read and write", () => {
   assert.equal(tenantAccessDenial("admin", false), undefined);
   assert.equal(tenantAccessDenial("admin", true), undefined);
+});
+
+test("Clerk-authoritative admins do not fall back to legacy GitHub admin revalidation", () => {
+  assert.equal(githubAdminRevalidationRequired("clerk"), false);
+  assert.equal(githubAdminRevalidationRequired("hybrid"), true);
+  assert.equal(githubAdminRevalidationRequired("legacy"), true);
+  assert.equal(githubAdminRevalidationRequired(undefined), true);
 });
 
 test("tenant-scoped review routes require an authenticated tenant member", async () => {

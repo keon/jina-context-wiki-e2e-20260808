@@ -23,6 +23,7 @@ interface StubUser {
 
 let user: StubUser | null = null;
 let organization: { readonly id: string; readonly name: string } | null = null;
+let signOutCalls = 0;
 
 export function setClerkUser(next: StubUser | null): void {
   user = next;
@@ -30,6 +31,16 @@ export function setClerkUser(next: StubUser | null): void {
 
 export function setClerkOrganization(next: { readonly id: string; readonly name: string } | null): void {
   organization = next;
+}
+
+export function clerkSignOutCallCount(): number {
+  return signOutCalls;
+}
+
+export function resetClerkStub(): void {
+  user = null;
+  organization = null;
+  signOutCalls = 0;
 }
 
 export function ClerkProvider({ children }: { readonly children: ReactNode; readonly [key: string]: unknown }) {
@@ -67,7 +78,10 @@ export function useOrganization() {
 export function useClerk() {
   return {
     openUserProfile: () => undefined,
-    signOut: () => Promise.resolve(),
+    signOut: () => {
+      signOutCalls += 1;
+      return Promise.resolve();
+    },
     getOrganization: () => Promise.resolve(null),
     createOrganization: ({ name }: { readonly name: string }) => Promise.resolve({ id: "org_test", name }),
     setActive: () => Promise.resolve()

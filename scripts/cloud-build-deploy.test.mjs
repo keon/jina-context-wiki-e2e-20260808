@@ -31,6 +31,8 @@ const LEGACY_TOPICS = [
 ];
 
 const deployment = await readFile("scripts/cloud-build-deploy.sh", "utf8");
+const causalDeployment = await readFile("scripts/cloud-build-deploy-causal-graph.sh", "utf8");
+const causalCloudBuild = await readFile("cloudbuild.causal-graph.yaml", "utf8");
 const releaseCleanupLibrary = await readFile("scripts/cloud-release-cleanup-lib.sh", "utf8");
 const apiDockerfile = await readFile("apps/api/Dockerfile", "utf8");
 const workerDockerfile = await readFile("apps/worker/Dockerfile", "utf8");
@@ -69,11 +71,40 @@ async function withFakeGcloud(source, callback) {
   }
 }
 
+function numericSecretPreflightGcloud(versionResult) {
+  return `#!/usr/bin/env bash
+if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
+  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-EAST1","location_type":"region","uniform_bucket_level_access":true}'
+  exit 0
+fi
+if [[ "$1 $2 $3" == "storage buckets get-iam-policy" ]]; then
+  printf '%s\\n' '{"bindings":[{"role":"roles/storage.admin","members":["serviceAccount:jina-cloud-build-deployer@quality-project.iam.gserviceaccount.com"]}]}'
+  exit 0
+fi
+if [[ "$1 $2 $3" == "secrets versions describe" ]]; then
+  ${versionResult}
+fi
+exit 97
+`;
+}
+
 test("production deployment shell is syntactically valid", async () => {
   await execFileAsync("bash", ["-n", "scripts/cloud-build-deploy.sh"]);
+  await execFileAsync("bash", ["-n", "scripts/cloud-build-deploy-causal-graph.sh"]);
   await execFileAsync("bash", ["-n", "scripts/cloud-release-cleanup-lib.sh"]);
   await execFileAsync(process.execPath, ["--check", "scripts/context-production-preflight.mjs"]);
   await execFileAsync(process.execPath, ["--check", "scripts/context-production-trigger-e2e.mjs"]);
+});
+
+test("production Cloud Build declares image validation before every dependent build step", () => {
+  const validationStep = cloudBuild.indexOf("  - id: validate-image-selection");
+  const firstDependent = cloudBuild.indexOf("    waitFor: [validate-image-selection]");
+  assert.ok(validationStep >= 0, "image selection validation step must exist");
+  assert.ok(firstDependent >= 0, "image build steps must wait for image selection validation");
+  assert.ok(
+    validationStep < firstDependent,
+    "Cloud Build requires every waitFor dependency to be declared before the dependent step"
+  );
 });
 
 test("staging uses one v2 database connection and one migration job", async () => {
@@ -96,6 +127,9 @@ test("staging uses one v2 database connection and one migration job", async () =
   assert.match(stagingDeployment, /--max-instances=10/);
   assert.match(stagingDeployment, /--max-instances=5/);
   assert.match(stagingDeployment, /JINA_REVIEW_BOARD_PIPELINE_MODE=\$\{review_board_pipeline_mode\}/);
+  assert.match(stagingDeployment, /DASHBOARD_AUTH_MODE=\$\{dashboard_auth_mode\}/);
+  assert.match(stagingDeployment, /JINA_GITHUB_OAUTH_CLIENT_ID is required/);
+  assert.match(stagingDeployment, /GITHUB_OAUTH_CLIENT_SECRET=\$\{github_oauth_client_secret\}:latest/);
   assert.match(stagingDeployment, /JINA_GRAPH_REQUEST_TIMEOUT_MS=30000/);
   assert.match(stagingDeployment, /github_app_slug="\$\{JINA_GITHUB_APP_SLUG:-jina-staging\}"/);
   assert.match(
@@ -167,7 +201,10 @@ test("staging uses one v2 database connection and one migration job", async () =
   );
   assert.doesNotMatch(stagingDeployment, /JINA_LEGACY_REVIEW_PIPELINE_ENABLED/);
   assert.doesNotMatch(deployment, /JINA_LEGACY_REVIEW_PIPELINE_ENABLED/);
-  assert.match(deployment, /JINA_REVIEW_RUN_TOPIC_MODE=legacy/);
+  assert.match(deployment, /JINA_REVIEW_RUN_TOPIC_MODE=relational/);
+  assert.doesNotMatch(deployment, /JINA_REVIEW_RUN_TOPIC_MODE=legacy/);
+  assert.match(deployment, /JINA_PRODUCT_API_URL=\$\{product_api_url\}/);
+  assert.match(deployment, /TRIGGER_API_URL=\$\{trigger_api_url\}/);
   assert.match(stagingDeployment, /deploy-staging-causal-graph\.sh/);
   assert.doesNotMatch(stagingDeployment, /gcloud services enable/);
   assert.match(stagingDeployment, /Cloud Scheduler API must be enabled as a staging platform prerequisite/);
@@ -186,6 +223,8 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingCloudBuild, /IMAGE_TAG=staging-\$COMMIT_SHA/);
   assert.match(stagingCloudBuild, /JINA_CONTEXT_TENANT_ID=\$\{_JINA_CONTEXT_TENANT_ID\}/);
   assert.match(stagingCloudBuild, /JINA_REVIEW_BOARD_PIPELINE_MODE=v2/);
+  assert.match(stagingCloudBuild, /JINA_DASHBOARD_AUTH_MODE=\$\{_JINA_DASHBOARD_AUTH_MODE\}/);
+  assert.match(stagingCloudBuild, /JINA_GITHUB_OAUTH_CLIENT_ID=\$\{_JINA_GITHUB_OAUTH_CLIENT_ID\}/);
   assert.match(stagingCloudBuild, /JINA_GITHUB_WEBHOOK_INBOX_ENABLED=true/);
   assert.match(
     stagingCloudBuild,
@@ -340,7 +379,7 @@ test("the private coordinated API cannot be mistaken for the public GitHub-auth 
   assert.match(publicApiCandidateDeployment, /project: "jina-463721"/);
   for (const contract of [
     /API_BASE_URL: "https:\/\/api\.usejina\.com"/,
-    /DASHBOARD_AUTH_MODE: "github"/,
+    /SUPPORTED_DASHBOARD_AUTH_MODES[^\n]+"github"[^\n]+"clerk"/,
     /DASHBOARD_URL: "https:\/\/app\.usejina\.com"/,
     /DASHBOARD_COOKIE_SAMESITE: "None"/,
     /DASHBOARD_COOKIE_SECURE: "true"/,
@@ -350,12 +389,93 @@ test("the private coordinated API cannot be mistaken for the public GitHub-auth 
   }
 });
 
-test("the polling Context pool keeps twenty real executors warm", () => {
-  assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MIN_INSTANCES: "20"/);
+test("the polling Context pool keeps one executor warm unless a release opts into more", () => {
+  assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MIN_INSTANCES: "1"/);
   assert.match(cloudBuild, /_JINA_CONTEXT_WORKER_MAX_INSTANCES: "100"/);
-  assert.match(deployment, /context_worker_min_instances="\$\{JINA_CONTEXT_WORKER_MIN_INSTANCES:-20\}"/);
+  assert.match(deployment, /context_worker_min_instances="\$\{JINA_CONTEXT_WORKER_MIN_INSTANCES:-1\}"/);
   assert.match(deployment, /--min-instances="\$\{context_worker_min_instances\}"/);
   assert.match(deployment, /CONTEXT_GIT_COMMAND_TIMEOUT_MS=300000/);
+});
+
+test("production long-lived services use only numeric Secret Manager versions", () => {
+  assert.doesNotMatch(deployment, /:latest/);
+  assert.doesNotMatch(cloudBuild, /:latest/);
+  assert.doesNotMatch(causalDeployment, /:latest/);
+  assert.doesNotMatch(causalCloudBuild, /:latest/);
+  assert.match(deployment, /validate_numeric_secret_ref "JINA_DB_PASS_SECRET" "\$\{db_pass_secret\}"/);
+  assert.match(
+    deployment,
+    /validate_numeric_secret_ref "JINA_MIGRATION_DB_PASS_SECRET" "\$\{migration_db_pass_secret\}"/
+  );
+  for (const substitution of [
+    "_JINA_GITHUB_WEBHOOK_SECRET_VERSION",
+    "_JINA_INTERNAL_API_TOKEN_SECRET_VERSION",
+    "_JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET_VERSION",
+    "_JINA_CONTEXT_API_TOKEN_SECRET_VERSION",
+    "_JINA_CONTEXT_PRIVATE_CHECKPOINT_KEY_SECRET_VERSION",
+    "_JINA_REVIEW_TRIGGER_SECRET_VERSION",
+    "_JINA_DAYTONA_API_KEY_SECRET_VERSION",
+    "_JINA_GITHUB_APP_ID_SECRET_VERSION",
+    "_JINA_GITHUB_APP_PRIVATE_KEY_SECRET_VERSION",
+    "_JINA_OPENAI_API_KEY_SECRET_VERSION",
+    "_JINA_GITHUB_CLONE_TOKEN_SECRET_VERSION",
+    "_JINA_WEB_AUTH_PASSWORD_SECRET_VERSION"
+  ]) {
+    assert.match(cloudBuild, new RegExp(`${substitution}: "[1-9][0-9]*"`));
+  }
+  assert.match(causalDeployment, /JINA_MIGRATION_DB_PASS_SECRET must use an explicit numeric version/);
+  assert.match(
+    causalDeployment,
+    /gcloud secrets versions describe "\$\{secret_version\}"[\s\S]+?state=\$\{secret_state:-unknown\}/
+  );
+  assert.match(causalCloudBuild, /_CLOUD_SQL_INSTANCE: jina-463721:us-east1:jina-db/);
+  assert.match(causalCloudBuild, /_JINA_DB_USER: jina_v2_app/);
+  for (const substitution of [
+    "_JINA_INTERNAL_API_TOKEN_SECRET_VERSION",
+    "_JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET_VERSION",
+    "_JINA_DAYTONA_API_KEY_SECRET_VERSION",
+    "_JINA_OPENAI_API_KEY_SECRET_VERSION",
+    "_JINA_GITHUB_APP_ID_SECRET_VERSION",
+    "_JINA_GITHUB_APP_PRIVATE_KEY_SECRET_VERSION",
+    "_JINA_GITHUB_CLONE_TOKEN_SECRET_VERSION"
+  ]) {
+    assert.match(causalCloudBuild, new RegExp(`${substitution}: "[1-9][0-9]*"`));
+  }
+  assert.match(deployment, /gcloud secrets versions access \{upstream_version\} --secret=\{upstream_secret\}/);
+});
+
+test("production run-review workers retain relational Trigger dispatch and exact credentials", () => {
+  const taskDeployments = [
+    ...deployment.matchAll(/gcloud run deploy jina-task-worker[\s\S]+?wait_for_candidate_revision "jina-task-worker"/g)
+  ].map((match) => match[0]);
+
+  assert.equal(taskDeployments.length, 2);
+  for (const taskDeployment of taskDeployments) {
+    assert.match(taskDeployment, /--set-env-vars="\$\(task_worker_environment /);
+    assert.match(
+      taskDeployment,
+      /JINA_PRODUCT_INTERNAL_API_TOKEN=\$\{product_internal_token_secret\}:\$\{product_internal_token_secret_version\}/
+    );
+    assert.match(taskDeployment, /TRIGGER_SECRET_KEY=\$\{review_trigger_secret\}:\$\{review_trigger_secret_version\}/);
+  }
+  assert.match(cloudBuild, /_JINA_PRODUCT_API_URL: https:\/\/api\.usejina\.com/);
+  assert.match(
+    deployment,
+    /"\$\{review_trigger_secret\}:\$\{review_trigger_secret_version\}"[\s\S]+?require_secret "\$\{secret_spec\}"/
+  );
+});
+
+test("Context lease expiry stays bounded relative to the worker heartbeat", () => {
+  const leaseMinutes = Number(/DEFAULT_CONTEXT_WORKER_LEASE_MS = (\d+) \* 60 \* 1000/.exec(apiServer)?.[1]);
+  const heartbeatMs = Number(
+    /heartbeatIntervalMs = positiveInt\(process\.env\.WORKER_HEARTBEAT_INTERVAL_MS, ([\d_]+)\)/
+      .exec(workerServer)?.[1]
+      ?.replaceAll("_", "")
+  );
+  assert.equal(leaseMinutes, 5);
+  assert.equal(heartbeatMs, 60_000);
+  assert.ok(leaseMinutes * 60_000 >= heartbeatMs * 3, "the lease must tolerate multiple missed renewals");
+  assert.ok(leaseMinutes * 60_000 <= heartbeatMs * 5, "hard-failure recovery must remain within five heartbeats");
 });
 
 test("background workers are quiesced and Board leases are proven empty before schema mutation", () => {
@@ -455,12 +575,15 @@ test("coordinated releases hold one renewable durable lease and reject overlap b
   assert.match(deployment, /JINA_CONTEXT_WORKER_LEASE_MS:-300000/);
   assert.match(deployment, /JINA_CONTEXT_WORKER_MAX_INSTANCES:-100/);
   assert.equal(deployment.match(/--max="\$\{context_worker_max_instances\}"/g)?.length, 2);
-  assert.equal(deployment.match(/--min="\$\{context_worker_min_instances\}"/g)?.length, 2);
+  assert.equal(deployment.match(/--min="\$\{context_worker_min_instances\}"/g)?.length, 1);
   assert.equal(deployment.match(/--max-instances="\$\{context_worker_max_instances\}"/g)?.length, 2);
   assert.match(deployment, /JINA_TASK_WORKER_MAX_INSTANCES:-5/);
   assert.equal(deployment.match(/--max="\$\{task_worker_max_instances\}"/g)?.length, 2);
-  assert.equal(deployment.match(/--min=1/g)?.length, 2);
+  assert.equal(deployment.match(/--min=1/g)?.length, 1);
   assert.equal(deployment.match(/--max-instances="\$\{task_worker_max_instances\}"/g)?.length, 2);
+  assert.equal(deployment.match(/--min=0/g)?.length, 2);
+  assert.equal(deployment.match(/--min-instances=0/g)?.length, 2);
+  assert.match(deployment, /A drain revision is\n# a routing fence, not an executor/);
   assert.match(deployment, /WORKER_HEARTBEAT_INTERVAL_MS=\$\{context_worker_heartbeat_interval_ms\}/);
   assert.match(deployment, /must cover at least three worker heartbeat intervals/);
 });
@@ -826,6 +949,28 @@ exit 97
   });
 });
 
+test("deployment rejects a missing numeric Secret version before cloud mutation", async () => {
+  await withFakeGcloud(numericSecretPreflightGcloud("exit 1"), async (env) => {
+    await assert.rejects(execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], { env }), (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /Secret jina-db-password version 2 is missing or unreadable/);
+      assert.doesNotMatch(error.stderr, /Cloud SQL backup/);
+      return true;
+    });
+  });
+});
+
+test("deployment rejects a disabled numeric Secret version before cloud mutation", async () => {
+  await withFakeGcloud(numericSecretPreflightGcloud("printf '%s\\n' DISABLED; exit 0"), async (env) => {
+    await assert.rejects(execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], { env }), (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /Secret jina-db-password version 2 is not ENABLED \(state=DISABLED\)/);
+      assert.doesNotMatch(error.stderr, /Cloud SQL backup/);
+      return true;
+    });
+  });
+});
+
 test("deployment rejects blanket lifecycle rules on retained Context artifacts", async () => {
   const fakeGcloud = `#!/usr/bin/env bash
 if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
@@ -899,12 +1044,18 @@ test("post-cutover trigger acceptance is deployed with a distinct least-scope fi
     deployment.match(/gcloud run jobs deploy "\$\{trigger_acceptance_job\}"[\s\S]+?--quiet\n/)?.[0] ?? "";
   assert.ok(jobBlock);
   assert.match(jobBlock, /--service-account="\$\{trigger_acceptance_service_account\}"/);
-  assert.match(jobBlock, /GITHUB_APP_ID=jina-github-app-id:latest/);
-  assert.match(jobBlock, /GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest/);
-  assert.match(jobBlock, /GITHUB_FIXTURE_APP_ID=\$\{trigger_acceptance_github_app_id_secret\}:latest/);
+  assert.match(jobBlock, /GITHUB_APP_ID=jina-github-app-id:\$\{github_app_id_secret_version\}/);
   assert.match(
     jobBlock,
-    /GITHUB_FIXTURE_APP_PRIVATE_KEY=\$\{trigger_acceptance_github_app_private_key_secret\}:latest/
+    /GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:\$\{github_app_private_key_secret_version\}/
+  );
+  assert.match(
+    jobBlock,
+    /GITHUB_FIXTURE_APP_ID=\$\{trigger_acceptance_github_app_id_secret\}:\$\{trigger_acceptance_github_app_id_secret_version\}/
+  );
+  assert.match(
+    jobBlock,
+    /GITHUB_FIXTURE_APP_PRIVATE_KEY=\$\{trigger_acceptance_github_app_private_key_secret\}:\$\{trigger_acceptance_github_app_private_key_secret_version\}/
   );
   assert.match(deployment, /--installation-id %q --fixture-installation-id %q --confirm-repository %q/);
   assert.match(deployment, /"\$\{acceptance_github_installation_id\}"/);
@@ -1028,10 +1179,11 @@ test("production context worker claims exactly the Board topics", () => {
   assert.deepEqual(configured, BOARD_TOPICS);
   for (const topic of LEGACY_TOPICS) assert.doesNotMatch(deployment, new RegExp(topic));
   assert.match(deployment, /WORKER_TOPICS=\$\{context_board_topics\}/);
+  assert.match(deployment, /JINA_PRODUCT_API_URL=\$\{product_api_url\}/);
   assert.match(deployment, /WORKER_PREFERRED_REPOSITORY=\$\{acceptance_repository\}/);
 });
 
-test("production Board agents are Daytona-only and do not receive the host model key", () => {
+test("production Board agents are Daytona-only and mount the managed fallback under its narrow name", () => {
   assert.match(deployment, /CONTEXT_BOARD_EXECUTOR=daytona/);
   assert.match(deployment, /CONTEXT_DAYTONA_MODEL_SECRET=/);
   assert.match(deployment, /CONTEXT_DAYTONA_MODEL_SECRET_ENV=/);
@@ -1039,7 +1191,7 @@ test("production Board agents are Daytona-only and do not receive the host model
   assert.match(deployment, /CONTEXT_DAYTONA_(?:SNAPSHOT|IMAGE)=/);
   assert.match(
     deployment,
-    /--set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=\$\{product_internal_token_secret\}:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=/
+    /--set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:\$\{internal_api_token_secret_version\},JINA_PRODUCT_INTERNAL_API_TOKEN=\$\{product_internal_token_secret\}:\$\{product_internal_token_secret_version\},JINA_MANAGED_MODEL_API_KEY=jina-openai-api-key:\$\{openai_api_key_secret_version\},DAYTONA_API_KEY=jina-daytona-api-key:\$\{daytona_api_key_secret_version\},GITHUB_APP_ID=/
   );
 
   const workerDeployment =
@@ -1047,6 +1199,7 @@ test("production Board agents are Daytona-only and do not receive the host model
       /gcloud run deploy jina-context-worker[\s\S]+?wait_for_candidate_revision "jina-context-worker"/
     )?.[0] ?? "";
   assert.ok(workerDeployment);
+  assert.match(workerDeployment, /JINA_MANAGED_MODEL_API_KEY=jina-openai-api-key:\$\{openai_api_key_secret_version\}/);
   assert.doesNotMatch(workerDeployment, /OPENAI_API_KEY=jina-openai-api-key/);
 });
 
@@ -1110,10 +1263,13 @@ test("production acceptance receives both web surfaces and only its bounded cred
   assert.match(deployment, /ACCEPTANCE_WEB_AUTH_USERNAME=omlabs/);
   assert.match(
     acceptanceDeployment,
-    /INTERNAL_API_TOKEN=jina-internal-api-token:latest,ACCEPTANCE_WEB_AUTH_PASSWORD=jina-web-auth-password:latest/
+    /INTERNAL_API_TOKEN=jina-internal-api-token:\$\{internal_api_token_secret_version\},ACCEPTANCE_WEB_AUTH_PASSWORD=jina-web-auth-password:\$\{web_auth_password_secret_version\}/
   );
   assert.doesNotMatch(acceptanceDeployment, /CONTEXT_API_TOKEN/);
-  assert.match(deployment, /^api_secrets=.*CONTEXT_API_TOKEN=jina-context-api-token:latest/m);
+  assert.match(
+    deployment,
+    /^api_secrets=.*CONTEXT_API_TOKEN=jina-context-api-token:\$\{context_api_token_secret_version\}/m
+  );
   assert.match(
     deployment,
     /gcloud run services add-iam-policy-binding jina-dashboard[\s\S]+?serviceAccount:\$\{acceptance_service_account\}[\s\S]+?roles\/run\.invoker/
@@ -1253,7 +1409,7 @@ test("deployment validates and preflights the product internal token Secret", as
   );
   assert.match(
     deployment,
-    /for secret_spec in[\s\S]+?"\$\{product_internal_token_secret\}:latest"[\s\S]+?require_secret "\$\{secret_spec\}"/
+    /for secret_spec in[\s\S]+?"\$\{product_internal_token_secret\}:\$\{product_internal_token_secret_version\}"[\s\S]+?require_secret "\$\{secret_spec\}"/
   );
 
   await assert.rejects(

@@ -381,6 +381,52 @@ test("a dashboard index can target an explicit branch and commit", async () => {
   ]);
 });
 
+test("a dashboard causal graph build reaches the causal graph admission route", async () => {
+  const commitSha = "e".repeat(40);
+  const { fetchImpl, urls, bodies } = recording(async () =>
+    Response.json({
+      build: {
+        id: "cg_1",
+        status: "active",
+        repository: "omxyz/a",
+        ref: "pull/18/head",
+        refSequence: 4,
+        commitSha,
+      },
+    }),
+  );
+  const client = new GraphApiClient(CONFIG, fetchImpl);
+
+  const result = await client.buildDashboardCausalGraph(CONTEXT, {
+    repository: "omxyz/a",
+    ref: "pull/18/head",
+    commitSha,
+    requestKey: "dashboard-causal-key",
+    metadata: { source: "jina-dashboard" },
+  });
+
+  assert.deepEqual(urls, ["https://graph.example/causal-graph/build"]);
+  assert.deepEqual(bodies, [
+    {
+      repository: "omxyz/a",
+      ref: "pull/18/head",
+      commitSha,
+      githubInstallationId: 42,
+      requestKey: "dashboard-causal-key",
+    },
+  ]);
+  assert.deepEqual(result.task, {
+    id: "cg_1",
+    status: "active",
+    metadata: {
+      repository: "omxyz/a",
+      ref: "pull/18/head",
+      refSequence: 4,
+      commitSha,
+    },
+  });
+});
+
 test("recent Context builds are tenant-scoped again before reaching the dashboard", async () => {
   const { fetchImpl, urls } = recording(async () =>
     Response.json({

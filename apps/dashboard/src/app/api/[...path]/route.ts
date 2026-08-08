@@ -1,5 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import type { NextRequest } from "next/server";
+import { dashboardAllowsLegacySession, dashboardProxyUsesClerk } from "../../../server/auth-mode.ts";
 import {
   dashboardWebAuthorization,
   isAllowedDashboardApiRequest,
@@ -48,13 +49,23 @@ async function proxy(request: NextRequest): Promise<Response> {
     if (!STRIPPED_REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
   }
   if (productApiRequest) {
-    const { isAuthenticated, getToken } = await auth();
-    if (!isAuthenticated) return Response.json({ error: "unauthenticated" }, { status: 401 });
-    const token = await getToken();
-    if (!token) return Response.json({ error: "unauthenticated" }, { status: 401 });
-    headers.set("authorization", `Bearer ${token}`);
+    const clerkAuth = dashboardProxyUsesClerk() ? await auth() : null;
+    const token = clerkAuth?.isAuthenticated ? await clerkAuth.getToken() : null;
+    if (token) {
+      headers.set("authorization", `Bearer ${token}`);
+    }
+    if (dashboardAllowsLegacySession()) {
+      const legacySession = request.cookies.get("jina_dashboard_session");
+      if (legacySession) headers.set("cookie", `${legacySession.name}=${legacySession.value}`);
+    }
+    if (!token && !headers.has("cookie")) {
+      return Response.json({ error: "unauthenticated" }, { status: 401 });
+    }
     const openRouterCookie = request.cookies.get("jina_openrouter_pkce");
-    if (openRouterCookie) headers.set("cookie", `${openRouterCookie.name}=${openRouterCookie.value}`);
+    if (openRouterCookie) {
+      const current = headers.get("cookie");
+      headers.set("cookie", [current, `${openRouterCookie.name}=${openRouterCookie.value}`].filter(Boolean).join("; "));
+    }
   } else {
     const principal = resolveDashboardPrincipal({
       iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),

@@ -27,12 +27,13 @@ cloud_sql_instance="${CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-p
 tenancy_mode="${JINA_TENANCY_MODE:-fixed}"
 db_name="${JINA_DB_NAME:-jina}"
 db_user="${JINA_DB_USER:-jina_app}"
-db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
+db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:2}"
 migration_db_user="${JINA_MIGRATION_DB_USER:-jina_app}"
-migration_db_pass_secret="${JINA_MIGRATION_DB_PASS_SECRET:-jina-primary-owner-db-password:latest}"
+migration_db_pass_secret="${JINA_MIGRATION_DB_PASS_SECRET:-jina-primary-owner-db-password:3}"
 # Jina v1 owns the migration login's password; this is where it keeps it.
 shared_owner_secret_project="${JINA_SHARED_OWNER_SECRET_PROJECT:-jina-463721}"
 shared_owner_secret="${JINA_SHARED_OWNER_SECRET:-jina-database-url}"
+shared_owner_secret_version="${JINA_SHARED_OWNER_SECRET_VERSION:-8}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
 acceptance_repository="${JINA_ACCEPTANCE_REPOSITORY:-omxyz/jina-context-graph-e2e}"
 acceptance_github_installation_id="${JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID:-140435029}"
@@ -59,7 +60,7 @@ acceptance_timeout_ms="${JINA_ACCEPTANCE_TIMEOUT_MS:-10800000}"
 acceptance_job_timeout_seconds="${JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS:-11700}"
 deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-deferred}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
-context_worker_min_instances="${JINA_CONTEXT_WORKER_MIN_INSTANCES:-20}"
+context_worker_min_instances="${JINA_CONTEXT_WORKER_MIN_INSTANCES:-1}"
 context_worker_max_instances="${JINA_CONTEXT_WORKER_MAX_INSTANCES:-100}"
 task_worker_max_instances="${JINA_TASK_WORKER_MAX_INSTANCES:-5}"
 context_artifact_bucket="${JINA_CONTEXT_GCS_BUCKET:-${GCP_PROJECT_ID}-jina-context-artifacts}"
@@ -71,6 +72,23 @@ context_daytona_model_secret_env="${JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV:-OPENA
 context_daytona_model_domains="${JINA_CONTEXT_DAYTONA_MODEL_DOMAINS:-api.openai.com}"
 context_checkpoint_publication_override_build_ids="${JINA_CONTEXT_CHECKPOINT_PUBLICATION_OVERRIDE_BUILD_IDS:-}"
 product_internal_token_secret="${JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET:-jina-v1-internal-api-token}"
+product_api_url="${JINA_PRODUCT_API_URL:-https://api.usejina.com}"
+review_trigger_secret="${JINA_REVIEW_TRIGGER_SECRET:-jina-review-trigger-secret-key}"
+trigger_api_url="${JINA_TRIGGER_API_URL:-https://api.trigger.dev}"
+github_webhook_secret_version="${JINA_GITHUB_WEBHOOK_SECRET_VERSION:-2}"
+internal_api_token_secret_version="${JINA_INTERNAL_API_TOKEN_SECRET_VERSION:-1}"
+context_api_token_secret_version="${JINA_CONTEXT_API_TOKEN_SECRET_VERSION:-1}"
+context_private_checkpoint_key_secret_version="${JINA_CONTEXT_PRIVATE_CHECKPOINT_KEY_SECRET_VERSION:-1}"
+product_internal_token_secret_version="${JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET_VERSION:-1}"
+review_trigger_secret_version="${JINA_REVIEW_TRIGGER_SECRET_VERSION:-1}"
+daytona_api_key_secret_version="${JINA_DAYTONA_API_KEY_SECRET_VERSION:-1}"
+github_app_id_secret_version="${JINA_GITHUB_APP_ID_SECRET_VERSION:-1}"
+github_app_private_key_secret_version="${JINA_GITHUB_APP_PRIVATE_KEY_SECRET_VERSION:-1}"
+trigger_acceptance_github_app_id_secret_version="${JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_ID_SECRET_VERSION:-1}"
+trigger_acceptance_github_app_private_key_secret_version="${JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET_VERSION:-1}"
+openai_api_key_secret_version="${JINA_OPENAI_API_KEY_SECRET_VERSION:-1}"
+github_clone_token_secret_version="${JINA_GITHUB_CLONE_TOKEN_SECRET_VERSION:-1}"
+web_auth_password_secret_version="${JINA_WEB_AUTH_PASSWORD_SECRET_VERSION:-1}"
 context_reset_mode="${JINA_CONTEXT_RESET_MODE:-disabled}"
 context_reset_confirmation="${JINA_CONFIRM_CONTEXT_RESET:-}"
 context_board_topics="run-context-input-snapshot|run-context-page-plan|run-context-page-build|run-context-publication"
@@ -153,6 +171,15 @@ validate_secret_name() {
   fi
 }
 
+validate_numeric_secret_ref() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[A-Za-z][A-Za-z0-9_-]{0,254}:[1-9][0-9]*$ ]]; then
+    echo "${name} must be a Secret Manager name with an explicit numeric version" >&2
+    exit 2
+  fi
+}
+
 validate_tenant_id() {
   local name="$1"
   local value="$2"
@@ -184,6 +211,26 @@ validate_positive_integer "JINA_CONTEXT_CODEX_CONTEXT_TOKENS" "${context_codex_c
 validate_positive_integer "JINA_CONTEXT_CODEX_COMPACT_TOKENS" "${context_codex_compact_tokens}"
 validate_positive_integer "JINA_ACCEPTANCE_TIMEOUT_MS" "${acceptance_timeout_ms}"
 validate_positive_integer "JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS" "${acceptance_job_timeout_seconds}"
+validate_numeric_secret_ref "JINA_DB_PASS_SECRET" "${db_pass_secret}"
+validate_numeric_secret_ref "JINA_MIGRATION_DB_PASS_SECRET" "${migration_db_pass_secret}"
+for secret_version_name in \
+  shared_owner_secret_version \
+  github_webhook_secret_version \
+  internal_api_token_secret_version \
+  context_api_token_secret_version \
+  context_private_checkpoint_key_secret_version \
+  product_internal_token_secret_version \
+  review_trigger_secret_version \
+  daytona_api_key_secret_version \
+  github_app_id_secret_version \
+  github_app_private_key_secret_version \
+  trigger_acceptance_github_app_id_secret_version \
+  trigger_acceptance_github_app_private_key_secret_version \
+  openai_api_key_secret_version \
+  github_clone_token_secret_version \
+  web_auth_password_secret_version; do
+  validate_positive_integer "${secret_version_name}" "${!secret_version_name}"
+done
 if (( context_codex_compact_tokens >= context_codex_context_tokens )); then
   echo "JINA_CONTEXT_CODEX_COMPACT_TOKENS must stay below the context window it compacts" >&2
   exit 2
@@ -205,6 +252,15 @@ validate_secret_name \
 validate_secret_name \
   "JINA_PRODUCT_INTERNAL_API_TOKEN_SECRET" \
   "${product_internal_token_secret}"
+validate_secret_name "JINA_REVIEW_TRIGGER_SECRET" "${review_trigger_secret}"
+if [[ ! "${product_api_url}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]]; then
+  echo "JINA_PRODUCT_API_URL must be an HTTPS URL" >&2
+  exit 2
+fi
+if [[ ! "${trigger_api_url}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]]; then
+  echo "JINA_TRIGGER_API_URL must be an HTTPS URL" >&2
+  exit 2
+fi
 if [[ "${trigger_acceptance_github_app_id_secret}" == "jina-github-app-id" ||
       "${trigger_acceptance_github_app_private_key_secret}" == "jina-github-app-private-key" ||
       "${trigger_acceptance_github_app_id_secret}" == "${trigger_acceptance_github_app_private_key_secret}" ]]; then
@@ -344,7 +400,7 @@ deploy_candidate_args=(
 # the public candidate is deployed separately to jina-463721/jina-code-review-api
 # with the complete numeric-secret-pinned GitHub runtime manifest.
 api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~DASHBOARD_AUTH_MODE=disabled~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=true~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_POOL_MAX=${api_db_pool_max}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_GCS_BUCKET=${context_artifact_bucket}"
-api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=jina-context-private-checkpoint-key:latest"
+api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:${github_webhook_secret_version},INTERNAL_API_TOKEN=jina-internal-api-token:${internal_api_token_secret_version},CONTEXT_API_TOKEN=jina-context-api-token:${context_api_token_secret_version},CONTEXT_PRIVATE_CHECKPOINT_KEY=jina-context-private-checkpoint-key:${context_private_checkpoint_key_secret_version}"
 
 case "${tenancy_mode}" in
   fixed)
@@ -390,7 +446,23 @@ PY
 require_secret() {
   local secret_spec="$1"
   local secret_name="${secret_spec%%:*}"
-  gcloud secrets describe "${secret_name}" --project="${GCP_PROJECT_ID}" >/dev/null
+  if [[ "${secret_spec}" != *:* ]]; then
+    gcloud secrets describe "${secret_name}" --project="${GCP_PROJECT_ID}" >/dev/null
+    return
+  fi
+  local secret_version="${secret_spec#*:}"
+  local secret_state
+  if ! secret_state="$(gcloud secrets versions describe "${secret_version}" \
+    --secret="${secret_name}" \
+    --project="${GCP_PROJECT_ID}" \
+    --format='value(state)')"; then
+    echo "Secret ${secret_name} version ${secret_version} is missing or unreadable" >&2
+    exit 2
+  fi
+  if [[ "${secret_state}" != "ENABLED" ]]; then
+    echo "Secret ${secret_name} version ${secret_version} is not ENABLED (state=${secret_state:-unknown})" >&2
+    exit 2
+  fi
 }
 
 artifact_bucket_bootstrap_hint() {
@@ -497,7 +569,7 @@ if is_public:
 # secret is unreadable, because cross-project access is not required to deploy.
 require_migration_credential_matches_shared_owner() {
   local upstream migration_secret migration_version
-  if ! upstream="$(gcloud secrets versions access latest \
+  if ! upstream="$(gcloud secrets versions access "${shared_owner_secret_version}" \
     --secret="${shared_owner_secret}" \
     --project="${shared_owner_secret_project}" 2>/dev/null)" || [[ -z "${upstream}" ]]; then
     echo "Skipping shared migration-credential check: cannot read ${shared_owner_secret} in ${shared_owner_secret_project}" >&2
@@ -512,6 +584,7 @@ require_migration_credential_matches_shared_owner() {
   UPSTREAM_URL="${upstream}" MIGRATION_PASSWORD="${migration}" \
     UPSTREAM_PROJECT="${shared_owner_secret_project}" \
     UPSTREAM_SECRET="${shared_owner_secret}" \
+    UPSTREAM_VERSION="${shared_owner_secret_version}" \
     MIGRATION_PROJECT="${GCP_PROJECT_ID}" \
     MIGRATION_SECRET="${migration_secret}" \
     MIGRATION_VERSION="${migration_version}" \
@@ -528,6 +601,7 @@ def fingerprint(value):
 
 upstream_project = os.environ["UPSTREAM_PROJECT"]
 upstream_secret = os.environ["UPSTREAM_SECRET"]
+upstream_version = os.environ["UPSTREAM_VERSION"]
 migration_project = os.environ["MIGRATION_PROJECT"]
 migration_secret = os.environ["MIGRATION_SECRET"]
 migration_version = os.environ["MIGRATION_VERSION"]
@@ -555,7 +629,7 @@ sys.exit(
             f"  {migration_label} has {fingerprint(actual)}",
             "Jina v1 owns this password. Copy it across rather than resetting the",
             "role, which would break v1:",
-            f"  gcloud secrets versions access latest --secret={upstream_secret} \\",
+            f"  gcloud secrets versions access {upstream_version} --secret={upstream_secret} \\",
             f"    --project={upstream_project} \\",
             "    | python3 -c \"import sys,urllib.parse as p; sys.stdout.write("
             "p.unquote(p.urlparse(sys.stdin.read().strip()).password or str()))\" \\",
@@ -655,7 +729,7 @@ context_worker_environment() {
   local claim_mode="$2"
   local target_revision="${3:-}"
   local environment
-  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=${context_board_topics}~WORKER_PREFERRED_REPOSITORY=${acceptance_repository}~WORKER_HEARTBEAT_INTERVAL_MS=${context_worker_heartbeat_interval_ms}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GIT_COMMAND_TIMEOUT_MS=300000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex"
+  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_PRODUCT_API_URL=${product_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=${context_board_topics}~WORKER_PREFERRED_REPOSITORY=${acceptance_repository}~WORKER_HEARTBEAT_INTERVAL_MS=${context_worker_heartbeat_interval_ms}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GIT_COMMAND_TIMEOUT_MS=300000~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex"
   if [[ "${claim_mode}" == "enabled" ]]; then
     [[ "${target_revision}" == "${context_candidate_revision}" ]] || {
       echo "Enabled Context worker requires its exact candidate revision" >&2
@@ -683,7 +757,7 @@ task_worker_environment() {
     echo "Enabled task worker requires its exact candidate revision" >&2
     exit 2
   fi
-  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~JINA_REVIEW_RUN_TOPIC_MODE=legacy~WORKER_TOPICS=run-review~REVIEW_MODEL=gpt-5.6-sol"
+  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_PRODUCT_API_URL=${product_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~JINA_REVIEW_RUN_TOPIC_MODE=relational~TRIGGER_API_URL=${trigger_api_url}~WORKER_TOPICS=run-review~REVIEW_MODEL=gpt-5.6-sol"
   if [[ "${claim_mode}" == "enabled" ]]; then
     environment+="~JINA_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}"
   fi
@@ -1020,7 +1094,7 @@ reconcile_trigger_acceptance_job() {
     --image="${worker_image}" \
     --service-account="${trigger_acceptance_service_account}" \
     --set-env-vars="JINA_TRIGGER_ACCEPTANCE_ALLOWED_REPOSITORY=${acceptance_repository}" \
-    --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_FIXTURE_APP_ID=${trigger_acceptance_github_app_id_secret}:latest,GITHUB_FIXTURE_APP_PRIVATE_KEY=${trigger_acceptance_github_app_private_key_secret}:latest" \
+    --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:${internal_api_token_secret_version},GITHUB_APP_ID=jina-github-app-id:${github_app_id_secret_version},GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:${github_app_private_key_secret_version},GITHUB_FIXTURE_APP_ID=${trigger_acceptance_github_app_id_secret}:${trigger_acceptance_github_app_id_secret_version},GITHUB_FIXTURE_APP_PRIVATE_KEY=${trigger_acceptance_github_app_private_key_secret}:${trigger_acceptance_github_app_private_key_secret_version}" \
     --command=/bin/sh \
     --args="^~^-c~${trigger_acceptance_command}" \
     --tasks=1 \
@@ -1220,22 +1294,23 @@ require_artifact_bucket_prerequisites
 for secret_spec in \
   "${db_pass_secret}" \
   "${migration_db_pass_secret}" \
-  "jina-github-webhook-secret:latest" \
-  "jina-context-private-checkpoint-key:latest" \
-  "jina-internal-api-token:latest" \
-  "${product_internal_token_secret}:latest" \
-  "jina-context-api-token:latest" \
-  "jina-daytona-api-key:latest" \
-  "jina-github-app-id:latest" \
-  "jina-github-app-private-key:latest" \
-  "${trigger_acceptance_github_app_id_secret}:latest" \
-  "${trigger_acceptance_github_app_private_key_secret}:latest" \
-  "jina-openai-api-key:latest" \
-  "jina-github-clone-token:latest" \
+  "jina-github-webhook-secret:${github_webhook_secret_version}" \
+  "jina-context-private-checkpoint-key:${context_private_checkpoint_key_secret_version}" \
+  "jina-internal-api-token:${internal_api_token_secret_version}" \
+  "${product_internal_token_secret}:${product_internal_token_secret_version}" \
+  "${review_trigger_secret}:${review_trigger_secret_version}" \
+  "jina-context-api-token:${context_api_token_secret_version}" \
+  "jina-daytona-api-key:${daytona_api_key_secret_version}" \
+  "jina-github-app-id:${github_app_id_secret_version}" \
+  "jina-github-app-private-key:${github_app_private_key_secret_version}" \
+  "${trigger_acceptance_github_app_id_secret}:${trigger_acceptance_github_app_id_secret_version}" \
+  "${trigger_acceptance_github_app_private_key_secret}:${trigger_acceptance_github_app_private_key_secret_version}" \
+  "jina-openai-api-key:${openai_api_key_secret_version}" \
+  "jina-github-clone-token:${github_clone_token_secret_version}" \
   "${worker_release_secret}"; do
   require_secret "${secret_spec}"
 done
-require_secret "jina-web-auth-password:latest"
+require_secret "jina-web-auth-password:${web_auth_password_secret_version}"
 require_migration_credential_matches_shared_owner
 for service_account in \
   "${api_service_account}" \
@@ -1285,7 +1360,7 @@ gcloud run jobs deploy jina-context-daytona-preflight \
   --image="${worker_image}" \
   --service-account="${context_worker_service_account}" \
   --set-env-vars="${daytona_preflight_env}" \
-  --set-secrets="DAYTONA_API_KEY=jina-daytona-api-key:latest" \
+  --set-secrets="DAYTONA_API_KEY=jina-daytona-api-key:${daytona_api_key_secret_version}" \
   --command=node \
   --args="${production_preflight_path},daytona" \
   --tasks=1 \
@@ -1398,10 +1473,13 @@ if [[ "${context_backup_status}" != "SUCCESSFUL" ]]; then
 fi
 echo "Verified Cloud SQL backup ${context_backup_id} for ${cloud_sql_instance}"
 
-# Create both paused drains before closing claim admission. The serving worker
-# generation remains authorized to renew and complete work while no new leases
-# can be claimed. Only after the Board reaches zero leases is that generation
-# fenced and replaced by the paused drain revisions.
+# Create both paused drains before closing claim admission. A drain revision is
+# a routing fence, not an executor: keep its revision-level minimum at zero so
+# it cannot run background Board reconciliation while owner DDL is waiting for
+# the state-store advisory lock. The serving worker generation remains
+# authorized to renew and complete work while no new leases can be claimed.
+# Only after the Board reaches zero leases is that generation fenced and
+# replaced by the paused drain revisions.
 serving_api_url="$(stable_service_url "jina-api")"
 gcloud run deploy jina-context-worker \
   --project="${GCP_PROJECT_ID}" \
@@ -1413,13 +1491,13 @@ gcloud run deploy jina-context-worker \
   --memory="${context_worker_memory}" \
   --timeout=300 \
   --scaling=auto \
-  --min="${context_worker_min_instances}" \
+  --min=0 \
   --max="${context_worker_max_instances}" \
-  --min-instances="${context_worker_min_instances}" \
+  --min-instances=0 \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(context_worker_environment "${serving_api_url}" "paused")" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:${internal_api_token_secret_version},JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_secret_version},JINA_MANAGED_MODEL_API_KEY=jina-openai-api-key:${openai_api_key_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:${daytona_api_key_secret_version},GITHUB_APP_ID=jina-github-app-id:${github_app_id_secret_version},GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:${github_app_private_key_secret_version},GITHUB_CLONE_TOKEN=jina-github-clone-token:${github_clone_token_secret_version}" \
   --no-traffic \
   --revision-suffix="${drain_suffix}" \
   --quiet
@@ -1434,13 +1512,13 @@ gcloud run deploy jina-task-worker \
   --concurrency=1 \
   --timeout=300 \
   --scaling=auto \
-  --min=1 \
+  --min=0 \
   --max="${task_worker_max_instances}" \
-  --min-instances=1 \
+  --min-instances=0 \
   --max-instances="${task_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(task_worker_environment "${serving_api_url}" "paused")" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:${internal_api_token_secret_version},JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_secret_version},OPENAI_API_KEY=jina-openai-api-key:${openai_api_key_secret_version},GITHUB_CLONE_TOKEN=jina-github-clone-token:${github_clone_token_secret_version},TRIGGER_SECRET_KEY=${review_trigger_secret}:${review_trigger_secret_version}" \
   --no-traffic \
   --revision-suffix="${drain_suffix}" \
   --quiet
@@ -1560,7 +1638,7 @@ gcloud run deploy jina-context-worker \
   --max-instances="${context_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="${context_worker_env_vars}" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:${internal_api_token_secret_version},JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_secret_version},JINA_MANAGED_MODEL_API_KEY=jina-openai-api-key:${openai_api_key_secret_version},JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:${daytona_api_key_secret_version},GITHUB_APP_ID=jina-github-app-id:${github_app_id_secret_version},GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:${github_app_private_key_secret_version},GITHUB_CLONE_TOKEN=jina-github-clone-token:${github_clone_token_secret_version}" \
   "${deploy_candidate_args[@]}" \
   --quiet
 
@@ -1583,7 +1661,7 @@ gcloud run deploy jina-task-worker \
   --max-instances="${task_worker_max_instances}" \
   --no-cpu-throttling \
   --set-env-vars="$(task_worker_environment "${api_url}" "enabled" "${task_candidate_revision}")" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:${internal_api_token_secret_version},JINA_PRODUCT_INTERNAL_API_TOKEN=${product_internal_token_secret}:${product_internal_token_secret_version},JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${worker_release_secret_version},OPENAI_API_KEY=jina-openai-api-key:${openai_api_key_secret_version},GITHUB_CLONE_TOKEN=jina-github-clone-token:${github_clone_token_secret_version},TRIGGER_SECRET_KEY=${review_trigger_secret}:${review_trigger_secret_version}" \
   "${deploy_candidate_args[@]}" \
   --quiet
 
@@ -1610,7 +1688,7 @@ for worker_service in "jina-context-worker" "jina-task-worker"; do
 done
 
 web_env_vars="^~^JINA_API_URL=${api_url}~JINA_TENANT_ID=${acceptance_tenant_id}~JINA_WEB_PRINCIPAL_ID=${acceptance_principal_id}~JINA_WEB_AUTH_USERNAME=omlabs"
-web_secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WEB_AUTH_PASSWORD=jina-web-auth-password:latest"
+web_secrets="INTERNAL_API_TOKEN=jina-internal-api-token:${internal_api_token_secret_version},JINA_WEB_AUTH_PASSWORD=jina-web-auth-password:${web_auth_password_secret_version}"
 
 gcloud run deploy jina-dashboard \
   --project="${GCP_PROJECT_ID}" \
@@ -1677,7 +1755,7 @@ if [[ "${deployment_acceptance_mode}" == "full" ]]; then
     --image="${worker_image}" \
     --service-account="${acceptance_service_account}" \
     --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~ACCEPTANCE_CONTEXT_WORKER_REVISION=${context_candidate_revision}~ACCEPTANCE_TASK_WORKER_REVISION=${task_candidate_revision}~ACCEPTANCE_CONTEXT_WORKER_URL=${context_worker_url}~ACCEPTANCE_CONTEXT_WORKER_AUDIENCE=${context_worker_audience}~ACCEPTANCE_TASK_WORKER_URL=${task_worker_url}~ACCEPTANCE_TASK_WORKER_AUDIENCE=${task_worker_audience}~ACCEPTANCE_DASHBOARD_URL=${dashboard_url}~ACCEPTANCE_DASHBOARD_AUDIENCE=${dashboard_audience}~ACCEPTANCE_ADMIN_URL=${admin_url}~ACCEPTANCE_WEB_AUTH_USERNAME=omlabs~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REPOSITORY=${acceptance_repository}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_DERIVATION_BUDGET_SECONDS=${acceptance_derivation_budget_seconds}~ACCEPTANCE_DERIVATION_TOKEN_BUDGET=${acceptance_derivation_token_budget}~ACCEPTANCE_TIMEOUT_MS=${acceptance_timeout_ms}" \
-    --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,ACCEPTANCE_WEB_AUTH_PASSWORD=jina-web-auth-password:latest" \
+    --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:${internal_api_token_secret_version},ACCEPTANCE_WEB_AUTH_PASSWORD=jina-web-auth-password:${web_auth_password_secret_version}" \
     --args=dist/acceptance.js \
     --tasks=1 \
     --max-retries=0 \

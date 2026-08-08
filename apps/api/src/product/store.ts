@@ -15,7 +15,10 @@ import {
 } from "./records.js";
 import { parseScenarioJson, parseScenarios, scenarioStepType, type ParsedScenario } from "./historical-scenarios.js";
 import {
+  linkClerkUserIdentity as linkClerkUserIdentityWithClient,
   upsertGithubUserIdentity as upsertGithubUserIdentityWithClient,
+  type ClerkIdentityLinkResult,
+  type ClerkIdentityProfile,
   type GithubIdentityProfile,
   type InternalUserIdentity,
 } from "./internal-user.js";
@@ -1762,54 +1765,188 @@ export interface ViewerTenant {
   clerk_organization_id?: string;
 }
 
-export interface ClerkOrgMembership {
+interface ClerkOrgMembership {
   organizationId: string;
   name: string;
   role: TenantRole;
 }
 
-/** Reconcile Clerk's authoritative organization memberships into Jina tenants. */
-export async function syncClerkTenantMemberships(input: {
+export interface ClerkMembershipBootstrap {
+  pending: boolean;
+  memberships: ClerkOrgMembership[];
+}
+
+export interface ClerkMembershipSyncResult {
+  linkedTenantIds: string[];
+  ignoredOrganizations: { organizationId: string; name: string }[];
+}
+
+export interface ClerkMembershipSyncInput {
+  clerkUserId: string;
   githubUserId: number;
   githubLogin: string;
   userId: string;
   memberships: ClerkOrgMembership[];
-}): Promise<void> {
+}
+
+/**
+ * Return the legacy team memberships that must be copied on this principal's
+ * first verified Clerk login. The durable marker makes this a one-time
+ * migration instead of a permanent fallback to tenant_members.
+ */
+export async function clerkMembershipBootstrap(
+  clerkUserId: string,
+  userId: string,
+): Promise<ClerkMembershipBootstrap> {
+  if (!databaseConfigured()) return { pending: false, memberships: [] };
+  return withTransaction((client) => clerkMembershipBootstrapWithClient(client, clerkUserId, userId));
+}
+
+export async function clerkMembershipBootstrapWithClient(
+  client: Pick<pg.PoolClient, "query">,
+  clerkUserId: string,
+  userId: string,
+): Promise<ClerkMembershipBootstrap> {
+  const marker = await client.query<{ user_id: string; clerk_user_id: string }>(
+    `select user_id, clerk_user_id
+       from clerk_membership_bootstraps
+      where user_id = $1::uuid or clerk_user_id = $2`,
+    [userId, clerkUserId],
+  );
+  if (marker.rows.some((row) => row.user_id !== userId || row.clerk_user_id !== clerkUserId)) {
+    throw new Error("Clerk membership bootstrap identity conflict");
+  }
+  if (marker.rows.length > 0) return { pending: false, memberships: [] };
+  const memberships = await client.query<{
+    organization_id: string;
+    name: string;
+    role: string;
+  }>(
+    `select t.clerk_organization_id as organization_id,
+            coalesce(nullif(btrim(t.name), ''), t.id::text) as name,
+            case when bool_or(m.role = 'admin') then 'admin' else 'member' end as role
+       from tenant_members m
+       join tenants t on t.id = m.tenant_id
+      where m.user_id = $1::uuid
+        and t.merged_into_tenant_id is null
+        and coalesce(
+              t.kind,
+              case when lower(coalesce(t.github_account_type, '')) = 'user' then 'personal' else 'team' end
+            ) = 'team'
+        and t.clerk_organization_id is not null
+      group by t.id, t.clerk_organization_id, t.name
+      order by lower(coalesce(nullif(btrim(t.name), ''), t.id::text)), t.id`,
+    [userId],
+  );
+  return {
+    pending: true,
+    memberships: memberships.rows.map((membership) => ({
+      organizationId: membership.organization_id,
+      name: membership.name,
+      role: membership.role === "admin" ? "admin" : "member",
+    })),
+  };
+}
+
+/** Seal a successful provider-side bootstrap without altering legacy rows. */
+export async function completeClerkMembershipBootstrap(
+  clerkUserId: string,
+  userId: string,
+): Promise<void> {
   if (!databaseConfigured()) return;
-  await withTransaction(async (client) => {
+  await withTransaction((client) => completeClerkMembershipBootstrapWithClient(client, clerkUserId, userId));
+}
+
+export async function completeClerkMembershipBootstrapWithClient(
+  client: Pick<pg.PoolClient, "query">,
+  clerkUserId: string,
+  userId: string,
+): Promise<void> {
+  await client.query("select pg_advisory_xact_lock(hashtextextended('clerk-bootstrap:' || $1::text, 0))", [userId]);
+  const conflicting = await client.query<{ user_id: string; clerk_user_id: string }>(
+    `select user_id, clerk_user_id
+       from clerk_membership_bootstraps
+      where user_id = $1::uuid or clerk_user_id = $2
+      for update`,
+    [userId, clerkUserId],
+  );
+  if (conflicting.rows.some((row) => row.user_id !== userId || row.clerk_user_id !== clerkUserId)) {
+    throw new Error("Clerk membership bootstrap identity conflict");
+  }
+  const inserted = await client.query(
+    `insert into clerk_membership_bootstraps (user_id, clerk_user_id, completed_at)
+     values ($1::uuid, $2, now())
+     on conflict (user_id) do update set
+       completed_at = clerk_membership_bootstraps.completed_at
+     where clerk_membership_bootstraps.clerk_user_id = excluded.clerk_user_id`,
+    [userId, clerkUserId],
+  );
+  if (inserted.rowCount !== 1) throw new Error("Clerk membership bootstrap identity conflict");
+}
+
+/**
+ * Reconcile Clerk memberships only for explicitly linked Jina tenants.
+ *
+ * Unlinked Clerk organizations are deliberately ignored. Auto-creating a Jina
+ * tenant here would duplicate live workspaces during directory migration and
+ * would give arbitrary pre-existing Clerk organizations a new data boundary.
+ */
+export async function syncClerkTenantMemberships(
+  input: ClerkMembershipSyncInput,
+): Promise<ClerkMembershipSyncResult> {
+  if (!databaseConfigured()) return { linkedTenantIds: [], ignoredOrganizations: [] };
+  return withTransaction((client) => syncClerkTenantMembershipsWithClient(client, input));
+}
+
+export async function syncClerkTenantMembershipsWithClient(
+  client: Pick<pg.PoolClient, "query">,
+  input: ClerkMembershipSyncInput,
+): Promise<ClerkMembershipSyncResult> {
+    const organizationIds = input.memberships.map((membership) => membership.organizationId);
+    const linked = organizationIds.length > 0
+      ? await client.query<{ id: string; clerk_organization_id: string }>(
+          `select id, clerk_organization_id
+             from tenants
+            where clerk_organization_id = any($1::text[])
+              and merged_into_tenant_id is null`,
+          [organizationIds],
+        )
+      : { rows: [] as { id: string; clerk_organization_id: string }[] };
+    const tenantByOrganizationId = new Map(
+      linked.rows.map((tenant) => [tenant.clerk_organization_id, tenant.id]),
+    );
     const keepTenantIds: string[] = [];
+    const ignoredOrganizations: { organizationId: string; name: string }[] = [];
     for (const membership of input.memberships) {
-      const tenant = await client.query<{ id: string }>(
-        `insert into tenants (kind, name, clerk_organization_id)
-         values ('team', $1, $2)
-         on conflict (clerk_organization_id) where clerk_organization_id is not null
-         do update set name = excluded.name, kind = 'team'
-         returning id`,
-        [membership.name, membership.organizationId],
-      );
-      const tenantId = tenant.rows[0].id;
+      const tenantId = tenantByOrganizationId.get(membership.organizationId);
+      if (!tenantId) {
+        ignoredOrganizations.push({
+          organizationId: membership.organizationId,
+          name: membership.name,
+        });
+        continue;
+      }
       keepTenantIds.push(tenantId);
       await client.query(
-        `insert into tenant_members
-           (tenant_id, github_user_id, github_login, user_id, role, source, synced_at)
-         values ($1, $2, $3, $4, $5, 'clerk', now())
-         on conflict (tenant_id, github_user_id) do update set
-           github_login = excluded.github_login,
+        `insert into clerk_tenant_memberships
+           (tenant_id, user_id, clerk_user_id, github_user_id, github_login, role, synced_at)
+         values ($1, $2::uuid, $3, $4, $5, $6, now())
+         on conflict (tenant_id, clerk_user_id) do update set
            user_id = excluded.user_id,
+           github_user_id = excluded.github_user_id,
+           github_login = excluded.github_login,
            role = excluded.role,
-           source = 'clerk',
            synced_at = now()`,
-        [tenantId, input.githubUserId, input.githubLogin, input.userId, membership.role],
+        [tenantId, input.userId, input.clerkUserId, input.githubUserId, input.githubLogin, membership.role],
       );
     }
     await client.query(
-      `delete from tenant_members
-        where user_id = $1::uuid
-          and source = 'clerk'
+      `delete from clerk_tenant_memberships
+        where clerk_user_id = $1
           and not (tenant_id = any($2::uuid[]))`,
-      [input.userId, keepTenantIds],
+      [input.clerkUserId, keepTenantIds],
     );
-  });
+    return { linkedTenantIds: keepTenantIds, ignoredOrganizations };
 }
 
 export interface TenantGithubConnection {
@@ -2054,8 +2191,14 @@ export async function updateJinaOrganizationName(
     : undefined;
 }
 
+export type MembershipAuthority = "legacy" | "hybrid" | "clerk";
+
 /** List the tenants a viewer belongs to, personal tenant(s) first then orgs, each alphabetical. */
-export async function listViewerTenants(githubUserId: number, userId?: string): Promise<ViewerTenant[]> {
+export async function listViewerTenants(
+  githubUserId: number,
+  userId?: string,
+  authority: MembershipAuthority = "legacy",
+): Promise<ViewerTenant[]> {
   if (!databaseConfigured()) {
     return [];
   }
@@ -2066,7 +2209,33 @@ export async function listViewerTenants(githubUserId: number, userId?: string): 
     role: string;
     clerk_organization_id: string | null;
   }>(
-    `select
+    `with viewer_memberships as (
+       select m.tenant_id, m.role
+         from tenant_members m
+        where $3::text in ('legacy', 'hybrid')
+          and (
+            ($2::uuid is not null and m.user_id = $2::uuid)
+            or (($2::uuid is null or m.user_id is null) and m.github_user_id = $1)
+          )
+       union all
+       select m.tenant_id, m.role
+         from clerk_tenant_memberships m
+        where $3::text in ('clerk', 'hybrid')
+          and $2::uuid is not null
+          and m.user_id = $2::uuid
+       union all
+       select t.id, 'admin'::text
+         from tenants t
+        where coalesce(
+                t.kind,
+                case when lower(coalesce(t.github_account_type, '')) = 'user' then 'personal' else 'team' end
+              ) = 'personal'
+          and (
+            ($2::uuid is not null and t.personal_owner_user_id = $2::uuid)
+            or ($2::uuid is null and t.github_account_id = $1)
+          )
+     )
+     select
        m.tenant_id,
        coalesce(nullif(btrim(t.name), ''), nullif(btrim(t.github_account_login), ''), t.id::text) as login,
        case
@@ -2074,16 +2243,14 @@ export async function listViewerTenants(githubUserId: number, userId?: string): 
            then 'User'
          else 'Organization'
        end as type,
-       m.role,
+       case when bool_or(m.role = 'admin') then 'admin' else 'member' end as role,
        t.clerk_organization_id
-       from tenant_members m
+       from viewer_memberships m
        join tenants t on t.id = m.tenant_id
       where t.merged_into_tenant_id is null
-        and (
-          ($2::uuid is not null and m.user_id = $2::uuid)
-          or (($2::uuid is null or m.user_id is null) and m.github_user_id = $1)
-        )`,
-    [githubUserId, userId ?? null],
+      group by m.tenant_id, t.id, t.name, t.github_account_login, t.github_account_type,
+               t.kind, t.clerk_organization_id`,
+    [githubUserId, userId ?? null, authority],
   );
   return sortViewerTenants(
     rows.map((row) => ({
@@ -2134,21 +2301,35 @@ export async function getTenantMembershipRole(
   githubUserId: number,
   tenantId: string,
   userId?: string,
+  authority: MembershipAuthority = "legacy",
 ): Promise<TenantRole | undefined> {
   if (!databaseConfigured()) {
     return undefined;
   }
   const row = await queryOne<{ role: string }>(
-    `select member.role
-       from tenant_members member
-       join tenants tenant on tenant.id = member.tenant_id
-      where member.tenant_id = $2
-        and tenant.merged_into_tenant_id is null
-        and (
-          ($3::uuid is not null and member.user_id = $3::uuid)
-          or (($3::uuid is null or member.user_id is null) and member.github_user_id = $1)
-        )`,
-    [githubUserId, tenantId, userId ?? null],
+    `with viewer_memberships as (
+       select member.role
+         from tenant_members member
+        where $4::text in ('legacy', 'hybrid')
+          and member.tenant_id = $2
+          and (
+            ($3::uuid is not null and member.user_id = $3::uuid)
+            or (($3::uuid is null or member.user_id is null) and member.github_user_id = $1)
+          )
+       union all
+       select member.role
+         from clerk_tenant_memberships member
+        where $4::text in ('clerk', 'hybrid')
+          and member.tenant_id = $2
+          and $3::uuid is not null
+          and member.user_id = $3::uuid
+     )
+     select case when bool_or(viewer_memberships.role = 'admin') then 'admin' else 'member' end as role
+       from viewer_memberships
+       join tenants tenant on tenant.id = $2
+      where tenant.merged_into_tenant_id is null
+      having count(*) > 0`,
+    [githubUserId, tenantId, userId ?? null, authority],
   );
   if (row) {
     return row.role === "admin" ? "admin" : "member";
@@ -4629,6 +4810,61 @@ export async function upsertGithubUserIdentity(
     return undefined;
   }
   return withTransaction((client) => upsertGithubUserIdentityWithClient(client, profile));
+}
+
+export async function linkClerkUserIdentity(
+  profile: ClerkIdentityProfile,
+): Promise<ClerkIdentityLinkResult | undefined> {
+  if (!databaseConfigured()) {
+    return undefined;
+  }
+  return withTransaction((client) => linkClerkUserIdentityWithClient(client, profile));
+}
+
+export interface ResolvedClerkUserIdentity {
+  userId: string;
+  githubUserId: number;
+  githubLogin: string;
+}
+
+/** Resolve a prelinked Clerk principal without relying on mutable email/name fields. */
+export async function resolveClerkUserIdentity(
+  clerkUserId: string,
+  externalUserId?: string | null,
+): Promise<ResolvedClerkUserIdentity | undefined> {
+  if (!databaseConfigured()) return undefined;
+  const externalId = externalUserId
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(externalUserId)
+    ? externalUserId
+    : null;
+  const rows = await query<{
+    user_id: string;
+    github_user_id: number;
+    github_login: string;
+  }>(
+    `select jina_user.id as user_id,
+            github.provider_user_id::bigint as github_user_id,
+            github.provider_login as github_login
+       from users jina_user
+       join user_identities github
+         on github.user_id = jina_user.id and github.provider = 'github'
+       left join user_identities clerk
+         on clerk.user_id = jina_user.id and clerk.provider = 'clerk'
+      where clerk.provider_user_id = $1
+         or ($2::uuid is not null and jina_user.id = $2::uuid)`,
+    [clerkUserId, externalId],
+  );
+  const uniqueUsers = new Set(rows.map((row) => row.user_id));
+  if (uniqueUsers.size > 1) {
+    throw new Error("Clerk principal and external id resolve to different Jina users");
+  }
+  const row = rows[0];
+  if (!row?.github_login) return undefined;
+  return {
+    userId: row.user_id,
+    githubUserId: Number(row.github_user_id),
+    githubLogin: row.github_login,
+  };
 }
 
 export async function saveSession(session: DashboardSession): Promise<void> {

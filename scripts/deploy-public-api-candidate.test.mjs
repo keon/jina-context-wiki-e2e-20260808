@@ -88,7 +88,7 @@ function rawManifest() {
       JINA_TENANCY_MODE: "shared-db",
       JINA_REQUIRE_WORKER_RELEASE_GATE: "true",
       JINA_DB_MANAGE_SCHEMA: "false",
-      JINA_DB_POOL_MAX: "3",
+      JINA_DB_POOL_MAX: "12",
       INSTANCE_UNIX_SOCKET: "/cloudsql/jina-463721:us-east1:jina-db",
       DB_NAME: "jina",
       DB_USER: "jina_v2_app",
@@ -96,7 +96,7 @@ function rawManifest() {
       GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION: "7",
       JINA_SCHEDULER_OIDC_AUDIENCE: "https://api.usejina.com",
       JINA_SCHEDULER_OIDC_EMAIL: "jina-api-runtime@jina-463721.iam.gserviceaccount.com",
-      JINA_REVIEW_BOARD_PIPELINE_MODE: "paused",
+      JINA_REVIEW_BOARD_PIPELINE_MODE: "v2",
       JINA_BILLING_ENFORCE: "on",
       JINA_GRAPH_API_URL: "https://jina-api-m56inn6iva-ue.a.run.app"
     },
@@ -492,6 +492,32 @@ test("manifest requires the fixed public target, a digest, and numeric secret ve
     mutate(copy);
     assert.throws(() => validatePublicApiCandidateManifest(copy));
   }
+});
+
+test("Clerk production auth requires pinned Clerk key bindings while retaining GitHub rollback bindings", () => {
+  const raw = rawManifest();
+  raw.environment.DASHBOARD_AUTH_MODE = "clerk";
+  raw.secrets.CLERK_PUBLISHABLE_KEY = {
+    project: "jina-463721",
+    name: "jina-clerk-publishable-key",
+    version: "1"
+  };
+  raw.secrets.CLERK_SECRET_KEY = {
+    project: "jina-463721",
+    name: "jina-clerk-secret-key",
+    version: "1"
+  };
+  raw.allowed_environment_changes = ["DASHBOARD_AUTH_MODE", "CLERK_PUBLISHABLE_KEY", "CLERK_SECRET_KEY"];
+
+  const manifest = validatePublicApiCandidateManifest(raw);
+  const args = buildPublicApiDeployArgs(manifest);
+  const setSecrets = args.find((arg) => arg.startsWith("--set-secrets="));
+  assert.match(setSecrets, /CLERK_PUBLISHABLE_KEY=jina-clerk-publishable-key:1/);
+  assert.match(setSecrets, /CLERK_SECRET_KEY=jina-clerk-secret-key:1/);
+  assert.match(setSecrets, /GITHUB_OAUTH_CLIENT_SECRET=/);
+
+  delete raw.secrets.CLERK_SECRET_KEY;
+  assert.throws(() => validatePublicApiCandidateManifest(raw), /CLERK_SECRET_KEY is required in Clerk auth mode/);
 });
 
 test("candidate validation proves the immutable inputs and production edge before deploy", async () => {

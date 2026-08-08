@@ -2648,8 +2648,7 @@
   text-align: left;
 }
 
-.knowledge-prose__invalid-link,
-.knowledge-diagram--error {
+.knowledge-prose__invalid-link {
   color: var(--bad-fg);
 }
 
@@ -2671,6 +2670,18 @@
   display: grid;
   place-items: center;
   color: var(--ink-subtle);
+}
+
+.knowledge-diagram--error {
+  color: var(--ink-subtle);
+}
+
+.knowledge-diagram--error figcaption {
+  font-weight: 600;
+}
+
+.knowledge-diagram--error details {
+  margin-top: var(--space-2);
 }
 
 .knowledge-evidence {

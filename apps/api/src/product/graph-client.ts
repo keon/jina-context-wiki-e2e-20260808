@@ -617,6 +617,29 @@ export class GraphApiClient {
     });
   }
 
+  async buildDashboardCausalGraph(
+    context: RequestContext,
+    input: DashboardGraphBuildInput,
+  ): Promise<{
+    task: { id: string; status: string; metadata: Record<string, unknown> };
+  }> {
+    const repository = context.repositories.find(
+      (candidate) =>
+        candidate.name.toLowerCase() === input.repository.toLowerCase(),
+    );
+    if (!repository) throw new ApiError(403, "repository access denied");
+    return this.startBuild(
+      context,
+      {
+        repository: repository.name,
+        ref: input.ref?.trim() || repository.defaultBranch,
+        ...(input.commitSha?.trim() ? { commitSha: input.commitSha.trim() } : {}),
+        requestKey: input.requestKey,
+      },
+      "/causal-graph/build",
+    );
+  }
+
   /**
    * Starts a context build. The engine derives knowledge from immutable evidence
    * and accepts no caller-supplied metadata, so build requests carry only the
@@ -630,6 +653,7 @@ export class GraphApiClient {
       commitSha?: string;
       requestKey: string;
     },
+    path = "/wiki/build",
   ): Promise<{
     task: { id: string; status: string; metadata: Record<string, unknown> };
   }> {
@@ -643,7 +667,7 @@ export class GraphApiClient {
         refSequence?: number;
         commitSha?: string;
       };
-    }>("/wiki/build", context, {
+    }>(path, context, {
       method: "POST",
       body: {
         repository: input.repository,

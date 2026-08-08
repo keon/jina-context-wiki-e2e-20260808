@@ -596,7 +596,13 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     if (!session) {
       return c.json({ tenants: [] });
     }
-    return c.json({ tenants: await listViewerTenants(session.user.id, session.userId) });
+    return c.json({
+      tenants: await listViewerTenants(
+        session.user.id,
+        session.userId,
+        session.membershipAuthority ?? "legacy",
+      ),
+    });
   });
 
   app.post(
@@ -604,7 +610,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
-      if (config.auth.mode === "clerk") {
+      if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
         throw new ApiError(409, "Organizations are managed through Clerk");
       }
       const session = await requireDashboardSession(c, config);
@@ -627,7 +633,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     requireDashboardOrigin,
     requireJsonContentType,
     async (c) => {
-      if (config.auth.mode === "clerk") {
+      if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
         throw new ApiError(409, "Organizations are managed through Clerk");
       }
       const session = await requireDashboardSession(c, config);
@@ -852,6 +858,37 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
             source: "jina-dashboard",
             indexMode: fullHistory ? "full-history" : "snapshot-first",
             historyLimit,
+            senderGithubUserId: session!.user.id,
+            senderLogin: session!.user.login,
+          },
+        }),
+        202,
+      );
+    },
+  );
+
+  app.post(
+    "/dashboard/tenants/:tenantId/causal-graph/build",
+    requireDashboardOrigin,
+    requireJsonContentType,
+    async (c) => {
+      const session = await requireDashboardSession(c, config);
+      const tenantId = tenantIdParam(c);
+      await requireTenantMembership(session, tenantId, { requireAdmin: true });
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      const repository = typeof body.repository === "string" ? body.repository.trim() : "";
+      const ref = typeof body.ref === "string" ? body.ref.trim() : "";
+      const commitSha = typeof body.commitSha === "string" ? body.commitSha.trim() : "";
+      if (!repository) throw new ApiError(400, "repository is required");
+      const context = await tenantGraphContext(tenantId, repository);
+      return c.json(
+        await graphs.buildDashboardCausalGraph(context, {
+          repository,
+          ...(ref ? { ref } : {}),
+          ...(commitSha ? { commitSha } : {}),
+          requestKey: `dashboard-causal:${tenantId}:${randomUUID()}`,
+          metadata: {
+            source: "jina-dashboard",
             senderGithubUserId: session!.user.id,
             senderLogin: session!.user.login,
           },
@@ -1890,12 +1927,21 @@ async function requireTenantMembership(
   if (!session) {
     throw new ApiError(401, "dashboard authentication required");
   }
-  const role = await getTenantMembershipRole(session.user.id, tenantId, session.userId);
+  const role = await getTenantMembershipRole(
+    session.user.id,
+    tenantId,
+    session.userId,
+    session.membershipAuthority ?? "legacy",
+  );
   const denial = tenantAccessDenial(role, opts.requireAdmin);
   if (denial) {
     throw new ApiError(denial.status, denial.message);
   }
-  if (opts.requireAdmin && role === "admin") {
+  // Clerk organization roles are the authority after the hard migration. A
+  // migrated Clerk admin must not be forced back through the retired GitHub
+  // OAuth membership check merely because a preserved legacy tenant_members
+  // observation has aged past its five-minute verification window.
+  if (opts.requireAdmin && role === "admin" && githubAdminRevalidationRequired(session.membershipAuthority)) {
     const refresh = await getGithubTenantAdminRefreshRequirement(
       session.user.id,
       tenantId,
@@ -1917,6 +1963,12 @@ async function requireTenantMembership(
     }
   }
   return role!;
+}
+
+export function githubAdminRevalidationRequired(
+  authority: DashboardSession["membershipAuthority"],
+): boolean {
+  return authority !== "clerk";
 }
 
 function containsControlCharacters(value: string): boolean {

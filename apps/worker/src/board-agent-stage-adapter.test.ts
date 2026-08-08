@@ -382,7 +382,8 @@ test("Daytona worker configuration requires one immutable selector and a Secret 
 
 test("execution profiles are fetched without retaining decrypted credentials and strictly bounded", async () => {
   const environment = {
-    JINA_API_URL: "https://api.usejina.test",
+    JINA_API_URL: "https://context.usejina.test",
+    JINA_PRODUCT_API_URL: "https://api.usejina.test",
     JINA_PRODUCT_INTERNAL_API_TOKEN: "internal-test-token"
   };
   const attempt = {
@@ -392,8 +393,10 @@ test("execution profiles are fetched without retaining decrypted credentials and
     buildId: "build-1"
   };
   let calls = 0;
-  const profileFetch = async () => {
+  const requestedUrls: string[] = [];
+  const profileFetch = async (input: string) => {
     calls += 1;
+    requestedUrls.push(input);
     return profileResponse({
       provider: "byok",
       model: "openai/gpt-5.6-terra",
@@ -411,6 +414,10 @@ test("execution profiles are fetched without retaining decrypted credentials and
   const first = await resolveContextExecutionProfile(environment, attempt, profileFetch);
   const second = await resolveContextExecutionProfile(environment, attempt, profileFetch);
   assert.equal(calls, 2);
+  assert.deepEqual(requestedUrls, [
+    "https://api.usejina.test/internal/context/execution-profile",
+    "https://api.usejina.test/internal/context/execution-profile"
+  ]);
   assert.equal(first?.credential.kind === "openai" ? first.credential.value : undefined, "sk-profile-1-credential");
   assert.equal(second?.credential.kind === "openai" ? second.credential.value : undefined, "sk-profile-2-credential");
 
@@ -484,6 +491,34 @@ test("execution profiles are fetched without retaining decrypted credentials and
   );
 });
 
+test("execution-profile requests retain the unified-API fallback", async () => {
+  let requestedUrl = "";
+  await resolveContextExecutionProfile(
+    {
+      JINA_API_URL: "https://unified.usejina.test",
+      JINA_PRODUCT_INTERNAL_API_TOKEN: "internal-test-token"
+    },
+    {
+      commitSha: "a".repeat(40),
+      attempt: 1,
+      tenantId: "tenant-1",
+      buildId: "build-1"
+    },
+    async (input) => {
+      requestedUrl = input;
+      return profileResponse({
+        provider: "managed",
+        model: "openai/gpt-5.6-terra",
+        effort: "medium",
+        fallback_policy: "managed",
+        credential: { kind: "managed" },
+        settings_revision: "settings-1"
+      });
+    }
+  );
+  assert.equal(requestedUrl, "https://unified.usejina.test/internal/context/execution-profile");
+});
+
 test("worker-scoped API credentials create a fresh Daytona runner for every stage", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-worker-scoped-credential-"));
   const credentialValue = "sk-worker-scoped-test-credential";
@@ -550,7 +585,10 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
     return {
       mode: "daytona",
       async run() {
-        if (execution?.credential.kind === "api-key") {
+        if (
+          execution?.credential.kind === "api-key" &&
+          execution.credential.environmentVariable === "OPENROUTER_API_KEY"
+        ) {
           throw new Error("OpenRouter provider service unavailable");
         }
         return envelope(Buffer.from('{"text":"completed"}'), []);
@@ -658,6 +696,35 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
     const managed = executions.find((execution) => execution?.credential.kind === "secret");
     assert.equal(managed?.model, "gpt-5.6-luna");
     assert.equal(managed?.effort, "medium");
+
+    executions.length = 0;
+    const managedApiKey = "sk-managed-production-key";
+    const managedKeyRunner = configuredPortableContextBoardAgentStageRunner({
+      environment: { ...environment, JINA_MANAGED_MODEL_API_KEY: managedApiKey },
+      attemptContext,
+      runnerFactory,
+      profileFetch: async () =>
+        profileResponse({
+          provider: "managed",
+          model: "openai/gpt-5.6-luna",
+          effort: "medium",
+          fallback_policy: "fail_notify",
+          credential: { kind: "managed" },
+          settings_revision: "settings-managed-key"
+        })
+    });
+    await managedKeyRunner.run({
+      id: "managed-key-stage",
+      prompt: "Complete the stage.",
+      workingDirectory: root,
+      readOnly: true,
+      budgetSeconds: 30
+    });
+    const managedKey = executions.find(
+      (execution) => execution?.credential.kind === "api-key" && execution.credential.value === managedApiKey
+    );
+    assert.equal(managedKey?.model, "gpt-5.6-luna");
+    assert.equal(managedKey?.effort, "medium");
 
     executions.length = 0;
     const codexRunner = configuredPortableContextBoardAgentStageRunner({

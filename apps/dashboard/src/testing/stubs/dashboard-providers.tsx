@@ -26,6 +26,7 @@ interface DashboardState {
   loading: boolean;
   authLoading: boolean;
   authRequired: boolean;
+  sessionError: string | null;
   filters: DashboardFilters;
 }
 
@@ -36,6 +37,7 @@ const INITIAL_DASHBOARD: DashboardState = {
   loading: true,
   authLoading: false,
   authRequired: false,
+  sessionError: null,
   filters: { project: "", team: "" }
 };
 
@@ -45,6 +47,7 @@ interface TenantState {
   selected: SelectedTenant | null;
   ready: boolean;
   legacyReviewMode: boolean;
+  accessError: string | null;
   fenceVersion: number;
 }
 
@@ -54,12 +57,15 @@ const INITIAL_TENANT: TenantState = {
   selected: null,
   ready: true,
   legacyReviewMode: true,
+  accessError: null,
   fenceVersion: 0
 };
 
 let dashboardState: DashboardState = { ...INITIAL_DASHBOARD };
 let tenantState: TenantState = { ...INITIAL_TENANT };
 let harnessState: CodexHarnessInfo = { configured: false };
+let reloadViewerCalls = 0;
+let retryDiscoveryCalls = 0;
 
 /** Sets what `useDashboard()` reports for the next render. */
 export function setDashboardState(patch: Partial<DashboardState>): void {
@@ -80,6 +86,16 @@ export function resetProviderStubs(): void {
   dashboardState = { ...INITIAL_DASHBOARD };
   tenantState = { ...INITIAL_TENANT };
   harnessState = { configured: false };
+  reloadViewerCalls = 0;
+  retryDiscoveryCalls = 0;
+}
+
+export function reloadViewerCallCount(): number {
+  return reloadViewerCalls;
+}
+
+export function retryDiscoveryCallCount(): number {
+  return retryDiscoveryCalls;
 }
 
 /* The surface the real module exports, in the shapes its consumers destructure. */
@@ -101,7 +117,9 @@ export function useDashboard() {
     ...dashboardState,
     setFilters: (filters: DashboardFilters) => setDashboardState({ filters }),
     reload: () => undefined,
-    reloadViewer: () => undefined,
+    reloadViewer: () => {
+      reloadViewerCalls += 1;
+    },
     setTenantScope: () => undefined
   };
 }
@@ -111,7 +129,10 @@ export function useTenant() {
     ...tenantState,
     selectTenant: () => undefined,
     addTenant: () => undefined,
-    updateTenant: () => undefined
+    updateTenant: () => undefined,
+    retryDiscovery: () => {
+      retryDiscoveryCalls += 1;
+    }
   };
 }
 

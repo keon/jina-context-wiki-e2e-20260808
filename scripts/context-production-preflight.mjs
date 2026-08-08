@@ -109,7 +109,9 @@ if (command === "daytona") {
 } else if (command === "board-drain") {
   await withDatabase((pool) => drainBoardLeases(pool));
 } else if (command === "board-await-drain") {
-  await withDatabase((pool) => awaitBoardLeases(pool));
+  await withDatabase((pool) => awaitBoardLeases(pool, { pauseGenerationAfterDrain: true }));
+} else if (command === "board-await-quiescence") {
+  await withDatabase((pool) => awaitBoardLeases(pool, { pauseGenerationAfterDrain: false }));
 } else if (command === "board-verify") {
   await withDatabase((pool) => verifyBoardLeases(pool));
 } else if (
@@ -128,7 +130,8 @@ if (command === "daytona") {
 } else {
   throw new Error(
     "Expected daytona, release-acquire, release-renew, worker-drain, worker-resume, worker-pause, worker-enable, " +
-      "runtime-write-enable, release-release, board-drain, board-await-drain, board-verify, schema-preflight, " +
+      "runtime-write-enable, release-release, board-drain, board-await-drain, board-await-quiescence, " +
+      "board-verify, schema-preflight, " +
       "schema-inspect, or schema-reset"
   );
 }
@@ -615,7 +618,7 @@ async function drainBoardLeases(pool) {
   }
 }
 
-async function awaitBoardLeases(pool) {
+async function awaitBoardLeases(pool, { pauseGenerationAfterDrain }) {
   const timeoutSeconds = Number(process.env.JINA_WORKER_DRAIN_TIMEOUT_SECONDS ?? "1800");
   if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 60 || timeoutSeconds > 14_400) {
     throw new Error("JINA_WORKER_DRAIN_TIMEOUT_SECONDS must be an integer between 60 and 14400");
@@ -635,7 +638,7 @@ async function awaitBoardLeases(pool) {
       await requireBoardStateTable(client);
       const result = await client.query("select snapshot from jina_runtime.api_state where id=1 for update");
       leases = result.rows[0]?.snapshot === undefined ? [] : activeBoardLeaseInventory(result.rows[0].snapshot);
-      if (leases.length === 0) {
+      if (leases.length === 0 && pauseGenerationAfterDrain) {
         await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.release_control'))");
         const current = await client.query(
           `select lease_release_id,lease_credential_sha256,lease_expires_at,worker_claims_enabled
@@ -656,9 +659,11 @@ async function awaitBoardLeases(pool) {
     if (leases.length === 0) {
       console.log(
         JSON.stringify({
-          event: "release_control.board_drained_and_worker_paused",
+          event: pauseGenerationAfterDrain
+            ? "release_control.board_drained_and_worker_paused"
+            : "release_control.board_quiescent_with_generation_preserved",
           boardLeases: 0,
-          workerClaimsEnabled: false,
+          workerGenerationPreserved: !pauseGenerationAfterDrain,
           verified: true
         })
       );

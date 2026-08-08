@@ -205,11 +205,14 @@ function configuredManagedProfileRunner(
         ? configuredModel
         : `openai/${configuredModel}`
       : configuredModel.replace(/^openai\//, "");
+  const managedApiKey = environment.JINA_MANAGED_MODEL_API_KEY?.trim();
   return runnerFactory(environment, protectedValues, {
-    credential: {
-      kind: "secret",
-      secret: { environmentVariable, secretName: requiredDaytonaModelSecretName(environment) }
-    },
+    credential: managedApiKey
+      ? { kind: "api-key", environmentVariable, value: managedApiKey }
+      : {
+          kind: "secret",
+          secret: { environmentVariable, secretName: requiredDaytonaModelSecretName(environment) }
+        },
     model: managedModel,
     effort,
     domains: commaSeparated(
@@ -236,18 +239,22 @@ export async function resolveContextExecutionProfile(
   attempt: BoardAgentAttemptContext,
   profileFetch: ContextProfileFetch = fetch
 ): Promise<ContextExecutionProfile | undefined> {
-  const apiUrl = environment.JINA_API_URL?.trim()?.replace(/\/+$/, "");
+  const apiUrl = (environment.JINA_PRODUCT_API_URL ?? environment.JINA_API_URL)?.trim()?.replace(/\/+$/, "");
   const token = environment.JINA_PRODUCT_INTERNAL_API_TOKEN?.trim();
   if (!token) return undefined;
-  if (!apiUrl) throw new Error("JINA_API_URL is required when JINA_PRODUCT_INTERNAL_API_TOKEN is configured");
+  if (!apiUrl) {
+    throw new Error(
+      "JINA_PRODUCT_API_URL or JINA_API_URL is required when JINA_PRODUCT_INTERNAL_API_TOKEN is configured"
+    );
+  }
   if (!attempt.tenantId || !attempt.buildId) throw new Error("Context execution profile requires tenantId and buildId");
   let endpoint: URL;
   try {
     endpoint = new URL(`${apiUrl}/internal/context/execution-profile`);
   } catch {
-    throw new Error("JINA_API_URL must be an absolute URL");
+    throw new Error("the product API URL must be absolute");
   }
-  if (endpoint.protocol !== "https:") throw new Error("JINA_API_URL must use HTTPS");
+  if (endpoint.protocol !== "https:") throw new Error("the product API URL must use HTTPS");
   const timeout = AbortSignal.timeout(15_000);
   const response = await profileFetch(endpoint.href, {
     method: "POST",

@@ -21,6 +21,7 @@
         "src/product/migrate-all.ts",
         "src/product/database-cutover.ts",
         "src/product/backfill-internal-users.ts",
+        "src/product/reconcile-clerk-identities.ts",
         "src/product/rollback-tenant-installation.ts",
         "src/product/sync-github-webhook.ts",
         "src/**/*.test.ts"

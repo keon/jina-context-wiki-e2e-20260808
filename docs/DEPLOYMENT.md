@@ -26,6 +26,13 @@ staging deploy installs the Board-recorded 15-minute billing retry schedule and 
 OpenTelemetry sidecars, including the causal worker's release-gated sidecar. Production continues to use the
 coordinated `cloudbuild.yaml` path below.
 
+Staging dashboard auth defaults to Clerk. A reversible identity-migration rehearsal may
+set Cloud Build substitutions `_JINA_DASHBOARD_AUTH_MODE=hybrid` and the non-secret
+`_JINA_GITHUB_OAUTH_CLIENT_ID`; the deploy then binds
+`jina-staging-github-oauth-client-secret` and fails closed if either half of the OAuth
+pair is unavailable. The detailed identity/data procedure is
+[CLERK_IDENTITY_CUTOVER.md](./CLERK_IDENTITY_CUTOVER.md).
+
 The audited staging-to-production source consolidation, provider inventory, backup,
 and rollback runbook is
 [STAGING_TO_PRODUCTION_CUTOVER.md](./STAGING_TO_PRODUCTION_CUTOVER.md).
@@ -434,6 +441,9 @@ CONTEXT_DAYTONA_SNAPSHOT=<immutable Daytona snapshot containing Codex>
 CONTEXT_DAYTONA_MODEL_SECRET=<Daytona organization Secret name>
 CONTEXT_DAYTONA_MODEL_SECRET_ENV=OPENAI_API_KEY
 CONTEXT_DAYTONA_MODEL_DOMAINS=api.openai.com
+# Optional Secret Manager-mounted managed credential. When present, this is
+# injected into the private ephemeral sandbox instead of the Daytona Secret.
+JINA_MANAGED_MODEL_API_KEY=<managed provider credential>
 CONTEXT_CODEX_MODEL=gpt-5.6-terra
 CONTEXT_CODEX_EFFORT=low
 CONTEXT_CODEX_VERBOSITY=high
@@ -474,7 +484,10 @@ internal token rotates; only the Context worker
 service account receives accessor permission.
 
 `CONTEXT_DAYTONA_MODEL_SECRET` is the Jina-managed fallback's Daytona organization
-Secret name, never its credential value. Tenant BYOK or Codex credentials arrive
+Secret name, never its credential value. Production may instead mount
+`JINA_MANAGED_MODEL_API_KEY` from Secret Manager when Daytona opaque-placeholder
+substitution is unavailable; the worker treats it as a protected value and passes it
+only to the build's private, provider-domain-restricted ephemeral sandbox. Tenant BYOK or Codex credentials arrive
 through the authenticated execution-profile endpoint, are added to redaction, and
 are injected only into the build's private ephemeral sandbox. They are not mounted as
 static Cloud Run configuration or persisted by the Context service. The sandbox receives only the exact
@@ -862,8 +875,10 @@ The coordinated `cloudbuild.yaml` invocation above calls
 4. under that lease, runs the exact schema-layout preflight and creates and verifies an
    on-demand Cloud SQL backup while the serving workers remain untouched;
 5. deploys claim-disabled Context and task-worker drain revisions from the exact pinned
-   worker image, closes only new-claim admission for the serving generation, and waits
-   up to 30 minutes for its existing lease holders to renew and complete normally;
+   worker image with a revision-level minimum of zero, closes only new-claim admission
+   for the serving generation, and waits up to 30 minutes for its existing lease holders
+   to renew and complete normally; the zero minimum keeps the routing fence from running
+   background Board reconciliation while owner DDL waits for the state-store lock;
 6. in the same locked transaction that proves the durable Board contains zero active
    leases, fences the old generation, then routes each worker service to its drain, removes every
    traffic tag, synchronously deletes every prior worker revision, and proves that only
@@ -991,7 +1006,9 @@ The deployment then routes
 each worker service 100% to its exact paused drain, clears all revision tags,
 synchronously deletes every other revision, and checks the resulting inventory. Every
 drain and candidate explicitly restores automatic scaling, preventing a stale manual
-instance count from multiplying Board pollers across later releases. Deletion is
+instance count from multiplying Board pollers across later releases. Paused drains use
+a zero revision-level minimum; accepted candidates restore their configured warm
+minimum. Deletion is
 deliberate: routing an old polling revision to zero percent does not by itself prove its
 minimum instances have terminated. A final zero-lease check precedes schema mutation.
 That same locked preflight rejects non-terminal pre-page-oriented Context builds

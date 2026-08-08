@@ -453,6 +453,7 @@ const openTelemetry = startOpenTelemetry({
 const metrics = new MetricsRegistry();
 const port = Number(process.env.PORT ?? 8080);
 const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
+const productApiUrl = (process.env.JINA_PRODUCT_API_URL?.trim() || apiUrl).replace(/\/$/, "");
 const token = requiredEnv("INTERNAL_API_TOKEN");
 const productInternalToken = process.env.JINA_PRODUCT_INTERNAL_API_TOKEN?.trim() || token;
 const reviewRunTopicMode = configuredReviewRunTopicMode(
@@ -1178,33 +1179,35 @@ async function runContextPageBuild(work: ClaimedWork<"run-context-page-build">):
     })
   );
   phaseReceiptIds.push(`${pageTaskId}:audit:0`);
-  if (requiredString(auditResult.verdict, "Context page audit verdict") === "unsupported") {
+  let auditVerdict = requiredString(auditResult.verdict, "Context page audit verdict");
+  for (let pass = 1; auditVerdict === "unsupported" && pass <= MAX_CONTEXT_REPAIR_PASS; pass += 1) {
     const findingsArtifact = parseArtifactRef(auditResult.outputArtifact, "Context page audit outputArtifact");
     const repairResult = await runContextPageRepair(
       internalStageWork(work, "run-context-page-repair", {
         ...work.task.metadata,
         documentPath,
         pageTaskId,
-        pass: 1,
+        pass,
         findingsArtifact
       })
     );
     pageArtifact = parseArtifactRef(repairResult.outputArtifact, "Context page repair outputArtifact");
-    phaseReceiptIds.push(`${pageTaskId}:repair:1`);
+    phaseReceiptIds.push(`${pageTaskId}:repair:${pass}`);
     auditResult = await runContextPageAudit(
       internalStageWork(work, "run-context-page-audit", {
         ...work.task.metadata,
         pageKey,
         documentPath,
         pageTaskId,
-        pass: 1,
-        dependencyResults: [contextStageDependency(pageTaskId, "repair-context-page", pageArtifact, 1, documentPath)]
+        pass,
+        dependencyResults: [contextStageDependency(pageTaskId, "repair-context-page", pageArtifact, pass, documentPath)]
       })
     );
-    phaseReceiptIds.push(`${pageTaskId}:audit:1`);
+    phaseReceiptIds.push(`${pageTaskId}:audit:${pass}`);
+    auditVerdict = requiredString(auditResult.verdict, "Context page audit verdict");
   }
   const finalAuditArtifact = parseArtifactRef(auditResult.outputArtifact, "final audit outputArtifact");
-  if (requiredString(auditResult.verdict, "Context page final audit verdict") !== "supported") {
+  if (auditVerdict !== "supported") {
     return {
       contract: CONTEXT_WORKFLOW_CONTRACT,
       schemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
@@ -3975,7 +3978,7 @@ async function runBillingRetry(work: ClaimedWork<"billing-retry">): Promise<Reco
 async function productInternalJson<T = Record<string, unknown>>(path: string, body: unknown): Promise<T> {
   assertLeaseOwned();
   const traceparent = activeTraceparent();
-  const response = await fetch(`${apiUrl}${path}`, {
+  const response = await fetch(`${productApiUrl}${path}`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${productInternalToken}`,

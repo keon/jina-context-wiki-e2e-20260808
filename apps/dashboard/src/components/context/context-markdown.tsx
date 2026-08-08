@@ -14,6 +14,7 @@ function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
   mermaidLoader ??= import("mermaid").then(({ default: mermaid }) => {
     mermaid.initialize({
       startOnLoad: false,
+      suppressErrorRendering: true,
       securityLevel: "strict",
       theme: "dark",
       fontFamily: "ui-sans-serif, system-ui, sans-serif"
@@ -23,36 +24,47 @@ function loadMermaid(): Promise<(typeof import("mermaid"))["default"]> {
   return mermaidLoader;
 }
 
+function removeMermaidArtifacts(diagramId: string): void {
+  for (const id of [diagramId, `d${diagramId}`, `i${diagramId}`]) {
+    document.getElementById(id)?.remove();
+  }
+}
+
 function MermaidDiagram({ source }: { readonly source: string }) {
   const reactId = useId();
   const [svg, setSvg] = useState("");
-  const [error, setError] = useState("");
+  const [renderFailed, setRenderFailed] = useState(false);
 
   useEffect(() => {
     let active = true;
     const diagramId = `context-mermaid-${reactId.replace(/[^a-z0-9_-]/gi, "")}`;
     setSvg("");
-    setError("");
+    setRenderFailed(false);
     void loadMermaid()
       .then((mermaid) => mermaid.render(diagramId, source))
       .then(({ svg: rendered }) => {
         if (active) setSvg(rendered);
       })
-      .catch((cause: unknown) => {
-        if (active) setError(cause instanceof Error ? cause.message : "The diagram could not be rendered.");
+      .catch(() => {
+        removeMermaidArtifacts(diagramId);
+        if (active) setRenderFailed(true);
       });
     return () => {
       active = false;
+      removeMermaidArtifacts(diagramId);
     };
   }, [reactId, source]);
 
-  if (error) {
+  if (renderFailed) {
     return (
-      <figure className="knowledge-diagram knowledge-diagram--error">
-        <figcaption>Diagram source (rendering failed: {error})</figcaption>
-        <pre>
-          <code>{source}</code>
-        </pre>
+      <figure className="knowledge-diagram knowledge-diagram--error" aria-label="Diagram unavailable">
+        <figcaption>Diagram unavailable</figcaption>
+        <details>
+          <summary>Show diagram source</summary>
+          <pre>
+            <code>{source}</code>
+          </pre>
+        </details>
       </figure>
     );
   }

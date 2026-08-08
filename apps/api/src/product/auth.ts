@@ -7,11 +7,15 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { dashboardOriginAllowed, type AppConfig } from "./config.js";
 import { ApiError } from "./errors.js";
 import {
+  clerkMembershipBootstrap,
+  completeClerkMembershipBootstrap,
   consumeOauthState,
   deleteSession,
   getSession,
   hasInstallationForAccounts,
   knownProjects,
+  linkClerkUserIdentity,
+  resolveClerkUserIdentity,
   saveOauthState,
   saveSession,
   syncTenantMemberships,
@@ -105,6 +109,8 @@ export interface DashboardSession {
   updatedAt: string;
   clerkUserId?: string;
   clerkOrganizationId?: string;
+  /** Membership authority used for this session during the reversible Clerk cutover. */
+  membershipAuthority?: "legacy" | "hybrid" | "clerk";
 }
 
 interface OAuthTokenResponse {
@@ -201,10 +207,10 @@ export async function githubCallback(c: Context, config: AppConfig): Promise<Res
 }
 
 export async function logout(c: Context, config: AppConfig): Promise<Response> {
-  if (config.auth.mode === "clerk") {
-    const session = await currentSession(c, config);
+  if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
+    const session = await currentClerkSession(c, config).catch(() => undefined);
     if (session) await deleteSession(session.id).catch(() => undefined);
-    return c.json({ ok: true });
+    if (config.auth.mode === "clerk") return c.json({ ok: true });
   }
   const sessionId = getCookie(c, config.auth.sessionCookieName);
   if (sessionId) {
@@ -321,10 +327,15 @@ async function currentSession(c: Context, config: AppConfig): Promise<DashboardS
     return undefined;
   }
 
-  if (config.auth.mode === "clerk") {
-    return currentClerkSession(c, config);
+  if (config.auth.mode === "clerk" || config.auth.mode === "hybrid") {
+    const clerkSession = await currentClerkSession(c, config);
+    if (clerkSession || config.auth.mode === "clerk") return clerkSession;
   }
 
+  return currentLegacySession(c, config);
+}
+
+async function currentLegacySession(c: Context, config: AppConfig): Promise<DashboardSession | undefined> {
   const sessionId = getCookie(c, config.auth.sessionCookieName);
   if (!sessionId) {
     return undefined;
@@ -364,6 +375,7 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
     cached &&
     cached.expiresAt > Date.now() &&
     !sessionAccessStale(cached) &&
+    cached.membershipAuthority === (config.auth.mode === "hybrid" ? "hybrid" : "clerk") &&
     cached.clerkOrganizationId === (auth.orgId ?? undefined)
   ) {
     return cached;
@@ -371,42 +383,172 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
 
   const user = await clerk.users.getUser(auth.userId);
   const githubAccount = user.externalAccounts.find((account) => account.provider === "oauth_github");
-  const githubUserId = Number(githubAccount?.externalId);
-  const githubLogin = githubAccount?.username?.trim();
-  if (!Number.isSafeInteger(githubUserId) || githubUserId <= 0 || !githubLogin) {
+  const accountGithubUserId = Number(githubAccount?.externalId);
+  const accountGithubLogin = githubAccount?.username?.trim();
+  const hasGithubAccount =
+    Number.isSafeInteger(accountGithubUserId) && accountGithubUserId > 0 && Boolean(accountGithubLogin);
+  const prelinked = await resolveClerkUserIdentity(auth.userId, user.externalId).catch(() => {
+    throw new ApiError(403, "This Clerk account conflicts with an existing Jina account");
+  });
+  if (user.externalId && !prelinked) {
+    throw new ApiError(403, "This Clerk account is linked to an unknown Jina account");
+  }
+  if (prelinked && hasGithubAccount && prelinked.githubUserId !== accountGithubUserId) {
+    throw new ApiError(403, "This Clerk account is linked to a different GitHub account");
+  }
+  const resolved = hasGithubAccount
+    ? await upsertGithubUserIdentity({
+        githubUserId: accountGithubUserId,
+        githubLogin: accountGithubLogin!,
+        displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || accountGithubLogin!,
+        avatarUrl: user.imageUrl,
+      }).then((identity) => {
+        if (prelinked && identity && prelinked.userId !== identity.userId) {
+          throw new ApiError(403, "This Clerk account is linked to a different Jina account");
+        }
+        return identity
+          ? { userId: identity.userId, githubUserId: accountGithubUserId, githubLogin: accountGithubLogin! }
+          : undefined;
+      })
+    : prelinked;
+  if (!resolved) {
+    throw new ApiError(403, "Connect GitHub to your Clerk profile before using Jina");
+  }
+  const { githubUserId, githubLogin, userId } = resolved;
+
+  if (user.externalId && user.externalId !== userId) {
+    throw new ApiError(403, "This Clerk account is linked to a different Jina account");
+  }
+  const primaryEmail = user.primaryEmailAddressId
+    ? user.emailAddresses.find((email) => email.id === user.primaryEmailAddressId)?.emailAddress
+    : user.emailAddresses[0]?.emailAddress;
+  const clerkIdentity = await linkClerkUserIdentity({
+    clerkUserId: auth.userId,
+    userId,
+    providerLogin: primaryEmail,
+  });
+  if (!clerkIdentity) throw new ApiError(503, "Jina identity storage is unavailable");
+  if (clerkIdentity.status === "conflict") {
+    throw new ApiError(403, "This Clerk account is already linked to a different Jina account");
+  }
+  if (!user.externalId) {
+    await clerk.users.updateUser(auth.userId, { externalId: userId }).catch((error: unknown) => {
+      console.warn("clerk_external_id_sync_failed", {
+        clerk_user_id: auth.userId,
+        jina_user_id: userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  let githubAccessToken: string | undefined;
+  let organizations: DashboardSession["organizations"] | undefined;
+  let projects: DashboardSession["projects"] | undefined;
+  let teams: DashboardSession["teams"] | undefined;
+  if (hasGithubAccount) {
+    const oauth = await clerk.users.getUserOauthAccessToken(auth.userId, "github");
+    githubAccessToken = oauth.data[0]?.token;
+    if (githubAccessToken) {
+      const access = await loadGithubSessionAccess(githubAccessToken).catch((error: unknown) => {
+        console.warn("clerk_github_access_refresh_failed", {
+          clerk_user_id: auth.userId,
+          github_user_id: githubUserId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return undefined;
+      });
+      if (access) {
+        organizations = access.organizations.map(githubOrgForSession);
+        projects = access.repositories.map(githubRepoForSession);
+        teams = access.teams;
+      }
+    }
+  }
+
+  // During the hybrid grace period, a matching unexpired Jina session supplies
+  // GitHub access until the user connects GitHub inside Clerk. The stable user
+  // id and numeric GitHub id must both match; email/name are never sufficient.
+  if ((!githubAccessToken || !organizations || !projects || !teams) && config.auth.mode === "hybrid") {
+    const legacy = await currentLegacySession(c, config);
+    if (
+      legacy?.accessToken
+      && legacy.userId === userId
+      && legacy.user.id === githubUserId
+    ) {
+      githubAccessToken = legacy.accessToken;
+      organizations = legacy.organizations;
+      projects = legacy.projects;
+      teams = legacy.teams;
+    }
+  }
+  if (!githubAccessToken || !organizations || !projects || !teams) {
     throw new ApiError(403, "Connect GitHub to your Clerk profile before using Jina");
   }
 
-  const oauth = await clerk.users.getUserOauthAccessToken(auth.userId, "github");
-  const githubAccessToken = oauth.data[0]?.token;
-  if (!githubAccessToken) {
-    throw new ApiError(403, "Reconnect GitHub in your Clerk profile before using Jina");
-  }
-  const access = await loadGithubSessionAccess(githubAccessToken);
-  const identity = await upsertGithubUserIdentity({
-    githubUserId,
-    githubLogin,
-    displayName: [user.firstName, user.lastName].filter(Boolean).join(" ") || githubLogin,
-    avatarUrl: user.imageUrl,
+  let memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
+  const bootstrap = await clerkMembershipBootstrap(auth.userId, userId).catch(() => {
+    throw new ApiError(403, "This Clerk account conflicts with an existing Jina membership migration");
   });
-  if (!identity) throw new ApiError(503, "Jina identity storage is unavailable");
-
-  const memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
-  await syncClerkTenantMemberships({
+  if (bootstrap.pending) {
+    let membershipByOrganization = new Map(
+      memberships.data.map((membership) => [membership.organization.id, membership]),
+    );
+    for (const desired of bootstrap.memberships) {
+      const desiredRole = desired.role === "admin" ? "org:admin" : "org:member";
+      let existing = membershipByOrganization.get(desired.organizationId);
+      if (!existing) {
+        try {
+          await clerk.organizations.createOrganizationMembership({
+            organizationId: desired.organizationId,
+            userId: auth.userId,
+            role: desiredRole,
+          });
+        } catch {
+          // A concurrent first request may have created the same membership.
+          // Refetch and require that exact principal/org pair before sealing.
+          memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
+          membershipByOrganization = new Map(
+            memberships.data.map((membership) => [membership.organization.id, membership]),
+          );
+          existing = membershipByOrganization.get(desired.organizationId);
+          if (!existing) throw new ApiError(503, "Clerk organization membership migration failed");
+        }
+      }
+      if (existing && existing.role !== desiredRole) {
+        await clerk.organizations.updateOrganizationMembership({
+          organizationId: desired.organizationId,
+          userId: auth.userId,
+          role: desiredRole,
+        });
+      }
+    }
+    // Provider writes finish before the durable seal. Partial failures leave
+    // the marker absent, so the next request retries idempotently.
+    await completeClerkMembershipBootstrap(auth.userId, userId);
+    memberships = await clerk.users.getOrganizationMembershipList({ userId: auth.userId, limit: 500 });
+  }
+  const membershipSync = await syncClerkTenantMemberships({
+    clerkUserId: auth.userId,
     githubUserId,
     githubLogin,
-    userId: identity.userId,
+    userId,
     memberships: memberships.data.map((membership) => ({
       organizationId: membership.organization.id,
       name: membership.organization.name,
       role: membership.role === "org:admin" ? "admin" : "member",
     })),
   });
+  if (membershipSync.ignoredOrganizations.length > 0) {
+    console.info("clerk_unlinked_organizations_ignored", {
+      clerk_user_id: auth.userId,
+      organization_ids: membershipSync.ignoredOrganizations.map((organization) => organization.organizationId),
+    });
+  }
 
   const now = new Date().toISOString();
   const session: DashboardSession = {
     id: cacheId,
-    userId: identity.userId,
+    userId,
     accessToken: githubAccessToken,
     user: {
       id: githubUserId,
@@ -415,14 +557,15 @@ async function currentClerkSession(c: Context, config: AppConfig): Promise<Dashb
       avatar_url: user.imageUrl,
       html_url: `https://github.com/${encodeURIComponent(githubLogin)}`,
     },
-    organizations: access.organizations.map(githubOrgForSession),
-    projects: access.repositories.map(githubRepoForSession),
-    teams: access.teams,
+    organizations,
+    projects,
+    teams,
     expiresAt: Date.now() + config.auth.sessionTtlSeconds * 1_000,
     createdAt: cached?.createdAt ?? now,
     updatedAt: now,
     clerkUserId: auth.userId,
     clerkOrganizationId: auth.orgId ?? undefined,
+    membershipAuthority: config.auth.mode === "hybrid" ? "hybrid" : "clerk",
   };
   await saveSession(session);
   return session;
@@ -783,7 +926,7 @@ function ensureGithubAuth(config: AppConfig): void {
 // when API_BASE_URL is unconfigured (local dev), where forwarded headers are not in play.
 // `path` is the provider-specific callback path (shared by GitHub login and OpenRouter OAuth).
 export function callbackUrlFor(c: Context, config: AppConfig, path: string): string {
-  if (config.auth?.mode === "clerk" && path.startsWith("/dashboard/")) {
+  if ((config.auth?.mode === "clerk" || config.auth?.mode === "hybrid") && path.startsWith("/dashboard/")) {
     return new URL(`/api${path}`, config.dashboardUrl).toString();
   }
   if (config.apiBaseUrl) {

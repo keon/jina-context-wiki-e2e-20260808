@@ -174,6 +174,30 @@ test("Clerk auth requires both server and browser keys", () => {
   );
 });
 
+test("hybrid auth requires both Clerk and rollback-capable GitHub credentials", () => {
+  const config = loadConfig(baseEnv({
+    NODE_ENV: "development",
+    DASHBOARD_AUTH_MODE: "hybrid",
+    GITHUB_OAUTH_CLIENT_ID: "github-client",
+    GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
+    CLERK_PUBLISHABLE_KEY: "pk_test_example",
+    CLERK_SECRET_KEY: "sk_test_example",
+  }));
+  assert.equal(config.auth.mode, "hybrid");
+  assert.equal(config.auth.githubClientId, "github-client");
+  assert.equal(config.auth.clerkPublishableKey, "pk_test_example");
+
+  assert.throws(
+    () => loadConfig(baseEnv({
+      NODE_ENV: "development",
+      DASHBOARD_AUTH_MODE: "hybrid",
+      CLERK_PUBLISHABLE_KEY: "pk_test_example",
+      CLERK_SECRET_KEY: "sk_test_example",
+    })),
+    /Missing required environment variable GITHUB_OAUTH_CLIENT_ID/,
+  );
+});
+
 /* ----------------------------------------- SECRETS_ENCRYPTION_KEY (FINDING 4a) --- */
 
 test("requires SECRETS_ENCRYPTION_KEY in production (does not fail open to plaintext)", () => {
