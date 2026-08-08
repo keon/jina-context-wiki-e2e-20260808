@@ -178,6 +178,10 @@ const WORKER_LEASE_MS = 30 * 60 * 1000;
 // deadline; every completion remains protected by its write fence.
 const DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 * 60 * 1000;
 const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
+// Wiki workers perform only two bounded control-plane calls (each defaults to
+// 30 seconds) before detaching. They never heartbeat this lease while Trigger
+// owns generation, so keep dispatch recovery independent of model-stage TTLs.
+const WIKI_DISPATCH_LEASE_MS = 2 * 60 * 1000;
 const WIKI_STAGE_OPERATION_LEASE_MS = 5 * 60 * 1000;
 const WIKI_STAGE_OPERATION_RENEW_MS = 60 * 1000;
 const WIKI_STAGE_OPERATION_WAIT_MS = 250;
@@ -196,7 +200,7 @@ const CONTEXT_QUOTA_MODEL_TOPICS = new Set<string>([
   contextWorkflowBoardTopics.planner,
   contextWorkflowBoardTopics.page
 ]);
-const LONG_LEASE_BOARD_TOPICS = new Set<string>([...CONTEXT_BOARD_TOPICS, ...CAUSAL_GRAPH_TOPICS]);
+const LONG_LEASE_BOARD_TOPICS = new Set<string>([...Object.values(contextWorkflowBoardTopics), ...CAUSAL_GRAPH_TOPICS]);
 const RETRYABLE_WORKER_FAILURE_CATEGORIES = new Set([
   "api_transport",
   "daytona",
@@ -521,6 +525,63 @@ function publicApiToken(token: ApiTokenRecord): Record<string, unknown> {
     ...(token.lastUsedAt ? { lastUsedAt: token.lastUsedAt } : {}),
     ...(token.revokedAt ? { revokedAt: token.revokedAt } : {})
   };
+}
+
+function workerLeaseDurationMs(topic: string | undefined, contextWorkerLeaseMs: number): number {
+  if (topic === contextWikiBoardTopic) return WIKI_DISPATCH_LEASE_MS;
+  return topic && LONG_LEASE_BOARD_TOPICS.has(topic) ? contextWorkerLeaseMs : WORKER_LEASE_MS;
+}
+
+function isWorkerOutboxMessageClaimable(message: BoardState["outbox"][number], at: IsoTimestamp): boolean {
+  if (message.status === "pending") return true;
+  if (message.status !== "leased" || !message.leaseExpiresAt) return false;
+  return message.leaseExpiresAt <= at || isStaleWikiDispatchLease(message, at);
+}
+
+function isStaleWikiDispatchLease(message: BoardState["outbox"][number], at: IsoTimestamp): boolean {
+  if (
+    message.topic !== contextWikiBoardTopic ||
+    message.status !== "leased" ||
+    !message.leaseId ||
+    !message.writeFenceToken ||
+    !message.leasedAt ||
+    !message.leaseExpiresAt
+  ) {
+    return false;
+  }
+  const atMs = Date.parse(at);
+  const leasedAtMs = Date.parse(message.leasedAt);
+  const storedExpiryMs = Date.parse(message.leaseExpiresAt);
+  return (
+    Number.isFinite(atMs) &&
+    Number.isFinite(leasedAtMs) &&
+    Number.isFinite(storedExpiryMs) &&
+    storedExpiryMs > atMs &&
+    leasedAtMs + WIKI_DISPATCH_LEASE_MS <= atMs
+  );
+}
+
+function reclaimStaleWikiDispatchLease(
+  state: BoardState,
+  message: BoardState["outbox"][number],
+  at: IsoTimestamp
+): BoardState {
+  if (!isStaleWikiDispatchLease(message, at)) return state;
+  const released = releaseOutboxLease(
+    state,
+    message.id,
+    requiredString(message.leaseId, "wiki dispatch leaseId"),
+    requiredString(message.writeFenceToken, "wiki dispatch writeFenceToken"),
+    at
+  );
+  if (!released) throw new Error("stale wiki dispatch lease could not be fenced for reclamation");
+  return appendEvent(released, "context.wiki_dispatch_lease_reclaimed", at, message.taskId, {
+    messageId: message.id,
+    attempt: message.payload.attempt,
+    priorLeaseId: message.leaseId,
+    priorLeaseExpiresAt: message.leaseExpiresAt,
+    effectiveLeaseExpiresAt: new Date(Date.parse(message.leasedAt!) + WIKI_DISPATCH_LEASE_MS).toISOString()
+  });
 }
 
 /** Creates the HTTP API without binding a port. */
@@ -5134,9 +5195,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const claimNow = nowIso();
     const hasCandidate = intakeState.board.outbox.some((message) => {
       const task = findTask(intakeState.board, message.taskId);
-      const claimable =
-        message.status === "pending" ||
-        (message.status === "leased" && message.leaseExpiresAt !== undefined && message.leaseExpiresAt <= claimNow);
+      const claimable = isWorkerOutboxMessageClaimable(message, claimNow);
       return (
         claimable && task && claimTenantIds.includes(String(task.metadata.tenantId)) && topics.includes(message.topic)
       );
@@ -5257,7 +5316,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             }
             const leaseId = randomUUID();
             const writeFenceToken = randomUUID();
-            let claimBoard = intakeState.board;
+            let claimBoard = reclaimStaleWikiDispatchLease(intakeState.board, candidate, now);
             if (
               candidateBuild?.type === contextWorkflowBoardTaskTypes.build &&
               candidate.status === "leased" &&
@@ -5281,9 +5340,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               expiresAt: new Date(Date.parse(now) + WORKER_LEASE_MS).toISOString()
             });
             if (!initiallyLeased) continue;
-            const leaseDurationMs = LONG_LEASE_BOARD_TOPICS.has(initiallyLeased.message.topic)
-              ? contextWorkerLeaseMs
-              : WORKER_LEASE_MS;
+            const leaseDurationMs = workerLeaseDurationMs(initiallyLeased.message.topic, contextWorkerLeaseMs);
             const leasedState = renewOutboxLease(
               initiallyLeased.state,
               initiallyLeased.message.id,
@@ -5447,10 +5504,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           leaseId,
           requiredString(body.writeFenceToken, "writeFenceToken"),
           now,
-          new Date(
-            Date.parse(now) +
-              (message && LONG_LEASE_BOARD_TOPICS.has(message.topic) ? contextWorkerLeaseMs : WORKER_LEASE_MS)
-          ).toISOString()
+          new Date(Date.parse(now) + workerLeaseDurationMs(message?.topic, contextWorkerLeaseMs)).toISOString()
         );
         if (!board) return { accepted: false };
         const renewedMessage = findOutboxMessage(board, id);

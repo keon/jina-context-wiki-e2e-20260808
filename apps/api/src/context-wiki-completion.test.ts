@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
-import { applyCommand, createEmptyBoardState, findTask } from "@jina/board";
+import { applyCommand, createEmptyBoardState, findTask, leaseNextOutboxMessage } from "@jina/board";
 import {
   artifactSha256,
   contextArtifactKey,
   createContextWikiBoardBuild,
+  contextWikiBoardTopic,
   type ContextArtifactRef,
   type ContextArtifactStore,
   type ContextArtifactWrite
@@ -51,6 +52,157 @@ const request: WikiTriggerRequestV1 = {
     tags: []
   }
 };
+
+test("stale oversized wiki dispatch leases are fenced and reclaimed with the exact dispatch authority", async () => {
+  const created = createContextWikiBoardBuild(createEmptyBoardState(), {
+    request,
+    now: "2026-08-08T12:00:00.000Z"
+  });
+  const testNow = Date.now();
+  const leasedAt = new Date(testNow - 5 * 60 * 1000).toISOString();
+  const legacyLeaseExpiresAt = new Date(testNow + 145 * 60 * 1000).toISOString();
+  const legacy = leaseNextOutboxMessage(created.state, {
+    topics: [contextWikiBoardTopic],
+    leaseId: "legacy-oversized-wiki-lease",
+    writeFenceToken: "legacy-oversized-wiki-fence",
+    now: leasedAt,
+    expiresAt: legacyLeaseExpiresAt
+  });
+  assert.ok(legacy);
+  const inProgress = applyCommand(
+    legacy.state,
+    { command: "TransitionTask", taskId: created.buildTaskId, toStatus: "in_progress" },
+    { actor: { type: "run", id: "legacy-wiki-worker" }, now: leasedAt }
+  ).state;
+  const state = memoryStateStore({ intakeState: { board: inProgress }, devDeliverySequence: 0 });
+  const server = createApiServer({
+    tenantId: TENANT,
+    stateStore: state,
+    internalApiToken: INTERNAL_TOKEN,
+    contextWikiTriggerServiceToken: SERVICE_TOKEN,
+    contextWikiExecutionGrantSecret: GRANT_SECRET,
+    contextWikiDispatchSecret: DISPATCH_SECRET,
+    contextWorkerLeaseMs: 150 * 60 * 1000
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const legacyFence = {
+    messageId: legacy.message.id,
+    leaseId: legacy.message.leaseId,
+    taskId: created.buildTaskId,
+    attempt: legacy.message.payload.attempt,
+    writeFenceToken: legacy.message.writeFenceToken
+  };
+  try {
+    const firstAuthority = await post(
+      baseUrl,
+      "/internal/context/wiki/dispatch/authorize",
+      INTERNAL_TOKEN,
+      legacyFence
+    );
+    assert.equal(firstAuthority.response.status, 200, JSON.stringify(firstAuthority.body));
+
+    const claimStartedAt = Date.now();
+    const reclaimed = await post(baseUrl, "/internal/worker/claim", INTERNAL_TOKEN, {
+      workerId: "reclaimed-wiki-dispatch-worker",
+      topics: [contextWikiBoardTopic]
+    });
+    const claimCompletedAt = Date.now();
+    assert.equal(reclaimed.response.status, 200, JSON.stringify(reclaimed.body));
+    const reclaimedWork = reclaimed.body as {
+      message: {
+        id: string;
+        leaseId: string;
+        leaseExpiresAt: string;
+        attempt: number;
+        writeFenceToken: string;
+      };
+      task: { id: string };
+    };
+    assert.equal(reclaimedWork.task.id, created.buildTaskId);
+    assert.equal(reclaimedWork.message.id, legacy.message.id);
+    assert.equal(reclaimedWork.message.attempt, legacy.message.payload.attempt);
+    assert.notEqual(reclaimedWork.message.leaseId, legacy.message.leaseId);
+    assert.ok(Date.parse(reclaimedWork.message.leaseExpiresAt) >= claimStartedAt + 110_000);
+    assert.ok(Date.parse(reclaimedWork.message.leaseExpiresAt) <= claimCompletedAt + 125_000);
+
+    const staleAuthority = await post(
+      baseUrl,
+      "/internal/context/wiki/dispatch/authorize",
+      INTERNAL_TOKEN,
+      legacyFence
+    );
+    assert.equal(staleAuthority.response.status, 409);
+
+    const replayedAuthority = await post(baseUrl, "/internal/context/wiki/dispatch/authorize", INTERNAL_TOKEN, {
+      messageId: reclaimedWork.message.id,
+      leaseId: reclaimedWork.message.leaseId,
+      taskId: reclaimedWork.task.id,
+      attempt: reclaimedWork.message.attempt,
+      writeFenceToken: reclaimedWork.message.writeFenceToken
+    });
+    assert.equal(replayedAuthority.response.status, 200, JSON.stringify(replayedAuthority.body));
+    assert.deepEqual(replayedAuthority.body, firstAuthority.body);
+
+    const snapshot = state.current();
+    assert.equal(
+      snapshot.intakeState.board.events.filter((event) => event.type === "context.wiki_dispatch_lease_reclaimed")
+        .length,
+      1
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("an oversized wiki dispatch lease is not reclaimed before its two-minute effective expiry", async () => {
+  const created = createContextWikiBoardBuild(createEmptyBoardState(), {
+    request,
+    now: "2026-08-08T12:00:00.000Z"
+  });
+  const testNow = Date.now();
+  const leasedAt = new Date(testNow - 30_000).toISOString();
+  const legacy = leaseNextOutboxMessage(created.state, {
+    topics: [contextWikiBoardTopic],
+    leaseId: "fresh-legacy-wiki-lease",
+    writeFenceToken: "fresh-legacy-wiki-fence",
+    now: leasedAt,
+    expiresAt: new Date(testNow + 149 * 60 * 1000 + 30_000).toISOString()
+  });
+  assert.ok(legacy);
+  const inProgress = applyCommand(
+    legacy.state,
+    { command: "TransitionTask", taskId: created.buildTaskId, toStatus: "in_progress" },
+    { actor: { type: "run", id: "fresh-legacy-wiki-worker" }, now: leasedAt }
+  ).state;
+  const state = memoryStateStore({ intakeState: { board: inProgress }, devDeliverySequence: 0 });
+  const server = createApiServer({
+    tenantId: TENANT,
+    stateStore: state,
+    internalApiToken: INTERNAL_TOKEN,
+    contextWorkerLeaseMs: 150 * 60 * 1000
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const response = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ workerId: "competing-wiki-dispatch-worker", topics: [contextWikiBoardTopic] })
+    });
+    assert.equal(response.status, 204);
+    const current = state.current().intakeState.board.outbox[0];
+    assert.equal(current?.status, "leased");
+    assert.equal(current?.leaseId, legacy.message.leaseId);
+    assert.equal(
+      state.current().intakeState.board.events.filter((event) => event.type === "context.wiki_dispatch_lease_reclaimed")
+        .length,
+      0
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
 
 test("Trigger callback verifies activated storage and atomically completes the one Board task", async () => {
   const created = createContextWikiBoardBuild(createEmptyBoardState(), {
