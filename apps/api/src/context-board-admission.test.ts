@@ -402,6 +402,45 @@ test("an invested default-ref build retains only the newest follow-up until it b
   assert.equal(latestContextBoardFollowup(promoted.state, first.build.buildTaskId), undefined);
 });
 
+test("a deferred promotion reanchors its follow-up to the current active build", () => {
+  const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-reanchor-first");
+  assert.equal(first.outcome, "created");
+  const active = transitionBoardTask(first.state, first.build.buildTaskId, "in_progress", NOW);
+  const deferred = github(active, pushEvent("8".repeat(40)), "delivery-reanchor-followup");
+  const completed = transitionBoardTask(deferred.state, first.build.buildTaskId, "done", LATER);
+  const followup = latestContextBoardFollowup(completed, first.build.buildTaskId);
+  assert.ok(followup);
+
+  const newer = createContextWorkflowBoardBuild(completed, {
+    contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+    contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+    promptContractVersion: "context-page-workflow-1",
+    validatorVersion: "context-page-validator-1",
+    pageIndexVersion: "pageindex-local-1",
+    executionProfileDigest: "a".repeat(64),
+    tenantId: TENANT,
+    repository: REPOSITORY,
+    ref: "release/next",
+    refSequence: 1,
+    requestKey: "manual:reanchor-active",
+    commitSha: "9".repeat(40),
+    githubInstallationId: INSTALLATION,
+    trigger: "manual",
+    now: LATER
+  });
+  const reanchored = admitContextBoardBuild(newer.state, { source: "followup", ...followup, now: LATER });
+  assert.equal(reanchored.outcome, "deferred");
+  assert.equal(reanchored.activeBuildTaskId, newer.buildTaskId);
+
+  const currentCompleted = transitionBoardTask(reanchored.state, newer.buildTaskId, "done", LATER);
+  assert.equal(
+    latestContextBoardFollowup(currentCompleted, first.build.buildTaskId),
+    undefined,
+    "the settled historical predecessor must not keep retrying a reanchored follow-up"
+  );
+  assert.equal(latestContextBoardFollowup(currentCompleted, newer.buildTaskId)?.requestKey, followup.requestKey);
+});
+
 test("a burst of deferred pushes occupies one bounded follow-up slot", () => {
   const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-burst-first");
   assert.equal(first.outcome, "created");

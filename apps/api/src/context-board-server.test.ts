@@ -1035,6 +1035,94 @@ test("durable follow-up promotion does not reschedule itself while restoring the
   }
 });
 
+test("startup follow-up reconciliation is bounded before durable pool checkout", async () => {
+  const tenantId = "tenant-followup-startup-bound";
+  let board = createEmptyBoardState();
+  const followupRequestKeys: string[] = [];
+  for (let index = 1; index <= 4; index += 1) {
+    const repository = `omxyz/followup-startup-bound-${index}`;
+    const initial = createContextWorkflowBoardBuild(board, {
+      contextWorkflowContract: CONTEXT_WORKFLOW_CONTRACT,
+      contextWorkflowSchemaRevision: CONTEXT_WORKFLOW_SCHEMA_REVISION,
+      promptContractVersion: "context-page-workflow-1",
+      validatorVersion: "context-page-validator-1",
+      pageIndexVersion: "pageindex-local-1",
+      executionProfileDigest: "f".repeat(64),
+      tenantId,
+      repository,
+      ref: "main",
+      refSequence: 1,
+      requestKey: `initial-followup-startup-bound-${index}`,
+      commitSha: String(index).repeat(40),
+      trigger: "push",
+      now: NOW
+    });
+    board = transitionBoardTask(initial.state, initial.buildTaskId, "in_progress", NOW);
+    board = transitionBoardTask(board, initial.buildTaskId, "done", NOW);
+    const requestKey = `followup-startup-bound-${index}`;
+    followupRequestKeys.push(requestKey);
+    const queued = applyCommand(
+      board,
+      {
+        command: "CommentTask",
+        taskId: initial.buildTaskId,
+        eventType: "context.build_followup_requested",
+        payload: {
+          followup: {
+            tenantId,
+            repository,
+            ref: "main",
+            requestKey,
+            commitSha: String(index + 4).repeat(40),
+            trigger: "push"
+          }
+        }
+      },
+      { actor: { type: "system", id: "followup-startup-bound-test" }, now: NOW }
+    );
+    assert.equal(queued.accepted, true);
+    board = queued.state;
+  }
+  const stateStore = blockingConcurrentStateStore({
+    intakeState: { board },
+    devDeliverySequence: 0
+  });
+  const server = createApiServer({ tenantId, stateStore });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    assert.equal((await fetch(`${baseUrl}/health`)).status, 200);
+    await stateStore.waitForFirstUpdate();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(stateStore.updateCount(), 1, "only one background promotion may enter durable storage");
+    assert.equal(stateStore.maxConcurrentUpdates(), 1);
+
+    stateStore.releaseUpdates();
+    const deadline = Date.now() + 3_000;
+    while (
+      Date.now() < deadline &&
+      !followupRequestKeys.every((requestKey) =>
+        stateStore.current().intakeState.board.tasks.some((task) => task.metadata.requestKey === requestKey)
+      )
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(
+      followupRequestKeys.every((requestKey) =>
+        stateStore.current().intakeState.board.tasks.some((task) => task.metadata.requestKey === requestKey)
+      ),
+      "every exact-owned startup follow-up should eventually be promoted"
+    );
+    const settledUpdateCount = stateStore.updateCount();
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    assert.equal(stateStore.updateCount(), settledUpdateCount, "settled startup follow-ups must stop retrying");
+  } finally {
+    stateStore.releaseUpdates();
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("a context worker can prefer release-acceptance repository work without excluding normal work", async () => {
   const tenantId = "tenant-preferred-repository";
   const ordinaryTaskId = entityId<"task">("ordinary-repository-task");
@@ -1574,6 +1662,62 @@ function mutableStateStore(initial: ApiSnapshot): ApiStateStore & { current(): A
       const updated = await operation(structuredClone(snapshot));
       snapshot = structuredClone(updated.state);
       return { committed: true, result: updated.result };
+    },
+    async close() {}
+  };
+}
+
+function blockingConcurrentStateStore(initial: ApiSnapshot): ApiStateStore & {
+  current(): ApiSnapshot;
+  updateCount(): number;
+  maxConcurrentUpdates(): number;
+  waitForFirstUpdate(): Promise<void>;
+  releaseUpdates(): void;
+} {
+  let snapshot = structuredClone(initial);
+  let updates = 0;
+  let concurrentUpdates = 0;
+  let maximumConcurrentUpdates = 0;
+  let firstUpdateEntered!: () => void;
+  let releaseUpdates!: () => void;
+  const firstEntered = new Promise<void>((resolve) => {
+    firstUpdateEntered = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    releaseUpdates = resolve;
+  });
+  return {
+    current: () => structuredClone(snapshot),
+    updateCount: () => updates,
+    maxConcurrentUpdates: () => maximumConcurrentUpdates,
+    waitForFirstUpdate: () => firstEntered,
+    releaseUpdates,
+    async load() {
+      return structuredClone(snapshot);
+    },
+    async ping() {},
+    async hasDelivery() {
+      return false;
+    },
+    async save(next) {
+      snapshot = structuredClone(next);
+      return true;
+    },
+    async update<T>(
+      operation: (current: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>
+    ) {
+      updates += 1;
+      concurrentUpdates += 1;
+      maximumConcurrentUpdates = Math.max(maximumConcurrentUpdates, concurrentUpdates);
+      firstUpdateEntered();
+      try {
+        await released;
+        const updated = await operation(structuredClone(snapshot));
+        snapshot = structuredClone(updated.state);
+        return { committed: true, result: updated.result };
+      } finally {
+        concurrentUpdates -= 1;
+      }
     },
     async close() {}
   };

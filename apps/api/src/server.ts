@@ -773,6 +773,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let devDeliverySequence = 0;
   let restoredVersion = 0;
   let mutations = Promise.resolve();
+  let contextFollowupPromotions = Promise.resolve();
   const contextFollowupPromotionRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const contextFollowupPromotionRetryAttempts = new Map<string, number>();
   const deliveries = new DeliveryCache(10_000);
@@ -4516,9 +4517,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return promoted.outcome === "created";
   }
 
+  function runContextBoardFollowupPromotion(tenantId: string, completedBuildTaskId: TaskId): Promise<boolean> {
+    // Follow-up reconciliation is background work over the single durable
+    // Board snapshot. Serialize these calls before they check out a connection
+    // so restoring many tenants/repositories cannot fan out one waiter per
+    // historical follow-up into the bounded Board pool.
+    const result = contextFollowupPromotions.then(() => promoteContextBoardFollowup(tenantId, completedBuildTaskId));
+    contextFollowupPromotions = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
   async function tryPromoteContextBoardFollowup(tenantId: string, completedBuildTaskId: TaskId): Promise<boolean> {
     try {
-      const promoted = await promoteContextBoardFollowup(tenantId, completedBuildTaskId);
+      const promoted = await runContextBoardFollowupPromotion(tenantId, completedBuildTaskId);
       if (promoted || !latestContextBoardFollowup(intakeState.board, completedBuildTaskId)) {
         clearContextBoardFollowupPromotionRetry(tenantId, completedBuildTaskId);
       } else {
@@ -4561,7 +4575,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           return;
         }
         try {
-          const promoted = await promoteContextBoardFollowup(tenantId, completedBuildTaskId);
+          const promoted = await runContextBoardFollowupPromotion(tenantId, completedBuildTaskId);
           if (promoted || !latestContextBoardFollowup(intakeState.board, completedBuildTaskId)) {
             clearContextBoardFollowupPromotionRetry(tenantId, completedBuildTaskId);
             return;
