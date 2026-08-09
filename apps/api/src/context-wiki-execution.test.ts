@@ -13,6 +13,7 @@ import {
   parseWikiContentBundle,
   serializeWikiContentBundle,
   wikiContentBundleSha256,
+  type EvidenceSnapshot,
   type WikiContentArtifactRef,
   type WikiContentBundleV1,
   type WikiContentStorePort
@@ -161,14 +162,32 @@ test("builds a usable source-grounded wiki before delegating publication", async
     const artifacts = new FileContextArtifactStore(root);
     const content = new MemoryWikiContentStore();
     const publication = new RecordingPublicationRuntime();
+    const evidence = new MemoryContextEngineStore();
+    const commitEvidence = evidence.commitSnapshot.bind(evidence);
+    let committedEvidence: EvidenceSnapshot | undefined;
+    Object.defineProperty(evidence, "commitSnapshot", {
+      value: async (snapshot: EvidenceSnapshot) => {
+        if (committedEvidence) {
+          assert.deepEqual(
+            snapshot,
+            committedEvidence,
+            "a retry must reproduce the complete PostgreSQL evidence snapshot"
+          );
+        } else {
+          committedEvidence = structuredClone(snapshot);
+        }
+        return commitEvidence(snapshot);
+      }
+    });
+    let wallClock = "2026-08-08T12:00:00.000Z";
     const executor = new ContextWikiStageExecutor({
       artifactStore: artifacts,
       contentStore: content,
-      evidenceStore: new MemoryContextEngineStore(),
+      evidenceStore: evidence,
       publication,
       mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
       fetch: githubFetch,
-      now: () => "2026-08-08T12:00:00.000Z"
+      now: () => wallClock
     });
     const base = {
       request,
@@ -180,6 +199,12 @@ test("builds a usable source-grounded wiki before delegating publication", async
       readonly instructionDigest: string;
       readonly primaryPaths: readonly string[];
     };
+    wallClock = "2026-08-08T12:05:00.000Z";
+    assert.deepEqual(
+      await executor.execute({ ...base, operationId: "snapshot", stage: "snapshot", input: {} }),
+      snapshot,
+      "snapshot replay must remain byte-identical after the wall clock advances"
+    );
     assert.match(snapshot.instructionDigest, /^[0-9a-f]{64}$/);
     assert.equal(snapshot.primaryPaths.includes("generated/ignored.ts"), false);
     const plan = (await executor.execute({

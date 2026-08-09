@@ -564,7 +564,11 @@ export class ContextWikiStageExecutor {
           selectedFiles: selected.length,
           omittedFiles: artifact.omittedFileCount
         }),
-        createdAt: this.#deps.now?.() ?? new Date().toISOString(),
+        // A Trigger retry must reproduce the exact checkpoint bytes after an
+        // evidence commit succeeds but its HTTP response or operation receipt
+        // is lost. The run-bound grant timestamp is immutable; wall-clock time
+        // would turn that safe replay into a checkpoint identity collision.
+        createdAt: execution.authorizedAt,
         sourceComplete: artifact.omittedFileCount === 0
       })
     );

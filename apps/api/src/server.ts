@@ -3785,7 +3785,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         "utf8"
       )
     );
-    const checkpointKey = `${operationDigest}:completed`;
+    // Context phase checkpoint identities are schema-constrained to one
+    // canonical SHA-256. Completion is already namespaced by `phase`, while
+    // the immutable receipt artifact carries the human-readable suffix.
+    const checkpointKey = operationDigest;
     const inputDigest = fingerprint(input.input);
     const ownerToken = randomUUID();
     const waitDeadline = Date.now() + WIKI_STAGE_OPERATION_MAX_WAIT_MS;
