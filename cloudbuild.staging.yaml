@@ -21,17 +21,18 @@ steps:
     args:
       # Staging images must pass the same validation as production CI —
       # a forked inline copy silently drops gates (this one had lost lint).
-      # Successful test output can exceed the GitHub check limit and hide a
-      # later deploy failure. Keep the complete log on failure, but emit one
-      # bounded success record so the terminal deployment diagnostics remain
-      # visible in the source-bound check.
+      # Test output can exceed the GitHub check limit and hide the terminal
+      # failure. Keep the complete log inside the step, but emit at most its
+      # last 400 lines / 48,000 bytes on failure and one bounded success record.
       - -ceu
       - |
         validation_log=/tmp/jina-staging-validation.log
         if scripts/cloud-build-ci.sh >"${validation_log}" 2>&1; then
           printf 'staging validation passed; full successful output suppressed\n'
         else
-          cat "${validation_log}"
+          printf 'staging validation failed; terminal output follows\n'
+          tail -n 400 "${validation_log}" | tail -c 48000
+          printf '\n'
           exit 1
         fi
     env:
