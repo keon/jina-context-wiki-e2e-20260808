@@ -8,7 +8,7 @@ generation, citations, search, and Mermaid rendering.
 ## Quick start
 
 ```ts
-import { evaluateRelease } from "release-guard";
+import { evaluateRelease, releaseDecisionSummary } from "release-guard";
 
 const decision = evaluateRelease({
   version: "2026.08.08",
@@ -18,6 +18,8 @@ const decision = evaluateRelease({
     { name: "deploy", passed: false }
   ]
 });
+
+console.log(releaseDecisionSummary(decision));
 ```
 
 The result is `blocked` until every stage passes. Duplicate stage names and an
