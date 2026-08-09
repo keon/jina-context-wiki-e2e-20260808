@@ -299,9 +299,9 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
     stagingCloudBuild,
     /serviceAccount: projects\/jina-staging-20260802\/serviceAccounts\/jina-cloud-build-staging@jina-staging-20260802\.iam\.gserviceaccount\.com/
   );
-  assert.match(stagingDeployment, /storage buckets get-iam-policy "gs:\/\/\$\{artifact_bucket\}"/);
+  assert.doesNotMatch(stagingDeployment, /storage buckets get-iam-policy/);
   assert.match(stagingDeployment, /\nrequire_artifact_bucket_prerequisites\n/);
-  assert.match(stagingDeployment, /public IAM principals are forbidden/);
+  assert.match(stagingReadiness, /storage buckets get-iam-policy "gs:\/\/\$\{artifact_bucket\}"/);
   assert.doesNotMatch(stagingDeployment, /storage buckets add-iam-policy-binding/);
   assert.doesNotMatch(stagingDeployment, /ensure_artifact_bucket_api_access/);
   assert.doesNotMatch(stagingDeployment, /roles\/storage\.objectUser/);
@@ -390,7 +390,7 @@ test("staging bucket safety rejects an unsafe storage shape before mutation", as
   );
 });
 
-test("staging bucket safety rejects public grants before migration or revision mutation", async () => {
+test("routine staging deploy does not require legacy bucket IAM read", async () => {
   await withFakeStagingBucketGcloud(
     {
       bucketDescription: {
@@ -407,9 +407,8 @@ test("staging bucket safety rejects public grants before migration or revision m
       await assert.rejects(
         () => execFileAsync("bash", ["scripts/deploy-staging.sh"], { env }),
         (error) => {
-          assert.equal(error.code, 2);
-          assert.match(error.stderr, /Artifact bucket prerequisite failed/);
-          assert.match(error.stderr, /public IAM principals are forbidden/);
+          assert.notEqual(error.code, 2, "bucket shape must pass without evaluating its IAM policy");
+          assert.doesNotMatch(error.stderr, /Artifact bucket prerequisite failed|public IAM principals/);
           return true;
         }
       );
