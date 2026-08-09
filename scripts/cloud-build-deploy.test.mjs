@@ -316,6 +316,13 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   );
   assert.match(stagingCloudBuild, /full successful output suppressed/);
   assert.match(stagingCloudBuild, /staging validation failed; terminal output follows/);
+  assert.match(stagingCloudBuild, /id: build-api[\s\S]+?args:[\s\S]+?- build\n\s+- --quiet[\s\S]+?id: build-worker/);
+  assert.match(stagingCloudBuild, /id: build-worker[\s\S]+?args:[\s\S]+?- build\n\s+- --quiet[\s\S]+?id: push-api/);
+  assert.match(stagingCloudBuild, /id: push-api[\s\S]+?args:[\s\S]+?- push\n\s+- --quiet[\s\S]+?id: push-worker/);
+  assert.match(
+    stagingCloudBuild,
+    /id: push-worker[\s\S]+?args:[\s\S]+?- push\n\s+- --quiet[\s\S]+?id: serialize-deployment/
+  );
   assert.doesNotMatch(stagingReadiness, /bucket-scoped roles\/storage\.admin/);
   assert.doesNotMatch(stagingReadiness, /roles\/storage\.objectUser/);
   assert.match(stagingReadiness, /project-level roles\/storage\.admin/);
