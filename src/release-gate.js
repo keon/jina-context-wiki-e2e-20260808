@@ -8,3 +8,7 @@ export function mayPromoteRelease(checks) {
 
   return required.every((name) => statusByName.get(name) === "passed");
 }
+
+export function promotionSummary(checks) {
+  return mayPromoteRelease(checks) ? "ready" : "blocked";
+}

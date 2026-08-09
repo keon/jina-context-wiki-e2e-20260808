@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mayPromoteRelease } from "../src/release-gate.js";
+import { mayPromoteRelease, promotionSummary } from "../src/release-gate.js";
 
 test("promotes only when review, wiki, and causal graph checks pass", () => {
   assert.equal(
@@ -21,4 +21,8 @@ test("promotes only when review, wiki, and causal graph checks pass", () => {
     ]),
     false
   );
+});
+
+test("summarizes a blocked promotion", () => {
+  assert.equal(promotionSummary([{ name: "review", status: "passed" }]), "blocked");
 });
