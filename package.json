@@ -1,0 +1,16 @@
+{
+  "name": "release-guard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "test": "node --test --import tsx test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "tsx": "4.23.11",
+    "typescript": "5.8.3"
+  }
+}
