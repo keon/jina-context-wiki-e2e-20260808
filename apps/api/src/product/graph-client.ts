@@ -2,6 +2,10 @@ import { ApiError } from "./errors.js";
 import type { GraphConfig } from "./config.js";
 import type { DashboardWorkOverview } from "./board-dashboard.js";
 import {
+  createDashboardWikiSourceResolver,
+  type DashboardWikiSourceResolver,
+} from "./dashboard-wiki-source.js";
+import {
   contextGraphDetail,
   contextQueryResult,
   generationToSummary,
@@ -313,6 +317,8 @@ export class GraphApiClient {
     private readonly config: GraphConfig | undefined,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
+    private readonly wikiSourceResolver: DashboardWikiSourceResolver =
+      createDashboardWikiSourceResolver(),
   ) {}
 
   /** The bearer to present for this tenant, and whether it was delegated. */
@@ -544,6 +550,7 @@ export class GraphApiClient {
           headers: {
             authorization: `Bearer ${config.internalToken}`,
             "x-jina-tenant-id": tenantId,
+            "x-jina-principal-id": tenantPrincipal(tenantId),
             "content-type": "application/json",
           },
           body: JSON.stringify({
@@ -596,6 +603,7 @@ export class GraphApiClient {
           headers: {
             authorization: `Bearer ${config.internalToken}`,
             "x-jina-tenant-id": tenantId,
+            "x-jina-principal-id": tenantPrincipal(tenantId),
           },
         },
       );
@@ -685,10 +693,18 @@ export class GraphApiClient {
         candidate.name.toLowerCase() === input.repository.toLowerCase(),
     );
     if (!repository) throw new ApiError(403, "repository access denied");
+    const source = await this.wikiSourceResolver({
+      installationId: requiredInstallationId(context),
+      repository: repository.name,
+      defaultBranch: repository.defaultBranch,
+      ...(input.ref?.trim() ? { ref: input.ref.trim() } : {}),
+      ...(input.commitSha?.trim()
+        ? { commitSha: input.commitSha.trim() }
+        : {}),
+    });
     return this.startBuild(context, {
       repository: repository.name,
-      ref: input.ref?.trim() || repository.defaultBranch,
-      ...(input.commitSha?.trim() ? { commitSha: input.commitSha.trim() } : {}),
+      ...source,
       requestKey: input.requestKey,
     });
   }
@@ -727,6 +743,9 @@ export class GraphApiClient {
       repository: string;
       ref: string;
       commitSha?: string;
+      scopeKind?: "branch" | "pull_request" | "commit";
+      pullRequest?: number;
+      baseCommitSha?: string;
       requestKey: string;
     },
     path = "/wiki/build",
@@ -749,6 +768,11 @@ export class GraphApiClient {
         repository: input.repository,
         ref: input.ref,
         ...(input.commitSha ? { commitSha: input.commitSha } : {}),
+        ...(input.scopeKind ? { scopeKind: input.scopeKind } : {}),
+        ...(input.pullRequest ? { pullRequest: input.pullRequest } : {}),
+        ...(input.baseCommitSha
+          ? { baseCommitSha: input.baseCommitSha }
+          : {}),
         githubInstallationId,
         requestKey: input.requestKey,
       },
