@@ -30,6 +30,7 @@ import {
   ReviewDispatchProvenanceError,
   resolveIntegrationKeysForRun,
   ReviewRunNotFoundError,
+  type CreateReviewRunInput,
   type InstallationRepository,
   type InstallationLifecycle,
   type ModelSettings,
@@ -70,6 +71,7 @@ export async function prepareReview(c: Context, config: AppConfig, billing?: Bil
       deliveryId: stringAt(payload, ["delivery_id"]),
       sourceEvent: stringAt(payload, ["source_event"]),
       triggerSource: stringAt(payload, ["trigger"]),
+      ...reviewCommandFieldsFromPayload(payload),
       orchestrationPayload: payload,
       installationId,
       account: {
@@ -141,6 +143,18 @@ export async function prepareReview(c: Context, config: AppConfig, billing?: Bil
   console.info("prepared_review_run", { review_run_id: reviewRunId, trigger_run_id: triggerRunId });
 
   return c.json({ ok: true, review_run_id: reviewRunId, model_settings: modelSettings, message: "review run accepted" });
+}
+
+/** Preserve authorized manual-review identity and guidance on the durable product run. */
+export function reviewCommandFieldsFromPayload(
+  payload: Record<string, unknown>,
+): Partial<Pick<CreateReviewRunInput, "manualCommandTag" | "reviewInstructions">> {
+  const manualCommandTag = stringAt(payload, ["manual_command_tag"]);
+  const reviewInstructions = stringAt(payload, ["review_instructions"]);
+  return {
+    ...(manualCommandTag ? { manualCommandTag } : {}),
+    ...(reviewInstructions ? { reviewInstructions } : {}),
+  };
 }
 
 export async function reconcileReviewTerminal(

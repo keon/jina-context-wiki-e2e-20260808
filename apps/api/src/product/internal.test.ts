@@ -10,6 +10,7 @@ import {
   keySourceDrifted,
   parseUsageRequestBody,
   resolveIntegrations,
+  reviewCommandFieldsFromPayload,
   reviewTerminalProductStatus,
   runPrepareBillingGate,
   settleIfTerminalRun,
@@ -39,6 +40,20 @@ function internalContext(body: unknown, token = "internal-token"): { c: Context;
 }
 
 const internalConfig = { internalApiToken: "internal-token" } as unknown as AppConfig;
+
+test("prepare preserves manual command identity and authorized review guidance", () => {
+  assert.deepEqual(
+    reviewCommandFieldsFromPayload({
+      manual_command_tag: "manual-command:1000:issue_comment:42",
+      review_instructions: "Focus on authorization boundaries.",
+    }),
+    {
+      manualCommandTag: "manual-command:1000:issue_comment:42",
+      reviewInstructions: "Focus on authorization boundaries.",
+    },
+  );
+  assert.deepEqual(reviewCommandFieldsFromPayload({}), {});
+});
 
 /* --------------------------------------- installation customer provisioning --- */
 
