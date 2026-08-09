@@ -54,6 +54,22 @@ revoke all on all sequences in schema jina_context from public;
 revoke execute on all functions in schema jina_context from public;
 
 grant usage on schema jina_context to ${CONTEXT_ROLES.join(",")};
+-- Wiki/PageIndex activation takes the same advisory lock as Board mutations
+-- and must attest the exact active Trigger authority before publication. Keep
+-- that cross-schema capability read-only and unavailable to query/token/quota
+-- roles. Some isolated Context tests initialize without the runtime schema, so
+-- install the grant conditionally; production migration always creates runtime
+-- state before applying these roles.
+do $runtime_authority$
+begin
+  if to_regclass('jina_runtime.api_state') is not null then
+    execute 'revoke all privileges on schema jina_runtime from ${CONTEXT_ROLES.join(",")}';
+    execute 'revoke all privileges on jina_runtime.api_state from ${CONTEXT_ROLES.join(",")}';
+    execute 'grant usage on schema jina_runtime to jina_context_tenant_admin,jina_context_admin';
+    execute 'grant select on jina_runtime.api_state to jina_context_tenant_admin,jina_context_admin';
+  end if;
+end
+$runtime_authority$;
 -- api_tokens lives in public (promoted by product migration 0038). The token
 -- capability must not depend on the default PUBLIC usage grant, which hardened
 -- databases (and test databases that recreate the schema) revoke.

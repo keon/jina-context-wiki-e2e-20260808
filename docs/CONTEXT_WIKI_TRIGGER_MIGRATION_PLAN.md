@@ -451,6 +451,12 @@ The bridge follows the same safety principle as an external payment or deploymen
 13. Trigger does not invoke `onFailure` for `CRASHED`, `SYSTEM_FAILURE`, `CANCELED`, `EXPIRED`, or `TIMED_OUT`. A separate five-minute `scheduled-wiki-reconciliation` task pages at most 100 active claimed parents per API page, retrieves exact Trigger run status, and uses a freshly minted run-bound grant to complete or fail them. It never polls in the Board worker.
 14. Both terminal callbacks check the exact activated storage receipt before recording failure. An activation-won race therefore converges to Board `done`; a terminal report can never replace an already published release with failure.
 
+PageIndex activation takes the Board API-state advisory lock and then reads the
+authority snapshot through a narrowly scoped cross-schema `SELECT` grant for the
+Context tenant-admin roles. It does not take a row-write lock and those roles receive
+no `INSERT` or `UPDATE` capability on `jina_runtime.api_state`; query, token, quota,
+and issue-publication roles cannot read the Board snapshot.
+
 Nonce claims are one-use capabilities scoped to the exact Board task, attempt, provider effect, and request digest. Cancellation before claim retires the pending authority and nonce; a later parent claim is rejected. A high-level operator retry creates a new Board task, request digest, attempt, nonce, and Trigger parent rather than reopening a terminal task.
 
 Cancellation and supersession record intent under the same Board advisory lock used by publication fencing. If intent wins, future domain writes reject. If activation wins first, the Board reconciles to `done`.
