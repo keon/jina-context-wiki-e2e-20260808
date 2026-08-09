@@ -104,12 +104,14 @@ export interface ProductAppDependencies {
   readonly githubWebhookInboxRepository?: GithubWebhookInboxRepository;
   readonly fetch?: typeof fetch;
   readonly githubAppJwtFactory?: () => string;
+  readonly githubWebhookHandler?: typeof handleGithubWebhook;
 }
 
 export function createApp(config: AppConfig, dependencies: ProductAppDependencies = {}): Hono {
   const boardWorkflowAdmitter = new ProductBoardWorkflowAdmitter();
   const billing = createBillingService(config);
-  const graphs = new GraphApiClient(config.graph);
+  const graphs = new GraphApiClient(config.graph, dependencies.fetch);
+  const githubWebhookHandler = dependencies.githubWebhookHandler ?? handleGithubWebhook;
   const githubWebhookInboxRepository = config.githubWebhookInbox
     ? dependencies.githubWebhookInboxRepository ?? new PostgresGithubWebhookInboxRepository()
     : undefined;
@@ -1258,13 +1260,6 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     rawBody: Buffer;
   }) => {
     const rawBody = input.rawBody.toString("utf8");
-    const response = await handleGithubWebhook({
-      config,
-      board: boardWorkflowAdmitter,
-      headers: input.headers,
-      rawBody,
-      billing,
-    });
     try {
       await graphs.relayGithubContext(input.headers, rawBody);
     } catch (error) {
@@ -1276,7 +1271,18 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
       // In direct local mode the non-2xx response still allows manual redelivery.
       throw new ApiError(424, "Context event relay failed");
     }
-    return response;
+    // Context admission is independent of the review workflow. Relay the exact
+    // signed delivery first so billing, model-provider, or review-dispatch
+    // failures cannot suppress an otherwise valid asynchronous wiki build. If
+    // review admission then fails, the durable inbox retries the whole handler;
+    // Context's delivery idempotency makes that replay converge safely.
+    return githubWebhookHandler({
+      config,
+      board: boardWorkflowAdmitter,
+      headers: input.headers,
+      rawBody,
+      billing,
+    });
   };
 
   app.post("/webhooks/github", async (c) => {

@@ -259,6 +259,9 @@ const server = createApiServer({
   contextQuotaService,
   ...(sharedIdentityResolver ? { sharedIdentityResolver } : {}),
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
+  ...(process.env.JINA_GRAPH_INTERNAL_TOKEN
+    ? { productGraphInternalToken: process.env.JINA_GRAPH_INTERNAL_TOKEN }
+    : {}),
   requireWorkerReleaseGate,
   ...(process.env.JINA_INTERNAL_PRINCIPAL_ID ? { internalApiPrincipalId: process.env.JINA_INTERNAL_PRINCIPAL_ID } : {}),
   ...(process.env.CONTEXT_API_TOKEN ? { contextApiToken: process.env.CONTEXT_API_TOKEN } : {}),

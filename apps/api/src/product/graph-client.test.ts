@@ -318,7 +318,23 @@ test("a dashboard index builds the repository's default branch", async () => {
       },
     }),
   );
-  const client = new GraphApiClient(CONFIG, fetchImpl);
+  const client = new GraphApiClient(
+    CONFIG,
+    fetchImpl,
+    Date.now,
+    async (input) => {
+      assert.deepEqual(input, {
+        installationId: 42,
+        repository: "omxyz/a",
+        defaultBranch: "main",
+      });
+      return {
+        scopeKind: "branch",
+        ref: "refs/heads/main",
+        commitSha: "c".repeat(40),
+      };
+    },
+  );
 
   const result = await client.buildDashboardGraph(CONTEXT, {
     repository: "omxyz/a",
@@ -330,7 +346,9 @@ test("a dashboard index builds the repository's default branch", async () => {
   assert.deepEqual(bodies, [
     {
       repository: "omxyz/a",
-      ref: "main",
+      ref: "refs/heads/main",
+      commitSha: "c".repeat(40),
+      scopeKind: "branch",
       githubInstallationId: 42,
       requestKey: "dashboard-key",
     },
@@ -360,7 +378,20 @@ test("a dashboard index can target an explicit branch and commit", async () => {
       },
     }),
   );
-  const client = new GraphApiClient(CONFIG, fetchImpl);
+  const client = new GraphApiClient(
+    CONFIG,
+    fetchImpl,
+    Date.now,
+    async (input) => {
+      assert.equal(input.ref, "release/next");
+      assert.equal(input.commitSha, commitSha);
+      return {
+        scopeKind: "branch",
+        ref: "refs/heads/release/next",
+        commitSha,
+      };
+    },
+  );
 
   await client.buildDashboardGraph(CONTEXT, {
     repository: "omxyz/a",
@@ -373,10 +404,59 @@ test("a dashboard index can target an explicit branch and commit", async () => {
   assert.deepEqual(bodies, [
     {
       repository: "omxyz/a",
-      ref: "release/next",
+      ref: "refs/heads/release/next",
       commitSha,
+      scopeKind: "branch",
       githubInstallationId: 42,
       requestKey: "dashboard-branch-key",
+    },
+  ]);
+});
+
+test("a dashboard pull-request build sends exact head and base identity", async () => {
+  const commitSha = "d".repeat(40);
+  const baseCommitSha = "b".repeat(40);
+  const { fetchImpl, bodies } = recording(async () =>
+    Response.json({
+      build: {
+        id: "cb_pr",
+        status: "active",
+        repository: "omxyz/a",
+        ref: "refs/pull/18/head",
+        commitSha,
+      },
+    }),
+  );
+  const client = new GraphApiClient(
+    CONFIG,
+    fetchImpl,
+    Date.now,
+    async () => ({
+      scopeKind: "pull_request",
+      ref: "refs/pull/18/head",
+      pullRequest: 18,
+      commitSha,
+      baseCommitSha,
+    }),
+  );
+
+  await client.buildDashboardGraph(CONTEXT, {
+    repository: "omxyz/a",
+    ref: "refs/pull/18/head",
+    requestKey: "dashboard-pr-key",
+    metadata: { source: "jina-dashboard" },
+  });
+
+  assert.deepEqual(bodies, [
+    {
+      repository: "omxyz/a",
+      ref: "refs/pull/18/head",
+      commitSha,
+      scopeKind: "pull_request",
+      pullRequest: 18,
+      baseCommitSha,
+      githubInstallationId: 42,
+      requestKey: "dashboard-pr-key",
     },
   ]);
 });
@@ -1051,7 +1131,16 @@ test("a delegated token carries context:build, so graph builds are not refused",
     buildAuth = new Headers(init?.headers).get("authorization") ?? undefined;
     return Response.json({ build: { id: "cb_1" } }, { status: 202 });
   }) as typeof fetch;
-  const client = new GraphApiClient(DELEGATING_CONFIG, fetchImpl);
+  const client = new GraphApiClient(
+    DELEGATING_CONFIG,
+    fetchImpl,
+    Date.now,
+    async () => ({
+      scopeKind: "branch",
+      ref: "refs/heads/main",
+      commitSha: "a".repeat(40),
+    }),
+  );
 
   await client.buildDashboardGraph(CONTEXT, {
     repository: "omxyz/a",

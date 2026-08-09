@@ -268,6 +268,12 @@ export interface ApiServerConfig {
   readonly sharedIdentityResolver?: SharedIdentityResolver;
   readonly internalApiToken?: string;
   /**
+   * Product API -> Context bridge credential. Unlike the operator credential,
+   * this bearer is accepted only on the small route union used by
+   * `GraphApiClient`, and every request must bind itself to a tenant principal.
+   */
+  readonly productGraphInternalToken?: string;
+  /**
    * Production-only generation fence. When enabled, every worker lease
    * mutation must carry the exact release credential and Cloud Run revision
    * selected in jina_runtime.release_control.
@@ -609,13 +615,26 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   // A static secret shaped like an issued token would be shadowed by the token
   // branch and could never authenticate, taking the deployment offline. Refuse at
   // construction rather than at the first request.
-  for (const staticToken of [config.internalApiToken, config.contextApiToken, config.contextWikiTriggerServiceToken]) {
+  for (const staticToken of [
+    config.internalApiToken,
+    config.productGraphInternalToken,
+    config.contextApiToken,
+    config.contextWikiTriggerServiceToken
+  ]) {
     if (staticToken?.startsWith("jina_atk_")) {
       throw new Error("static API tokens must not use the jina_atk_ prefix reserved for issued tokens");
     }
   }
   if (config.internalApiToken && config.contextApiToken && config.internalApiToken === config.contextApiToken) {
     throw new Error("internal and Context API tokens must be distinct");
+  }
+  if (
+    config.productGraphInternalToken &&
+    (config.productGraphInternalToken === config.internalApiToken ||
+      config.productGraphInternalToken === config.contextApiToken ||
+      config.productGraphInternalToken === config.contextWikiTriggerServiceToken)
+  ) {
+    throw new Error("product graph internal token must be distinct from other static API tokens");
   }
   if (
     config.contextWikiTriggerServiceToken &&
@@ -1014,6 +1033,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     const isInternal =
       hasInternalApiCredential(request, config) ||
+      hasProductGraphInternalCredential(request, config, url.pathname) ||
       principal.principalId === "svc:context-wiki-trigger" ||
       principal.principalId === "svc:context-wiki-execution";
     if (url.pathname.startsWith("/internal/") && !isInternal && url.pathname !== "/internal/context/access/sync") {
@@ -6412,7 +6432,16 @@ async function authenticatedPrincipal(
     constantTimeEquals(authorization, `Bearer ${config.contextApiToken}`) &&
     isContextCredentialRoute(pathname, request.method ?? "GET")
   );
-  if (!internal && !context) return undefined;
+  const productGraphInternal = hasProductGraphInternalCredential(request, config, pathname);
+  if (!internal && !context && !productGraphInternal) return undefined;
+  if (productGraphInternal && !internal) {
+    const tenantHeader = firstHeader(request.headers["x-jina-tenant-id"]);
+    const principalHeader = firstHeader(request.headers["x-jina-principal-id"]);
+    const tenantId = contextCredentialTenantId(tenantHeader, config);
+    const principalId = normalizedForwardedPrincipal(principalHeader);
+    if (!tenantId || principalId !== `tenant:${tenantId.toLowerCase()}`) return undefined;
+    return { tenantId, principalId, forwarded: true };
+  }
   if (internal && pathname === "/internal/context/access/sync") {
     const tenantId = contextCredentialTenantId(config.contextApiTenantId, config);
     const principalId = normalizedForwardedPrincipal(config.contextApiPrincipalId);
@@ -6501,6 +6530,37 @@ function hasInternalApiCredential(request: IncomingMessage, config: ApiServerCon
     config.internalApiToken &&
     authorization !== undefined &&
     constantTimeEquals(authorization, `Bearer ${config.internalApiToken}`)
+  );
+}
+
+/**
+ * The product web tier needs a few tenant-administrator operations, but does
+ * not need the operator/worker surface behind `INTERNAL_API_TOKEN`. Keep this
+ * method/path union closed by default so newly-added internal routes never
+ * silently become reachable by the bridge credential.
+ */
+function hasProductGraphInternalCredential(
+  request: IncomingMessage,
+  config: ApiServerConfig,
+  pathname: string
+): boolean {
+  const authorization = firstHeader(request.headers.authorization);
+  return Boolean(
+    config.productGraphInternalToken &&
+    authorization !== undefined &&
+    constantTimeEquals(authorization, `Bearer ${config.productGraphInternalToken}`) &&
+    isProductGraphInternalRoute(request.method ?? "GET", pathname)
+  );
+}
+
+function isProductGraphInternalRoute(method: string, pathname: string): boolean {
+  if (method === "GET") return pathname === "/overview" || pathname === "/internal/context/tokens";
+  if (method !== "POST") return false;
+  return (
+    pathname === "/internal/context/tokens" ||
+    pathname === "/internal/context/review-access" ||
+    /^\/internal\/context\/tokens\/[^/]+\/revoke$/.test(pathname) ||
+    /^\/internal\/context\/builds\/[^/]+\/cancel$/.test(pathname)
   );
 }
 

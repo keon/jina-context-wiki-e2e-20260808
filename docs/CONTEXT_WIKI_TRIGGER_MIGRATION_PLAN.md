@@ -159,6 +159,7 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     Caller->>API: Request asynchronous wiki build
+    Note over Caller,API: Signed webhook supplies immutable head/base SHA; dashboard resolves mutable ref through its repository-scoped GitHub App token
     API->>Board: Admit one build wiki task
     Board-->>Bridge: Lease run wiki build
     Bridge->>Board: Commit pending authority and nonce digest
@@ -413,7 +414,9 @@ interface WikiTriggerRequestV1 {
 }
 ```
 
-The source commit is resolved before Board creation. `ref` identifies a publication scope; mutable branches and pull requests use canonical refs, while a direct commit uses immutable `refs/commits/{sha}`. It is never the mutable source checkout input. `refSequence` is required for branch/PR scope and forbidden for commit scope. Credentials, page bodies, repository archives, prompts, and audit reports never enter Board metadata.
+The source commit is resolved before Board creation. A signed GitHub webhook contributes its immutable head SHA and, for a pull request, its immutable base SHA. A dashboard request that starts from a mutable branch or `refs/pull/{number}/head` first resolves that ref with a repository-scoped, read-only GitHub App installation token, then sends the canonical scope plus immutable commit identity to admission. `ref` identifies a publication scope; mutable branches and pull requests use canonical refs, while a direct commit uses immutable `refs/commits/{sha}`. It is never the mutable source checkout input. `refSequence` is required for branch/PR scope and forbidden for commit scope. Credentials, page bodies, repository archives, prompts, and audit reports never enter Board metadata.
+
+The product webhook handler relays the exact raw, signed delivery to Context before invoking the independent review workflow. Context verifies the provider signature again. Review billing, model configuration, or dispatch failures therefore cannot suppress wiki admission; a durable webhook retry safely repeats the same Context delivery ID, which converges through Context admission idempotency.
 
 `improvement` is required exactly when `generationReason = 'daily_audit_fix'` and forbidden otherwise. Its artifact must be the durable, tenant/repository-scoped report produced by `auditId`; its object generation and SHA-256 are part of the canonical request digest. The generator treats the report as untrusted evidence and verifies each finding against the audited release and source snapshot.
 
@@ -1524,6 +1527,7 @@ Use one admission mode:
 JINA_WIKI_PIPELINE_MODE=legacy-board|trigger-allowlist|trigger
 JINA_WIKI_TRIGGER_ALLOWLIST=<tenant/repository pairs>
 JINA_WIKI_ARTIFACT_STORE=gcs|postgres
+JINA_GRAPH_INTERNAL_TOKEN=<product-to-Context bridge credential>
 ```
 
 Persist the selected owner and pipeline version at admission so a later flag change cannot transfer an active/deferred request between orchestrators.
@@ -1548,7 +1552,7 @@ JINA_WIKI_DIAGRAM_POLICY_VERSION
 JINA_WIKI_DEFAULT_LOCALE=en
 ```
 
-`JINA_CONTEXT_TRIGGER_API_URL`/secret/access token are API-side Trigger control-plane settings used to dispatch and inspect runs. `JINA_CONTEXT_INTERNAL_API_URL` and the bootstrap service token are Trigger-side settings used only for claim/grant exchange and scoped internal calls. `JINA_WIKI_ARTIFACT_STORE` is API-only, accepts exactly `gcs` or `postgres`, and fails closed when the selected backend is unavailable. Staging sets `postgres`; production currently uses the `gcs` default until a separately reviewed migration. Context Trigger deployment intentionally has no `DATABASE_URL`, Cloud SQL credential, GCS service-account key, or bucket-wide storage role.
+`JINA_CONTEXT_TRIGGER_API_URL`/secret/access token are API-side Trigger control-plane settings used to dispatch and inspect runs. `JINA_CONTEXT_INTERNAL_API_URL` and the bootstrap service token are Trigger-side settings used only for claim/grant exchange and scoped internal calls. The distinct `JINA_GRAPH_INTERNAL_TOKEN` authenticates the co-located product API only on the exact tenant-bound Context routes it consumes (overview, token management, review access, and build cancellation); it is never promoted to the operator or worker credential. `JINA_WIKI_ARTIFACT_STORE` is API-only, accepts exactly `gcs` or `postgres`, and fails closed when the selected backend is unavailable. Staging sets `postgres`; production currently uses the `gcs` default until a separately reviewed migration. Context Trigger deployment intentionally has no `DATABASE_URL`, Cloud SQL credential, GCS service-account key, or bucket-wide storage role.
 
 ## 16. Implementation sequence
 

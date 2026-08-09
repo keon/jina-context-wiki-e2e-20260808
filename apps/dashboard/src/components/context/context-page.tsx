@@ -187,8 +187,9 @@ export function ContextPage({ view = "wiki" }: { readonly view?: ContextView }) 
               ? { repository, ref }
               : {
                   repository,
-                  ref,
-                  ...(wikiVersion?.kind === "commit" && release?.commitSha ? { commitSha: release.commitSha } : {})
+                  ...(wikiVersion?.kind === "commit" && release?.commitSha
+                    ? { ref: `refs/commits/${release.commitSha}`, commitSha: release.commitSha }
+                    : { ref })
                 }
           )
         }
