@@ -36,6 +36,9 @@ export async function admitBoardReview(
 ): Promise<BoardReviewAdmissionResult> {
   return withTransaction(async (client) => {
     const scope = await resolveReviewScopeWithClient(client, arrival.input);
+    const repositoryId = requiredNumber(arrival.input.repository.githubRepoId, "repository.githubRepoId");
+    const pullRequestNumber = requiredNumber(arrival.input.pullRequest.number, "pullRequest.number");
+    await lockReviewScopeWithClient(client, scope.tenantId, repositoryId, pullRequestNumber);
     await lockReviewRequestKeyWithClient(client, scope.tenantId, scope.idempotencyKey);
     const existing = await repository.findAdmissionByDedupe(client, {
       tenantId: scope.tenantId,
@@ -47,7 +50,19 @@ export async function admitBoardReview(
       );
     }
     if (existing) return replayExistingReviewAdmission(client, scope, existing);
-    return admitBoardReviewWithClient(client, arrival, scope, repository);
+    const admitted = await admitBoardReviewWithClient(client, arrival, scope, repository);
+    if (!admitted.replayed && arrival.input.manualCommandTag) {
+      await supersedeOlderReviewWorkflowsWithClient(client, {
+        tenantId: scope.tenantId,
+        repositoryId,
+        pullRequestNumber,
+        headSha: requiredText(arrival.input.pullRequest.headSha, "pullRequest.headSha"),
+        workflowId: admitted.workflowId,
+        commandTag: arrival.input.manualCommandTag,
+        actorId: arrival.input.deliveryId ?? "manual-review",
+      });
+    }
+    return admitted;
   });
 }
 
@@ -187,6 +202,9 @@ export function buildReviewBoardAdmission(input: {
       repository: input.arrival.input.repository.fullName,
       pull_request_number: pullRequestNumber,
       head_sha: headSha,
+      ...(input.arrival.input.manualCommandTag
+        ? { manual_command_tag: input.arrival.input.manualCommandTag }
+        : {}),
       request_identity: requestIdentity,
       request_digest: requestDigest,
     },
@@ -210,6 +228,186 @@ export function buildReviewBoardAdmission(input: {
     actorType: "github",
     actorId: input.arrival.input.deliveryId ?? "manual-review",
   };
+}
+
+interface ActiveReviewWorkflowRow {
+  readonly id: string;
+  readonly trace_id: string;
+  readonly manual_command_tag: string | null;
+  readonly task_id: string;
+}
+
+async function lockReviewScopeWithClient(
+  client: pg.PoolClient,
+  tenantId: string,
+  repositoryId: number,
+  pullRequestNumber: number,
+): Promise<void> {
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+    `review-scope:${tenantId}:${repositoryId}:${pullRequestNumber}`,
+  ]);
+}
+
+/**
+ * A manual command is authoritative for its current PR head. It supersedes an
+ * automatic review and every older manual command before any more Board work
+ * can be claimed. Out-of-order delivery is resolved from the signed command
+ * timestamp/id tag rather than database arrival order.
+ */
+async function supersedeOlderReviewWorkflowsWithClient(
+  client: pg.PoolClient,
+  input: {
+    readonly tenantId: string;
+    readonly repositoryId: number;
+    readonly pullRequestNumber: number;
+    readonly headSha: string;
+    readonly workflowId: string;
+    readonly commandTag: string;
+    readonly actorId: string;
+  },
+): Promise<void> {
+  const active = await client.query<ActiveReviewWorkflowRow>(
+    `select workflow.id,workflow.trace_id,
+            workflow.metadata->>'manual_command_tag' manual_command_tag,
+            task.id task_id
+       from jina_runtime.board_workflows workflow
+       join jina_runtime.board_tasks task on task.workflow_id=workflow.id
+      where workflow.tenant_id=$1
+        and workflow.workflow_type='pr_review'
+        and workflow.pipeline_version=$2
+        and workflow.status in ('queued','running','superseding')
+        and workflow.metadata->>'repository_id'=$3
+        and workflow.metadata->>'pull_request_number'=$4
+        and workflow.metadata->>'head_sha'=$5
+        and task.task_type='review'
+        and task.topic='run-review'
+      order by workflow.created_at,workflow.id
+      for update of workflow,task`,
+    [
+      input.tenantId,
+      REVIEW_BOARD_PIPELINE_VERSION,
+      String(input.repositoryId),
+      String(input.pullRequestNumber),
+      input.headSha,
+    ],
+  );
+  const current = active.rows.find((workflow) => workflow.id === input.workflowId);
+  if (!current) throw new Error(`manual review workflow ${input.workflowId} is not active after admission`);
+
+  const newestManual = active.rows
+    .filter((workflow): workflow is ActiveReviewWorkflowRow & { manual_command_tag: string } =>
+      Boolean(workflow.manual_command_tag),
+    )
+    .sort((left, right) => compareManualCommandTags(left.manual_command_tag, right.manual_command_tag))
+    .at(-1);
+  const winner = newestManual && compareManualCommandTags(newestManual.manual_command_tag, input.commandTag) > 0
+    ? newestManual
+    : current;
+  const winnerTag = winner.manual_command_tag ?? input.commandTag;
+  const winnerCommentId = manualCommandIdentity(winnerTag).commentId;
+  const targets = active.rows.filter((workflow) => workflow.id !== winner.id);
+
+  for (const target of targets) {
+    const targetIdentity = target.manual_command_tag
+      ? manualCommandIdentity(target.manual_command_tag)
+      : undefined;
+    const reason = targetIdentity
+      ? `a newer @usejina comment (${winnerCommentId}) superseded comment ${targetIdentity.commentId}`
+      : `@usejina comment ${winnerCommentId} superseded the automatic review for this pull request head`;
+    const supersession = {
+      schema_version: 1,
+      reason,
+      superseded_by_workflow_id: winner.id,
+      superseded_by_manual_command_tag: winnerTag,
+      newer_comment_id: winnerCommentId,
+      ...(targetIdentity ? { requested_comment_id: targetIdentity.commentId } : {}),
+    };
+
+    await client.query(
+      `update jina_runtime.board_attempts
+          set status='fenced',finished_at=clock_timestamp(),failure_category='superseded',diagnostic=$2
+        where workflow_id=$1 and status='leased'`,
+      [target.id, reason],
+    );
+    await client.query(
+      `update jina_runtime.board_tasks
+          set status='superseded',current_attempt_id=null,available_at=null,
+              completed_at=coalesce(completed_at,clock_timestamp()),updated_at=clock_timestamp()
+        where workflow_id=$1
+          and status not in ('succeeded','failed','canceled','superseded')`,
+      [target.id],
+    );
+    await client.query(
+      `update jina_runtime.board_workflows
+          set status='superseded',completed_at=coalesce(completed_at,clock_timestamp()),
+              updated_at=clock_timestamp(),metadata=metadata || $2::jsonb
+        where id=$1 and status in ('queued','running','superseding')`,
+      [target.id, JSON.stringify(supersession)],
+    );
+    const supersededRuns = await client.query<{ id: string; trigger_run_id: string | null }>(
+      `update review_runs
+          set status='superseded',bot_status='superseded',finished_at=coalesce(finished_at,now()),updated_at=now()
+        where board_workflow_id=$1
+          and status not in ('completed','completed_superseded','failed','superseded','cancelled','canceled','blocked_insufficient_credits')
+        returning id,trigger_run_id`,
+      [target.id],
+    );
+    for (const review of supersededRuns.rows) {
+      await client.query(
+        `insert into review_run_events (review_run_id,status,payload_json,trigger_run_id)
+         values ($1,'review_superseded',$2::jsonb,$3)`,
+        [review.id, JSON.stringify(supersession), review.trigger_run_id],
+      );
+    }
+    await client.query(
+      `insert into jina_runtime.board_events
+         (tenant_id,workflow_id,task_id,event_type,source_event_id,actor_type,actor_id,trace_id,payload)
+       values ($1,$2,$3,'task.superseded',$4,'github',$5,$6,$7::jsonb)
+       on conflict (workflow_id,source_event_id) where source_event_id is not null do nothing`,
+      [
+        input.tenantId,
+        target.id,
+        target.task_id,
+        `review-superseded:${winner.id}:task:${target.task_id}`,
+        input.actorId,
+        target.trace_id,
+        JSON.stringify(supersession),
+      ],
+    );
+    await client.query(
+      `insert into jina_runtime.board_events
+         (tenant_id,workflow_id,event_type,source_event_id,actor_type,actor_id,trace_id,payload)
+       values ($1,$2,'workflow.superseded',$3,'github',$4,$5,$6::jsonb)
+       on conflict (workflow_id,source_event_id) where source_event_id is not null do nothing`,
+      [
+        input.tenantId,
+        target.id,
+        `review-superseded:${winner.id}:workflow`,
+        input.actorId,
+        target.trace_id,
+        JSON.stringify(supersession),
+      ],
+    );
+  }
+}
+
+function manualCommandIdentity(tag: string): { readonly requestedAtMs: number; readonly event: string; readonly commentId: number } {
+  const match = /^manual-command:(\d+):(issue_comment|pull_request_review_comment):(\d+)$/.exec(tag);
+  if (!match) throw new Error("manual command tag is invalid");
+  const requestedAtMs = Number(match[1]);
+  const commentId = Number(match[3]);
+  if (!Number.isSafeInteger(requestedAtMs) || !Number.isSafeInteger(commentId)) {
+    throw new Error("manual command tag contains an unsafe integer");
+  }
+  return { requestedAtMs, event: match[2], commentId };
+}
+
+export function compareManualCommandTags(leftTag: string, rightTag: string): number {
+  const left = manualCommandIdentity(leftTag);
+  const right = manualCommandIdentity(rightTag);
+  return left.requestedAtMs - right.requestedAtMs ||
+    left.event.localeCompare(right.event) ||
+    left.commentId - right.commentId;
 }
 
 class ReviewOrchestratorOwnershipError extends Error {

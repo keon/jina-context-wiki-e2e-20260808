@@ -46,6 +46,7 @@ import {
   reconcileReviewTerminal,
   recordReviewEvent,
   recordReviewUsage,
+  reviewSupersession,
   resolveIntegrations,
   resolveContextExecutionProfile,
   retryBilling,
@@ -1368,6 +1369,7 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
     }
     return c.json(await listManualReviewRuns(scopeTag));
   });
+  app.post("/internal/reviews/:reviewRunId/supersession", (c) => reviewSupersession(c, config));
   app.post("/internal/reviews/:reviewRunId/events", (c) => recordReviewEvent(c, config));
   app.post("/internal/reviews/:reviewRunId/complete", (c) => completeReview(c, config, billing));
   app.post("/internal/reviews/:reviewRunId/usage", (c) => recordReviewUsage(c, config, billing));

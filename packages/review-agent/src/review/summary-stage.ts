@@ -46,6 +46,7 @@ export async function runReviewSummaryStage(
       repository: payload.repository,
       pullRequestNumber: payload.pull_request_number,
       headSha: payload.head_sha,
+      reviewRunId: payload.review_run_id,
       manual: manualReviewSupersession(payload)
     });
     if (earlySuperseded) {
@@ -120,6 +121,7 @@ export async function runReviewSummaryStage(
       repository: payload.repository,
       pullRequestNumber: payload.pull_request_number,
       headSha: payload.head_sha,
+      reviewRunId: payload.review_run_id,
       manual: manualReviewSupersession(payload)
     });
     if (publishSuperseded) {

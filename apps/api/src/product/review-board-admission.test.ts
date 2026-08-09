@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   buildReviewBoardAdmission,
+  compareManualCommandTags,
   REVIEW_BOARD_PIPELINE_VERSION,
 } from "./review-board-admission.js";
 
@@ -96,6 +97,7 @@ test("manual v2 Board identity stays comment-stable while Trigger concurrency re
         deliveryId: "manual-delivery",
         sourceEvent: "issue_comment",
         triggerSource: "manual",
+        manualCommandTag: "manual-command:1:issue_comment:9001",
         installationId: 456,
         repository: { githubRepoId: 123, fullName: "acme/example" },
         pullRequest: { number: 42, headSha: "new-head-sha" },
@@ -110,8 +112,25 @@ test("manual v2 Board identity stays comment-stable while Trigger concurrency re
 
   assert.equal(admission.subjectId, "123:42:issue_comment:9001");
   assert.equal(admission.concurrencyKey, idempotencyKey);
+  assert.equal(admission.metadata?.manual_command_tag, "manual-command:1:issue_comment:9001");
   assert.equal(
     (admission.tasks[0].metadata?.trigger_options as { concurrencyKey?: string }).concurrencyKey,
     triggerOptions.concurrencyKey,
   );
+});
+
+test("manual command order uses webhook time and comment identity", () => {
+  assert.ok(
+    compareManualCommandTags(
+      "manual-command:2000:issue_comment:9002",
+      "manual-command:1000:issue_comment:9999",
+    ) > 0,
+  );
+  assert.ok(
+    compareManualCommandTags(
+      "manual-command:2000:pull_request_review_comment:9003",
+      "manual-command:2000:issue_comment:9002",
+    ) > 0,
+  );
+  assert.throws(() => compareManualCommandTags("not-a-command", "manual-command:1:issue_comment:1"));
 });

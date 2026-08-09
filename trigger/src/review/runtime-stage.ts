@@ -177,6 +177,7 @@ export async function runReviewRuntimeStage(
       repository: payload.repository,
       pullRequestNumber: payload.pull_request_number,
       headSha: payload.head_sha,
+      reviewRunId: payload.review_run_id,
       manual: manualReviewSupersession(payload)
     });
     if (earlySuperseded) {
@@ -500,6 +501,7 @@ export async function runReviewRuntimeStage(
       repository: payload.repository,
       pullRequestNumber: payload.pull_request_number,
       headSha: payload.head_sha,
+      reviewRunId: payload.review_run_id,
       manual: manualReviewSupersession(payload)
     });
     if (superseded) {
@@ -922,6 +924,7 @@ async function publishSuperseded(input: {
     repository: input.payload.repository,
     pullRequestNumber: input.payload.pull_request_number,
     headSha: input.payload.head_sha,
+    reviewRunId: input.payload.review_run_id,
     manual: manualReviewSupersession(input.payload)
   });
   if (!superseded) {

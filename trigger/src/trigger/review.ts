@@ -198,6 +198,7 @@ export const review = task({
         repository,
         pullRequestNumber: payload.pull_request.number,
         headSha,
+        reviewRunId: stagePayload.review_run_id,
         manual: manualSupersession,
       });
       if (earlySuperseded) {
@@ -208,7 +209,7 @@ export const review = task({
           triggerRunId: ctx.run.id,
           status: "github_review_progress_finalized",
           update: {
-            status: "Skipped",
+            status: "Superseded",
             findings: "Unavailable",
           },
         });

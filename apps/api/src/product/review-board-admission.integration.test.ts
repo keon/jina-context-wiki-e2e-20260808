@@ -12,6 +12,7 @@ import { admitScheduledBillingRetry } from "./billing-board-admission.js";
 import { admitBoardReview } from "./review-board-admission.js";
 import {
   prepareReviewRun,
+  getReviewSupersession,
   reconcileBoardReviewTerminal,
   ReviewDispatchNotBoundError,
   ReviewDispatchProvenanceError,
@@ -333,6 +334,125 @@ test(
         assert.equal(raceProductState.rows[0]?.prepare_closed, false);
       }
 
+      const supersededHead = "head-sha-v2-manual-authority";
+      const automatic = await admitBoardReview(reviewArrival(supersededHead));
+      const automaticTask = await control.query<{ task_id: string; request_digest: string }>(
+        `select id task_id,metadata->>'request_digest' request_digest
+         from jina_runtime.board_tasks where workflow_id=$1`,
+        [automatic.workflowId],
+      );
+      await control.query(
+        `insert into jina_runtime.board_effect_receipts
+           (idempotency_key,tenant_id,workflow_id,task_id,effect_type,effect_version,
+            provider,status,request_digest,provider_id,completed_at)
+         values ($1,$2,$3,$4,'trigger.review.dispatch',1,'trigger.dev','succeeded',$5,$6,now())`,
+        [
+          `trigger-review:${automatic.workflowId}`,
+          automatic.tenantId,
+          automatic.workflowId,
+          automaticTask.rows[0].task_id,
+          automaticTask.rows[0].request_digest,
+          "run_superseded_automatic",
+        ],
+      );
+      const automaticReviewRunId = await prepareReviewRun({
+        ...reviewInput(supersededHead),
+        triggerRunId: "run_superseded_automatic",
+      });
+
+      const firstManual = await admitBoardReview(
+        manualReviewArrival(supersededHead, 2_000, 9_002),
+      );
+      const automaticSupersession = await control.query<{
+        workflow_status: string;
+        task_status: string;
+        review_status: string;
+        reason: string;
+        superseded_events: string;
+      }>(
+        `select workflow.status workflow_status,task.status task_status,review.status review_status,
+                workflow.metadata->>'reason' reason,
+                (select count(*)::text from jina_runtime.board_events event
+                  where event.workflow_id=workflow.id
+                    and event.event_type in ('task.superseded','workflow.superseded')) superseded_events
+           from jina_runtime.board_workflows workflow
+           join jina_runtime.board_tasks task on task.workflow_id=workflow.id
+           join review_runs review on review.board_workflow_id=workflow.id
+          where workflow.id=$1`,
+        [automatic.workflowId],
+      );
+      assert.deepEqual(automaticSupersession.rows[0], {
+        workflow_status: "superseded",
+        task_status: "superseded",
+        review_status: "superseded",
+        reason: "@usejina comment 9002 superseded the automatic review for this pull request head",
+        superseded_events: "2",
+      });
+      assert.deepEqual(await getReviewSupersession(automaticReviewRunId), {
+        reason: "@usejina comment 9002 superseded the automatic review for this pull request head",
+        expected_head_sha: supersededHead,
+        newer_comment_id: 9_002,
+      });
+
+      const outOfOrderOlder = await admitBoardReview(
+        manualReviewArrival(supersededHead, 1_000, 9_001),
+      );
+      const afterOutOfOrder = await workflowStatuses(control, [firstManual.workflowId, outOfOrderOlder.workflowId]);
+      assert.deepEqual(afterOutOfOrder, {
+        [firstManual.workflowId]: "queued",
+        [outOfOrderOlder.workflowId]: "superseded",
+      });
+
+      const latestManual = await admitBoardReview(
+        manualReviewArrival(supersededHead, 3_000, 9_003),
+      );
+      const finalManualStatuses = await workflowStatuses(control, [
+        firstManual.workflowId,
+        outOfOrderOlder.workflowId,
+        latestManual.workflowId,
+      ]);
+      assert.deepEqual(finalManualStatuses, {
+        [firstManual.workflowId]: "superseded",
+        [outOfOrderOlder.workflowId]: "superseded",
+        [latestManual.workflowId]: "queued",
+      });
+
+      const supersededBeforePrepareHead = "head-sha-v2-superseded-before-prepare";
+      const beforePrepareAutomatic = await admitBoardReview(reviewArrival(supersededBeforePrepareHead));
+      const beforePrepareTask = await control.query<{ task_id: string; request_digest: string }>(
+        `select id task_id,metadata->>'request_digest' request_digest
+         from jina_runtime.board_tasks where workflow_id=$1`,
+        [beforePrepareAutomatic.workflowId],
+      );
+      await control.query(
+        `insert into jina_runtime.board_effect_receipts
+           (idempotency_key,tenant_id,workflow_id,task_id,effect_type,effect_version,
+            provider,status,request_digest,provider_id,completed_at)
+         values ($1,$2,$3,$4,'trigger.review.dispatch',1,'trigger.dev','succeeded',$5,$6,now())`,
+        [
+          `trigger-review:${beforePrepareAutomatic.workflowId}`,
+          beforePrepareAutomatic.tenantId,
+          beforePrepareAutomatic.workflowId,
+          beforePrepareTask.rows[0].task_id,
+          beforePrepareTask.rows[0].request_digest,
+          "run_superseded_before_prepare",
+        ],
+      );
+      await admitBoardReview(manualReviewArrival(supersededBeforePrepareHead, 4_000, 9_004));
+      const supersededAtPrepareId = await prepareReviewRun({
+        ...reviewInput(supersededBeforePrepareHead),
+        triggerRunId: "run_superseded_before_prepare",
+      });
+      assert.equal(
+        (
+          await control.query<{ status: string }>("select status from review_runs where id=$1", [
+            supersededAtPrepareId,
+          ])
+        ).rows[0]?.status,
+        "superseded",
+      );
+      assert.equal((await getReviewSupersession(supersededAtPrepareId))?.newer_comment_id, 9_004);
+
       const billingFirst = await admitScheduledBillingRetry({
         schedule_time: "2026-08-04T10:30:00.000Z",
       });
@@ -428,6 +548,50 @@ function reviewArrival(headSha: string) {
     triggerPayload: input.orchestrationPayload,
     triggerOptions,
   } as const;
+}
+
+function manualReviewArrival(headSha: string, requestedAtMs: number, commentId: number) {
+  const automatic = reviewInput(headSha);
+  const idempotencyKey = `review:456:123:42:issue_comment:${commentId}`;
+  const manualCommandTag = `manual-command:${requestedAtMs}:issue_comment:${commentId}`;
+  const orchestrationPayload = {
+    ...automatic.orchestrationPayload,
+    delivery_id: `delivery-manual-${commentId}`,
+    review_idempotency_key: idempotencyKey,
+    source_event: "issue_comment",
+    action: "created",
+    requested_by: { login: "octocat", comment_id: commentId },
+    manual_command_tag: manualCommandTag,
+    review_instructions: `review command ${commentId}`,
+    trigger: "manual",
+  } as const;
+  return {
+    input: {
+      ...automatic,
+      idempotencyKey,
+      deliveryId: `delivery-manual-${commentId}`,
+      sourceEvent: "issue_comment",
+      triggerSource: "manual",
+      manualCommandTag,
+      reviewInstructions: `review command ${commentId}`,
+      orchestrationPayload,
+    },
+    triggerPayload: orchestrationPayload,
+    triggerOptions: {
+      idempotencyKey,
+      concurrencyKey: `review:456:123:42:${headSha}`,
+      tags: ["installation:456", "repo:123", "pr:42", "bot:code_review", manualCommandTag],
+      ttl: "30m",
+    },
+  } as const;
+}
+
+async function workflowStatuses(pool: Pool, workflowIds: string[]): Promise<Record<string, string>> {
+  const statuses = await pool.query<{ id: string; status: string }>(
+    `select id,status from jina_runtime.board_workflows where id=any($1::text[]) order by id`,
+    [workflowIds],
+  );
+  return Object.fromEntries(statuses.rows.map((row) => [row.id, row.status]));
 }
 
 async function migrateDatabase(url: string): Promise<void> {

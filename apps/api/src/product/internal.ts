@@ -14,6 +14,7 @@ import {
   getModelSettingsForRun,
   getOrCreateContextExecutionProfile,
   getReviewProviderResolution,
+  getReviewSupersession,
   getTenantBillingIdentity,
   saveRunModelSettingsSnapshot,
   getReviewRunStatus,
@@ -312,6 +313,12 @@ export async function recordReviewEvent(c: Context, config: AppConfig): Promise<
   console.info("recorded_review_event", { review_run_id: reviewRunId, status });
 
   return c.json({ ok: true, review_run_id: reviewRunId });
+}
+
+export async function reviewSupersession(c: Context, config: AppConfig): Promise<Response> {
+  authorizeInternal(c, config);
+  const reviewRunId = requiredParam(c, "reviewRunId");
+  return c.json({ superseded: (await getReviewSupersession(reviewRunId)) ?? null });
 }
 
 export async function completeReview(

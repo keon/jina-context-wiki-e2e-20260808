@@ -74,6 +74,17 @@ test("progress comment renders skipped and blocked states", () => {
   assert.match(skipped, /\| Review \| Skipped \|/);
   assert.match(skipped, /\| Findings \| Unavailable \|/);
 
+  const superseded = renderReviewProgressComment(
+    mergeReviewProgressState(initialReviewProgressState("run-1", "abc123"), {
+      reviewRunId: "run-1",
+      headSha: "abc123",
+      status: "Superseded",
+      findings: "Unavailable"
+    })
+  );
+  assert.match(superseded, /A newer @usejina command superseded this review\./);
+  assert.match(superseded, /\| Review \| Superseded \|/);
+
   const blocked = renderReviewProgressComment(
     mergeReviewProgressState(initialReviewProgressState("run-1", "abc123"), {
       reviewRunId: "run-1",
@@ -330,7 +341,7 @@ test("blocked and superseded final states mark findings unavailable", () => {
     {
       reviewRunId: "run-1",
       headSha: "abc123",
-      status: "Skipped",
+      status: "Superseded",
       findings: "Unavailable"
     }
   );

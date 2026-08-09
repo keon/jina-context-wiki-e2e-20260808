@@ -4,7 +4,7 @@ import { createIssueComment, listIssueComments, updateIssueComment, type GitHubR
 import { postReviewEvent, reviewRunUrl, type ReviewStagePayload, type ReviewStageResult } from "./workflow.js";
 import { errorMessage } from "../shared/utils.js";
 
-type ReviewProgressStatus = "Queued" | "In progress" | "Completed" | "Skipped" | "Blocked";
+type ReviewProgressStatus = "Queued" | "In progress" | "Completed" | "Skipped" | "Superseded" | "Blocked";
 type ReviewFindingsStatus = "Pending" | "Issues found" | "No issues found" | "Unavailable" | "Insufficient credits";
 
 type ReviewProgressNotice = {
@@ -279,7 +279,7 @@ function reviewStatusForStageResults(input: {
     return "Blocked";
   }
   if (input.superseded) {
-    return "Skipped";
+    return "Superseded";
   }
   if (input.stageResults.length === 0) {
     return "Skipped";
@@ -320,6 +320,9 @@ function statusMessage(state: ReviewProgressCommentState): string {
   if (state.status === "Skipped") {
     return "Jina skipped this review.";
   }
+  if (state.status === "Superseded") {
+    return "A newer @usejina command superseded this review.";
+  }
   if (state.status === "Completed") {
     return "Jina has completed this review.";
   }
@@ -331,6 +334,7 @@ function reviewProgressStatus(value: unknown): ReviewProgressStatus | undefined 
     value === "In progress" ||
     value === "Completed" ||
     value === "Skipped" ||
+    value === "Superseded" ||
     value === "Blocked"
     ? value
     : undefined;
@@ -420,5 +424,5 @@ function modelSettingsUrl(): string {
 }
 
 function isTerminalStatus(status: ReviewProgressStatus): boolean {
-  return status === "Completed" || status === "Skipped" || status === "Blocked";
+  return status === "Completed" || status === "Skipped" || status === "Superseded" || status === "Blocked";
 }

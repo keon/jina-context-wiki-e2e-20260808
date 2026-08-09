@@ -71,6 +71,13 @@ export interface ResolvedReviewScope {
   readonly idempotencyKey: string;
 }
 
+export interface ReviewSupersessionDetails {
+  readonly reason: string;
+  readonly expected_head_sha: string;
+  readonly requested_comment_id?: number;
+  readonly newer_comment_id?: number;
+}
+
 export interface InstallationRepository {
   githubRepoId?: number;
   owner?: string;
@@ -145,8 +152,10 @@ export async function prepareReviewRun(input: CreateReviewRunInput): Promise<str
       workflow_id: string;
       workflow_type: string;
       pipeline_version: string;
+      status: string;
+      metadata: Record<string, unknown>;
     }>(
-      `select id workflow_id,workflow_type,pipeline_version
+      `select id workflow_id,workflow_type,pipeline_version,status,metadata
        from jina_runtime.board_workflows
        where tenant_id=$1 and dedupe_key=$2
        for update`,
@@ -261,8 +270,59 @@ export async function prepareReviewRun(input: CreateReviewRunInput): Promise<str
     if (authority.rowCount !== 1) {
       throw new ReviewDispatchProvenanceError("Board review dispatch receipt belongs to another authority record");
     }
+    if (workflow.status === "superseded") {
+      await markReviewRunSupersededWithClient(client, review.id, workflow.metadata, triggerRunId);
+    }
     return review.id;
   });
+}
+
+async function markReviewRunSupersededWithClient(
+  client: pg.PoolClient,
+  reviewRunId: string,
+  metadata: Record<string, unknown>,
+  triggerRunId?: string,
+): Promise<void> {
+  const details = reviewSupersessionDetails(metadata);
+  const updated = await client.query(
+    `update review_runs
+        set status='superseded',bot_status='superseded',finished_at=coalesce(finished_at,now()),updated_at=now()
+      where id=$1 and status <> all($2)
+      returning id`,
+    [reviewRunId, TERMINAL_RUN_STATUSES],
+  );
+  if (updated.rowCount !== 1) return;
+  await client.query(
+    `insert into review_run_events (review_run_id,status,payload_json,trigger_run_id)
+     values ($1,'review_superseded',$2::jsonb,$3)`,
+    [reviewRunId, JSON.stringify({ schema_version: 1, ...details }), triggerRunId ?? null],
+  );
+}
+
+function reviewSupersessionDetails(
+  metadata: Record<string, unknown>,
+  headSha?: string,
+): ReviewSupersessionDetails {
+  const expectedHeadSha = textMetadata(metadata.expected_head_sha) ??
+    textMetadata(metadata.head_sha) ??
+    headSha ??
+    "unknown";
+  const requestedCommentId = numberMetadata(metadata.requested_comment_id);
+  const newerCommentId = numberMetadata(metadata.newer_comment_id);
+  return {
+    reason: textMetadata(metadata.reason) ?? "a newer @usejina command superseded this review",
+    expected_head_sha: expectedHeadSha,
+    ...(requestedCommentId === undefined ? {} : { requested_comment_id: requestedCommentId }),
+    ...(newerCommentId === undefined ? {} : { newer_comment_id: newerCommentId }),
+  };
+}
+
+function textMetadata(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function numberMetadata(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
 }
 
 export class ReviewDispatchNotBoundError extends Error {
@@ -3826,6 +3886,29 @@ export async function getReviewRunStatus(reviewRunId: string): Promise<string | 
   }
   const row = await queryOne<{ status: string }>(`select status from review_runs where id = $1`, [reviewRunId]);
   return row?.status;
+}
+
+export async function getReviewSupersession(
+  reviewRunId: string,
+): Promise<ReviewSupersessionDetails | undefined> {
+  if (!databaseConfigured()) return undefined;
+  const row = await queryOne<{
+    status: string;
+    head_sha: string;
+    workflow_status: string | null;
+    workflow_metadata: Record<string, unknown> | null;
+  }>(
+    `select run.status,run.head_sha,
+            workflow.status workflow_status,workflow.metadata workflow_metadata
+       from review_runs run
+       left join jina_runtime.board_workflows workflow on workflow.id=run.board_workflow_id
+      where run.id=$1`,
+    [reviewRunId],
+  );
+  if (!row || (row.status !== "superseded" && row.workflow_status !== "superseded")) {
+    return undefined;
+  }
+  return reviewSupersessionDetails(row.workflow_metadata ?? {}, row.head_sha);
 }
 
 /** 'pending' usage rows (credits already computed) awaiting an Autumn track — for the retry job. */

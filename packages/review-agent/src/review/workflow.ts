@@ -234,8 +234,24 @@ export async function currentReviewSuperseded(input: {
   repository: GitHubRepository;
   pullRequestNumber: number;
   headSha: string;
+  reviewRunId?: string;
   manual?: ManualReviewSupersession;
 }): Promise<ReviewSuperseded | undefined> {
+  if (input.reviewRunId) {
+    try {
+      const response = await postInternal<{ superseded: ReviewSuperseded | null }>(
+        `/internal/reviews/${encodeURIComponent(input.reviewRunId)}/supersession`,
+        {}
+      );
+      if (response.superseded) return response.superseded;
+    } catch (error) {
+      logger.warn("review_supersession_lookup_failed", {
+        review_run_id: input.reviewRunId,
+        error: errorMessage(error)
+      });
+      throw error;
+    }
+  }
   if (input.manual) {
     const manualSuperseded = await newerManualReviewSuperseded({
       ...input.manual,
