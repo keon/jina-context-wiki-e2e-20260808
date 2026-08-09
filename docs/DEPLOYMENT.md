@@ -491,7 +491,7 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 
 The API request timeout is 3,600 seconds. Each instance has a shared Context/product
 pool capped at three connections with a ten-second checkout deadline, a dedicated
-Board-state pool capped at two with five-second checkout and thirty-second idle
+Board-state pool capped at two with thirty-second checkout and idle
 deadlines, and a shared-identity pool capped at three. With four live instances, their
 configured maxima total 32 connections; raise a configurable limit only while
 preserving an explicit aggregate database connection budget.

@@ -456,12 +456,19 @@ test("stage operations replay exact receipts, retry pre-effect failures, and rec
         input
       });
 
+    const loadsBeforeFirstStage = state.loadCount();
     const first = await stage("lost-response", { alpha: 1, beta: 2 });
     assert.equal(first.response.status, 200, JSON.stringify(first.body));
+    assert.equal(
+      state.loadCount(),
+      loadsBeforeFirstStage + 1,
+      "a cache miss must resolve its request and live authority from one Board reload"
+    );
     const replay = await stage("lost-response", { beta: 2, alpha: 1 });
     assert.equal(replay.response.status, 200, JSON.stringify(replay.body));
     assert.deepEqual(replay.body, first.body);
     assert.equal(calls.get("lost-response"), 1);
+    assert.equal(state.loadCount(), loadsBeforeFirstStage + 1, "an immutable receipt replay must not reload Board");
 
     const changed = await stage("lost-response", { alpha: 1, beta: 3 });
     assert.equal(changed.response.status, 409);
@@ -982,11 +989,14 @@ async function post(baseUrl: string, path: string, token: string, body: unknown,
   return { response, body: value };
 }
 
-function memoryStateStore(initial: ApiSnapshot): ApiStateStore & { current(): ApiSnapshot } {
+function memoryStateStore(initial: ApiSnapshot): ApiStateStore & { current(): ApiSnapshot; loadCount(): number } {
   let snapshot = structuredClone(initial);
+  let loads = 0;
   return {
     current: () => structuredClone(snapshot),
+    loadCount: () => loads,
     async load() {
+      loads += 1;
       return structuredClone(snapshot);
     },
     async ping() {},
