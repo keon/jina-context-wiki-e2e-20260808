@@ -301,7 +301,7 @@ export function latestContextBoardFollowup(state: BoardState, buildTaskId: TaskI
     return undefined;
   }
   const events = state.events
-    .filter((event) => event.type === "context.build_followup_requested")
+    .filter((event) => event.type === "context.build_followup_requested" && event.taskId === buildTaskId)
     .map((event) => ({ event, followup: queuedFollowup(event.payload?.followup) }))
     .filter(
       (candidate): candidate is { event: (typeof state.events)[number]; followup: ContextBoardFollowup } =>
