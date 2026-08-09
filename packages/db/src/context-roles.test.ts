@@ -13,6 +13,7 @@ const currentTables = [
   "context_release_audit_runs",
   "context_release_audits",
   "context_releases",
+  "context_wiki_artifacts",
   "context_wiki_projections",
   "current_context_board_releases",
   "issue_graph_releases",
@@ -44,6 +45,7 @@ test("promoted api_tokens keeps its Context security model in public", () => {
 
 test("release tables are immutable except the one-time Context attachment", () => {
   assert.match(CONTEXT_SCHEMA_SQL, /create trigger context_releases_immutable/);
+  assert.match(CONTEXT_SCHEMA_SQL, /create trigger context_wiki_artifacts_immutable/);
   assert.match(CONTEXT_SCHEMA_SQL, /immutable outside its one-time attachment/);
   assert.match(CONTEXT_SCHEMA_SQL, /create trigger issue_graph_releases_immutable/);
   assert.match(CONTEXT_SCHEMA_SQL, /reject_immutable_change/);

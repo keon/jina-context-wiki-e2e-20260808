@@ -74,33 +74,25 @@ async function withFakeGcloud(source, callback) {
   }
 }
 
-async function withFakeStagingBucketGcloud({ grantSucceeds, postPolicy }, callback) {
-  const directory = await mkdtemp(join(tmpdir(), "jina-staging-bucket-iam-"));
+async function withFakeStagingBucketGcloud({ bucketDescription, bucketPolicy }, callback) {
+  const directory = await mkdtemp(join(tmpdir(), "jina-staging-bucket-safety-"));
   const executable = join(directory, "gcloud");
-  const policyCallCount = join(directory, "policy-call-count");
   const mutationLog = join(directory, "mutation-log");
   await writeFile(
     executable,
     `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
-  printf '%s\\n' '{"name":"jina-staging-20260802-context-artifacts-us-east1","location":"US-EAST1","location_type":"region","uniform_bucket_level_access":true}'
+  printf '%s\\n' '${JSON.stringify(bucketDescription)}'
   exit 0
 fi
 if [[ "$1 $2 $3" == "storage buckets get-iam-policy" ]]; then
-  calls=0
-  if [[ -f "${policyCallCount}" ]]; then calls="$(<"${policyCallCount}")"; fi
-  calls=$((calls + 1))
-  printf '%s' "$calls" >"${policyCallCount}"
-  if [[ "$calls" == "1" ]]; then
-    printf '%s\\n' '{"bindings":[]}'
-  else
-    printf '%s\\n' '${JSON.stringify(postPolicy)}'
-  fi
+  printf '%s\\n' '${JSON.stringify(bucketPolicy)}'
   exit 0
 fi
 if [[ "$1 $2 $3" == "storage buckets add-iam-policy-binding" ]]; then
-  exit ${grantSucceeds ? 0 : 13}
+  printf '%s\\n' "$*" >>"${mutationLog}"
+  exit 88
 fi
 if [[ "$1 $2 $3" == "run jobs deploy" || "$1 $2 $3" == "run services update-traffic" || "$1 $2 $3" == "--quiet run deploy" ]]; then
   printf '%s\\n' "$*" >>"${mutationLog}"
@@ -309,27 +301,21 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   );
   assert.match(stagingDeployment, /storage buckets get-iam-policy "gs:\/\/\$\{artifact_bucket\}"/);
   assert.match(stagingDeployment, /\nrequire_artifact_bucket_prerequisites\n/);
-  assert.match(stagingDeployment, /\nensure_artifact_bucket_api_access\n/);
-  assert.match(stagingDeployment, /roles\/storage\.admin/);
   assert.match(stagingDeployment, /public IAM principals are forbidden/);
-  assert.match(
-    stagingDeployment,
-    /storage buckets add-iam-policy-binding "gs:\/\/\$\{artifact_bucket\}"[\s\S]+?serviceAccount:\$\{api_service_account\}[\s\S]+?roles\/storage\.objectUser/
-  );
+  assert.doesNotMatch(stagingDeployment, /storage buckets add-iam-policy-binding/);
+  assert.doesNotMatch(stagingDeployment, /ensure_artifact_bucket_api_access/);
+  assert.doesNotMatch(stagingDeployment, /roles\/storage\.objectUser/);
   assert.ok(
     stagingDeployment.indexOf("\nrequire_artifact_bucket_prerequisites\n") <
-      stagingDeployment.indexOf("\nensure_artifact_bucket_api_access\n")
-  );
-  assert.ok(
-    stagingDeployment.indexOf("\nensure_artifact_bucket_api_access\n") <
       stagingDeployment.indexOf('gcloud run jobs deploy "${migration_job}"')
   );
-  assert.match(stagingDeployment, /Artifact bucket API IAM postcondition failed/);
-  assert.match(stagingDeployment, /roles\/storage\.objectAdmin/);
-  assert.match(stagingReadiness, /roles\/storage\.admin/);
-  assert.match(stagingReadiness, /roles\/storage\.objectUser/);
+  assert.match(stagingDeployment, /JINA_WIKI_ARTIFACT_STORE=postgres/);
+  assert.doesNotMatch(stagingReadiness, /bucket-scoped roles\/storage\.admin/);
+  assert.doesNotMatch(stagingReadiness, /roles\/storage\.objectUser/);
   assert.match(stagingReadiness, /project-level roles\/storage\.admin/);
   assert.match(stagingReadiness, /allAuthenticatedUsers/);
+  assert.match(stagingReadiness, /JINA_WIKI_ARTIFACT_STORE/);
+  assert.match(stagingReadiness, /\.value == "postgres"/);
   assert.match(stagingSerialization, /build\.get\("buildTriggerId"\) == os\.environ\["TRIGGER_ID"\]/);
   assert.match(stagingSerialization, /build\.get\("createTime", ""\) < os\.environ\["CURRENT_CREATE_TIME"\]/);
   assert.match(stagingSerialization, /active = \{"QUEUED", "PENDING", "WORKING"\}/);
@@ -339,15 +325,24 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.doesNotMatch(deploymentDocs, /\.github\/workflows\/deploy-staging\.yml/);
 });
 
-test("staging bucket IAM remediation fails before migration or revision mutation", async () => {
+test("staging bucket safety does not require deployer or API bucket grants", async () => {
   await withFakeStagingBucketGcloud(
-    { grantSucceeds: false, postPolicy: { bindings: [] } },
+    {
+      bucketDescription: {
+        name: "jina-staging-20260802-context-artifacts-us-east1",
+        location: "US-EAST1",
+        location_type: "region",
+        uniform_bucket_level_access: true
+      },
+      bucketPolicy: { bindings: [] }
+    },
     async ({ env, mutationLog }) => {
       await assert.rejects(
         () => execFileAsync("bash", ["scripts/deploy-staging.sh"], { env }),
         (error) => {
-          assert.match(error.stderr, /Cannot grant staging API object access/);
-          assert.match(error.stderr, /roles\/storage\.admin to jina-cloud-build-staging@/);
+          assert.notEqual(error.code, 2, "empty bucket IAM must pass the staging safety gate");
+          assert.doesNotMatch(error.stderr, /Artifact bucket prerequisite failed/);
+          assert.doesNotMatch(error.stderr, /storage\.objectUser|storage\.admin/);
           return true;
         }
       );
@@ -356,25 +351,51 @@ test("staging bucket IAM remediation fails before migration or revision mutation
   );
 });
 
-test("staging bucket IAM postcondition rejects stronger API and public grants before mutation", async () => {
-  const apiMember = "serviceAccount:jina-api-staging@jina-staging-20260802.iam.gserviceaccount.com";
+test("staging bucket safety rejects an unsafe storage shape before mutation", async () => {
   await withFakeStagingBucketGcloud(
     {
-      grantSucceeds: true,
-      postPolicy: {
-        bindings: [
-          { role: "roles/storage.objectUser", members: [apiMember] },
-          { role: "roles/storage.admin", members: [apiMember] },
-          { role: "roles/storage.objectViewer", members: ["allUsers"] }
-        ]
+      bucketDescription: {
+        name: "jina-staging-20260802-context-artifacts-us-east1",
+        location: "US-EAST1",
+        location_type: "region",
+        uniform_bucket_level_access: true,
+        lifecycle: { rule: [{ action: { type: "Delete" }, condition: { age: 30 } }] }
+      },
+      bucketPolicy: { bindings: [] }
+    },
+    async ({ env, mutationLog }) => {
+      await assert.rejects(
+        () => execFileAsync("bash", ["scripts/deploy-staging.sh"], { env }),
+        (error) => {
+          assert.equal(error.code, 2);
+          assert.match(error.stderr, /lifecycle rules must be absent/);
+          return true;
+        }
+      );
+      await assert.rejects(() => readFile(mutationLog, "utf8"), /ENOENT/);
+    }
+  );
+});
+
+test("staging bucket safety rejects public grants before migration or revision mutation", async () => {
+  await withFakeStagingBucketGcloud(
+    {
+      bucketDescription: {
+        name: "jina-staging-20260802-context-artifacts-us-east1",
+        location: "US-EAST1",
+        location_type: "region",
+        uniform_bucket_level_access: true
+      },
+      bucketPolicy: {
+        bindings: [{ role: "roles/storage.objectViewer", members: ["allUsers"] }]
       }
     },
     async ({ env, mutationLog }) => {
       await assert.rejects(
         () => execFileAsync("bash", ["scripts/deploy-staging.sh"], { env }),
         (error) => {
-          assert.match(error.stderr, /Artifact bucket API IAM postcondition failed/);
-          assert.match(error.stderr, /forbidden stronger direct bucket roles: roles\/storage\.admin/);
+          assert.equal(error.code, 2);
+          assert.match(error.stderr, /Artifact bucket prerequisite failed/);
           assert.match(error.stderr, /public IAM principals are forbidden/);
           return true;
         }

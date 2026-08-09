@@ -43,6 +43,36 @@ create index if not exists context_repository_access_principal
   on jina_context.repository_access (tenant_id,principal_id,repository)
   where permission in ('read','write','admin');
 
+-- Immutable binary objects used by the Trigger wiki pipeline. Object keys use
+-- the same canonical tenant/repository paths as the filesystem and GCS ports;
+-- generation is an opaque positive decimal identity bound into every ref URI.
+create table if not exists jina_context.context_wiki_artifacts (
+  tenant_id text not null,
+  repository text not null,
+  object_key text not null check (octet_length(object_key) between 1 and 4096),
+  object_generation bigint generated always as identity,
+  artifact_class text not null check (
+    artifact_class in ('context-artifact','wiki-content','wiki-audit-report')
+  ),
+  content_type text not null check (octet_length(content_type) between 1 and 255),
+  content_sha256 text not null check (content_sha256 ~ '^[0-9a-f]{64}$'),
+  content_length integer not null check (content_length between 0 and 536870912),
+  content_metadata jsonb not null check (
+    jsonb_typeof(content_metadata)='object'
+    and octet_length(content_metadata::text) <= 16384
+  ),
+  content_bytes bytea not null,
+  created_at timestamptz not null default now(),
+  primary key (tenant_id,object_key),
+  unique (object_generation),
+  foreign key (tenant_id,repository)
+    references jina_context.repositories(tenant_id,repository),
+  check (object_generation > 0),
+  check (octet_length(content_bytes)=content_length)
+);
+create index if not exists context_wiki_artifacts_repository
+  on jina_context.context_wiki_artifacts (tenant_id,repository,object_generation);
+
 create table if not exists jina_context.context_evidence_snapshots (
   checkpoint_id text primary key,
   tenant_id text not null,
@@ -434,6 +464,12 @@ drop trigger if exists context_evidence_snapshots_immutable
   on jina_context.context_evidence_snapshots;
 create trigger context_evidence_snapshots_immutable
   before update or delete on jina_context.context_evidence_snapshots
+  for each row execute function jina_context.reject_immutable_change();
+
+drop trigger if exists context_wiki_artifacts_immutable
+  on jina_context.context_wiki_artifacts;
+create trigger context_wiki_artifacts_immutable
+  before update or delete on jina_context.context_wiki_artifacts
   for each row execute function jina_context.reject_immutable_change();
 
 drop trigger if exists context_board_publications_immutable

@@ -1,7 +1,7 @@
 # Context Wiki: Trigger.dev Generation, Versioned Storage, and Independent Audit Plan
 
 Status: implemented on `codex/context-wiki-trigger`; staging deployment and live acceptance pending
-Target implementation baseline: `staging@597b16c`
+Target implementation baseline: `staging@55881471f8c3`
 Implementation worktree: `codex/context-wiki-trigger`
 Primary precedent: `trigger/`, `packages/review-agent`, and the review Trigger.dev dispatch path
 External design reference: [langchain-ai/openwiki](https://github.com/langchain-ai/openwiki)
@@ -26,11 +26,12 @@ orchestrator: trigger
 
 There are no Board children, per-page tasks, gate tasks, repair tasks, or Board dependencies for a Trigger-backed wiki build. Trigger.dev owns the internal generation run, child work, retries, fan-out, joins, and operational progress. The Board owns admission, high-level status, deduplication, ref ordering, cancellation/supersession intent, the authorized Trigger parent identity, and the final release identity.
 
-The published wiki is not stored in Trigger.dev. Existing product stores remain authoritative:
+The published wiki is not stored in Trigger.dev. Product stores remain authoritative:
 
-- GCS stores the immutable canonical wiki bundle and other large immutable artifacts.
-- PostgreSQL stores release identities, mutable branch/PR current pointers, generation-scoped documents and search projections, citations, hierarchy, ACL projections, audit facts, and billing facts.
-- Trigger.dev stores only live orchestration state and bounded task outputs/metadata.
+- The API owns a dual artifact adapter. Staging selects `PostgresWikiArtifactStore` and stores immutable wiki-stage objects, canonical content bundles, and audit reports as tenant-scoped append-only `bytea` rows in `jina_context.context_wiki_artifacts`. Production retains the existing GCS adapter until a separate explicit cutover.
+- PostgreSQL stores release identities, mutable branch/PR current pointers, generation-scoped documents and search projections, citations, hierarchy, ACL projections, audit facts, and billing facts in both environments. In staging it also stores the immutable artifact-object bytes; query routes still read the compact projections rather than scanning `bytea`.
+- Legacy Context artifacts continue to use the existing GCS bucket. The staging deployment checks that bucket read-only for region, uniform access, lifecycle, and public exposure, but new wiki builds require no API bucket IAM grant.
+- Trigger.dev stores only live orchestration state and bounded task outputs/metadata. It receives neither PostgreSQL nor GCS credentials.
 
 Normal list, read, search, ask, diff, and export paths never call Trigger.dev. Trigger.dev produces releases; the Context API serves them.
 
@@ -49,7 +50,7 @@ The implementation is acceptable only if all of the following remain true:
 9. A stale ref sequence cannot replace the current branch or pull-request release even if its Trigger run finishes later.
 10. Exact historical reads use `releaseId`; mutable branch and pull-request selectors resolve through a current pointer.
 11. Every query is scoped to exactly one published `generationId`, tenant, repository, and ACL fingerprint.
-12. The canonical wiki bundle remains recoverable and portable without PostgreSQL, while PostgreSQL remains the normal low-latency serving projection.
+12. The canonical wiki bundle is a self-contained, digest-addressed artifact that remains portable through export and sufficient to reproject serving data. Its physical object backend is deployment-selected: append-only PostgreSQL in staging and GCS in production until cutover; PostgreSQL projection tables remain the normal low-latency serving path in either case.
 13. Source, instruction, model, generator, Mermaid, and audit-policy identities are versioned so a release is reproducible and explainable.
 14. A broken nonessential diagram or internal link degrades visibly and diagnostically; it does not make an otherwise useful wiki unavailable.
 15. Repository content, pull-request content, prior wiki content, and audit reports are untrusted data, never execution policy.
@@ -114,7 +115,9 @@ flowchart LR
     Board --> Bridge["Trigger dispatch bridge"]
     Bridge --> Generate["Trigger generate wiki"]
     Generate --> Internal["Context API execution boundary"]
-    Internal --> Bundle["Immutable GCS bundle"]
+    Internal --> Artifacts["Immutable API-owned artifact objects"]
+    Artifacts --> StagingStore["Staging append-only PostgreSQL bytea"]
+    Artifacts --> ProductionStore["Production GCS until cutover"]
     Internal --> Prepared["Prepared PostgreSQL projection"]
     Prepared --> Activate["PageIndex activation transaction"]
     Activate --> Current["Branch or PR current pointer"]
@@ -131,17 +134,17 @@ flowchart LR
 
 Ownership is deliberately narrow:
 
-| Concern                                 | Source of truth                    | Board projection           |
-| --------------------------------------- | ---------------------------------- | -------------------------- |
-| Admission, request dedupe, ref ordering | Board/API admission                | One high-level task        |
-| Parent-run authorization                | Board external-effect receipt      | Authorized Trigger run ID  |
-| Generation phases, retries, fan-out     | Trigger.dev                        | None                       |
-| Canonical wiki bytes                    | GCS release artifact               | Release ID and digest only |
-| Queryable documents and indexes         | PostgreSQL generation projection   | None                       |
-| Current branch/PR release               | PostgreSQL current-release pointer | Terminal release ID only   |
-| Daily audit execution                   | Trigger.dev scheduled/manual run   | None                       |
-| Audit result                            | PostgreSQL row plus GCS report     | Optional summary only      |
-| Usage and billing                       | Existing quota/usage ledger        | Compact terminal totals    |
+| Concern                                 | Source of truth                                       | Board projection           |
+| --------------------------------------- | ----------------------------------------------------- | -------------------------- |
+| Admission, request dedupe, ref ordering | Board/API admission                                   | One high-level task        |
+| Parent-run authorization                | Board external-effect receipt                         | Authorized Trigger run ID  |
+| Generation phases, retries, fan-out     | Trigger.dev                                           | None                       |
+| Canonical wiki bytes                    | API artifact port: staging Postgres, production GCS   | Release ID and digest only |
+| Queryable documents and indexes         | PostgreSQL generation projection                      | None                       |
+| Current branch/PR release               | PostgreSQL current-release pointer                    | Terminal release ID only   |
+| Daily audit execution                   | Trigger.dev scheduled/manual run                      | None                       |
+| Audit result                            | PostgreSQL summary plus immutable API artifact report | Optional summary only      |
+| Usage and billing                       | Existing quota/usage ledger                           | Compact terminal totals    |
 
 ### 4.1 Generation sequence
 
@@ -152,7 +155,7 @@ sequenceDiagram
     participant Board as Board
     participant Bridge as Wiki bridge
     participant Trigger as Trigger generate wiki
-    participant GCS as GCS artifacts
+    participant Objects as API artifact store
     participant DB as PostgreSQL
 
     Caller->>API: Request asynchronous wiki build
@@ -162,8 +165,9 @@ sequenceDiagram
     Bridge->>Trigger: Dispatch canonical request
     Trigger->>API: Claim parent run and execution grant
     API->>Board: Bind authorized parent run
-    Trigger->>API: Upload scoped immutable artifacts
-    API->>GCS: Verify scope digest generation and store
+    Trigger->>API: Submit scoped immutable stage results
+    API->>Objects: Validate scope and digest then create object
+    Note over API,Objects: Staging writes append-only Postgres bytea; production currently writes GCS
     Trigger->>API: Prepare exact V2 release projection
     API->>DB: Prepare hidden release and generation
     Trigger->>API: Activate exact PageIndex release
@@ -213,7 +217,7 @@ sequenceDiagram
     participant Audit as Trigger audit wiki
     participant API as Context API
     participant DB as PostgreSQL
-    participant GCS as GCS artifacts
+    participant Objects as API artifact store
     participant Admission as Wiki admission
     participant Board as Board
 
@@ -225,22 +229,22 @@ sequenceDiagram
     Audit->>API: Claim signed request with exact Trigger run
     API->>DB: Insert immutable audit run claim
     Audit->>API: Read exact release and canonical bundle
-    API->>GCS: Verify and read immutable artifacts
+    API->>Objects: Verify and read exact immutable objects
     Audit->>API: Exercise published query routes
     API->>DB: Query exact published generation
     alt Evaluation completes
         Audit->>API: Complete audit with report and digest
-        API->>GCS: Store scoped full audit report
+        API->>Objects: Create scoped full audit report
         API->>DB: Insert immutable audit summary
     else Ordinary retries exhaust
         Audit->>API: Fail with run-bound grant and bounded code
-        API->>GCS: Recover completed report or write deterministic error report
+        API->>Objects: Recover completed report or create deterministic error report
         API->>DB: Insert immutable success or error summary
     else Trigger hard-crashes without onFailure
         Reconciler->>API: Page unsettled immutable run claims
         Reconciler->>Audit: Retrieve exact Trigger run status
         Reconciler->>API: Complete recovered output or fail terminal run
-        API->>GCS: Recover completed report or write deterministic error report
+        API->>Objects: Recover completed report or create deterministic error report
         API->>DB: Insert immutable success or error summary
     end
     alt Improvement is needed
@@ -257,7 +261,7 @@ sequenceDiagram
     end
 ```
 
-### 4.3 Read and query sequence
+### 4.3 Read, query, and export sequence
 
 ```mermaid
 sequenceDiagram
@@ -266,16 +270,26 @@ sequenceDiagram
     participant Pointer as Release pointer
     participant Projection as Published projection
     participant Query as Query engine
+    participant Objects as API artifact store
 
-    Reader->>API: List read search ask or diff with selector
+    Reader->>API: Request with branch PR commit or release selector
     API->>API: Authorize tenant and repository
     API->>Pointer: Resolve branch PR commit or release
     Pointer-->>API: Published release and generation
-    API->>Projection: Verify generation and ACL
-    API->>Query: Retrieve within exact generation
-    Query->>Projection: Exact lexical hierarchy and structural routes
-    Query-->>API: Documents evidence citations and conflicts
-    API-->>Reader: Release explicit response
+    alt List read search ask or diff
+        API->>Projection: Verify generation published state and ACL
+        API->>Query: Retrieve within exact generation
+        Query->>Projection: Exact lexical hierarchy and structural routes
+        Query-->>API: Documents evidence citations and conflicts
+        Note over API,Projection: No artifact bytea scan and no GCS request
+        API-->>Reader: Release explicit response
+    else Export recovery reprojection or audit
+        API->>Projection: Read verified artifact ref for release
+        API->>Objects: Get exact tenant key generation and digest
+        Note over API,Objects: Staging Postgres bytea or production GCS
+        Objects-->>API: Verified immutable canonical bytes
+        API-->>Reader: Authorized release-bound result
+    end
 ```
 
 ### 4.4 Trigger execution boundary
@@ -296,7 +310,7 @@ POST /internal/context/wiki/audits/{auditId}/admit-fix
 
 The claim exchanges the one-use dispatch nonce and actual Trigger parent-run identity for a short-lived signed execution grant containing exact `tenantId`, repository, Board build or audit ID, request/input digest, allowed operation set, expiry, and nonce ID. Child tasks call the stage route with that operation-scoped grant; they cannot broaden scope. Every stage accepts a deterministic operation ID, re-verifies the grant and immutable request authority, and returns a bounded artifact/release handoff. Audit scheduling uses the service bootstrap credential only for due selection; each selected audit exchanges its signed dispatch nonce for a release-scoped grant before its first external effect.
 
-The scoped stage executor performs source reads, artifact writes, finalization, projection, and activation inside the API trust boundary. Trigger receives only bounded stage outputs containing immutable references and release identities. All GCS byte validation, PostgreSQL prepare/activation, audit insertion, due selection, follow-up admission, RLS, and advisory-lock operations remain API-owned.
+The scoped stage executor performs source reads, artifact writes, finalization, projection, and activation inside the API trust boundary. Trigger receives only bounded stage outputs containing immutable references and release identities. The API selects one wiki artifact adapter at startup: `PostgresWikiArtifactStore` for staging, or the existing GCS-backed ports for production. Artifact-byte validation, PostgreSQL prepare/activation, audit insertion, due selection, follow-up admission, RLS, and advisory-lock operations remain API-owned.
 
 Stage transport and replay are bounded independently by route class. Lightweight
 due-selection, dispatch, and other read/control requests use a 30-second HTTP
@@ -539,17 +553,17 @@ Leaf infrastructure/model calls may use bounded retries for transient failures. 
 
 The first implementation may keep a single parent plus cohesive child tasks:
 
-| Trigger task      | Responsibility                                                  | Durable output                 |
-| ----------------- | --------------------------------------------------------------- | ------------------------------ |
-| `generate-wiki`   | Parent orchestration and activation                             | Compact release result         |
-| `wiki-snapshot`   | Exact commit checkout and manifest                              | GCS snapshot/evidence refs     |
-| `wiki-plan`       | Repository map, impact plan, page and diagram skeleton          | GCS plan ref                   |
-| `wiki-write-page` | Generate one add/revise page                                    | GCS page ref                   |
-| `wiki-finalize`   | Retain pages, indexes, OKF, links, Mermaid, changelog, manifest | GCS bundle ref and diagnostics |
-| `wiki-project`    | Prepared documents/fragments/citations/relations                | Prepared generation ID         |
-| `wiki-pageindex`  | Hierarchy artifact and atomic activation                        | Release and attachment IDs     |
+| Trigger task      | Responsibility                                                  | Durable output                     |
+| ----------------- | --------------------------------------------------------------- | ---------------------------------- |
+| `generate-wiki`   | Parent orchestration and activation                             | Compact release result             |
+| `wiki-snapshot`   | Exact commit checkout and manifest                              | Immutable artifact refs            |
+| `wiki-plan`       | Repository map, impact plan, page and diagram skeleton          | Immutable plan ref                 |
+| `wiki-write-page` | Generate one add/revise page                                    | Immutable page ref                 |
+| `wiki-finalize`   | Retain pages, indexes, OKF, links, Mermaid, changelog, manifest | Content-bundle ref and diagnostics |
+| `wiki-project`    | Prepared documents/fragments/citations/relations                | Prepared generation ID             |
+| `wiki-pageindex`  | Hierarchy artifact and atomic activation                        | Release and attachment IDs         |
 
-These are Trigger implementation details. They never become Board task types or a PostgreSQL workflow-state table. “GCS ref” and “prepared generation” in the table mean outputs obtained through the scoped Context API routes in Section 4.4; tasks do not open GCS or PostgreSQL directly.
+These are Trigger implementation details. They never become Board task types or a PostgreSQL workflow-state table. “Artifact ref” and “prepared generation” in the table mean outputs obtained through the scoped Context API routes in Section 4.4; tasks do not open GCS or PostgreSQL directly. Storing artifact bytes in Postgres does not turn those rows into workflow state: they remain immutable inputs, outputs, and replay receipts, while Trigger owns live phase state.
 
 ### 6.3 Minimum usable wiki contract
 
@@ -689,7 +703,7 @@ The model never authors `index.md`. After pages are finalized, code derives root
 
 This keeps:
 
-- the standalone GCS/export bundle navigable;
+- the standalone exported bundle navigable;
 - indexes byte-stable when the tree is unchanged;
 - navigation synchronized with the serving hierarchy;
 - model calls focused on substantive pages.
@@ -863,7 +877,7 @@ Use distinct bounded diagnostic codes for `parse_failed`, `render_failed`, `forb
 
 ### 8.5 Diagram metadata and incremental behavior
 
-Canonical Mermaid source remains in Markdown/GCS. Store only lightweight generation-scoped metadata in `context_documents.metadata`:
+Canonical Mermaid source remains in the Markdown content artifact. Store only lightweight generation-scoped metadata in `context_documents.metadata`:
 
 ```ts
 interface WikiDiagramRecordV1 {
@@ -885,7 +899,7 @@ Search indexes captions and adjacent prose, not raw Mermaid DSL. Read/export ret
 
 ## 9. Canonical storage and versioning
 
-### 9.1 GCS canonical bundle
+### 9.1 Canonical content artifact
 
 Separate content identity from release identity.
 
@@ -922,13 +936,13 @@ Its deterministic JSON serializer sorts pages by `documentPath`, normalizes line
 Generation plans, finalization attestations, release manifests, and release envelopes remain under the existing build-scoped artifact policy:
 
 ```text
-context-v2/tenants/{tenant}/repositories/{owner}/{repo}/builds/{buildId}/context-release/{name}
+context/tenants/{tenant}/repositories/{owner}/{repo}/builds/{buildId}/context-release/{name}
 ```
 
 The content bundle is keyed independently of a build:
 
 ```text
-context-v2/tenants/{tenant}/repositories/{owner}/{repo}/wiki-content/{bundleSha256}.json
+context/tenants/{tenant}/repositories/{owner}/{repo}/wiki-content/{bundleSha256}.json
 ```
 
 ```ts
@@ -950,12 +964,29 @@ interface WikiContentArtifactRef {
 The build-specific V2 release envelope remains under the existing policy:
 
 ```text
-context-v2/tenants/{tenant}/repositories/{owner}/{repo}/builds/{buildId}/context-release/release-v2.json
+context/tenants/{tenant}/repositories/{owner}/{repo}/builds/{buildId}/context-release/release-v2.json
 ```
 
-`packages/db/src/context/gcs-artifact-store.ts` already uses create-only object generations and digest verification for build artifacts. Add a separate `WikiContentStorePort` behind the Context API with `putIfAbsent`, `find`, and repository-scoped validation rather than weakening `isContextArtifactKeyInRepositoryScope()`. It validates tenant, normalized repository, declared `publicSnapshotDigest`, exact serialized-byte `bundleSha256`, digest-derived key, GCS object generation, and create-only semantics. Cross-tenant or cross-repository references are always rejected.
+The Context API exposes three logical ports over one selected wiki artifact backend:
 
-Add `wiki-content` and `wiki-audit-report` to the durable GCS kinds. `context-release` remains durable; intermediate plans/pages may use lifecycle-managed artifact kinds. Concurrent puts of identical serialized bundles converge on the existing verified object. A stored object's bytes not matching its digest path are a terminal integrity error, not an overwrite. Identical Markdown generated under different policy/model versions reuses the same content object, while each build still writes its own policy-bearing V2 envelope and manifest.
+- `ContextArtifactStore` for build-scoped stage inputs/outputs and durable operation receipts;
+- `WikiContentStorePort` for repository-scoped content-addressed bundles;
+- `WikiAuditArtifactStorePort` for release/audit-scoped immutable reports.
+
+`JINA_WIKI_ARTIFACT_STORE=postgres` selects `PostgresWikiArtifactStore` for all three ports. Staging sets it explicitly. The adapter preserves the canonical keys above and returns an opaque positive decimal `objectGeneration`, so release and audit references retain the same backend-neutral shape as GCS references. Its URI is deterministic—`postgres://jina_context/context_wiki_artifacts/{key}?generation={objectGeneration}`—and is revalidated with the key and generation on every read. The table is append-only and tenant-scoped:
+
+```text
+jina_context.context_wiki_artifacts
+  tenant_id, repository, object_key, object_generation,
+  artifact_class, content_type, content_sha256, content_length,
+  content_metadata, content_bytes bytea, created_at
+```
+
+The primary identity is `(tenant_id, object_key)`, `object_generation` is globally unique, and `(tenant_id, repository)` references the repository catalog. Inserts validate the tenant/repository/key relationship, content type, byte length, SHA-256, metadata bounds, and class-specific key policy. A retry of the same key succeeds only when the stored bytes and metadata match; a first-writer collision with different content is terminal. Update/delete triggers enforce immutability. Context RLS and the tenant-admin API transaction prevent cross-tenant access, and the public/query database role has no permission to read raw artifact bytes. The adapter enforces explicit per-object caps: 32 MiB for generic wiki-stage artifacts/receipts, 512 MiB for the complete content bundle, and 2 MiB for an audit report. The table check accepts at most 512 MiB, so every class-specific adapter bound is also database-enforced.
+
+The default `gcs` selection retains the existing `GcsContextArtifactStore` and `GcsWikiArtifactStore` behavior for production. Those adapters use create-only object generations and digest verification. The application-level key, scope, digest, immutability, and port contracts are identical, so changing the physical backend does not change release identity, selectors, audit semantics, or Trigger payloads. It is a deployment cutover, not a data-format fork.
+
+`wiki-content` and `wiki-audit-report` are durable artifact classes. `context-release` remains durable; intermediate plans/pages are retained according to backend-aware reference/erasure policy. Concurrent puts of identical serialized bundles converge on the existing verified object. A stored object's bytes not matching its digest path are a terminal integrity error, not an overwrite. Identical Markdown generated under different policy/model versions reuses the same content object, while each build still writes its own policy-bearing V2 envelope and manifest.
 
 `publicSnapshotDigest` continues using `contextPublicSnapshotDigest()` over the canonical sorted-page Markdown representation. The serialized `WikiContentBundleV1` has its own exact-byte `bundleSha256` because the JSON envelope, paths, and per-page hash fields are not identical to the public-page concatenation. Both digests are verified when the V2 loader hydrates a normalized release; neither is silently substituted for the other.
 
@@ -971,7 +1002,7 @@ The build-scoped V2 release manifest contains content facts and policy/provenanc
 
 `WikiReleaseArtifactV2` contains the release-specific tenant/repository/ref/commit/build/run/request lineage and references the verified content bundle plus finalization and generation-plan artifacts. This split makes content reuse real while retaining the current build-scoped publication envelope and audit trail.
 
-### 9.2 PostgreSQL release identity
+### 9.2 PostgreSQL release identity and serving projection
 
 Reuse and extend:
 
@@ -981,7 +1012,8 @@ Reuse and extend:
 - generation-scoped document, fragment, exact, hierarchy, structural, and citation tables;
 - published views that expose only `index_generations.status = 'published'`.
 
-Add release fields through a migration:
+Add release fields through a migration. Artifact fields store verified backend-neutral
+references—not duplicated object bytes:
 
 ```text
 orchestrator
@@ -1057,7 +1089,7 @@ tenant + repository + ref_name + locale -> releaseId + refSequence + commitSha
 
 Existing immutable releases and current-pointer rows may use the legacy bare ref `main`. Do not rewrite their identities during cutover. During the drain period, a branch selector resolves the canonical `refs/heads/{name}` pointer first and then the legacy bare-ref alias only when no canonical pointer exists. New admissions and pointer updates always write the canonical form. Remove fallback only after historical-read retention no longer needs it.
 
-Direct commit releases store `scopeKind = 'commit'`, `scopeKey = <sha>`, synthetic immutable `ref = refs/commits/{sha}`, and no `refSequence`; they do not update `current_context_board_releases`. A commit selector resolves the most recently activated matching release in the requested locale using `pageindex_attached_at DESC, release_id DESC`. Clients that require stable historical bytes pass `releaseId`. `GET /context/releases?commitSha=...&locale=...` exposes all matching releases so ambiguity is visible.
+Direct commit releases store `scopeKind = 'commit'`, `scopeKey = <sha>`, synthetic immutable `ref = refs/commits/{sha}`, and no `refSequence`; they do not update `current_context_board_releases`. A commit selector resolves the most recently activated matching release in the requested locale using `pageindex_attached_at DESC, release_id DESC`. Clients that require stable historical bytes pass `releaseId`. `GET /wiki/releases?commitSha=...&locale=...` exposes all matching releases so ambiguity is visible.
 
 Locale is orthogonal to the release selector and defaults to the configured product locale, initially `en`. A branch or PR release can advance only its own locale pointer. Incremental-parent lookup uses the same canonical ref and locale. A translation copies `releaseFamilyId` from its source release; a new source-language generation allocates a new family so stale translations cannot be presented as translations of revised source content.
 
@@ -1135,7 +1167,7 @@ The first Trigger claim also inserts one immutable `context_release_audit_runs` 
 
 The audit reads:
 
-- the exact GCS canonical bundle for source-of-truth bytes;
+- the exact canonical content artifact through the API-selected backend for source-of-truth bytes;
 - the published PostgreSQL projection to test real list/read/search/PageIndex behavior;
 - the release manifest, citations, diagrams, generator versions, and source commit;
 - optionally the current repository commit/diff when checking staleness.
@@ -1203,13 +1235,13 @@ create table jina_context.context_release_audit_followups (
 
 Insert an audit row once, only when the audit is terminal. There is no partial row to update: Trigger owns live execution, and a terminal `error` is itself an immutable audit outcome. Install the same append-only update/delete rejection used for immutable Context facts. Follow-up admission state lives in the separate idempotent receipt table so it cannot mutate the audit result.
 
-The full report is a durable `wiki-audit-report` GCS artifact under an audit-scoped key, not a fictitious Board build:
+The full report is a durable `wiki-audit-report` artifact object under an audit-scoped key, not a fictitious Board build:
 
 ```text
 context/tenants/{tenant}/repositories/{owner}/{repo}/audits/{auditId}/wiki-audit-report/report.json
 ```
 
-Add a strict audit-artifact port/validator parallel to the repository-scoped content port. The row stores bounded queryable facts and its verified artifact reference. Before insert, validate tenant/repository/audit scope, report SHA-256, declared audit/release/input-digest identity, and GCS object generation. Audit status is not copied into or allowed to mutate the immutable release row.
+The strict audit-artifact port/validator parallels the repository-scoped content port. The audit summary row stores bounded queryable facts and its verified artifact reference; staging stores the referenced report bytes in `context_wiki_artifacts`, while the production adapter currently stores them in GCS. Before insert, validate tenant/repository/audit scope, report SHA-256, declared audit/release/input-digest identity, and the backend-issued positive decimal object generation. Audit status is not copied into or allowed to mutate the immutable release row.
 
 `audit-wiki.onFailure` reclaims the exact run-bound grant and calls the scoped failure route with only a stable terminal code. Before creating an error report, the API looks up the create-only report key: if evaluation already wrote a verified report before the parent or completion call crashed, that report wins and is committed as the terminal result. Otherwise the API writes a generic bounded error report whose immutable timestamp comes from the original run claim, so `onFailure` and reconciler retries produce identical bytes. A terminal success/error row is insert-once; failure can never overwrite an existing successful audit.
 
@@ -1275,26 +1307,32 @@ Locale is a separate optional field, not another `WikiSelector` union member. Fo
 Retain and extend:
 
 ```http
-GET  /context/releases?repository=o/r&ref=refs/heads/main&locale=en
-GET  /context/releases?repository=o/r&commitSha=<sha>&locale=en
-GET  /context/list?repository=o/r&releaseId=<release>&locale=en
-GET  /context/read?repository=o/r&releaseId=<release>&locale=en&document=<id>
-POST /context/search
-GET  /context/diff?repository=o/r&fromReleaseId=<a>&toReleaseId=<b>
-POST /context/ask
-GET  /context/export?repository=o/r&releaseId=<release>&locale=en
+GET  /wiki/releases?repository=o/r&ref=refs/heads/main&locale=en
+GET  /wiki/releases?repository=o/r&commitSha=<sha>&locale=en
+GET  /wiki/list?repository=o/r&releaseId=<release>&locale=en
+GET  /wiki/read?repository=o/r&releaseId=<release>&locale=en&document=<id>
+POST /wiki/search
+GET  /wiki/diff?repository=o/r&fromReleaseId=<a>&toReleaseId=<b>
+POST /wiki/ask
+GET  /wiki/export?repository=o/r&releaseId=<release>&locale=en
 ```
 
-List/read/search/diff query PostgreSQL. GCS is used for full export, audit, recovery, and reprojection, not normal reads.
-`/context/export` resolves and authorizes the same strict selector, then hydrates
-the verified repository-scoped content bundle from GCS and returns it with the
+List/read/search/diff query the published PostgreSQL projection. They never scan
+`context_wiki_artifacts.content_bytes` and never call GCS.
+`/wiki/export` resolves and authorizes the same strict selector, then hydrates
+the verified repository-scoped content bundle through the API artifact port and returns it with the
 immutable release identity and current-policy audit summary. The dashboard
 proxy and MCP `ask_context` surface preserve the same selector, locale, release,
 citation, and non-gating audit semantics rather than inventing separate heads.
+Audit, recovery, export, and reprojection are the only ordinary wiki paths that
+hydrate raw artifact bytes. In staging those bytes come from an exact tenant/key/
+generation Postgres row; in production they currently come from the corresponding
+GCS object. Both paths verify scope, length, digest, content type, and generation
+before parsing.
 
-`POST /context/build` returns `202 Accepted` for a newly admitted or already-active asynchronous build, with `{ boardBuildId, status, statusUrl, duplicate }`. It never waits for Trigger dispatch or publication. A completed exact duplicate may return `200` with its existing release identity.
+`POST /wiki/build` returns `202 Accepted` for a newly admitted or already-active asynchronous build, with `{ boardBuildId, status, statusUrl, duplicate }`. It never waits for Trigger dispatch or publication. A completed exact duplicate may return `200` with its existing release identity.
 
-`POST /context/search` uses an explicit selector object:
+`POST /wiki/search` uses an explicit selector object:
 
 ```ts
 interface WikiAuditSummary {
@@ -1396,10 +1434,11 @@ This is informational. A published wiki remains readable regardless of audit out
 ## 13. Security and tenancy
 
 - Resolve commits and trusted `.jina/wiki/instruction.md` before admission using the GitHub installation identity.
-- Mint short-lived GitHub installation tokens at execution time; never store them in Board, Trigger metadata, logs, or GCS.
+- Mint short-lived GitHub installation tokens at execution time; never store them in Board, Trigger metadata, logs, or an artifact object.
 - Use a Context-Trigger-specific bootstrap service identity only to exchange an authorized run/audit identity for short-lived execution grants; every product-data call requires the narrower grant.
 - Give Trigger no PostgreSQL connection string, database role, GCS service-account key, or bucket-wide credential. Keep product-store access and tenant/repository validation in the Context API.
-- Scope build artifacts to tenant/repository/build and shared content artifacts to tenant/repository/bundle SHA-256; verify bundle SHA-256, declared public snapshot digest, and GCS object generation without allowing cross-scope references.
+- Scope build artifacts to tenant/repository/build and shared content artifacts to tenant/repository/bundle SHA-256; verify bundle SHA-256, declared public snapshot digest, and the backend-issued positive decimal object generation without allowing cross-scope references.
+- Keep raw `context_wiki_artifacts` bytes behind the tenant-admin API role and Context RLS. Public/query roles read only published release/catalog/audit-summary projections.
 - Treat repository source, prior wiki, PR text, audit reports, connector content, and Mermaid text as untrusted data.
 - Enforce wiki exclusions before model access.
 - Keep Mermaid `securityLevel: 'strict'`, forbid interactive directives, and sanitize parser errors before storage/rendering.
@@ -1420,6 +1459,7 @@ This is informational. A published wiki remains readable regardless of audit out
 - `packages/context-engine/src/publication/wiki-release-v2.ts` for content bundle, finalization attestation, V2 release/parser/digest, and normalized V1/V2 views.
 - `packages/context-engine/src/ports/wiki-content-store.ts` and tests.
 - `packages/context-engine/src/ports/wiki-audit-artifact-store.ts` and tests.
+- `packages/db/src/context/postgres-wiki-artifact-store.ts` implementing all three wiki artifact ports with create-only collision verification, bounded bytes, tenant-admin transactions, and backend-neutral references.
 - `packages/context-trigger-client/` for dispatch, retrieve, cancel, schedule/control status parsing, and dashboard URLs.
 - `services/context-trigger/` with `trigger.config.ts`, package config, tests, and tasks.
 - `services/context-trigger/src/trigger/generate-wiki.ts`.
@@ -1435,6 +1475,7 @@ This is informational. A published wiki remains readable regardless of audit out
 - DB migration for Trigger publication authority/release metadata.
 - DB migration/repository for `context_release_audits`.
 - DB migration/repository for `context_release_audit_followups`.
+- DB migration for append-only, tenant-scoped `context_wiki_artifacts`, including RLS, immutable triggers, byte/metadata limits, and no raw-byte grant to the query role.
 - `.github/workflows/deploy-context-trigger.yml`.
 
 ### 14.2 Modify
@@ -1447,7 +1488,7 @@ This is informational. A published wiki remains readable regardless of audit out
 - `packages/context-engine/src/ports/artifact-store.ts`: keep build-scoped validation unchanged and add the separate repository-scoped wiki-content reference/port exports.
 - `packages/db/src/context/board-publication-repository.ts`: Trigger authority and release metadata while preserving prepared visibility.
 - `packages/db/src/context/board-pageindex-attachment-repository.ts`: Trigger fence, activation attestation, locale-aware branch/PR pointer advancement, and pointer-free direct-commit activation.
-- `packages/db/src/context/schema.ts`: audit table, explicit artifact columns, locale-aware pointer key, conditional ref sequence, partial indexes, and published-view compatibility.
+- `packages/db/src/context/schema.ts`: wiki artifact-object table, audit table, explicit artifact columns, locale-aware pointer key, conditional ref sequence, partial indexes, RLS/role boundaries, and published-view compatibility.
 - `apps/api/src/context-board-admission.ts`: one-task Trigger admission and audit-fix admission.
 - `apps/api/src/server.ts`: bridge/control/internal mutation endpoints, audit endpoints, selectors, `ask_context`, export.
 - `apps/api/src/mcp.ts`: `ask_context`, release selectors, richer instructions/resources.
@@ -1456,6 +1497,7 @@ This is informational. A published wiki remains readable regardless of audit out
 - `apps/dashboard/package.json`: exact shared Mermaid version rather than an unconstrained compatible range.
 - `.jina` configuration parser/docs: wiki instruction and exclusions.
 - workspace manifests, lockfiles, TypeScript/Turbo config, environment examples, deploy/readiness scripts, observability docs.
+- staging deploy/readiness: select `JINA_WIKI_ARTIFACT_STORE=postgres`, verify it on the deployed API revision, and keep only read-only safety checks for the legacy Context bucket.
 - API runtime image: provision pinned Playwright integration plus system Chromium and validate exact Mermaid/renderer bundle identity; Trigger retains only scoped orchestration authority.
 
 ### 14.3 Remove after drain
@@ -1481,6 +1523,7 @@ Use one admission mode:
 ```text
 JINA_WIKI_PIPELINE_MODE=legacy-board|trigger-allowlist|trigger
 JINA_WIKI_TRIGGER_ALLOWLIST=<tenant/repository pairs>
+JINA_WIKI_ARTIFACT_STORE=gcs|postgres
 ```
 
 Persist the selected owner and pipeline version at admission so a later flag change cannot transfer an active/deferred request between orchestrators.
@@ -1497,8 +1540,6 @@ JINA_CONTEXT_TRIGGER_DASHBOARD_URL
 JINA_CONTEXT_INTERNAL_API_URL
 JINA_CONTEXT_TRIGGER_SERVICE_TOKEN
 JINA_CONTEXT_EXECUTION_GRANT_SECRET
-JINA_CONTEXT_TRIGGER_SERVICE_TOKEN
-JINA_CONTEXT_EXECUTION_GRANT_SECRET
 JINA_CONTEXT_TRIGGER_DISPATCH_SECRET
 JINA_WIKI_AUDIT_CRON
 JINA_WIKI_AUDIT_POLICY_VERSION
@@ -1507,7 +1548,7 @@ JINA_WIKI_DIAGRAM_POLICY_VERSION
 JINA_WIKI_DEFAULT_LOCALE=en
 ```
 
-`JINA_CONTEXT_TRIGGER_API_URL`/secret/access token are API-side Trigger control-plane settings used to dispatch and inspect runs. `JINA_CONTEXT_INTERNAL_API_URL` and the bootstrap service token are Trigger-side settings used only for claim/grant exchange and scoped internal calls. Context Trigger deployment intentionally has no `DATABASE_URL`, Cloud SQL credential, GCS service-account key, or bucket-wide storage role.
+`JINA_CONTEXT_TRIGGER_API_URL`/secret/access token are API-side Trigger control-plane settings used to dispatch and inspect runs. `JINA_CONTEXT_INTERNAL_API_URL` and the bootstrap service token are Trigger-side settings used only for claim/grant exchange and scoped internal calls. `JINA_WIKI_ARTIFACT_STORE` is API-only, accepts exactly `gcs` or `postgres`, and fails closed when the selected backend is unavailable. Staging sets `postgres`; production currently uses the `gcs` default until a separately reviewed migration. Context Trigger deployment intentionally has no `DATABASE_URL`, Cloud SQL credential, GCS service-account key, or bucket-wide storage role.
 
 ## 16. Implementation sequence
 
@@ -1653,7 +1694,9 @@ Exit: generation completes without audit, daily audit can run later, and improve
 - Incremental parent resolution never crosses locale.
 - Requests with conflicting selectors are rejected.
 - Diff compares stable logical IDs and revision fingerprints.
-- GCS reprojection recreates the same serving projection.
+- Reprojection from either verified artifact backend recreates the same serving projection.
+- Postgres-backed and GCS-backed refs preserve the same tenant/repository/key/digest/generation validation contract.
+- Query/list/read/search never fetch `context_wiki_artifacts.content_bytes`; export, audit, recovery, and reprojection fetch only the exact authorized object ref.
 
 ### 17.5 Audit
 
@@ -1671,6 +1714,8 @@ Exit: generation completes without audit, daily audit can run later, and improve
 ### 17.6 Security and failure injection
 
 - Wrong tenant/repository/run/digest/artifact prefix is rejected.
+- The Postgres adapter rejects cross-tenant/repository keys, traversal/unsafe keys, non-decimal generations, oversized bytes/metadata, digest mismatches, and different-byte first-writer collisions.
+- The query database role cannot select raw `context_wiki_artifacts` bytes; API tenant-admin transactions remain RLS-scoped.
 - PR-head instructions cannot govern their own build.
 - Excluded source is inaccessible to generation.
 - Mermaid interactive directives are rejected.
@@ -1723,30 +1768,32 @@ Use single-owner routing. Never generate/publish the same admitted request throu
 
 ## 20. Risks and mitigations
 
-| Risk                                                    | Mitigation                                                                                                          |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Trigger accepts work but dispatch response is lost      | Global idempotency plus one authorized-run CAS and reconciliation                                                   |
-| Trigger parent starts before bridge receives its run ID | Precommitted nonce digest and parent-first claim CAS before any side effect                                         |
-| Internal Trigger state leaks back into Board            | Strict one-task schema and progress reads from Trigger only                                                         |
-| Generation becomes another long gate-heavy workflow     | No semantic audit/repair stages in `generate-wiki`; deterministic finalizer only                                    |
-| First wiki is partial or unusable                       | Minimum usable bundle contract and complete-set page accounting                                                     |
-| Audit blocks availability                               | Audit is independent and non-gating by invariant                                                                    |
-| Audit mutates history                                   | Immutable audit record; improvement is a new release                                                                |
-| Stale audit republishes older source                    | Audit-fix admission rechecks the locale pointer under the publication lock and records `superseded` without a build |
-| Branch/PR results overwrite newer source                | Monotonic ref sequence and activation transaction                                                                   |
-| One locale replaces another                             | Locale is part of pointer identity, sequence uniqueness, incremental-parent resolution, and selectors               |
-| Same commit has ambiguous wiki history                  | Exact `releaseId`; commit release listing and explicit newest resolution                                            |
-| GCS becomes a slow query path                           | PostgreSQL remains the serving projection                                                                           |
-| PostgreSQL loses canonical bytes                        | Immutable GCS bundle supports export/reprojection                                                                   |
-| Cross-build reuse bypasses artifact scope               | Separate repository-scoped content port plus new build-scoped release envelope                                      |
-| Shared content digest collides with policy metadata     | Exact-byte `bundleSha256` keys a content-only serialization; provenance stays build-scoped                          |
-| Trigger gains broad product-store access                | API-owned DB/GCS boundary plus short-lived operation- and repository-scoped grants                                  |
-| V2 publication fakes removed certification              | Discriminated V1/V2 contracts and deterministic finalization attestation                                            |
-| Diagram renders locally but not in product              | Exact shared Mermaid version plus parse and render smoke test                                                       |
-| Diagram syntax failure makes page unusable              | Safe conversion to text and diagnostic breadcrumb                                                                   |
-| Diagram becomes semantically stale                      | Evidence-linked metadata, incremental impact, and scheduled audit                                                   |
-| Repository instructions become prompt injection         | Trusted base/default-branch policy and untrusted-source boundaries                                                  |
-| Feature scope delays orchestration cutover              | Phase OpenWiki-derived product additions while preserving final contracts                                           |
+| Risk                                                    | Mitigation                                                                                                                               |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Trigger accepts work but dispatch response is lost      | Global idempotency plus one authorized-run CAS and reconciliation                                                                        |
+| Trigger parent starts before bridge receives its run ID | Precommitted nonce digest and parent-first claim CAS before any side effect                                                              |
+| Internal Trigger state leaks back into Board            | Strict one-task schema and progress reads from Trigger only                                                                              |
+| Generation becomes another long gate-heavy workflow     | No semantic audit/repair stages in `generate-wiki`; deterministic finalizer only                                                         |
+| First wiki is partial or unusable                       | Minimum usable bundle contract and complete-set page accounting                                                                          |
+| Audit blocks availability                               | Audit is independent and non-gating by invariant                                                                                         |
+| Audit mutates history                                   | Immutable audit record; improvement is a new release                                                                                     |
+| Stale audit republishes older source                    | Audit-fix admission rechecks the locale pointer under the publication lock and records `superseded` without a build                      |
+| Branch/PR results overwrite newer source                | Monotonic ref sequence and activation transaction                                                                                        |
+| One locale replaces another                             | Locale is part of pointer identity, sequence uniqueness, incremental-parent resolution, and selectors                                    |
+| Same commit has ambiguous wiki history                  | Exact `releaseId`; commit release listing and explicit newest resolution                                                                 |
+| Artifact-byte storage becomes a slow query path         | Compact PostgreSQL publication/search projections serve normal reads; raw bytes are hydrated only for export/audit/recovery/reprojection |
+| Staging Postgres artifact row is lost or corrupted      | Immutable digest/generation checks fail closed; database backup/restore covers bytes and release metadata atomically                     |
+| Production GCS artifact is lost or corrupted            | Immutable generation/digest validation fails closed and production backup/retention policy remains in force                              |
+| Staging and production artifact backends drift          | Shared three-port conformance tests and backend-neutral refs; backend cutover cannot change release identity                             |
+| Cross-build reuse bypasses artifact scope               | Separate repository-scoped content port plus new build-scoped release envelope                                                           |
+| Shared content digest collides with policy metadata     | Exact-byte `bundleSha256` keys a content-only serialization; provenance stays build-scoped                                               |
+| Trigger gains broad product-store access                | API-owned database/object boundary plus short-lived operation- and repository-scoped grants                                              |
+| V2 publication fakes removed certification              | Discriminated V1/V2 contracts and deterministic finalization attestation                                                                 |
+| Diagram renders locally but not in product              | Exact shared Mermaid version plus parse and render smoke test                                                                            |
+| Diagram syntax failure makes page unusable              | Safe conversion to text and diagnostic breadcrumb                                                                                        |
+| Diagram becomes semantically stale                      | Evidence-linked metadata, incremental impact, and scheduled audit                                                                        |
+| Repository instructions become prompt injection         | Trusted base/default-branch policy and untrusted-source boundaries                                                                       |
+| Feature scope delays orchestration cutover              | Phase OpenWiki-derived product additions while preserving final contracts                                                                |
 
 ## 21. Definition of done
 
@@ -1755,7 +1802,7 @@ The migration and discussed feature set are complete when:
 - every new wiki generation appears on the Board as one `build-wiki` task;
 - Trigger.dev owns all generation internals and the Board contains no child workflow state;
 - a cold build publishes a complete usable wiki before any audit runs;
-- GCS holds a portable canonical bundle and PostgreSQL holds an exact published query projection;
+- the API-selected immutable artifact backend holds a portable canonical bundle and PostgreSQL holds an exact published query projection; staging uses append-only Postgres bytes while production retains GCS until cutover;
 - Trigger holds no broad PostgreSQL/GCS credential and all product-store access passes the scoped Context API boundary;
 - branch, PR, commit, and release selectors return the correct locale-isolated version, while translations share only an explicit release family;
 - deterministic indexes, OKF metadata, instructions, exclusions, incremental updates, no-op reuse, changelog, and export are implemented;

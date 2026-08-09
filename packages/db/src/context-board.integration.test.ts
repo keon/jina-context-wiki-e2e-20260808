@@ -41,6 +41,7 @@ test(
           "context_release_audit_runs",
           "context_release_audits",
           "context_releases",
+          "context_wiki_artifacts",
           "context_wiki_projections",
           "current_context_board_releases",
           "issue_graph_releases",
