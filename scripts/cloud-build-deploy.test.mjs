@@ -74,6 +74,60 @@ async function withFakeGcloud(source, callback) {
   }
 }
 
+async function withFakeStagingBucketGcloud({ grantSucceeds, postPolicy }, callback) {
+  const directory = await mkdtemp(join(tmpdir(), "jina-staging-bucket-iam-"));
+  const executable = join(directory, "gcloud");
+  const policyCallCount = join(directory, "policy-call-count");
+  const mutationLog = join(directory, "mutation-log");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
+  printf '%s\\n' '{"name":"jina-staging-20260802-context-artifacts-us-east1","location":"US-EAST1","location_type":"region","uniform_bucket_level_access":true}'
+  exit 0
+fi
+if [[ "$1 $2 $3" == "storage buckets get-iam-policy" ]]; then
+  calls=0
+  if [[ -f "${policyCallCount}" ]]; then calls="$(<"${policyCallCount}")"; fi
+  calls=$((calls + 1))
+  printf '%s' "$calls" >"${policyCallCount}"
+  if [[ "$calls" == "1" ]]; then
+    printf '%s\\n' '{"bindings":[]}'
+  else
+    printf '%s\\n' '${JSON.stringify(postPolicy)}'
+  fi
+  exit 0
+fi
+if [[ "$1 $2 $3" == "storage buckets add-iam-policy-binding" ]]; then
+  exit ${grantSucceeds ? 0 : 13}
+fi
+if [[ "$1 $2 $3" == "run jobs deploy" || "$1 $2 $3" == "run services update-traffic" || "$1 $2 $3" == "--quiet run deploy" ]]; then
+  printf '%s\\n' "$*" >>"${mutationLog}"
+fi
+case "$1 $2 $3" in
+  "artifacts docker images"|"iam service-accounts describe"|"secrets versions describe"|"secrets describe jina-staging-worker-release-credential") exit 0 ;;
+esac
+exit 97
+`
+  );
+  await chmod(executable, 0o755);
+  try {
+    return await callback({
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        IMAGE_TAG: "staging-behavioral-test",
+        JINA_CONTEXT_TENANT_ID: "000f5dca-8b8b-45b3-8866-6853dbff4dd3",
+        JINA_PRODUCT_INTERNAL_TOKEN_VERSION: "4"
+      },
+      mutationLog
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 function numericSecretPreflightGcloud(versionResult) {
   return `#!/usr/bin/env bash
 if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
@@ -255,6 +309,7 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   );
   assert.match(stagingDeployment, /storage buckets get-iam-policy "gs:\/\/\$\{artifact_bucket\}"/);
   assert.match(stagingDeployment, /\nrequire_artifact_bucket_prerequisites\n/);
+  assert.match(stagingDeployment, /\nensure_artifact_bucket_api_access\n/);
   assert.match(stagingDeployment, /roles\/storage\.admin/);
   assert.match(stagingDeployment, /public IAM principals are forbidden/);
   assert.match(
@@ -263,14 +318,17 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   );
   assert.ok(
     stagingDeployment.indexOf("\nrequire_artifact_bucket_prerequisites\n") <
-      stagingDeployment.indexOf('storage buckets add-iam-policy-binding "gs://${artifact_bucket}"')
+      stagingDeployment.indexOf("\nensure_artifact_bucket_api_access\n")
   );
   assert.ok(
-    stagingDeployment.indexOf('storage buckets add-iam-policy-binding "gs://${artifact_bucket}"') <
+    stagingDeployment.indexOf("\nensure_artifact_bucket_api_access\n") <
       stagingDeployment.indexOf('gcloud run jobs deploy "${migration_job}"')
   );
+  assert.match(stagingDeployment, /Artifact bucket API IAM postcondition failed/);
+  assert.match(stagingDeployment, /roles\/storage\.objectAdmin/);
   assert.match(stagingReadiness, /roles\/storage\.admin/);
   assert.match(stagingReadiness, /roles\/storage\.objectUser/);
+  assert.match(stagingReadiness, /project-level roles\/storage\.admin/);
   assert.match(stagingReadiness, /allAuthenticatedUsers/);
   assert.match(stagingSerialization, /build\.get\("buildTriggerId"\) == os\.environ\["TRIGGER_ID"\]/);
   assert.match(stagingSerialization, /build\.get\("createTime", ""\) < os\.environ\["CURRENT_CREATE_TIME"\]/);
@@ -279,6 +337,51 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.doesNotMatch(stagingSerialization, /BUILDS_JSON=/);
   assert.match(deploymentDocs, /`jina-staging-deploy`/);
   assert.doesNotMatch(deploymentDocs, /\.github\/workflows\/deploy-staging\.yml/);
+});
+
+test("staging bucket IAM remediation fails before migration or revision mutation", async () => {
+  await withFakeStagingBucketGcloud(
+    { grantSucceeds: false, postPolicy: { bindings: [] } },
+    async ({ env, mutationLog }) => {
+      await assert.rejects(
+        () => execFileAsync("bash", ["scripts/deploy-staging.sh"], { env }),
+        (error) => {
+          assert.match(error.stderr, /Cannot grant staging API object access/);
+          assert.match(error.stderr, /roles\/storage\.admin to jina-cloud-build-staging@/);
+          return true;
+        }
+      );
+      await assert.rejects(() => readFile(mutationLog, "utf8"), /ENOENT/);
+    }
+  );
+});
+
+test("staging bucket IAM postcondition rejects stronger API and public grants before mutation", async () => {
+  const apiMember = "serviceAccount:jina-api-staging@jina-staging-20260802.iam.gserviceaccount.com";
+  await withFakeStagingBucketGcloud(
+    {
+      grantSucceeds: true,
+      postPolicy: {
+        bindings: [
+          { role: "roles/storage.objectUser", members: [apiMember] },
+          { role: "roles/storage.admin", members: [apiMember] },
+          { role: "roles/storage.objectViewer", members: ["allUsers"] }
+        ]
+      }
+    },
+    async ({ env, mutationLog }) => {
+      await assert.rejects(
+        () => execFileAsync("bash", ["scripts/deploy-staging.sh"], { env }),
+        (error) => {
+          assert.match(error.stderr, /Artifact bucket API IAM postcondition failed/);
+          assert.match(error.stderr, /forbidden stronger direct bucket roles: roles\/storage\.admin/);
+          assert.match(error.stderr, /public IAM principals are forbidden/);
+          return true;
+        }
+      );
+      await assert.rejects(() => readFile(mutationLog, "utf8"), /ENOENT/);
+    }
+  );
 });
 
 test("staging deployment serialization accepts build listings larger than the environment limit", async () => {

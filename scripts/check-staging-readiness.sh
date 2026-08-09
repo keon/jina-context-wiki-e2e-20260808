@@ -64,6 +64,19 @@ for role in "${required_deployer_roles[@]}"; do
     fail "Automatic staging deployer requires ${role}"
   fi
 done
+for member in \
+  "serviceAccount:${staging_deployer}" \
+  "serviceAccount:${api_service_account}"; do
+  if jq -e --arg member "${member}" '
+      .bindings[]? |
+      select(.role == "roles/storage.admin") |
+      .members[]? | select(. == $member)
+    ' <<<"${project_policy}" >/dev/null; then
+    fail "${member} must not have project-level roles/storage.admin"
+  else
+    pass "${member} has no visible project-level roles/storage.admin grant"
+  fi
+done
 
 deployer_policy="$(gcloud iam service-accounts get-iam-policy "${staging_deployer}" \
   --project="${staging_project}" --format=json 2>/dev/null || true)"
@@ -155,6 +168,20 @@ if jq -e --arg member "serviceAccount:${api_service_account}" '
   pass "Staging API can read and write Context artifacts"
 else
   fail "Staging API requires bucket-scoped roles/storage.objectUser on the Context artifact bucket"
+fi
+if jq -e --arg member "serviceAccount:${api_service_account}" '
+    .bindings[]? |
+    select(
+      .role == "roles/storage.admin" or
+      .role == "roles/storage.objectAdmin" or
+      .role == "roles/storage.legacyBucketOwner" or
+      .role == "roles/storage.legacyBucketWriter"
+    ) |
+    .members[]? | select(. == $member)
+  ' <<<"${artifact_bucket_policy}" >/dev/null; then
+  fail "Staging API must not have stronger direct roles on the Context artifact bucket"
+else
+  pass "Staging API has no stronger direct Context artifact bucket role"
 fi
 if ! jq -e 'type == "object" and (.bindings | type == "array")' \
   <<<"${artifact_bucket_policy}" >/dev/null; then

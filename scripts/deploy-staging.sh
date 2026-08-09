@@ -203,38 +203,90 @@ if errors:
     exit 2
   fi
 
+  if ! BUCKET_POLICY="${bucket_policy}" python3 -c '
+import json
+import os
+import sys
+
+policy = json.loads(os.environ["BUCKET_POLICY"])
+bindings = policy.get("bindings", [])
+public_members = {"allUsers", "allAuthenticatedUsers"}
+is_public = any(
+    public_members.intersection(binding.get("members", []))
+    for binding in bindings
+)
+if is_public:
+    sys.stderr.write("Artifact bucket prerequisite failed: public IAM principals are forbidden\n")
+    raise SystemExit(2)
+'; then
+    artifact_bucket_bootstrap_hint
+    exit 2
+  fi
+}
+
+ensure_artifact_bucket_api_access() {
+  local bucket_policy
+  if ! gcloud storage buckets add-iam-policy-binding "gs://${artifact_bucket}" \
+    --member="serviceAccount:${api_service_account}" \
+    --role="roles/storage.objectUser" \
+    --quiet >/dev/null 2>&1; then
+    printf 'Cannot grant staging API object access on gs://%s using %s.\n' \
+      "${artifact_bucket}" "${build_service_account}" >&2
+    artifact_bucket_bootstrap_hint
+    exit 2
+  fi
+
+  if ! bucket_policy="$(gcloud storage buckets get-iam-policy "gs://${artifact_bucket}" \
+    --project="${project}" --format=json 2>/dev/null)"; then
+    printf 'Cannot verify IAM after granting staging API access on gs://%s.\n' "${artifact_bucket}" >&2
+    exit 2
+  fi
+
   if ! BUCKET_POLICY="${bucket_policy}" \
-    BUILD_MEMBER="serviceAccount:${build_service_account}" \
+    API_MEMBER="serviceAccount:${api_service_account}" \
     python3 -c '
 import json
 import os
 import sys
 
 policy = json.loads(os.environ["BUCKET_POLICY"])
-build_member = os.environ["BUILD_MEMBER"]
+api_member = os.environ["API_MEMBER"]
 bindings = policy.get("bindings", [])
-has_admin = any(
-    binding.get("role") == "roles/storage.admin"
-    and build_member in binding.get("members", [])
+errors = []
+has_object_user = any(
+    binding.get("role") == "roles/storage.objectUser"
+    and api_member in binding.get("members", [])
     and not binding.get("condition")
     for binding in bindings
 )
+stronger_roles = {
+    "roles/storage.admin",
+    "roles/storage.objectAdmin",
+    "roles/storage.legacyBucketOwner",
+    "roles/storage.legacyBucketWriter",
+}
+stronger_api_roles = sorted({
+    binding.get("role")
+    for binding in bindings
+    if binding.get("role") in stronger_roles and api_member in binding.get("members", [])
+})
 public_members = {"allUsers", "allAuthenticatedUsers"}
 is_public = any(
     public_members.intersection(binding.get("members", []))
     for binding in bindings
 )
-if not has_admin:
-    sys.stderr.write(
-        "Artifact bucket prerequisite failed: "
-        f"{build_member} needs an unconditional bucket-scoped roles/storage.admin binding\n"
-    )
-    raise SystemExit(2)
+if not has_object_user:
+    errors.append("the API needs an unconditional roles/storage.objectUser binding")
+if stronger_api_roles:
+    errors.append("the API has forbidden stronger direct bucket roles: " + ", ".join(stronger_api_roles))
 if is_public:
-    sys.stderr.write("Artifact bucket prerequisite failed: public IAM principals are forbidden\n")
+    errors.append("public IAM principals are forbidden")
+if errors:
+    sys.stderr.write("Artifact bucket API IAM postcondition failed: " + "; ".join(errors) + "\n")
     raise SystemExit(2)
 '; then
-    artifact_bucket_bootstrap_hint
+    printf 'Retain only bucket-scoped roles/storage.objectUser for %s and remove public or stronger direct bucket grants.\n' \
+      "${api_service_account}" >&2
     exit 2
   fi
 }
@@ -277,6 +329,7 @@ gcloud secrets versions describe "${product_internal_token_version}" \
   --secret="${product_internal_token_secret}" --project="${project}" >/dev/null
 gcloud secrets describe "${worker_release_credential_secret}" --project="${project}" >/dev/null
 require_artifact_bucket_prerequisites
+ensure_artifact_bucket_api_access
 
 serving_revision() {
   local service="$1"
@@ -499,14 +552,6 @@ rollback_failed_staging_release() {
   exit "${status}"
 }
 trap rollback_failed_staging_release EXIT
-
-# Context artifacts and wiki bundles are immutable, create-only API writes.
-# The prerequisite check proves this build can maintain IAM on this bucket
-# without granting it storage administration over the staging project.
-gcloud storage buckets add-iam-policy-binding "gs://${artifact_bucket}" \
-  --member="serviceAccount:${api_service_account}" \
-  --role="roles/storage.objectUser" \
-  --quiet >/dev/null
 
 if [[ "${JINA_SKIP_STAGING_MIGRATIONS:-false}" == "true" ]]; then
   deployed_migration_image="$(gcloud run jobs describe "${migration_job}" \

@@ -28,8 +28,9 @@ coordinated `cloudbuild.yaml` path below.
 Staging dashboard auth defaults to Clerk and fails closed when its configured
 publishable/secret key pair is unavailable.
 
-The staging Context artifact bucket is a platform prerequisite. Bootstrap its
-bucket-scoped identities once; never grant either storage role at project scope:
+The staging Context artifact bucket is a platform prerequisite. The preferred
+bootstrap grants its bucket-scoped identities once; never grant either storage
+role at project scope:
 
 ```sh
 staging_bucket=gs://jina-staging-20260802-context-artifacts-us-east1
@@ -44,7 +45,10 @@ gcloud storage buckets add-iam-policy-binding "${staging_bucket}" \
 The bucket must remain regional in `us-east1`, use uniform bucket-level access,
 have no lifecycle rules or public IAM principals, and retain immutable Context
 release and wiki objects while the database references them. Each staging deploy
-revalidates the bucket and idempotently maintains the API runtime binding.
+revalidates the bucket, attempts to maintain the API runtime binding, and proves
+the exact IAM postcondition before migrations or revision mutation. Remove direct
+API grants for `roles/storage.admin`, `roles/storage.objectAdmin`, or legacy bucket
+owner/writer; the API needs only `roles/storage.objectUser` on this bucket.
 
 For an operator rerun, invoke the source-bound trigger with the exact audited staging SHA:
 
