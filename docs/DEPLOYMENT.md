@@ -138,9 +138,10 @@ API authority secrets, and adds
 the compatibility window so already-admitted work can drain; new wiki admissions always
 create exactly one Board task. `scripts/check-staging-readiness.sh` verifies the four
 Context Trigger secrets, while `scripts/cloud-build-deploy.test.mjs` statically verifies
-the runtime isolation and environment contract. The staging validation step retains its
-complete output on failure but emits only a bounded success record, keeping terminal
-deployment diagnostics visible in GitHub's size-limited Cloud Build check.
+the runtime isolation and environment contract. The staging validation step keeps its
+complete log inside the Cloud Build step, emits the terminal 400 lines on failure, and
+emits only a bounded success record. This keeps the actionable failure or deployment
+diagnostics visible in GitHub's size-limited Cloud Build check.
 
 Cloud Build validates, builds, and deploys one coordinated release to
 `jina-v2/us-east1`. API, worker, dashboard, and admin images are built from the same
