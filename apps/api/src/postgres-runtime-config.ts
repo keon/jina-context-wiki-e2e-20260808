@@ -1,7 +1,11 @@
 import type { PostgresJsonStateStoreConfig } from "@jina/db";
 
 export const API_BOARD_STATE_POOL_MAX = 2;
-export const API_BOARD_STATE_CONNECTION_TIMEOUT_MS = 5_000;
+// Wiki page generation fans out concurrently (five children in the staging
+// acceptance run, with a bounded planner allowed to produce more). Each child
+// reads the large Board snapshot once to revalidate live cancellation authority,
+// so two connections need a bounded queue window longer than one observed wave.
+export const API_BOARD_STATE_CONNECTION_TIMEOUT_MS = 30_000;
 export const API_BOARD_STATE_IDLE_TIMEOUT_MS = 30_000;
 
 /**

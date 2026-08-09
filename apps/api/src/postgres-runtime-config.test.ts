@@ -37,7 +37,7 @@ test("Board state factory strips the shared pool and bounds dedicated checkout",
   assert.equal(received.connectionString, "postgresql://runtime.example/jina");
   assert.equal(received.manageSchema, false);
   assert.ok(API_BOARD_STATE_POOL_MAX <= 2);
-  assert.ok(API_BOARD_STATE_CONNECTION_TIMEOUT_MS < 10_000);
+  assert.equal(API_BOARD_STATE_CONNECTION_TIMEOUT_MS, 30_000);
   assert.equal(API_BOARD_STATE_IDLE_TIMEOUT_MS, 30_000);
 });
 

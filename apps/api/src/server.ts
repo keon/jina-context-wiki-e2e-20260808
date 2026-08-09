@@ -1270,28 +1270,36 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (grant.kind !== "build" || !config.contextWikiStageExecutor) {
         throw new ApiError(403, "forbidden", "build execution grant is invalid");
       }
-      await reload();
-      const task = findTask(intakeState.board, entityId<"task">(authorityId));
-      if (!task || task.type !== contextWikiBoardTaskType) throw notFound("wiki build not found");
-      const triggerRequest = parseWikiTriggerRequest(task.metadata.triggerRequest);
-      if (
-        triggerRequest.tenantId !== grant.tenantId ||
-        triggerRequest.repository !== grant.repository ||
-        triggerRequest.requestedLocale !== grant.locale ||
-        requiredString(task.metadata.requestDigest, "requestDigest") !== grant.authorityDigest
-      ) {
-        throw new ApiError(403, "forbidden", "wiki execution grant escaped its repository scope");
-      }
+      let authorizedRequest: ReturnType<typeof parseWikiTriggerRequest> | undefined;
+      const requireAuthorizedRequest = () => {
+        if (!authorizedRequest) throw new Error("wiki stage request was not authorized");
+        return authorizedRequest;
+      };
       const output = await runDurableWikiStageOperation({
         grant,
         stage,
         operationId,
         input: stageInput,
         authorizeMiss: async () => {
+          // A cache miss needs one fresh Board read after the operation lease is
+          // won. Resolving the request and checking live authority from that
+          // same snapshot avoids a redundant multi-megabyte state reload for
+          // every parallel page child while preserving cancellation fencing.
           await reload();
-          const current = findTask(intakeState.board, task.id);
+          const current = findTask(intakeState.board, entityId<"task">(authorityId));
+          if (!current || current.type !== contextWikiBoardTaskType) {
+            throw new ApiError(409, "wiki_execution_revoked", "wiki build authority is no longer active");
+          }
+          const triggerRequest = parseWikiTriggerRequest(current.metadata.triggerRequest);
+          if (
+            triggerRequest.tenantId !== grant.tenantId ||
+            triggerRequest.repository !== grant.repository ||
+            triggerRequest.requestedLocale !== grant.locale ||
+            requiredString(current.metadata.requestDigest, "requestDigest") !== grant.authorityDigest
+          ) {
+            throw new ApiError(403, "forbidden", "wiki execution grant escaped its repository scope");
+          }
           try {
-            if (!current) throw new Error("wiki build not found");
             assertContextWikiExecutionActive(intakeState.board, {
               taskId: current.id,
               requestDigest: grant.authorityDigest,
@@ -1300,12 +1308,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           } catch {
             throw new ApiError(409, "wiki_execution_revoked", "wiki build authority is no longer active");
           }
+          authorizedRequest = triggerRequest;
         },
         ...(config.contextWikiStageExecutor.recover
           ? {
               recover: () =>
                 config.contextWikiStageExecutor!.recover!({
-                  request: triggerRequest,
+                  request: requireAuthorizedRequest(),
                   requestDigest: grant.authorityDigest,
                   triggerParentRunId: grant.triggerParentRunId,
                   authorizedAt: grant.issuedAt,
@@ -1317,7 +1326,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           : {}),
         execute: async () => {
           return config.contextWikiStageExecutor!.execute({
-            request: triggerRequest,
+            request: requireAuthorizedRequest(),
             requestDigest: grant.authorityDigest,
             triggerParentRunId: grant.triggerParentRunId,
             authorizedAt: grant.issuedAt,
