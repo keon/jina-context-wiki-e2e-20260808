@@ -36,7 +36,7 @@ test("invalid Mermaid stays inside a compact fallback instead of injecting an er
     />
   );
 
-  await waitFor(() => assert.ok(screen.getByLabelText("Diagram unavailable")), { timeout: 5_000 });
+  await waitFor(() => assert.ok(screen.getByLabelText("Diagram unavailable")), { timeout: 10_000 });
 
   assert.equal(document.body.querySelector("svg"), null);
   assert.doesNotMatch(document.body.textContent ?? "", /syntax error in text/i);

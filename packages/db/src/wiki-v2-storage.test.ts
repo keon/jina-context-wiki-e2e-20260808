@@ -193,21 +193,39 @@ test(
   async () => {
     const bootstrap = new Pool({ connectionString: databaseUrl, max: 1 });
     await bootstrap.query("drop schema if exists jina_context cascade");
+    await bootstrap.query(`
+      do $roles$
+      declare role_name text;
+      begin
+        foreach role_name in array array[
+          'jina_context_query','jina_context_quota','jina_context_tokens',
+          'jina_context_issue_publish','jina_context_tenant_admin','jina_context_admin'
+        ] loop
+          if not exists (select 1 from pg_roles where rolname=role_name) then
+            execute format('create role %I nologin',role_name);
+          end if;
+        end loop;
+      end
+      $roles$;
+      create schema if not exists jina_runtime;
+      create table if not exists jina_runtime.api_state (
+        id smallint primary key check (id=1),
+        snapshot jsonb not null,
+        version bigint not null default 1,
+        updated_at timestamptz not null default now()
+      );
+      truncate table jina_runtime.api_state;
+      grant all privileges on schema jina_runtime to
+        jina_context_query,jina_context_quota,jina_context_tokens,
+        jina_context_issue_publish,jina_context_tenant_admin,jina_context_admin;
+      grant all privileges on jina_runtime.api_state to
+        jina_context_query,jina_context_quota,jina_context_tokens,
+        jina_context_issue_publish,jina_context_tenant_admin,jina_context_admin
+    `);
     await bootstrap.end();
     const database = new ContextDatabase({ connectionString: databaseUrl, manageRoles: true, max: 2 });
     try {
       await database.initialize();
-      await database.pool.query(`
-        create schema if not exists jina_runtime;
-        create table if not exists jina_runtime.api_state (
-          id smallint primary key check (id=1),
-          snapshot jsonb not null,
-          version bigint not null default 1,
-          updated_at timestamptz not null default now()
-        );
-        grant usage on schema jina_runtime to jina_context_tenant_admin,jina_context_admin;
-        grant select,insert,update on jina_runtime.api_state to jina_context_tenant_admin,jina_context_admin
-      `);
       const tenantId = "tenant-wiki-v2";
       const repository = "acme/widgets";
       const ref = "refs/heads/main";
@@ -215,6 +233,54 @@ test(
       const checkpointId = "checkpoint-wiki-v2";
       const preparedAt = "2026-08-08T12:00:00.000Z";
       const evidenceId = "evidence-wiki-v2";
+      const runtimePrivileges = await database.pool.query<{
+        role_name: string;
+        schema_usage: boolean;
+        schema_create: boolean;
+        table_select: boolean;
+        table_insert: boolean;
+        table_update: boolean;
+        table_delete: boolean;
+        table_truncate: boolean;
+        table_references: boolean;
+        table_trigger: boolean;
+      }>(
+        `select role_name,
+                has_schema_privilege(role_name,'jina_runtime','usage') as schema_usage,
+                has_schema_privilege(role_name,'jina_runtime','create') as schema_create,
+                has_table_privilege(role_name,'jina_runtime.api_state','select') as table_select,
+                has_table_privilege(role_name,'jina_runtime.api_state','insert') as table_insert,
+                has_table_privilege(role_name,'jina_runtime.api_state','update') as table_update,
+                has_table_privilege(role_name,'jina_runtime.api_state','delete') as table_delete,
+                has_table_privilege(role_name,'jina_runtime.api_state','truncate') as table_truncate,
+                has_table_privilege(role_name,'jina_runtime.api_state','references') as table_references,
+                has_table_privilege(role_name,'jina_runtime.api_state','trigger') as table_trigger
+         from unnest($1::text[]) role_name
+         order by role_name`,
+        [
+          [
+            "jina_context_query",
+            "jina_context_quota",
+            "jina_context_tokens",
+            "jina_context_issue_publish",
+            "jina_context_tenant_admin",
+            "jina_context_admin"
+          ]
+        ]
+      );
+      for (const privileges of runtimePrivileges.rows) {
+        const publicationAdmin =
+          privileges.role_name === "jina_context_tenant_admin" || privileges.role_name === "jina_context_admin";
+        assert.equal(privileges.schema_usage, publicationAdmin);
+        assert.equal(privileges.table_select, publicationAdmin);
+        assert.equal(privileges.schema_create, false);
+        assert.equal(privileges.table_insert, false);
+        assert.equal(privileges.table_update, false);
+        assert.equal(privileges.table_delete, false);
+        assert.equal(privileges.table_truncate, false);
+        assert.equal(privileges.table_references, false);
+        assert.equal(privileges.table_trigger, false);
+      }
       const evidenceBody = "Ready now.";
       const evidenceDigest = fingerprint(evidenceBody);
       const evidence = createEvidenceRecord({
@@ -618,7 +684,42 @@ test(
       };
       const staleAuthority = (error: unknown): boolean =>
         error instanceof WikiTriggerPublicationError && error.code === "stale_ref_sequence";
+      await assert.rejects(
+        database.transactionAs(
+          "jina_context_query",
+          { tenantIds: [tenantId] },
+          async (client) => client.query("select snapshot from jina_runtime.api_state where id=1"),
+          "wiki_trigger_authority_query_role_denied"
+        ),
+        /permission denied/
+      );
       await saveAuthority("canceled");
+      await database.transactionAs(
+        "jina_context_admin",
+        { tenantIds: [tenantId] },
+        async (client) => {
+          const identity = await client.query<{
+            current_user: string;
+            runtime_usage: boolean;
+            runtime_select: boolean;
+          }>(
+            `select current_user,
+                    has_schema_privilege(current_user,'jina_runtime','usage') as runtime_usage,
+                    has_table_privilege(current_user,'jina_runtime.api_state','select') as runtime_select`
+          );
+          assert.deepEqual(identity.rows[0], {
+            current_user: "jina_context_tenant_admin",
+            runtime_usage: true,
+            runtime_select: true
+          });
+          await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+          const authority = await client.query<{ snapshot: unknown }>(
+            "select snapshot from jina_runtime.api_state where id=1"
+          );
+          assert.equal(authority.rowCount, 1);
+        },
+        "wiki_trigger_authority_exact_access"
+      );
       await assert.rejects(publications.activate(activation), staleAuthority);
       await saveAuthority("in_progress", true);
       await assert.rejects(publications.activate(activation), staleAuthority);

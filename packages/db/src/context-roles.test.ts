@@ -61,6 +61,14 @@ test("runtime roles expose only current-path capabilities", () => {
   ]);
   assert.match(CONTEXT_ROLES_SQL, /grant select on[\s\S]*jina_context\.context_releases/);
   assert.match(CONTEXT_ROLES_SQL, /grant select,insert,update on jina_context\.context_quota_ledgers/);
+  assert.match(
+    CONTEXT_ROLES_SQL,
+    /grant select on jina_runtime\.api_state to jina_context_tenant_admin,jina_context_admin/
+  );
+  assert.match(CONTEXT_ROLES_SQL, /revoke all privileges on schema jina_runtime from jina_context_query/);
+  assert.match(CONTEXT_ROLES_SQL, /revoke all privileges on jina_runtime\.api_state from jina_context_query/);
+  assert.doesNotMatch(CONTEXT_ROLES_SQL, /jina_runtime\.api_state to jina_context_query/);
+  assert.doesNotMatch(CONTEXT_ROLES_SQL, /grant [^;]*update[^;]* on jina_runtime\.api_state/);
   assert.doesNotMatch(
     CONTEXT_ROLES_SQL,
     /evidence_records|evidence_checkpoints|context_documents|context_fragments|generation_projectors|exact_index/

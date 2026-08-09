@@ -681,8 +681,11 @@ export class PostgresWikiTriggerPublicationRepository implements WikiTriggerPubl
         // query-visible. The lock order is ref -> API state, matching audit-fix
         // admission, so the two workflows cannot deadlock.
         await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+        // The advisory lock already prevents a concurrent Board write. Keep
+        // this authority check a plain SELECT so the Context publication role
+        // needs no INSERT/UPDATE capability on the Board snapshot table.
         const runtime = await client.query<{ snapshot: unknown }>(
-          "select snapshot from jina_runtime.api_state where id=1 for share"
+          "select snapshot from jina_runtime.api_state where id=1"
         );
         assertLiveWikiTriggerAuthority(runtime.rows[0]?.snapshot, input.fence);
         const publication = await byReleaseForUpdate(client, releaseId);
