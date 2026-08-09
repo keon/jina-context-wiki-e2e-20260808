@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   fingerprint,
   parseWikiFinalizationAttestationV1,
@@ -16,6 +15,9 @@ import {
 } from "@jina/context-engine";
 import type { WikiTriggerRequestV1 } from "@jina/shared-kernel";
 import {
+  contextWikiDefaultOpenAiModel,
+  contextWikiGeneratorInferenceConfigDigest,
+  contextWikiGeneratorPromptDigest,
   type ContextWikiActivatedOutput,
   type ContextWikiProjectedOutput,
   type ContextWikiPublicationRuntime,
@@ -86,6 +88,7 @@ export class ApiOwnedContextWikiPublicationRuntime implements ContextWikiPublica
       content: `${JSON.stringify(release)}\n`
     });
     const fence = publicationFence(input, input.operationId);
+    const provenance = contextWikiGeneratorPublicationProvenance();
     const commit: WikiTriggerPublicationCommitV2 = {
       release,
       releaseArtifact,
@@ -95,10 +98,7 @@ export class ApiOwnedContextWikiPublicationRuntime implements ContextWikiPublica
       pipelineVersion: input.request.pipelineVersion,
       instructionDigest: input.finalized.instructionDigest,
       exclusionPolicyDigest: input.finalized.exclusionPolicyDigest,
-      modelProviderFamily: process.env.OPENAI_API_KEY ? "openai" : "deterministic",
-      modelId: process.env.JINA_WIKI_MODEL?.trim() || (process.env.OPENAI_API_KEY ? "gpt-5.4-mini" : "host-v1"),
-      promptDigest: digestText("context-wiki-page-prompt-v1"),
-      inferenceConfigDigest: digestText("context-wiki-inference-v1")
+      ...provenance
     };
     const publication = await this.publications.prepare(commit);
     if (publication.releaseId !== releaseId) throw new Error("wiki publication prepared the wrong release");
@@ -238,6 +238,21 @@ export class ApiOwnedContextWikiPublicationRuntime implements ContextWikiPublica
   }
 }
 
+function contextWikiGeneratorPublicationProvenance(
+  environment: NodeJS.ProcessEnv = process.env
+): Pick<WikiTriggerPublicationCommitV2, "modelProviderFamily" | "modelId" | "promptDigest" | "inferenceConfigDigest"> {
+  const modelProviderFamily = environment.OPENAI_API_KEY ? "openai" : "deterministic";
+  const modelId =
+    environment.JINA_WIKI_MODEL?.trim() ||
+    (modelProviderFamily === "openai" ? contextWikiDefaultOpenAiModel : "host-v1");
+  return {
+    modelProviderFamily,
+    modelId,
+    promptDigest: contextWikiGeneratorPromptDigest,
+    inferenceConfigDigest: contextWikiGeneratorInferenceConfigDigest(modelProviderFamily, modelId)
+  };
+}
+
 function releaseEnvelope(
   input: {
     readonly request: WikiTriggerRequestV1;
@@ -312,8 +327,4 @@ function publicationFence(
     locale: input.request.requestedLocale,
     operationId
   };
-}
-
-function digestText(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
 }

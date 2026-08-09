@@ -310,6 +310,14 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
       stagingDeployment.indexOf('gcloud run jobs deploy "${migration_job}"')
   );
   assert.match(stagingDeployment, /JINA_WIKI_ARTIFACT_STORE=postgres/);
+  assert.match(stagingDeployment, /JINA_WIKI_GENERATOR_POLICY_VERSION=wiki-generator-v2/);
+  assert.match(stagingDeployment, /JINA_WIKI_MODEL=gpt-5\.6-terra/);
+  assert.match(stagingDeployment, /JINA_WIKI_AUDIT_POLICY_VERSION=audit\.v2/);
+  assert.match(stagingDeployment, /JINA_WIKI_AUDIT_MODEL=gpt-5\.6-terra/);
+  assert.match(
+    stagingDeployment,
+    /JINA_WIKI_AUDITOR_CONFIG_DIGEST=ec59b154179e29cec049f93c0d69ff6d3e90a8aecba0b37ab1f24d52ef7bc28b/
+  );
   assert.match(
     stagingCloudBuild,
     /if scripts\/cloud-build-ci\.sh >"\$\{validation_log\}" 2>&1; then[\s\S]+?tail -n 400 "\$\{validation_log\}" \| tail -c 48000[\s\S]+?exit 1/
@@ -329,6 +337,10 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingReadiness, /allAuthenticatedUsers/);
   assert.match(stagingReadiness, /JINA_WIKI_ARTIFACT_STORE/);
   assert.match(stagingReadiness, /\.value == "postgres"/);
+  assert.match(stagingReadiness, /JINA_WIKI_GENERATOR_POLICY_VERSION/);
+  assert.match(stagingReadiness, /wiki-generator-v2/);
+  assert.match(stagingReadiness, /JINA_WIKI_AUDITOR_CONFIG_DIGEST/);
+  assert.match(stagingReadiness, /ec59b154179e29cec049f93c0d69ff6d3e90a8aecba0b37ab1f24d52ef7bc28b/);
   assert.match(stagingSerialization, /build\.get\("buildTriggerId"\) == os\.environ\["TRIGGER_ID"\]/);
   assert.match(stagingSerialization, /build\.get\("createTime", ""\) < os\.environ\["CURRENT_CREATE_TIME"\]/);
   assert.match(stagingSerialization, /active = \{"QUEUED", "PENDING", "WORKING"\}/);

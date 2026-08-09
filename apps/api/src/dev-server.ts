@@ -28,7 +28,7 @@ import { createLogger, errorLogFields, startOpenTelemetry } from "@jina/observab
 import { createApiServer } from "./server.js";
 import { ContextWikiStageExecutor } from "./context-wiki-execution.js";
 import { ApiOwnedContextWikiPublicationRuntime } from "./context-wiki-publication.js";
-import { ContextWikiAuditCoordinator } from "./context-wiki-audit.js";
+import { ContextWikiAuditCoordinator, OpenAiContextWikiSemanticAudit } from "./context-wiki-audit.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
 import { createDedicatedBoardStateStore } from "./postgres-runtime-config.js";
 import type { ApiSnapshot } from "./server.js";
@@ -233,7 +233,13 @@ const contextWikiAuditCoordinator =
           }
         },
         contextWikiArtifactStore,
-        process.env.JINA_WIKI_CHROMIUM_EXECUTABLE_PATH
+        process.env.JINA_WIKI_CHROMIUM_EXECUTABLE_PATH,
+        process.env.OPENAI_API_KEY
+          ? new OpenAiContextWikiSemanticAudit(
+              process.env.OPENAI_API_KEY,
+              process.env.JINA_WIKI_AUDIT_MODEL ?? process.env.JINA_WIKI_MODEL ?? "gpt-5.6-terra"
+            )
+          : undefined
       )
     : undefined;
 
