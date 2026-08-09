@@ -142,7 +142,9 @@ the runtime isolation and environment contract. The staging validation step keep
 complete log inside the Cloud Build step, emits up to 400 terminal lines capped at
 48,000 bytes on failure, and emits only a bounded success record. This keeps the
 actionable failure or deployment diagnostics visible in GitHub's size-limited Cloud
-Build check.
+Build check. Successful staging image builds and pushes also use Docker's quiet mode;
+Docker errors remain fatal and visible, while routine layer and package progress cannot
+displace the serialized deployment result.
 
 Cloud Build validates, builds, and deploys one coordinated release to
 `jina-v2/us-east1`. API, worker, dashboard, and admin images are built from the same

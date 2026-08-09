@@ -44,6 +44,7 @@ steps:
     waitFor: [validate]
     args:
       - build
+      - --quiet
       - --file=apps/api/Dockerfile
       - --label=org.opencontainers.image.revision=$COMMIT_SHA
       - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/api:staging-$COMMIT_SHA
@@ -54,6 +55,7 @@ steps:
     waitFor: [validate]
     args:
       - build
+      - --quiet
       - --file=apps/worker/Dockerfile
       - --label=org.opencontainers.image.revision=$COMMIT_SHA
       - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/worker:staging-$COMMIT_SHA
@@ -64,6 +66,7 @@ steps:
     waitFor: [build-api]
     args:
       - push
+      - --quiet
       - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/api:staging-$COMMIT_SHA
 
   - id: push-worker
@@ -71,6 +74,7 @@ steps:
     waitFor: [build-worker]
     args:
       - push
+      - --quiet
       - us-east1-docker.pkg.dev/$PROJECT_ID/${_ARTIFACT_REPOSITORY}/worker:staging-$COMMIT_SHA
 
   - id: serialize-deployment
