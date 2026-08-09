@@ -226,7 +226,7 @@ if jq -e '
     ([$service.spec.template.spec.containers[0].env[]? |
       select(.name == "JINA_WIKI_PIPELINE_MODE" and .value == "trigger")] | length == 1) and
     ([$service.spec.template.spec.containers[0].env[]? |
-      select(.name == "JINA_WIKI_GENERATOR_POLICY_VERSION" and .value == "wiki-generator-v2")] | length == 1) and
+      select(.name == "JINA_WIKI_GENERATOR_POLICY_VERSION" and .value == "wiki-generator-v3")] | length == 1) and
     ([$service.spec.template.spec.containers[0].env[]? |
       select(.name == "JINA_WIKI_MODEL" and .value == "gpt-5.6-terra")] | length == 1) and
     ([$service.spec.template.spec.containers[0].env[]? |

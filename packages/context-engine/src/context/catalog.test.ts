@@ -325,6 +325,91 @@ test("public context search uses deterministic PageIndex-tree retrieval", async 
   assert.ok(!("answer" in response));
 });
 
+test("public context search promotes body evidence when the PageIndex summary is generic", async () => {
+  const release = generation("release-body", "1111111111111111111111111111111111111111", "2026-07-29T00:00:00.000Z");
+  const derived = document({
+    id: "derived-body",
+    generationId: release.id,
+    logicalId: "workflows/request-flow.md",
+    revisionId: "revision-body",
+    title: "Runtime request flow",
+    body: "# Runtime request flow\n\nThe durable callback receipt makes Trigger retries idempotent."
+  });
+  const baseProjection = projection(release, [derived]);
+  const projected: GenerationProjection = {
+    ...baseProjection,
+    hierarchyNodes: [
+      {
+        ...baseProjection.hierarchyNodes[0]!,
+        title: "Workflow",
+        summary: "System operations"
+      }
+    ]
+  };
+  const response = await new ContextCatalogService(storeFor([projected])).searchContext({
+    tenantId: "tenant-1",
+    principalId: "reader",
+    repository: "acme/widget",
+    query: "durable callback receipt Trigger retries"
+  });
+  assert.equal(response.results[0]?.logicalId, "workflows/request-flow.md");
+  assert.match(response.results[0]?.excerpts[0] ?? "", /durable callback receipt/);
+});
+
+test("an exact body match outranks a limit-filling weak tree match", async () => {
+  const release = generation(
+    "release-ranked-body",
+    "1111111111111111111111111111111111111111",
+    "2026-07-29T00:00:00.000Z"
+  );
+  const weakTreeMatch = document({
+    id: "derived-weak-tree",
+    generationId: release.id,
+    logicalId: "components/trigger-label.md",
+    revisionId: "revision-weak-tree",
+    title: "Trigger overview",
+    body: "# Overview\n\nGeneral system orientation."
+  });
+  const exactBodyMatch = document({
+    id: "derived-exact-body",
+    generationId: release.id,
+    logicalId: "workflows/request-flow.md",
+    revisionId: "revision-exact-body",
+    title: "Runtime request flow",
+    body: "# Runtime request flow\n\nThe durable callback receipt makes Trigger retries idempotent."
+  });
+  const baseProjection = projection(release, [weakTreeMatch, exactBodyMatch]);
+  const projected: GenerationProjection = {
+    ...baseProjection,
+    hierarchyNodes: [
+      {
+        ...baseProjection.hierarchyNodes[0]!,
+        documentId: weakTreeMatch.id,
+        title: "Trigger overview",
+        summary: "Trigger orientation"
+      },
+      {
+        ...baseProjection.hierarchyNodes[0]!,
+        id: "node-exact-body",
+        documentId: exactBodyMatch.id,
+        title: "Workflow",
+        summary: "System operations",
+        preorderStart: 2,
+        preorderEnd: 2
+      }
+    ]
+  };
+  const response = await new ContextCatalogService(storeFor([projected])).searchContext({
+    tenantId: "tenant-1",
+    principalId: "reader",
+    repository: "acme/widget",
+    query: "durable callback receipt Trigger retries idempotent",
+    limit: 1
+  });
+  assert.equal(response.results.length, 1);
+  assert.equal(response.results[0]?.logicalId, "workflows/request-flow.md");
+});
+
 test("context search execution records that no model selector was configured or attempted", async () => {
   const release = generation(
     "release-fallback",

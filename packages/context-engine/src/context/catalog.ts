@@ -304,7 +304,24 @@ export class ContextCatalogService {
       modelUsageObserved: false
     };
     const validNodes = new Map(tree.map((node) => [node.id, node]));
-    const selectedNodeIds = [...new Set(selection.nodeIds)].filter((id) => validNodes.has(id)).slice(0, limit);
+    // PageIndex titles and summaries are intentionally concise, so selecting
+    // solely from the tree can miss the exact page whose body answers a
+    // natural-language query. Rank bounded document fragments as a second
+    // deterministic signal, then project those matches back onto their
+    // PageIndex nodes. This preserves the hierarchy/ACL boundary while making
+    // Search and deterministic Ask use the content the wiki actually wrote.
+    const bodyMatchedNodeIds = documents
+      .map((document) => ({
+        document,
+        score: bestExcerpts(input.query, document, projection.fragments, 1).score
+      }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((left, right) => right.score - left.score || left.document.sourceId.localeCompare(right.document.sourceId))
+      .map(({ document }) => tree.find((node) => node.documentId === document.id)?.id)
+      .filter((id): id is string => id !== undefined);
+    const selectedNodeIds = [...new Set([...selection.nodeIds, ...bodyMatchedNodeIds])].filter((id) =>
+      validNodes.has(id)
+    );
     const selectedByDocument = new Map<string, string[]>();
     for (const nodeId of selectedNodeIds) {
       const documentId = validNodes.get(nodeId)!.documentId;
@@ -333,7 +350,7 @@ export class ContextCatalogService {
       context: {
         release: publicRelease(projection.generation),
         query: input.query,
-        results,
+        results: results.slice(0, limit),
         retrieval: {
           method: "lexical_tree",
           selector: "pageindex-lexical-tree-v1"

@@ -78,6 +78,11 @@ class FakeStorage {
 
 test("wiki search projection omits Mermaid programs while preserving surrounding prose", () => {
   const source = [
+    "---",
+    'title: "Architecture"',
+    'source_paths: ["private/runtime.ts"]',
+    "---",
+    "",
     "# Architecture",
     "",
     "Requests enter through the API and are processed asynchronously.",
@@ -99,6 +104,7 @@ test("wiki search projection omits Mermaid programs while preserving surrounding
   assert.match(projected, /Diagram: API to worker request flow/);
   assert.match(projected, /worker publishes the completed release/);
   assert.doesNotMatch(projected, /flowchart|PRIVATE_NODE|-->/);
+  assert.doesNotMatch(projected, /source_paths|private\/runtime\.ts/);
   assert.match(source, /flowchart LR/);
   assert.doesNotMatch(
     wikiSearchableMarkdown("# Broken diagram\n\n```mermaid\nflowchart LR\n  UNTERMINATED --> PRIVATE"),
@@ -747,6 +753,7 @@ test(
       assert.equal(auditInputs?.tenantId, tenantId);
       assert.equal(auditInputs?.repository, repository);
       assert.equal(auditInputs?.releaseId, releaseId);
+      assert.equal(auditInputs?.generatorPolicyVersion, "generator-v2");
       assert.equal(auditInputs?.releaseArtifact.sha256, releaseArtifact.sha256);
       assert.equal(auditInputs?.contentBundleArtifact.sha256, contentBundleArtifact.sha256);
       assert.deepEqual(auditInputs?.evidenceSnapshot, evidenceSnapshot);

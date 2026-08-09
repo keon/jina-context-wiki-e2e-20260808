@@ -138,7 +138,7 @@ gh run watch --repo=omxyz/jina --exit-status
 
 The ordinary source-bound staging Cloud Build deploy then mounts
 `JINA_WIKI_PIPELINE_MODE=trigger`, `JINA_WIKI_ARTIFACT_STORE=postgres`,
-`JINA_WIKI_GENERATOR_POLICY_VERSION=wiki-generator-v2`,
+`JINA_WIKI_GENERATOR_POLICY_VERSION=wiki-generator-v3`,
 `JINA_WIKI_MODEL=gpt-5.6-terra`, `JINA_WIKI_AUDIT_POLICY_VERSION=audit.v2`, the matching
 semantic-auditor model/digest, and the three API authority secrets, and adds
 `run-wiki-build` to the Context worker. Existing four-stage Context topics remain during

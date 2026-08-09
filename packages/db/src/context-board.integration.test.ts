@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PostgresContextPhaseCheckpointRepository } from "./context/context-phase-checkpoint-repository.js";
 import { ContextDatabase } from "./context/database.js";
+import { CONTEXT_SCHEMA_SQL } from "./context/schema.js";
 
 // This test recreates jina_context. Never fall back to DATABASE_URL.
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -21,6 +22,19 @@ test(
     });
     try {
       await database.pool.query("drop schema if exists jina_context cascade");
+      await database.pool.query(CONTEXT_SCHEMA_SQL);
+
+      // Reproduce the authority constraint shipped by an early staging
+      // revision, then prove the idempotent schema installer expands it for
+      // the audit workflow's immutable wa_* authority.
+      await database.pool.query(`
+        alter table jina_context.context_phase_checkpoints
+          drop constraint context_phase_checkpoints_build_id_check,
+          drop constraint context_phase_checkpoints_task_id_check;
+        alter table jina_context.context_phase_checkpoints
+          add constraint context_phase_checkpoints_build_id_check check (build_id ~ '^task_'),
+          add constraint context_phase_checkpoints_task_id_check check (task_id ~ '^task_')
+      `);
       await database.initialize();
 
       const tables = await database.pool.query<{ table_name: string }>(
@@ -51,6 +65,27 @@ test(
       );
 
       const operationLeases = new PostgresContextPhaseCheckpointRepository(database);
+      const auditAuthority = `wa_${"1".repeat(32)}`;
+      const recordedAudit = await operationLeases.record({
+        tenantId: TENANT,
+        repository: REPOSITORY,
+        buildId: auditAuthority,
+        taskId: auditAuthority,
+        phase: "wiki-trigger-operation",
+        checkpointKey: "9".repeat(64),
+        attempt: 1,
+        artifact: {
+          uri: "postgres://jina_context/context_wiki_artifacts/audit-operation?generation=1",
+          key: "context/tenants/tenant-context-release/repositories/acme/context/audits/audit-operation.json",
+          contentType: "application/json",
+          bytes: 2,
+          sha256: "8".repeat(64),
+          objectGeneration: "1"
+        },
+        recordedAt: "2026-08-08T12:00:00.000Z"
+      });
+      assert.equal(recordedAudit.created, true);
+      assert.equal(recordedAudit.checkpoint.buildId, auditAuthority);
       const operation = {
         tenantId: TENANT,
         repository: REPOSITORY,

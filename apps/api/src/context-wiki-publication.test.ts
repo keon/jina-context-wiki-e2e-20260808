@@ -22,7 +22,7 @@ import {
 } from "./context-wiki-execution.js";
 import { ApiOwnedContextWikiPublicationRuntime } from "./context-wiki-publication.js";
 
-test("publication persists the exact generator-v2 model, prompt, and inference provenance", async () => {
+test("publication persists the exact generator-v3 model, prompt, and inference provenance", async () => {
   const tenantId = "tenant-publication";
   const repository = "acme/widgets";
   const buildId = "task_wiki_publication";
@@ -78,7 +78,7 @@ test("publication persists the exact generator-v2 model, prompt, and inference p
       validDiagramCount: 0,
       degradedDiagramCount: 0
     },
-    generatorPolicyVersion: "wiki-generator-v2",
+    generatorPolicyVersion: "wiki-generator-v3",
     finalizerVersion: "context-wiki-finalizer-v1",
     okfPolicyVersion: "openwiki-compatible-okf-v1",
     mermaidVersion: "11.16.1",
@@ -156,7 +156,7 @@ test("publication persists the exact generator-v2 model, prompt, and inference p
     releaseFamilyId: "family-publication",
     requestedLocale: "en",
     pipelineVersion: "context_wiki.trigger.v1",
-    generatorPolicyVersion: "wiki-generator-v2",
+    generatorPolicyVersion: "wiki-generator-v3",
     options: {
       idempotencyKey: "wiki:publication",
       concurrencyKey: "wiki:tenant-publication:acme/widgets:refs/heads/main:en",

@@ -25,6 +25,7 @@ import type {
   WikiReleaseAuditRecord
 } from "@jina/db";
 import { chromium } from "playwright-core";
+import { mermaidFences } from "./context-wiki-mermaid-fences.js";
 
 export interface AuditWikiRequestV1 {
   readonly schemaVersion: 1;
@@ -1500,10 +1501,10 @@ async function auditMermaid(
   readonly checks: Readonly<Record<string, unknown>>;
 }> {
   const diagrams = pages.flatMap((page) =>
-    [...page.bodyMarkdown.matchAll(/```mermaid[ \t]*\n([\s\S]*?)```/g)].map((match, ordinal) => ({
+    mermaidFences(page.bodyMarkdown).map((fence, ordinal) => ({
       documentPath: page.documentPath,
       ordinal,
-      source: match[1] ?? ""
+      source: fence.source
     }))
   );
   const findings: WikiAuditFinding[] = [];

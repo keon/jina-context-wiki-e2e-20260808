@@ -49,3 +49,53 @@ test("invalid Mermaid stays inside a compact fallback instead of injecting an er
   assert.equal(details?.hasAttribute("open"), true);
   assert.equal(screen.getByLabelText("Diagram unavailable").querySelector("code")?.textContent, source);
 });
+
+test("tilde-fenced Mermaid uses the same renderer and compact failure contract", async () => {
+  const source = "flowchart LR\nA -->";
+  renderComponent(
+    <ContextMarkdown
+      bodyMarkdown={`~~~mermaid\n${source}\n~~~`}
+      release={release}
+      document={catalogDocument}
+      documents={[catalogDocument]}
+      onOpen={() => undefined}
+    />
+  );
+
+  await waitFor(() => assert.ok(screen.getByLabelText("Diagram unavailable")), { timeout: 10_000 });
+  assert.equal(document.body.querySelector("svg"), null);
+  assert.equal(screen.getByLabelText("Diagram unavailable").querySelector("code")?.textContent, source);
+});
+
+test("blockquote Mermaid uses the same renderer and compact failure contract", async () => {
+  const source = "flowchart LR\nA -->";
+  renderComponent(
+    <ContextMarkdown
+      bodyMarkdown={`> ~~~mermaid\n> ${source.replaceAll("\n", "\n> ")}\n> ~~~`}
+      release={release}
+      document={catalogDocument}
+      documents={[catalogDocument]}
+      onOpen={() => undefined}
+    />
+  );
+
+  await waitFor(() => assert.ok(screen.getByLabelText("Diagram unavailable")), { timeout: 10_000 });
+  assert.equal(document.body.querySelector("svg"), null);
+  assert.equal(screen.getByLabelText("Diagram unavailable").querySelector("code")?.textContent, source);
+});
+
+test("degraded mermaid-source fences stay inert code and never re-enter the diagram renderer", () => {
+  const source = "flowchart LR\nA[image] --> B[https://example.test/pixel.png]";
+  const { container } = renderComponent(
+    <ContextMarkdown
+      bodyMarkdown={`\`\`\`mermaid-source\n${source}\n\`\`\``}
+      release={release}
+      document={catalogDocument}
+      documents={[catalogDocument]}
+      onOpen={() => undefined}
+    />
+  );
+
+  assert.equal(container.querySelector("figure[aria-label='Architecture diagram']"), null);
+  assert.equal(container.querySelector("pre code")?.textContent, `${source}\n`);
+});

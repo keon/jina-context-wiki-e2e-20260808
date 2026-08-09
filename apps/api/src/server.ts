@@ -143,6 +143,7 @@ import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 import { isProductApiRoute } from "./product-api-router.js";
 import {
   ContextWikiSnapshotError,
+  contextWikiDefaultGeneratorPolicyVersion,
   contextWikiStageNames,
   type ContextWikiStageExecutor,
   type ContextWikiStageName
@@ -2349,7 +2350,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 : {}),
               locale,
               ...(priorRelease?.refSequence ? { priorRefSequence: priorRelease.refSequence } : {}),
-              generatorPolicyVersion: process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || "wiki-generator-v1",
+              generatorPolicyVersion:
+                process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || contextWikiDefaultGeneratorPolicyVersion,
               now: nowIso()
             });
             if (admission.outcome === "created" && config.contextQuotaService) {
@@ -4128,7 +4130,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 },
                 locale: current.locale,
                 priorRefSequence: currentRefSequence,
-                generatorPolicyVersion: process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || "wiki-generator-v1",
+                generatorPolicyVersion:
+                  process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || contextWikiDefaultGeneratorPolicyVersion,
                 now: nowIso()
               });
               if (admission.outcome === "created" && config.contextQuotaService) {
@@ -4378,7 +4381,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(priorRelease ? { parentReleaseId: priorRelease.releaseId } : {}),
         locale,
         ...(priorRelease ? { priorRefSequence: priorRelease.refSequence } : {}),
-        generatorPolicyVersion: process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || "wiki-generator-v1",
+        generatorPolicyVersion:
+          process.env.JINA_WIKI_GENERATOR_POLICY_VERSION?.trim() || contextWikiDefaultGeneratorPolicyVersion,
         now: nowIso()
       });
       const reservedBuildIds: string[] = [];

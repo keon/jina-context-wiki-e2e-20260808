@@ -522,7 +522,11 @@ export function wikiBodySha256(bodyMarkdown: string): string {
 export function wikiSearchableMarkdown(bodyMarkdown: string): string {
   const searchable: string[] = [];
   let mermaidFence: { readonly marker: "`" | "~"; readonly minimumLength: number } | undefined;
-  for (const line of bodyMarkdown.replace(/\r\n?/g, "\n").split("\n")) {
+  const normalized = bodyMarkdown.replace(/\r\n?/g, "\n");
+  const withoutGeneratedFrontmatter = normalized.startsWith("---\n")
+    ? normalized.replace(/^---\n[\s\S]*?\n---\n*/, "")
+    : normalized;
+  for (const line of withoutGeneratedFrontmatter.split("\n")) {
     const opening = /^\s*(`{3,}|~{3,})(?:mermaid|mermaid-source)\s*$/i.exec(line);
     if (!mermaidFence && opening) {
       searchable.push("> Mermaid diagram (source omitted from the search index).");

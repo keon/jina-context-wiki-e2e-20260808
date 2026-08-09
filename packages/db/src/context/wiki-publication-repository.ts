@@ -67,6 +67,7 @@ export interface PublishedWikiReleaseInputs {
   readonly scopeKey: string;
   readonly commitSha: string;
   readonly locale: string;
+  readonly generatorPolicyVersion: string;
   readonly releaseFamilyId: string;
   readonly publicSnapshotDigest: string;
   readonly contentBundleArtifact: WikiContentArtifactRef;
@@ -249,6 +250,7 @@ export class PostgresWikiTriggerPublicationRepository implements WikiTriggerPubl
       scope_key: string;
       commit_sha: string;
       locale: string;
+      generator_policy_version: string;
       release_family_id: string;
       public_snapshot_digest: string;
       content_bundle_artifact: unknown;
@@ -264,7 +266,8 @@ export class PostgresWikiTriggerPublicationRepository implements WikiTriggerPubl
       `select publication.tenant_id,publication.repository,publication.release_id,
               publication.ref_name,publication.ref_sequence::text,
               publication.scope_kind,publication.scope_key,
-              publication.commit_sha,publication.locale,publication.release_family_id,
+              publication.commit_sha,publication.locale,publication.generator_policy_version,
+              publication.release_family_id,
               publication.public_snapshot_digest,publication.content_bundle_artifact,
               publication.release_artifact,evidence.snapshot as evidence_snapshot,publication.build_id
        from jina_context.context_board_publications publication
@@ -291,6 +294,7 @@ export class PostgresWikiTriggerPublicationRepository implements WikiTriggerPubl
       scopeKey: row.scope_key,
       commitSha: row.commit_sha,
       locale: row.locale,
+      generatorPolicyVersion: row.generator_policy_version,
       releaseFamilyId: row.release_family_id,
       publicSnapshotDigest: row.public_snapshot_digest,
       contentBundleArtifact: validateWikiContentArtifactRef(row.content_bundle_artifact, { tenantId, repository }),

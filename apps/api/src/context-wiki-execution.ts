@@ -24,6 +24,7 @@ import {
   contextMermaidVersion,
   type WikiTriggerRequestV1
 } from "@jina/shared-kernel";
+import { mermaidFences, replaceMermaidFences, replaceMermaidFencesAsync } from "./context-wiki-mermaid-fences.js";
 
 export const contextWikiStageNames = [
   "snapshot",
@@ -179,6 +180,7 @@ interface ContextWikiPriorReleaseReader {
     | {
         readonly commitSha: string;
         readonly locale: string;
+        readonly generatorPolicyVersion: string;
         readonly contentBundleArtifact: WikiContentArtifactRef;
       }
     | undefined
@@ -223,10 +225,12 @@ interface SnapshotArtifact {
   readonly instructionSourceCommit: string;
   readonly exclusions: readonly string[];
   readonly exclusionPolicyDigest: string;
+  readonly generatorPolicyVersion: string;
   readonly templateProfile: "library" | "service" | "application" | "monorepo";
   readonly parent?: {
     readonly releaseId: string;
     readonly commitSha: string;
+    readonly generatorPolicyVersion: string;
     readonly contentBundleArtifact: WikiContentArtifactRef;
     readonly changedPaths: readonly string[];
   };
@@ -321,11 +325,13 @@ const MAX_SOURCE_BYTES = 1_500_000;
 const MAX_FILE_BYTES = 128_000;
 const MAX_FETCH_FILE_BYTES = 2_000_000;
 const MAX_COMPONENT_PAGES = 12;
-const contextWikiGeneratorPromptVersion = "wiki-content-v2";
+const MIN_ARCHITECTURAL_MODULE_FILES = 4;
+const contextWikiGeneratorPromptVersion = "wiki-content-v3";
+export const contextWikiDefaultGeneratorPolicyVersion = "wiki-generator-v3";
 export const contextWikiDefaultOpenAiModel = "gpt-5.6-terra";
 const contextWikiGeneratorMaxOutputTokens = 8_000;
 export const contextWikiGeneratorPromptDigest = fingerprint({
-  version: 2,
+  version: 3,
   selector: contextWikiGeneratorPromptVersion,
   contract: "first-pass-engineering-wiki-evidence-grounded-module-planned",
   trustBoundary: "responses-instructions-over-untrusted-input"
@@ -561,6 +567,7 @@ export class ContextWikiStageExecutor {
       parent = {
         releaseId: request.parentReleaseId,
         commitSha: prior.commitSha,
+        generatorPolicyVersion: prior.generatorPolicyVersion,
         contentBundleArtifact: prior.contentBundleArtifact,
         changedPaths
       };
@@ -582,6 +589,7 @@ export class ContextWikiStageExecutor {
       instructionSourceCommit: policyCommit,
       exclusions,
       exclusionPolicyDigest,
+      generatorPolicyVersion: request.generatorPolicyVersion,
       templateProfile: wikiPolicy.templateProfile ?? inferTemplateProfile(selected),
       improvementFindings,
       ...(parent ? { parent } : {})
@@ -680,7 +688,13 @@ export class ContextWikiStageExecutor {
       // release. Reusing the old bytes would leave the page frontmatter pinned
       // to the parent commit and make an otherwise correct incremental release
       // stale by construction.
-      const bodyMarkdown = normalizeGeneratedPage(execution.request, pageJob, prior.bodyMarkdown);
+      const bodyMarkdown = normalizeWikiAndSourceLinks(
+        normalizeGeneratedPage(execution.request, pageJob, prior.bodyMarkdown),
+        pageJob.documentPath,
+        planOutput.pageJobs,
+        snapshot.treePaths ?? snapshot.files.map((file) => file.path),
+        execution.request
+      );
       const bodySha256 = sha256(bodyMarkdown);
       const diagrams = validateMermaidInMarkdown(bodyMarkdown);
       const pageArtifact = await this.putArtifact(execution.request, "context-page", `${pageJob.documentPath}.json`, {
@@ -722,8 +736,15 @@ export class ContextWikiStageExecutor {
       usage = generated.usage;
     }
     body = normalizeGeneratedPage(execution.request, pageJob, body);
-    body = normalizePlannedWikiLinks(body, pageJob.documentPath, planOutput.pageJobs);
+    body = normalizeWikiAndSourceLinks(
+      body,
+      pageJob.documentPath,
+      planOutput.pageJobs,
+      snapshot.treePaths ?? snapshot.files.map((file) => file.path),
+      execution.request
+    );
     if (pageJob.documentPath === "index.md") body = ensureIndexNavigation(body, planOutput.pageJobs);
+    body = ensurePlannedMermaid(body, pageJob);
     const diagrams = validateMermaidInMarkdown(body);
     if (diagrams.degraded > 0) body = degradeInvalidMermaid(body);
     const bodySha256 = sha256(body);
@@ -795,7 +816,7 @@ export class ContextWikiStageExecutor {
       ? await this.#deps.contentStore.get(snapshot.parent.contentBundleArtifact)
       : undefined;
     validateWikiPathAccounting(planOutput.pathAccounting, planOutput.pageJobs, pages, priorBundle);
-    await validateMermaidPagesWithBrowser(pages, this.#deps.chromiumExecutablePath);
+    await validateMermaidPagesWithBrowser(pages, this.#deps.chromiumExecutablePath, planOutput.pageJobs);
     pages.sort((left, right) => left.documentPath.localeCompare(right.documentPath));
     const knownPaths = new Set(pages.map((page) => page.documentPath));
     const diagnostics = pages.flatMap((page) => [
@@ -1006,6 +1027,19 @@ function buildWikiPlan(snapshot: SnapshotArtifact, priorBundle?: WikiContentBund
   const manifests = paths.filter((path) =>
     /(^|\/)(package\.json|pyproject\.toml|cargo\.toml|go\.mod|pom\.xml)$/i.test(path)
   );
+  const rootReadmes = paths.filter((path) => /^readme(?:\.[^.]+)?$/i.test(path));
+  const rootManifests = paths.filter((path) =>
+    /^(?:package\.json|pnpm-workspace\.ya?ml|pyproject\.toml|cargo\.toml|go\.mod|pom\.xml|makefile)$/i.test(path)
+  );
+  const rootBootstrapSources = dedupePaths([
+    ...rootReadmes,
+    ...rootManifests,
+    ...representativeMatchingPaths(
+      paths,
+      /(?:^|\/)(?:scripts?\/.*(?:bootstrap|setup|install)|\.github\/workflows\/.*(?:ci|test))\b/i,
+      8
+    )
+  ]);
   const jobs: WikiPageJob[] = [
     {
       documentPath: "index.md",
@@ -1021,7 +1055,10 @@ function buildWikiPlan(snapshot: SnapshotArtifact, priorBundle?: WikiContentBund
       documentPath: "quickstart.md",
       title: "Quickstart",
       purpose: "Give source-grounded installation, configuration, and first-run instructions.",
-      sourcePaths: [...readmes.slice(0, 2), ...manifests.slice(0, 4)],
+      sourcePaths: dedupePaths([...rootBootstrapSources, ...readmes.slice(0, 2), ...manifests.slice(0, 4)]).slice(
+        0,
+        32
+      ),
       diagrams: [],
       action: "add"
     },
@@ -1107,7 +1144,10 @@ function buildWikiPlan(snapshot: SnapshotArtifact, priorBundle?: WikiContentBund
       action: "add"
     });
   }
-  const lifecycleSources = representativeMatchingPaths(paths, /(?:state|status|workflow|lifecycle|machine)/i, 28);
+  const lifecycleSources = dedupePaths([
+    ...representativeMatchingPaths(paths, /(?:state|status|workflow|lifecycle|machine)/i, 24),
+    ...representativeMatchingPaths(paths, /(?:board|admission|lease|checkpoint|outbox|worker)/i, 16)
+  ]).slice(0, 32);
   if (lifecycleSources.length > 0) {
     jobs.push({
       documentPath: "reference/lifecycle.md",
@@ -1141,11 +1181,15 @@ function buildWikiPlan(snapshot: SnapshotArtifact, priorBundle?: WikiContentBund
       action: "add"
     });
   }
-  const testSources = representativeMatchingPaths(
-    paths,
-    /(?:^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:test|spec)\.[^.]+$/i,
-    24
-  );
+  const testSources = dedupePaths([
+    ...rootManifests,
+    ...representativeMatchingPaths(paths, /(?:^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:test|spec)\.[^.]+$/i, 24),
+    ...representativeMatchingPaths(
+      paths,
+      /(?:^|\/)(?:scripts?\/.*(?:ci|test)|\.github\/workflows\/.*(?:ci|test))\b/i,
+      8
+    )
+  ]).slice(0, 32);
   if (testSources.length > 0) {
     jobs.push({
       documentPath: "reference/testing.md",
@@ -1164,6 +1208,7 @@ function buildWikiPlan(snapshot: SnapshotArtifact, priorBundle?: WikiContentBund
     action: !priorPaths.has(job.documentPath)
       ? "add"
       : job.documentPath === "index.md" ||
+          snapshot.parent?.generatorPolicyVersion !== snapshot.generatorPolicyVersion ||
           snapshot.improvementFindings.some((finding) => finding.documentPath === job.documentPath) ||
           [...job.sourcePaths, ...priorPageSourcePaths(priorBundle, job.documentPath)].some((path) =>
             changedPaths.has(path)
@@ -1245,6 +1290,10 @@ function representativeMatchingPaths(paths: readonly string[], pattern: RegExp, 
     depth += 1;
   }
   return selected;
+}
+
+function dedupePaths(paths: readonly string[]): string[] {
+  return [...new Set(paths)];
 }
 
 function representativeModulePaths(modules: readonly WikiModuleGroup[], limit: number): string[] {
@@ -1533,6 +1582,7 @@ async function generatePageWithOpenAi(input: {
     "- Start with the page's purpose and the mental model a reader needs. Explain responsibilities, boundaries, dependency direction, and runtime consequences before implementation detail.",
     "- Synthesize cross-file behavior. Do not turn the source list into one paragraph per file, and do not claim that directory names prove runtime relationships.",
     "- Ground every concrete behavioral assertion with one or more backticked source paths in the same paragraph. Use function/type/config identifiers when present in evidence.",
+    "- When linking to repository source, use an absolute GitHub blob URL pinned to the supplied commit. Never encode a repository source path as a relative Markdown link; use backticks when a link is unnecessary.",
     "- Distinguish verified behavior from a clearly labeled inference. Never invent commands, services, configuration, dependencies, ordering, or failure semantics.",
     "- Include practical orientation: important entry points, how data/control moves, failure or retry boundaries, and where a maintainer would change the behavior when the supplied evidence supports them.",
     "- Prefer concise tables for exact mappings and Mermaid only for relationships that prose cannot make equally clear. Avoid generic advice and repeated repository summaries.",
@@ -1636,17 +1686,48 @@ function ensureIndexNavigation(body: string, jobs: readonly WikiPageJob[]): stri
   return `${withoutReservedMap.join("\n").trimEnd()}\n\n## Wiki map\n\n${links}\n`;
 }
 
-function normalizePlannedWikiLinks(body: string, from: string, jobs: readonly WikiPageJob[]): string {
+function normalizeWikiAndSourceLinks(
+  body: string,
+  from: string,
+  jobs: readonly WikiPageJob[],
+  sourcePaths: readonly string[],
+  request: WikiTriggerRequestV1
+): string {
   const known = new Set(jobs.map((job) => job.documentPath));
+  const source = new Set(sourcePaths);
   const directory = from.includes("/") ? from.slice(0, from.lastIndexOf("/") + 1) : "";
   return body.replace(/(\[[^\]]*\]\()([^\s)]+)(\))/g, (match, prefix: string, href: string, suffix: string) => {
+    if (/^https:\/\/github\.com\//i.test(href) && href.includes("/blob/")) {
+      const label = prefix.slice(1, -2).replaceAll("`", "");
+      try {
+        const url = new URL(href);
+        const segments = url.pathname.split("/").filter(Boolean);
+        const repository = segments.slice(0, 2).join("/");
+        const decodedPath = decodeURIComponent(url.pathname);
+        const sourceTarget = [...source].find((path) => decodedPath.endsWith(`/${path}`));
+        if (repository.toLowerCase() === request.repository.toLowerCase() && sourceTarget) {
+          return `${prefix}https://github.com/${request.repository}/blob/${request.source.commitSha}/${encodePath(sourceTarget)}${url.hash}${suffix}`;
+        }
+      } catch {
+        // Fall through to the non-evidence rendering below.
+      }
+      return `\`${label}\` (unverified external source)`;
+    }
     if (/^(?:https?:|mailto:|#)/i.test(href)) return match;
     const hashIndex = href.indexOf("#");
     const target = hashIndex === -1 ? href : href.slice(0, hashIndex);
     const hash = hashIndex === -1 ? "" : href.slice(hashIndex);
     if (!target || known.has(normalizeRelativePath(`${directory}${target}`))) return match;
     const rootTarget = normalizeRelativePath(target.replace(/^\.\//, ""));
-    return known.has(rootTarget) ? `${prefix}${relativeWikiLink(from, rootTarget)}${hash}${suffix}` : match;
+    if (known.has(rootTarget)) return `${prefix}${relativeWikiLink(from, rootTarget)}${hash}${suffix}`;
+    const sourceTarget = [
+      normalizeRelativePath(`${directory}${target}`),
+      normalizeRelativePath(target),
+      normalizeRelativePath(target.replace(/^(?:\.\.\/)+/, ""))
+    ].find((path) => source.has(path));
+    return sourceTarget
+      ? `${prefix}https://github.com/${request.repository}/blob/${request.source.commitSha}/${encodePath(sourceTarget)}${hash}${suffix}`
+      : match;
   });
 }
 
@@ -1692,7 +1773,7 @@ function pageType(documentPath: string): string {
 }
 
 function validateMermaidInMarkdown(body: string): { valid: number; degraded: number; diagnostics: string[] } {
-  const sources = [...body.matchAll(/```mermaid[ \t]*\n([\s\S]*?)```/g)].map((match) => match[1] ?? "");
+  const sources = mermaidFences(body).map((fence) => fence.source);
   let valid = 0;
   let degraded = 0;
   const diagnostics: string[] = [];
@@ -1708,12 +1789,35 @@ function validateMermaidInMarkdown(body: string): { valid: number; degraded: num
   return { valid, degraded, diagnostics };
 }
 
+function ensurePlannedMermaid(body: string, job: WikiPageJob): string {
+  const plan = job.diagrams[0];
+  if (!plan) return body;
+  const fallback = plannedMermaidFallback(job).markdown;
+  const replaced = replaceMermaidFences(body, (fence) =>
+    mermaidDiagnostic(fence.source) === undefined ? fence.markdown : fallback
+  );
+  return mermaidFences(replaced).length > 0
+    ? replaced
+    : `${replaced.trimEnd()}\n\n## ${plan.purpose}\n\nThis conservative diagram is generated from the page's cited source areas; the surrounding source-grounded prose remains authoritative.\n\n${fallback}\n\n*Diagram: ${plan.purpose}*\n`;
+}
+
+function plannedMermaidFallback(job: WikiPageJob): { readonly source: string; readonly markdown: string } {
+  const plan = job.diagrams[0];
+  if (!plan) throw new Error("planned Mermaid fallback requires a diagram plan");
+  const labels = dedupePaths(job.sourcePaths.map(sourceModuleKey)).slice(0, 8);
+  const source = deterministicMermaid(plan.kind, labels.length > 0 ? labels : ["repository"]);
+  return {
+    source,
+    markdown: `<!-- jina: deterministic Mermaid fallback for ${plan.id} -->\n\`\`\`mermaid\n${source}\n\`\`\``
+  };
+}
+
 function degradeInvalidMermaid(body: string): string {
-  return body.replace(/```mermaid[ \t]*\n([\s\S]*?)```/g, (fence, source: string) => {
-    const diagnostic = mermaidDiagnostic(source);
+  return replaceMermaidFences(body, (fence) => {
+    const diagnostic = mermaidDiagnostic(fence.source);
     return diagnostic === undefined
-      ? fence
-      : `<!-- jina: mermaid ${diagnostic}; converted to text -->\n> Diagram unavailable: the generated Mermaid source did not pass the strict safety policy.\n\n\`\`\`mermaid-source\n${source.trim()}\n\`\`\``;
+      ? fence.markdown
+      : `<!-- jina: mermaid ${diagnostic}; converted to text -->\n> Diagram unavailable: the generated Mermaid source did not pass the strict safety policy.\n\n\`\`\`mermaid-source\n${fence.source.trim()}\n\`\`\``;
   });
 }
 
@@ -1734,18 +1838,17 @@ function mermaidDiagnostic(source: string): string | undefined {
 
 async function validateMermaidPagesWithBrowser(
   pages: {
+    documentPath: string;
     bodyMarkdown: string;
     bodySha256: string;
     validDiagramCount: number;
     degradedDiagramCount: number;
     diagramDiagnostics: readonly string[];
   }[],
-  executablePath: string | undefined
+  executablePath: string | undefined,
+  jobs: readonly WikiPageJob[]
 ): Promise<void> {
-  const total = pages.reduce(
-    (count, page) => count + [...page.bodyMarkdown.matchAll(/```mermaid[ \t]*\n([\s\S]*?)```/g)].length,
-    0
-  );
+  const total = pages.reduce((count, page) => count + mermaidFences(page.bodyMarkdown).length, 0);
   if (total === 0 || !executablePath) return;
   if (total > 192) {
     for (const page of pages) degradeAllPageDiagrams(page, "source_too_large");
@@ -1764,46 +1867,59 @@ async function validateMermaidPagesWithBrowser(
     // an SSRF primitive even if a future parser accepts a new URL form.
     await context.route("**/*", (route) => route.abort("blockedbyclient"));
     const mermaidScript = createRequire(import.meta.url).resolve("mermaid/dist/mermaid.min.js");
+    const render = async (source: string, id: string): Promise<void> => {
+      const page = await context.newPage();
+      try {
+        await page.setContent("<!doctype html><html><body><div id=target></div></body></html>");
+        await page.addScriptTag({ path: mermaidScript });
+        await page.evaluate((config) => {
+          const runtime = globalThis as unknown as { mermaid: { initialize(value: unknown): void } };
+          runtime.mermaid.initialize(config);
+        }, contextMermaidConfig);
+        await promiseWithTimeout(
+          page.evaluate(
+            async ({ diagramId, diagramSource }) => {
+              const runtime = globalThis as unknown as {
+                mermaid: {
+                  parse(value: string): Promise<unknown>;
+                  render(id: string, value: string): Promise<{ svg: string }>;
+                };
+              };
+              await runtime.mermaid.parse(diagramSource);
+              const rendered = await runtime.mermaid.render(diagramId, diagramSource);
+              if (!rendered.svg.includes("<svg")) throw new Error("Mermaid renderer returned no SVG");
+            },
+            { diagramId: id, diagramSource: source }
+          ),
+          5_000
+        );
+      } finally {
+        await page.close().catch(() => undefined);
+      }
+    };
+    const jobsByPath = new Map(jobs.map((job) => [job.documentPath, job]));
     let ordinal = 0;
     for (const pageRecord of pages) {
       const diagnostics: string[] = [];
-      pageRecord.bodyMarkdown = await replaceMermaidFencesAsync(pageRecord.bodyMarkdown, async (fence, source) => {
-        let page: Awaited<ReturnType<typeof context.newPage>> | undefined;
+      pageRecord.bodyMarkdown = await replaceMermaidFencesAsync(pageRecord.bodyMarkdown, async (fence) => {
         try {
-          page = await context.newPage();
-          await page.setContent("<!doctype html><html><body><div id=target></div></body></html>");
-          await page.addScriptTag({ path: mermaidScript });
-          await page.evaluate((config) => {
-            const runtime = globalThis as unknown as {
-              mermaid: { initialize(value: unknown): void };
-            };
-            runtime.mermaid.initialize(config);
-          }, contextMermaidConfig);
-          const id = `jina_wiki_${ordinal++}`;
-          await promiseWithTimeout(
-            page.evaluate(
-              async ({ diagramId, diagramSource }) => {
-                const runtime = globalThis as unknown as {
-                  mermaid: {
-                    parse(value: string): Promise<unknown>;
-                    render(id: string, value: string): Promise<{ svg: string }>;
-                  };
-                };
-                await runtime.mermaid.parse(diagramSource);
-                const rendered = await runtime.mermaid.render(diagramId, diagramSource);
-                if (!rendered.svg.includes("<svg")) throw new Error("Mermaid renderer returned no SVG");
-              },
-              { diagramId: id, diagramSource: source }
-            ),
-            5_000
-          );
-          return fence;
+          await render(fence.source, `jina_wiki_${ordinal++}`);
+          return fence.markdown;
         } catch (error) {
+          const job = jobsByPath.get(pageRecord.documentPath);
+          if (job?.diagrams[0]) {
+            const fallback = plannedMermaidFallback(job);
+            try {
+              await render(fallback.source, `jina_wiki_fallback_${ordinal++}`);
+              return fallback.markdown;
+            } catch {
+              // Preserve the original bounded classification below when even
+              // the deterministic renderer path is unavailable.
+            }
+          }
           const code = boundedErrorMessage(error).toLowerCase().includes("parse") ? "parse_failed" : "render_failed";
           diagnostics.push(code);
-          return degradedMermaidFence(source, code);
-        } finally {
-          await page?.close().catch(() => undefined);
+          return degradedMermaidFence(fence.source, code);
         }
       });
       const validation = validateMermaidInMarkdown(pageRecord.bodyMarkdown);
@@ -1831,9 +1947,9 @@ function degradeAllPageDiagrams(
   code: string
 ): void {
   let degraded = 0;
-  page.bodyMarkdown = page.bodyMarkdown.replace(/```mermaid[ \t]*\n([\s\S]*?)```/g, (_fence, source: string) => {
+  page.bodyMarkdown = replaceMermaidFences(page.bodyMarkdown, (fence) => {
     degraded += 1;
-    return degradedMermaidFence(source, code);
+    return degradedMermaidFence(fence.source, code);
   });
   if (degraded === 0) return;
   page.validDiagramCount = 0;
@@ -1844,23 +1960,6 @@ function degradeAllPageDiagrams(
 
 function degradedMermaidFence(source: string, code: string): string {
   return `<!-- jina: mermaid ${code}; converted to text -->\n> Diagram unavailable: Mermaid validation did not complete successfully.\n\n\`\`\`mermaid-source\n${source.trim()}\n\`\`\``;
-}
-
-async function replaceMermaidFencesAsync(
-  body: string,
-  replace: (fence: string, source: string) => Promise<string>
-): Promise<string> {
-  const expression = /```mermaid[ \t]*\n([\s\S]*?)```/g;
-  const chunks: string[] = [];
-  let cursor = 0;
-  for (const match of body.matchAll(expression)) {
-    const index = match.index;
-    chunks.push(body.slice(cursor, index));
-    chunks.push(await replace(match[0], match[1] ?? ""));
-    cursor = index + match[0].length;
-  }
-  chunks.push(body.slice(cursor));
-  return chunks.join("");
 }
 
 async function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -2310,6 +2409,34 @@ function balancedSourceEntries<T extends { readonly path: string; readonly size:
   const orderedBuckets = [...buckets.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([, bucket]) => bucket.sort(moduleEntryPriority));
+
+  // The planner can publish at most MAX_COMPONENT_PAGES component pages. Give
+  // the same number of strongest application/service/package buckets enough
+  // source bodies to explain behavior, rather than merely enough paths to
+  // prove the directory exists. Without this reservation a large monorepo can
+  // spend all 80 global slots after two round-robin depths; a component such
+  // as services/context-trigger then sees package.json + package-lock.json and
+  // must truthfully refuse to describe its actual tasks.
+  const architecturalBuckets = [...buckets.entries()]
+    .filter(([key]) => /^(?:apps|packages|services)\//.test(key))
+    .sort(([leftKey, left], [rightKey, right]) => {
+      const score = (key: string, bucket: readonly T[]): number => {
+        const root = key.split("/")[0];
+        const rootWeight = root === "apps" || root === "services" ? 4_000 : 2_000;
+        const runtimeWeight = bucket.some((entry) =>
+          /(?:server|worker|index|main|schema|workflow|trigger|handler|router|service|client)/i.test(entry.path)
+        )
+          ? 500
+          : 0;
+        return rootWeight + runtimeWeight + Math.min(bucket.length, 100);
+      };
+      return score(rightKey, right) - score(leftKey, left) || leftKey.localeCompare(rightKey);
+    })
+    .slice(0, MAX_COMPONENT_PAGES);
+  for (const [, bucket] of architecturalBuckets) {
+    for (const entry of bucket.slice(0, MIN_ARCHITECTURAL_MODULE_FILES)) add(entry);
+  }
+
   let depth = 0;
   while (true) {
     let added = false;
@@ -2346,6 +2473,7 @@ function isRepositoryGuideOrManifest(path: string): boolean {
 function moduleEntryPriority<T extends { readonly path: string; readonly size: number }>(left: T, right: T): number {
   const score = (entry: T): number => {
     const basename = entry.path.split("/").at(-1)?.toLowerCase() ?? "";
+    if (/^(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|cargo\.lock)$/.test(basename)) return 5;
     if (/^(?:readme(?:\..+)?|package\.json|pyproject\.toml|cargo\.toml|go\.mod|pom\.xml)$/.test(basename)) return 0;
     if (/^(?:index|main|server|worker|app|cli|route|router|handler|schema)\./.test(basename)) return 1;
     if (/(?:workflow|service|controller|client|repository|store|database|migration)/.test(basename)) return 2;
@@ -2410,8 +2538,10 @@ function normalizeRelativePath(path: string): string {
   const stack: string[] = [];
   for (const part of path.split("/")) {
     if (!part || part === ".") continue;
-    if (part === "..") stack.pop();
-    else stack.push(part);
+    if (part === "..") {
+      if (stack.length === 0) return "";
+      stack.pop();
+    } else stack.push(part);
   }
   return stack.join("/");
 }

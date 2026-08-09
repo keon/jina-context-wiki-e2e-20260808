@@ -275,6 +275,7 @@ test("daily audit dispatch is signed, immutable, non-gating, and idempotent", as
           scopeKey: "main",
           commitSha,
           locale,
+          generatorPolicyVersion: "wiki-generator-v3",
           releaseFamilyId: "family-test",
           publicSnapshotDigest,
           contentBundleArtifact: contentRef,
@@ -839,8 +840,8 @@ test(
           index === 0
             ? [
                 "```mermaid\nsequenceDiagram\n  API->>Worker: Build\n```",
-                `\`\`\`mermaid\nflowchart LR\n  A[image] --> B[${externalUrl}]\n\`\`\``,
-                "```mermaid\nflowchart LR\n  A[unterminated --> B\n```"
+                `> ~~~mermaid\n> flowchart LR\n>   A[image] --> B[${externalUrl}]\n> ~~~`,
+                "~~~~mermaid\nflowchart LR\n  A[unterminated --> B"
               ].join("\n\n")
             : "";
         const bodyMarkdown = `${page.bodyMarkdown}\n${diagrams}\n`;
@@ -966,6 +967,7 @@ async function runFixtureAudit(
           scopeKey: identity.scopeKey,
           commitSha: identity.commitSha,
           locale: identity.locale,
+          generatorPolicyVersion: "wiki-generator-v3",
           releaseFamilyId: identity.releaseFamilyId,
           publicSnapshotDigest: content.publicSnapshotDigest,
           contentBundleArtifact: fixture.release.contentBundleArtifact,
@@ -1009,6 +1011,7 @@ function publishedInputs(fixture: ReturnType<typeof deepReleaseFixture>, content
     scopeKey: identity.scopeKey,
     commitSha: identity.commitSha,
     locale: identity.locale,
+    generatorPolicyVersion: "wiki-generator-v3",
     releaseFamilyId: identity.releaseFamilyId,
     publicSnapshotDigest: content.publicSnapshotDigest,
     contentBundleArtifact: fixture.release.contentBundleArtifact,

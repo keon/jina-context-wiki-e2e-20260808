@@ -110,7 +110,7 @@ function markdownText(node: ReactNode): string {
 
 function mermaidSource(children: ReactNode): string | undefined {
   if (!isValidElement<{ readonly className?: string; readonly children?: ReactNode }>(children)) return undefined;
-  if (!/\blanguage-mermaid\b/.test(children.props.className ?? "")) return undefined;
+  if (!(children.props.className ?? "").split(/\s+/).includes("language-mermaid")) return undefined;
   return markdownText(children.props.children).replace(/\n$/, "");
 }
 

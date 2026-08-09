@@ -378,9 +378,10 @@ test("snapshot and planning preserve module breadth in a large monorepo", async 
   const root = await mkdtemp(join(tmpdir(), "jina-context-wiki-breadth-"));
   try {
     const artifacts = new FileContextArtifactStore(root);
+    const content = new MemoryWikiContentStore();
     const executor = new ContextWikiStageExecutor({
       artifactStore: artifacts,
-      contentStore: new MemoryWikiContentStore(),
+      contentStore: content,
       evidenceStore: new MemoryContextEngineStore(),
       publication: new RecordingPublicationRuntime(),
       mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
@@ -391,7 +392,7 @@ test("snapshot and planning preserve module breadth in a large monorepo", async 
         const prompt = String(JSON.parse(String(init?.body)).input);
         capturedPrompts.push(prompt);
         const text = prompt.includes("Write the Api application page")
-          ? "# API application\n\nContinue with [Architecture](architecture.md)."
+          ? "# API application\n\nContinue with [Architecture](architecture.md). The runtime starts in [server source](../../apps/api/server.ts) and [the unpinned server](https://github.com/acme/widgets/blob/main/apps/api/server.ts), not [another repository](https://github.com/other/widgets/blob/main/apps/api/server.ts)."
           : "# Grounded page\n\nRepository overview.";
         return Response.json({
           output: [{ content: [{ type: "output_text", text }] }],
@@ -430,6 +431,17 @@ test("snapshot and planning preserve module breadth in a large monorepo", async 
       );
       assert.ok(stored.treePaths.some((path) => path.startsWith(prefix)));
     }
+    for (const runtimePath of [
+      "apps/api/server.ts",
+      "apps/worker/worker.ts",
+      "packages/db/schema.ts",
+      "services/context-trigger/src/trigger/generate-wiki.ts"
+    ]) {
+      assert.ok(
+        selectedPaths.includes(runtimePath),
+        `architectural component should retain runtime source ${runtimePath}`
+      );
+    }
     assert.equal(stored.files.length, 80);
     for (const largePath of ["apps/api/server.ts", "apps/worker/worker.ts", "packages/db/schema.ts"]) {
       const file = stored.files.find((candidate) => candidate.path === largePath);
@@ -465,6 +477,18 @@ test("snapshot and planning preserve module breadth in a large monorepo", async 
     }
     assert.ok(plan.pageJobs.some((job) => job.documentPath === "operations/deployment.md"));
     assert.ok(plan.pageJobs.some((job) => job.documentPath === "reference/testing.md"));
+    assert.deepEqual(plan.pageJobs.find((job) => job.documentPath === "quickstart.md")?.sourcePaths.slice(0, 2), [
+      "README.md",
+      "package.json"
+    ]);
+    assert.ok(
+      plan.pageJobs
+        .find((job) => job.documentPath === "reference/lifecycle.md")
+        ?.sourcePaths.includes("apps/worker/worker.ts")
+    );
+    assert.ok(
+      plan.pageJobs.find((job) => job.documentPath === "reference/testing.md")?.sourcePaths.includes("package.json")
+    );
     assert.ok(
       plan.pageJobs.find((job) => job.documentPath === "architecture.md")?.sourcePaths.includes("apps/api/server.ts")
     );
@@ -472,6 +496,11 @@ test("snapshot and planning preserve module breadth in a large monorepo", async 
       plan.pageJobs
         .find((job) => job.documentPath === "workflows/request-flow.md")
         ?.sourcePaths.includes("apps/worker/worker.ts")
+    );
+    assert.ok(
+      plan.pageJobs
+        .find((job) => job.documentPath === "components/services-context-trigger.md")
+        ?.sourcePaths.includes("services/context-trigger/src/trigger/generate-wiki.ts")
     );
     for (const documentPath of ["index.md", "architecture.md"]) {
       const pageJob = plan.pageJobs.find((job) => job.documentPath === documentPath);
@@ -488,7 +517,7 @@ test("snapshot and planning preserve module breadth in a large monorepo", async 
         "apps/api/server.ts",
         "apps/worker/worker.ts",
         "packages/db/schema.ts",
-        "services/context-trigger/generate-wiki.ts",
+        "services/context-trigger/src/trigger/generate-wiki.ts",
         "packages/module-17/index.ts"
       ]) {
         assert.match(prompt, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -507,6 +536,12 @@ test("snapshot and planning preserve module breadth in a large monorepo", async 
     };
     assert.match(capturedPrompts.at(-1) ?? "", /Architecture: \.\.\/architecture\.md/);
     assert.match(componentPage.bodyMarkdown, /\[Architecture\]\(\.\.\/architecture\.md\)/);
+    assert.ok(
+      componentPage.bodyMarkdown.includes(`https://github.com/acme/widgets/blob/${commitSha}/apps/api/server.ts`)
+    );
+    assert.doesNotMatch(componentPage.bodyMarkdown, /github\.com\/acme\/widgets\/blob\/main/);
+    assert.doesNotMatch(componentPage.bodyMarkdown, /github\.com\/other\/widgets\/blob/);
+    assert.match(componentPage.bodyMarkdown, /`another repository` \(unverified external source\)/);
     const allPages = await Promise.all(
       plan.pageJobs.map((pageJob, index) =>
         executor.execute({
@@ -529,6 +564,13 @@ test("snapshot and planning preserve module breadth in a large monorepo", async 
     assert.ok(
       overviewProjection.citations.some((citation) => citation.anchor.pathOrUrl === "packages/module-17/index.ts")
     );
+    const finalizedBundle = await content.get(finalized.contentBundleArtifact);
+    for (const documentPath of ["architecture.md", "workflows/request-flow.md", "reference/data-model.md"]) {
+      const page = finalizedBundle.pages.find((candidate) => candidate.documentPath === documentPath);
+      if (plan.pageJobs.some((job) => job.documentPath === documentPath)) {
+        assert.match(page?.bodyMarkdown ?? "", /```mermaid\n/);
+      }
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -676,6 +718,7 @@ test("incremental planning accounts for every retained, regenerated, added, and 
           return {
             commitSha: priorCommitSha,
             locale: "en",
+            generatorPolicyVersion: incrementalRequest.generatorPolicyVersion,
             contentBundleArtifact: priorArtifact
           };
         }
@@ -718,6 +761,51 @@ test("incremental planning accounts for every retained, regenerated, added, and 
     assert.ok(plan.pathAccounting.addedPaths.includes("quickstart.md"));
     assert.ok(plan.pathAccounting.retiredPaths.includes("getting-started.md"));
     assert.ok(plan.pathAccounting.retiredPaths.includes("obsolete.md"));
+
+    const upgradedExecutor = new ContextWikiStageExecutor({
+      artifactStore: artifacts,
+      contentStore: content,
+      evidenceStore: new MemoryContextEngineStore(),
+      publication: new RecordingPublicationRuntime(),
+      priorReleases: {
+        async getPublishedReleaseInputs() {
+          return {
+            commitSha: priorCommitSha,
+            locale: "en",
+            generatorPolicyVersion: "wiki-generator-v0",
+            contentBundleArtifact: priorArtifact
+          };
+        }
+      },
+      mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
+      fetch: incrementalGithubFetch,
+      now: () => "2026-08-08T12:00:00.000Z"
+    });
+    const upgradedBase = {
+      ...base,
+      request: { ...incrementalRequest, boardBuildId: "task_wiki_policy_upgrade" },
+      requestDigest: "6".repeat(64),
+      triggerParentRunId: "run_policy_upgrade"
+    };
+    const upgradedSnapshot = await upgradedExecutor.execute({
+      ...upgradedBase,
+      operationId: "snapshot-policy-upgrade",
+      stage: "snapshot",
+      input: {}
+    });
+    const upgradedPlan = (await upgradedExecutor.execute({
+      ...upgradedBase,
+      operationId: "plan-policy-upgrade",
+      stage: "plan",
+      input: { snapshot: upgradedSnapshot }
+    })) as {
+      readonly pathAccounting: {
+        readonly retainedPaths: readonly string[];
+        readonly regeneratedPaths: readonly string[];
+      };
+    };
+    assert.deepEqual(upgradedPlan.pathAccounting.retainedPaths, []);
+    assert.ok(upgradedPlan.pathAccounting.regeneratedPaths.includes("architecture.md"));
 
     const pages = await Promise.all(
       plan.pageJobs.map((pageJob, index) =>
@@ -773,7 +861,12 @@ test("incremental planning accounts for every retained, regenerated, added, and 
       publication: new RecordingPublicationRuntime(),
       priorReleases: {
         async getPublishedReleaseInputs() {
-          return { commitSha: priorCommitSha, locale: "en", contentBundleArtifact: priorArtifact };
+          return {
+            commitSha: priorCommitSha,
+            locale: "en",
+            generatorPolicyVersion: incrementalRequest.generatorPolicyVersion,
+            contentBundleArtifact: priorArtifact
+          };
         }
       },
       mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
@@ -910,8 +1003,8 @@ test(
         if (url.origin !== "https://api.openai.com") return githubFetch(input);
         const prompt = String(JSON.parse(String(init?.body)).input);
         const body = prompt.includes("Write the Architecture page")
-          ? "# Architecture\n\n`README.md` and `src/index.ts` define this boundary.\n\n```mermaid\nflowchart LR\n  A[README] --> B[Source]\n```\n\n*Diagram: grounded source flow.*\n"
-          : `# Generated page\n\nThis page is grounded in \`README.md\` and \`src/index.ts\`.\n\n\`\`\`mermaid\nflowchart LR\n  A[image] --> B[${externalUrl}]\n\`\`\`\n\n*Diagram: an unsafe external image.*\n`;
+          ? "# Architecture\n\n`README.md` and `src/index.ts` define this boundary.\n\n> ~~~mermaid\n> flowchart LR\n>   A -->\n> ~~~\n\n*Diagram: parser-invalid source flow.*\n"
+          : `# Generated page\n\nThis page is grounded in \`README.md\` and \`src/index.ts\`.\n\n~~~~mermaid\nflowchart LR\n  A[image] --> B[${externalUrl}]`;
         return Response.json({
           output: [{ content: [{ type: "output_text", text: body }] }],
           usage: { input_tokens: 10, output_tokens: 20 }
@@ -962,7 +1055,19 @@ test(
       assert.equal(requestCount, 0);
       assert.ok(finalized.diagnostics.some((diagnostic) => diagnostic.code === "forbidden_directive"));
       assert.ok(bundle.pages.some((page) => page.bodyMarkdown.includes("converted to text")));
+      assert.equal(
+        bundle.pages.some((page) => page.bodyMarkdown.includes("~~~mermaid")),
+        false
+      );
+      assert.equal(
+        bundle.pages.some((page) => page.bodyMarkdown.includes("~~~~mermaid")),
+        false
+      );
       assert.ok(bundle.pages.some((page) => page.bodyMarkdown.includes("```mermaid\nflowchart LR")));
+      const architecture = bundle.pages.find((page) => page.documentPath === "architecture.md");
+      assert.match(architecture?.bodyMarkdown ?? "", /deterministic Mermaid fallback/);
+      assert.match(architecture?.bodyMarkdown ?? "", /```mermaid\nflowchart LR/);
+      assert.doesNotMatch(architecture?.bodyMarkdown ?? "", /converted to text|A -->\n/);
     } finally {
       await rm(root, { recursive: true, force: true });
       await new Promise<void>((resolve, reject) =>
@@ -1113,12 +1218,14 @@ async function monorepoGithubFetch(input: string | URL | Request): Promise<Respo
     "apps/api/server.ts",
     "apps/worker/worker.ts",
     "packages/db/schema.ts",
-    "services/context-trigger/generate-wiki.ts",
+    "services/context-trigger/package.json",
+    "services/context-trigger/package-lock.json",
+    "services/context-trigger/src/trigger/generate-wiki.ts",
     "tests/wiki.test.ts",
     ...Array.from({ length: 100 }, (_, index) => `apps/api/features/feature-${String(index).padStart(3, "0")}.ts`),
     ...Array.from({ length: 8 }, (_, index) => `apps/worker/jobs/job-${index}.ts`),
     ...Array.from({ length: 8 }, (_, index) => `packages/db/repositories/repository-${index}.ts`),
-    ...Array.from({ length: 8 }, (_, index) => `services/context-trigger/tasks/task-${index}.ts`),
+    ...Array.from({ length: 8 }, (_, index) => `services/context-trigger/src/trigger/task-${index}.ts`),
     ...Array.from({ length: 18 }, (_, index) => `packages/module-${String(index).padStart(2, "0")}/index.ts`)
   ];
   const largePaths = new Set(["apps/api/server.ts", "apps/worker/worker.ts", "packages/db/schema.ts"]);

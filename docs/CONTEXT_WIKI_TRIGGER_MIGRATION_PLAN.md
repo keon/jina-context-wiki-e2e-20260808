@@ -325,7 +325,8 @@ dispatch nonce, attempt, and Trigger parent-run ID so a late commit replays the 
 persisted authority rather than creating another writer.
 
 The API records each completed stage result as an immutable operation artifact plus a
-durable phase checkpoint bound to the exact authority ID, request digest, Trigger
+durable phase checkpoint bound to the exact authority ID (`task_*` for generation or
+`wa_*` for an independent audit), request digest, Trigger
 parent-run ID, stage, operation ID, and canonical input digest. An exact cached receipt
 may replay after Board terminal reconciliation because it performs no new side effect;
 a receipt miss must revalidate live Board authority before recovery or execution. A
@@ -748,7 +749,13 @@ Exclusions are enforced while creating the snapshot and evidence manifest, not m
 
 ### 7.3 Model overview and deterministic catalog indexes
 
-Generator V2 lets the model author the explanatory portion of `index.md` under the same grounding contract as every other page, because the first page must provide a DeepWiki-quality product and architecture orientation. Code then appends the complete wiki map if the model omitted it. Reserved `components/index.md`, `agent-index.md`, and release `log.md` remain deterministic, and PageIndex derives its hierarchy from the stable logical catalog.
+Generator V2 lets the model author the explanatory portion of `index.md` under the same grounding contract as every other page, because the first page must provide a DeepWiki-quality product and architecture orientation. Code replaces the reserved wiki-map section with the complete deterministic map even when the model supplied a partial one. Reserved `components/index.md`, `agent-index.md`, and release `log.md` remain deterministic, and PageIndex derives its hierarchy from the stable logical catalog.
+
+Snapshot selection is hierarchy-aware rather than a flat filename sample. The bounded 80-file/1.5-MiB snapshot first ranks the major `apps/`, `services/`, and `packages/` modules, reserves up to four high-signal runtime/entry-point files for the top twelve architectural modules, and then round-robins the remaining budget across every module. Lockfiles are inventory evidence, not preferred runtime evidence. Large text entry points remain in the complete tree inventory and contribute a bounded body excerpt rather than disappearing. Page planning then supplies up to 32 byte-budgeted representatives to overview/architecture synthesis and keeps the same paths in frontmatter and formal citations.
+
+These contracts are published as `wiki-generator-v3` with prompt selector `wiki-content-v3`. The parent release's generator policy is loaded with its immutable content seed; a policy mismatch revises every substantive planned page even when the source commit did not change. This prevents a deployment from claiming V3 provenance while silently retaining V2 prose or degraded diagrams.
+
+Specialized pages receive the authority-bearing sources they need: quickstart prioritizes root README/manifests/bootstrap workflows; lifecycle combines explicit state/workflow files with Board, admission, lease, checkpoint, outbox, and worker sources; testing combines root runner manifests/CI scripts with representative tests. Relative links to planned wiki pages are repaired against the deterministic catalog. Relative links that actually name repository source are converted to immutable GitHub blob URLs at the release commit, so source navigation cannot masquerade as a broken wiki edge.
 
 This keeps:
 
@@ -756,6 +763,8 @@ This keeps:
 - indexes byte-stable when the tree is unchanged;
 - navigation synchronized with the serving hierarchy;
 - model calls focused on substantive pages.
+
+Search uses two deterministic lexical signals over the same published release: PageIndex node title/summary text and matching document-fragment bodies projected back to their owning nodes. Generated frontmatter and raw Mermaid programs are omitted from the searchable projection, while diagram captions and adjacent prose remain. This preserves hierarchy-aware results, prevents metadata from becoming a synthesized answer, and allows a specific runtime term that appears only in page prose to retrieve the correct component/workflow page.
 
 ### 7.4 OKF-compatible metadata
 
@@ -902,6 +911,8 @@ Do not place citations inside Mermaid labels. The rendered diagram is an explana
 Create browser-safe `packages/shared-kernel/src/mermaid-config.ts` exporting one serializable strict configuration, the exact supported Mermaid version, forbidden-directive policy, and `mermaidConfigDigest`. Both the finalizer and dashboard import this module. Pin exact `mermaid` package bytes in the root/service lockfiles; a compatible semver range is insufficient.
 
 The hosted finalizer applies a bounded static safety filter and then uses the real Mermaid parser and browser renderer for every fence that survives it. Because Trigger has no database or artifact-store authority, the finalization child invokes the scoped API-owned stage executor, and the API runtime image provisions pinned Playwright plus system Chromium. CI and the staging deployment smoke test validate that provisioning. No task downloads a browser at runtime.
+
+Every planned diagram is present on the first release even when model output is malformed or omits its fence. Before browser validation, generation preserves a valid model-authored diagram but replaces an invalid planned fence—or supplies a missing one—with a deterministic, dialect-correct, source-area diagram carrying an explicit fallback marker and conservative caption. This guarantees safe visual orientation without pretending the fallback encodes relationships not established by evidence; the later semantic critic still evaluates whether the diagram's meaning is sufficiently useful.
 
 The API-owned finalizer opens one headless browser/context for the whole wiki, opens an isolated page for each fence, loads the same bundled Mermaid script/configuration as the dashboard, and tears the browser down in `finally`. Current enforced bounds are at most 192 diagrams per release, at most 32 KiB of Mermaid source per diagram, and five seconds per render. Exceeding a content bound degrades the affected diagram (or all diagrams when the release-wide count is exceeded). Browser launch/process failure degrades the diagrams with `renderer_unavailable`; it does not fail the otherwise usable wiki release.
 

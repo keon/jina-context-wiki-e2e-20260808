@@ -383,6 +383,20 @@ create table if not exists jina_context.context_phase_checkpoints (
   recorded_at timestamptz not null,
   primary key (tenant_id,task_id,phase,checkpoint_key)
 );
+-- Early staging revisions constrained both authority columns to task_* even
+-- though audit-wiki intentionally uses its immutable wa_* identity as the
+-- durable operation subject. Converge existing databases as well as fresh
+-- installs so an audit can persist and replay its terminal stage receipt.
+alter table jina_context.context_phase_checkpoints
+  drop constraint if exists context_phase_checkpoints_build_id_check;
+alter table jina_context.context_phase_checkpoints
+  drop constraint if exists context_phase_checkpoints_task_id_check;
+alter table jina_context.context_phase_checkpoints
+  add constraint context_phase_checkpoints_build_id_check
+    check (build_id ~ '^(task(_[a-z0-9]+)?|wa)_[a-f0-9]{32}$');
+alter table jina_context.context_phase_checkpoints
+  add constraint context_phase_checkpoints_task_id_check
+    check (task_id ~ '^(task(_[a-z0-9]+)?|wa)_[a-f0-9]{32}$');
 create index if not exists context_phase_checkpoints_build
   on jina_context.context_phase_checkpoints (tenant_id,build_id,recorded_at,task_id);
 
