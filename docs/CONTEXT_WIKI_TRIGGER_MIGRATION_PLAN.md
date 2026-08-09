@@ -1,12 +1,12 @@
 # Context Wiki: Trigger.dev Generation, Versioned Storage, and Independent Audit Plan
 
-Status: implemented on `codex/context-wiki-trigger`; staging deployment and live acceptance pending
-Target implementation baseline: `staging@55881471f8c3`
+Status: implemented and iterating through live staging acceptance on `codex/context-wiki-trigger`
+Target implementation baseline: `staging@3eb19039a763`
 Implementation worktree: `codex/context-wiki-trigger`
 Primary precedent: `trigger/`, `packages/review-agent`, and the review Trigger.dev dispatch path
 External design reference: [langchain-ai/openwiki](https://github.com/langchain-ai/openwiki)
 
-Implementation checkpoint (2026-08-08): the shared contracts, one-task Board admission, Trigger bridge/service, API-owned generation stages, immutable V2 bundle/release storage, locale-aware release selectors, independent daily audit/follow-up path, query/MCP/export surfaces, strict Mermaid rendering, staging configuration, and CI coverage described below are present in this branch. The legacy Board graph remains available only as the feature-flagged drain path. The final release gate is a deployed staging run against a real sample-repository pull request, followed by merge to `staging`.
+Implementation checkpoint (2026-08-09): the shared contracts, one-task Board admission, Trigger bridge/service, API-owned generation stages, immutable V2 bundle/release storage, locale-aware release selectors, independent daily audit/follow-up path, query/MCP/export surfaces, strict Mermaid rendering, staging configuration, and CI coverage described below are merged to `staging`. A real sample-repository pull request has published and served an eight-page release. Generator/auditor V2 adds breadth-preserving monorepo sampling, module-level planning, a first-pass quality contract, and model-backed semantic audit; its remaining gate is a clean `omxyz/jina` generation, audit, query, and source-update cycle.
 
 ## 1. Executive decision
 
@@ -683,6 +683,37 @@ The V2 prepared-publication transaction accepts `WikiTriggerPublicationCommitV2`
 
 ## 7. OpenWiki-derived content features
 
+### 7.0 Competitive feature and quality gate
+
+The target is not “OpenWiki in the cloud.” The product combines OpenWiki's owned/portable documentation ideas, DeepWiki's cluster-planned repository explanation, and Google Code Wiki's continuously refreshed linked diagrams with stronger immutable release and audit semantics.
+
+Competitive observations are grounded in the [OpenWiki README](https://github.com/langchain-ai/openwiki), [official DeepWiki documentation](https://docs.devin.ai/work-with-devin/deepwiki), [Google Code Wiki announcement](https://developers.googleblog.com/en/introducing-code-wiki-accelerating-your-code-understanding/), and the open-source [CodeWiki hierarchical-generation research](https://github.com/FSoft-AI4Code/CodeWiki).
+
+| Capability                   | Context Wiki generator/auditor V2                                                                                                                 | OpenWiki                                                        | DeepWiki by Devin                                               | Google Code Wiki                                                 | Assessment                                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Automatic freshness          | GitHub webhook admits one async build for the exact branch/PR commit; daily audit may admit a new immutable improvement release                   | CI/scheduled `--update` writes owned Markdown                   | Indexed branches regenerate hosted wiki                         | Regenerates after repository changes                             | Context meets or exceeds freshness while retaining historical releases                                  |
+| First-pass structure         | Breadth-preserving source sampling, module-level monorepo plan, cross-module writing contract, deterministic navigation                           | Agent chooses and updates local OKF concepts                    | Default cluster planning or explicit `.devin/wiki.json` pages   | Continuously structured wiki over the full codebase              | V2 targets parity; live `omxyz/jina` rubric is the acceptance proof                                     |
+| Source grounding             | Exact commit, source paths, evidence checkpoint, manifest, citations, and release digest                                                          | Repository-local evidence and links                             | Source links and code search                                    | Hyperlinks to exact files/classes/functions                      | Context has the strongest immutable provenance contract                                                 |
+| Diagrams                     | Planned flow/sequence/state/ER, exact Mermaid version/config, real Chromium parse/render, network denial, safe degradation, later semantic critic | Mermaid selection plus parse validation and safe degradation    | Architecture diagrams                                           | Architecture, class, and sequence diagrams                       | Context is strongest on safety/versioning; class diagrams remain a future feature                       |
+| Query and agent use          | Version-selectable list/read/search/ask/diff/export plus MCP                                                                                      | Interactive chat/visualizer and agent-memory files              | Ask Devin and public DeepWiki MCP                               | Gemini-powered repository chat                                   | Context has the broadest version-aware API surface; DeepWiki retains stronger general code search today |
+| Branch/PR/commit history     | Independent branch, PR, commit, locale, release-family, and exact-release selectors                                                               | Files on the checked-out branch                                 | Multiple indexed branches                                       | Public-repository current state                                  | Context is materially stronger                                                                          |
+| Independent quality loop     | Daily/manual Trigger audit, deterministic integrity checks, semantic critic, immutable findings, idempotent improvement admission                 | Next update repairs validation breadcrumbs                      | Regeneration/steering; no separately documented immutable audit | Automatic regeneration; no separately documented immutable audit | Context is materially stronger                                                                          |
+| Ownership/portability        | Content-addressed OKF-compatible export; hosted projections                                                                                       | Repository-owned OKF Markdown                                   | Hosted wiki                                                     | Hosted wiki                                                      | Context and OpenWiki lead                                                                               |
+| External knowledge/providers | Repository code plus future connector contract                                                                                                    | Broad providers and Notion/Slack/Gmail/web/LangSmith connectors | Devin organization knowledge and integrations                   | Public code/Gemini                                               | OpenWiki and Devin remain stronger                                                                      |
+
+The honest conclusion is conditional: Context is already stronger than OpenWiki on multi-version serving, asynchronous orchestration, immutable provenance, auditability, ACL isolation, and query/export surfaces. It is not universally more feature-rich because OpenWiki owns more connectors/model providers and a local visualizer, DeepWiki exposes mature code search and effort controls, and Google Code Wiki advertises class diagrams and full-codebase continuous regeneration. Generator/auditor V2 closes the largest content-quality gap. “As good as DeepWiki/Code Wiki” is accepted only when an initial `omxyz/jina` release passes the repository rubric below without using audit findings to repair that first release.
+
+First-pass acceptance rubric (100 points):
+
+- factual correctness and exact-source entailment: 25;
+- subsystem coverage and information hierarchy: 20;
+- cross-module architecture and runtime/data/control flows: 20;
+- onboarding, testing, deployment, and failure-mode usefulness: 15;
+- diagram semantic value and renderer correctness: 10;
+- navigation, citations, search/ask retrieval, and concise writing: 10.
+
+The release must score at least 80 overall, at least 20/25 for correctness, have no high-severity fabricated claim, and pass every deterministic finalizer before its later audit is considered. The same rubric is rerun after source-update and audit-driven releases to measure improvement rather than page-count churn.
+
 ### 7.1 Repository-owned brief
 
 Add the trusted, user-authored file:
@@ -715,9 +746,9 @@ Extend `.jina/config.json` with:
 
 Exclusions are enforced while creating the snapshot and evidence manifest, not merely included as model guidance. Excluded files cannot enter prompts, citations, artifacts, diagrams, or search indexes. Record an `exclusionPolicyDigest` on the release.
 
-### 7.3 Deterministic indexes
+### 7.3 Model overview and deterministic catalog indexes
 
-The model never authors `index.md`. After pages are finalized, code derives root and nested indexes from the stable logical catalog and PageIndex-compatible hierarchy.
+Generator V2 lets the model author the explanatory portion of `index.md` under the same grounding contract as every other page, because the first page must provide a DeepWiki-quality product and architecture orientation. Code then appends the complete wiki map if the model omitted it. Reserved `components/index.md`, `agent-index.md`, and release `log.md` remain deterministic, and PageIndex derives its hierarchy from the stable logical catalog.
 
 This keeps:
 
@@ -870,9 +901,9 @@ Do not place citations inside Mermaid labels. The rendered diagram is an explana
 
 Create browser-safe `packages/shared-kernel/src/mermaid-config.ts` exporting one serializable strict configuration, the exact supported Mermaid version, forbidden-directive policy, and `mermaidConfigDigest`. Both the finalizer and dashboard import this module. Pin exact `mermaid` package bytes in the root/service lockfiles; a compatible semver range is insufficient.
 
-The hosted finalizer always uses the real Mermaid parser and a browser-equivalent renderer; it does not rely on heuristic validation. Because Trigger has no database or GCS authority, the finalization child invokes the scoped API-owned stage executor, and the API runtime image provisions pinned Playwright plus system Chromium. CI and the staging deployment smoke test validate that provisioning. No task downloads a browser at runtime.
+The hosted finalizer applies a bounded static safety filter and then uses the real Mermaid parser and browser renderer for every fence that survives it. Because Trigger has no database or artifact-store authority, the finalization child invokes the scoped API-owned stage executor, and the API runtime image provisions pinned Playwright plus system Chromium. CI and the staging deployment smoke test validate that provisioning. No task downloads a browser at runtime.
 
-The API-owned finalizer opens one headless browser/context for the whole wiki, loads the same bundled Mermaid script/configuration as the dashboard, batch-renders every parsed diagram, and tears the browser down in `finally`. Bounds for V1 are: at most two diagrams per page, at most 192 per release, at most 32 KiB of Mermaid source per diagram, five seconds per render, and 120 seconds for the complete render batch. Exceeding a content bound degrades that diagram; browser launch/process failure is a typed transient infrastructure error eligible for the bounded finalizer child retry. After retry exhaustion, diagrams are degraded to text so the non-diagram wiki remains usable.
+The API-owned finalizer opens one headless browser/context for the whole wiki, opens an isolated page for each fence, loads the same bundled Mermaid script/configuration as the dashboard, and tears the browser down in `finally`. Current enforced bounds are at most 192 diagrams per release, at most 32 KiB of Mermaid source per diagram, and five seconds per render. Exceeding a content bound degrades the affected diagram (or all diagrams when the release-wide count is exceeded). Browser launch/process failure degrades the diagrams with `renderer_unavailable`; it does not fail the otherwise usable wiki release.
 
 For every fence:
 
@@ -881,7 +912,7 @@ For every fence:
 3. Run `mermaid.parse`.
 4. Run a server-side render smoke test with the dashboard configuration.
 5. If valid, preserve the page bytes.
-6. If invalid, sanitize/redact and length-cap the diagnostic, convert the fence to `text`, and add a repair marker.
+6. If invalid, sanitize/redact and length-cap the diagnostic, convert the fence to inert `mermaid-source`, and add a repair marker.
 
 Example marker:
 
@@ -891,7 +922,7 @@ Example marker:
 
 The wiki still publishes. The final `publicSnapshotDigest` is computed after degradation.
 
-Use distinct bounded diagnostic codes for `parse_failed`, `render_failed`, `forbidden_directive`, `source_too_large`, `render_timeout`, and `renderer_unavailable`. Redact and cap human diagnostics separately. The release records exact Mermaid package version, configuration digest, renderer bundle digest, and diagram policy version. CI proves the Trigger bundle and dashboard resolve the same Mermaid version and configuration digest.
+Use distinct bounded diagnostic codes for `parse_failed`, `render_failed`, `forbidden_directive`, `source_too_large`, and `renderer_unavailable`. Redact and cap human diagnostics separately. The release records the exact Mermaid package version, configuration digest, and diagram policy version. CI proves the API and dashboard resolve the same Mermaid version and configuration digest.
 
 ### 8.5 Diagram metadata and incremental behavior
 
@@ -1190,9 +1221,13 @@ The audit reads:
 - the release manifest, citations, diagrams, generator versions, and source commit;
 - optionally the current repository commit/diff when checking staleness.
 
-The implemented deterministic V1 audit re-reads and parses the immutable V2 release envelope and release manifest, verifies their exact tenant/repository/release/ref/commit/locale/content identities, and revalidates every page citation against the exact persisted evidence checkpoint, anchor, revision, ordinal, and repository ACL fingerprint. It independently recomputes bundle/page bindings, validates generated frontmatter repository/commit/locale/title consistency, checks relative links, probes the exact published list/search/PageIndex projection, and runs the pinned Mermaid parser/renderer under an abort-all network policy with release/source/time bounds. Its bounded claim pass reports explicit foreign full-commit claims and conservative opposing boolean assertions such as `enabled`/`disabled`; these are deterministic diagnostics, not open-ended fact checking.
+The deterministic audit core re-reads and parses the immutable V2 release envelope and release manifest, verifies their exact tenant/repository/release/ref/commit/locale/content identities, and revalidates every page citation against the exact persisted evidence checkpoint, anchor, revision, ordinal, and repository ACL fingerprint. It independently recomputes bundle/page bindings, validates generated frontmatter repository/commit/locale/title consistency, checks relative links, probes the exact published list/search/PageIndex projection, and runs the pinned Mermaid parser/renderer under an abort-all network policy with release/source/time bounds. Its bounded claim pass reports explicit foreign full-commit claims and conservative opposing boolean assertions such as `enabled`/`disabled`.
 
-Semantic source-citation entailment, completeness challenges for missing components/workflows, Mermaid meaning versus adjacent prose, recommendations that a page should contain a diagram, natural-language localization completeness, and repository-head staleness beyond the release's explicit commit bindings are intentionally deferred to a later versioned model-backed audit policy. That future policy may read an authorized current commit/diff, but it must preserve the same immutable input identity and non-gating behavior. V1 never claims those model-semantic checks have run.
+Audit policy `audit.v2` then runs a separately versioned model critic over the immutable wiki bundle and exact evidence checkpoint. Its configuration identity is `SHA-256(promptVersion NUL modelId)` and must equal the signed `auditorConfigDigest`; staging pins `context-wiki-quality-v2`, `gpt-5.6-terra`, and digest `ec59b154179e29cec049f93c0d69ff6d3e90a8aecba0b37ab1f24d52ef7bc28b`. The critic evaluates factual entailment, architectural coverage, cross-module runtime/data/control flow, onboarding and operational usefulness, navigation, prose specificity, and Mermaid meaning. It may emit at most 20 actionable findings, each bound to an existing document and one or more paths present in the exact evidence checkpoint. Unknown pages and nonexistent evidence paths are discarded. A model/provider failure fails the audit stage for Trigger retry rather than silently certifying quality.
+
+Semantic findings never mutate or gate the audited release. A terminal `needs_improvement` result is stored immutably, the five-minute reconciliation schedule admits one idempotent `daily_audit_fix` Board task, and generation receives those findings as untrusted repair observations. The normal planner still decides the complete next wiki from current source shape; findings select pages for revision rather than becoming executable policy. The new release is audited under its own release/audit identity, so improvement is measurable and historical bytes remain queryable.
+
+Natural-language localization completeness and repository-head staleness beyond the release's explicit commit bindings remain future policy dimensions. They may read an authorized current commit/diff, but must preserve the same immutable input identity and non-gating behavior.
 
 ### 11.4 Audit storage
 

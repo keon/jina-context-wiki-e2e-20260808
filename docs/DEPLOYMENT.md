@@ -122,8 +122,10 @@ Configure the GitHub `Staging` environment with:
 - variables `JINA_CONTEXT_TRIGGER_PROJECT_REF`, `JINA_TRIGGER_PROJECT_REF`,
   `JINA_CONTEXT_INTERNAL_API_URL=https://api.staging.usejina.com`,
   `JINA_CONTEXT_TRIGGER_API_URL=https://api.trigger.dev`,
-  `JINA_WIKI_AUDIT_POLICY_VERSION=audit.v1`, and a lowercase SHA-256
-  `JINA_WIKI_AUDITOR_CONFIG_DIGEST`.
+  `JINA_WIKI_AUDIT_POLICY_VERSION=audit.v2`, and
+  `JINA_WIKI_AUDITOR_CONFIG_DIGEST=ec59b154179e29cec049f93c0d69ff6d3e90a8aecba0b37ab1f24d52ef7bc28b`.
+  The digest binds semantic-audit prompt `context-wiki-quality-v2` to model
+  `gpt-5.6-terra`; change all three identities together.
 
 `JINA_CONTEXT_TRIGGER_PROJECT_REF` must differ from both the staging review project and
 the production review project. Deploy the Trigger project from the exact staging SHA:
@@ -135,8 +137,10 @@ gh run watch --repo=omxyz/jina --exit-status
 ```
 
 The ordinary source-bound staging Cloud Build deploy then mounts
-`JINA_WIKI_PIPELINE_MODE=trigger`, `JINA_WIKI_ARTIFACT_STORE=postgres`, and the three
-API authority secrets, and adds
+`JINA_WIKI_PIPELINE_MODE=trigger`, `JINA_WIKI_ARTIFACT_STORE=postgres`,
+`JINA_WIKI_GENERATOR_POLICY_VERSION=wiki-generator-v2`,
+`JINA_WIKI_MODEL=gpt-5.6-terra`, `JINA_WIKI_AUDIT_POLICY_VERSION=audit.v2`, the matching
+semantic-auditor model/digest, and the three API authority secrets, and adds
 `run-wiki-build` to the Context worker. Existing four-stage Context topics remain during
 the compatibility window so already-admitted work can drain; new wiki admissions always
 create exactly one Board task. `scripts/check-staging-readiness.sh` verifies the four

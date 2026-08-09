@@ -224,11 +224,23 @@ if jq -e '
     ([$service.spec.template.spec.containers[0].env[]? |
       select(.name == "JINA_WIKI_ARTIFACT_STORE" and .value == "postgres")] | length == 1) and
     ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_WIKI_PIPELINE_MODE" and .value == "trigger")] | length == 1) and
+    ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_WIKI_GENERATOR_POLICY_VERSION" and .value == "wiki-generator-v2")] | length == 1) and
+    ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_WIKI_MODEL" and .value == "gpt-5.6-terra")] | length == 1) and
+    ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_WIKI_AUDIT_POLICY_VERSION" and .value == "audit.v2")] | length == 1) and
+    ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_WIKI_AUDIT_MODEL" and .value == "gpt-5.6-terra")] | length == 1) and
+    ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_WIKI_AUDITOR_CONFIG_DIGEST" and .value == "ec59b154179e29cec049f93c0d69ff6d3e90a8aecba0b37ab1f24d52ef7bc28b")] | length == 1) and
+    ([$service.spec.template.spec.containers[0].env[]? |
       select(.name == "JINA_PRODUCT_DATABASE_URL")] | length == 0)
   ' <<<"${api_service_json}" >/dev/null; then
-  pass "Staging product data and wiki artifacts use the shared v2 PostgreSQL connection"
+  pass "Staging product data, wiki artifacts, generator v2, and semantic audit v2 are configured"
 else
-  fail "Staging must use shared v2 DB_* credentials and JINA_WIKI_ARTIFACT_STORE=postgres without JINA_PRODUCT_DATABASE_URL"
+  fail "Staging must use shared DB/wiki storage plus the exact Trigger generator and semantic-audit v2 contracts"
 fi
 
 database_users="$(gcloud sql users list --instance=jina-db-staging \

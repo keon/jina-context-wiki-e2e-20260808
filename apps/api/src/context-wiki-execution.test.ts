@@ -13,6 +13,7 @@ import {
   parseWikiContentBundle,
   serializeWikiContentBundle,
   wikiContentBundleSha256,
+  type ContextArtifactRef,
   type EvidenceSnapshot,
   type WikiContentArtifactRef,
   type WikiContentBundleV1,
@@ -156,6 +157,85 @@ test("snapshot failures expose only stable phase codes and messages", async () =
   }
 });
 
+test("snapshot fails closed when GitHub marks the recursive source tree incomplete", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jina-context-wiki-truncated-tree-"));
+  try {
+    const executor = new ContextWikiStageExecutor({
+      artifactStore: new FileContextArtifactStore(root),
+      contentStore: new MemoryWikiContentStore(),
+      evidenceStore: new MemoryContextEngineStore(),
+      publication: new RecordingPublicationRuntime(),
+      mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
+      fetch: async () => Response.json({ truncated: true, tree: [] }),
+      now: () => "2026-08-08T12:00:00.000Z"
+    });
+    await assert.rejects(
+      executor.execute({
+        request,
+        requestDigest: "9".repeat(64),
+        triggerParentRunId: "run_truncated_tree",
+        authorizedAt: "2026-08-08T12:00:00.000Z",
+        operationId: "snapshot-truncated-tree",
+        stage: "snapshot",
+        input: {}
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof ContextWikiSnapshotError);
+        assert.equal(error.phase, "source-tree");
+        assert.match(String((error.cause as Error).message), /source tree response is truncated/);
+        return true;
+      }
+    );
+
+    const baseCommitSha = "8".repeat(40);
+    const policyExecutor = new ContextWikiStageExecutor({
+      artifactStore: new FileContextArtifactStore(root),
+      contentStore: new MemoryWikiContentStore(),
+      evidenceStore: new MemoryContextEngineStore(),
+      publication: new RecordingPublicationRuntime(),
+      mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
+      fetch: async (input) => {
+        const url = new URL(String(input));
+        return Response.json(
+          url.pathname.endsWith(`/git/trees/${baseCommitSha}`)
+            ? { truncated: true, tree: [] }
+            : { truncated: false, tree: [{ type: "blob", path: "README.md", sha: "1".repeat(40), size: 100 }] }
+        );
+      },
+      now: () => "2026-08-08T12:00:00.000Z"
+    });
+    await assert.rejects(
+      policyExecutor.execute({
+        request: {
+          ...request,
+          source: {
+            ...request.source,
+            scopeKind: "pull_request",
+            scopeKey: "42",
+            ref: "refs/pull/42/head",
+            refSequence: 1,
+            baseCommitSha
+          }
+        },
+        requestDigest: "8".repeat(64),
+        triggerParentRunId: "run_truncated_policy_tree",
+        authorizedAt: "2026-08-08T12:00:00.000Z",
+        operationId: "snapshot-truncated-policy-tree",
+        stage: "snapshot",
+        input: {}
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof ContextWikiSnapshotError);
+        assert.equal(error.phase, "policy-tree");
+        assert.match(String((error.cause as Error).message), /policy tree response is truncated/);
+        return true;
+      }
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("builds a usable source-grounded wiki before delegating publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-context-wiki-"));
   try {
@@ -294,6 +374,241 @@ test("builds a usable source-grounded wiki before delegating publication", async
   }
 });
 
+test("snapshot and planning preserve module breadth in a large monorepo", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jina-context-wiki-breadth-"));
+  try {
+    const artifacts = new FileContextArtifactStore(root);
+    const executor = new ContextWikiStageExecutor({
+      artifactStore: artifacts,
+      contentStore: new MemoryWikiContentStore(),
+      evidenceStore: new MemoryContextEngineStore(),
+      publication: new RecordingPublicationRuntime(),
+      mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
+      openAiApiKey: "test-openai-key",
+      fetch: async (input, init) => {
+        const url = new URL(String(input));
+        if (url.origin !== "https://api.openai.com") return monorepoGithubFetch(input);
+        const prompt = String(JSON.parse(String(init?.body)).input);
+        capturedPrompts.push(prompt);
+        const text = prompt.includes("Write the Api application page")
+          ? "# API application\n\nContinue with [Architecture](architecture.md)."
+          : "# Grounded page\n\nRepository overview.";
+        return Response.json({
+          output: [{ content: [{ type: "output_text", text }] }],
+          usage: { input_tokens: 10, output_tokens: 5 }
+        });
+      },
+      now: () => "2026-08-08T12:00:00.000Z"
+    });
+    const capturedPrompts: string[] = [];
+    const base = {
+      request,
+      requestDigest: "1".repeat(64),
+      triggerParentRunId: "run_breadth",
+      authorizedAt: "2026-08-08T12:00:00.000Z"
+    };
+    const snapshot = (await executor.execute({
+      ...base,
+      operationId: "snapshot-breadth",
+      stage: "snapshot",
+      input: {}
+    })) as { readonly snapshotArtifact: ContextArtifactRef };
+    const stored = JSON.parse(Buffer.from(await artifacts.get(snapshot.snapshotArtifact)).toString("utf8")) as {
+      readonly files: readonly {
+        readonly path: string;
+        readonly size: number;
+        readonly originalSize?: number;
+        readonly truncated?: boolean;
+      }[];
+      readonly treePaths: readonly string[];
+    };
+    const selectedPaths = stored.files.map((file) => file.path);
+    for (const prefix of ["apps/api/", "apps/worker/", "packages/db/", "services/context-trigger/"]) {
+      assert.ok(
+        selectedPaths.some((path) => path.startsWith(prefix)),
+        `snapshot should represent ${prefix}`
+      );
+      assert.ok(stored.treePaths.some((path) => path.startsWith(prefix)));
+    }
+    assert.equal(stored.files.length, 80);
+    for (const largePath of ["apps/api/server.ts", "apps/worker/worker.ts", "packages/db/schema.ts"]) {
+      const file = stored.files.find((candidate) => candidate.path === largePath);
+      assert.ok(file, `large runtime entry point ${largePath} should have a bounded body excerpt`);
+      assert.equal(file.truncated, true);
+      assert.ok((file.originalSize ?? 0) > 128_000);
+      assert.ok(file.size <= 128_000);
+      assert.ok(stored.treePaths.includes(largePath));
+    }
+
+    const plan = (await executor.execute({
+      ...base,
+      operationId: "plan-breadth",
+      stage: "plan",
+      input: { snapshot }
+    })) as {
+      readonly pageJobs: readonly {
+        readonly documentPath: string;
+        readonly purpose: string;
+        readonly sourcePaths: readonly string[];
+      }[];
+    };
+    for (const documentPath of [
+      "components/apps-api.md",
+      "components/apps-worker.md",
+      "components/packages-db.md",
+      "components/services-context-trigger.md"
+    ]) {
+      assert.ok(
+        plan.pageJobs.some((job) => job.documentPath === documentPath),
+        `plan should contain ${documentPath}; got ${plan.pageJobs.map((job) => job.documentPath).join(", ")}`
+      );
+    }
+    assert.ok(plan.pageJobs.some((job) => job.documentPath === "operations/deployment.md"));
+    assert.ok(plan.pageJobs.some((job) => job.documentPath === "reference/testing.md"));
+    assert.ok(
+      plan.pageJobs.find((job) => job.documentPath === "architecture.md")?.sourcePaths.includes("apps/api/server.ts")
+    );
+    assert.ok(
+      plan.pageJobs
+        .find((job) => job.documentPath === "workflows/request-flow.md")
+        ?.sourcePaths.includes("apps/worker/worker.ts")
+    );
+    for (const documentPath of ["index.md", "architecture.md"]) {
+      const pageJob = plan.pageJobs.find((job) => job.documentPath === documentPath);
+      assert.ok(pageJob);
+      await executor.execute({
+        ...base,
+        operationId: `page-${documentPath}`,
+        stage: "write-page",
+        input: { snapshot, plan, pageJob }
+      });
+    }
+    for (const prompt of capturedPrompts) {
+      for (const path of [
+        "apps/api/server.ts",
+        "apps/worker/worker.ts",
+        "packages/db/schema.ts",
+        "services/context-trigger/generate-wiki.ts",
+        "packages/module-17/index.ts"
+      ]) {
+        assert.match(prompt, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      }
+    }
+    const componentJob = plan.pageJobs.find((job) => job.documentPath === "components/apps-api.md");
+    assert.ok(componentJob);
+    const component = (await executor.execute({
+      ...base,
+      operationId: "page-components-apps-api",
+      stage: "write-page",
+      input: { snapshot, plan, pageJob: componentJob }
+    })) as { readonly pageArtifact: ContextArtifactRef };
+    const componentPage = JSON.parse(Buffer.from(await artifacts.get(component.pageArtifact)).toString("utf8")) as {
+      readonly bodyMarkdown: string;
+    };
+    assert.match(capturedPrompts.at(-1) ?? "", /Architecture: \.\.\/architecture\.md/);
+    assert.match(componentPage.bodyMarkdown, /\[Architecture\]\(\.\.\/architecture\.md\)/);
+    const allPages = await Promise.all(
+      plan.pageJobs.map((pageJob, index) =>
+        executor.execute({
+          ...base,
+          operationId: `page-breadth-final-${index}`,
+          stage: "write-page",
+          input: { snapshot, plan, pageJob }
+        })
+      )
+    );
+    const finalized = (await executor.execute({
+      ...base,
+      operationId: "finalize-breadth",
+      stage: "finalize",
+      input: { snapshot, plan, pages: allPages }
+    })) as FinalizedWikiOutput;
+    const overviewProjection = finalized.pages.find((page) => page.documentPath === "index.md");
+    assert.ok(overviewProjection);
+    assert.ok(overviewProjection.sourcePaths.includes("packages/module-17/index.ts"));
+    assert.ok(
+      overviewProjection.citations.some((citation) => citation.anchor.pathOrUrl === "packages/module-17/index.ts")
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the first-pass overview uses the quality prompt and retains deterministic navigation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jina-context-wiki-quality-prompt-"));
+  try {
+    const artifacts = new FileContextArtifactStore(root);
+    let capturedPrompt = "";
+    let capturedInstructions = "";
+    const executor = new ContextWikiStageExecutor({
+      artifactStore: artifacts,
+      contentStore: new MemoryWikiContentStore(),
+      evidenceStore: new MemoryContextEngineStore(),
+      publication: new RecordingPublicationRuntime(),
+      mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
+      openAiApiKey: "test-openai-key",
+      fetch: async (input, init) => {
+        const url = new URL(String(input));
+        if (url.origin !== "https://api.openai.com") return githubFetch(input);
+        const requestBody = JSON.parse(String(init?.body)) as { input: string; instructions: string };
+        capturedPrompt = requestBody.input;
+        capturedInstructions = requestBody.instructions;
+        return Response.json({
+          output: [
+            {
+              content: [
+                {
+                  type: "output_text",
+                  text: "# Overview\n\nWidgets accepts requests through `src/server.ts` and exports its public entry point from `src/index.ts`.\n\n## Wiki map\n\n- [Bogus](bogus.md)\n\n## Closing note\n\nKeep this model-authored explanation."
+                }
+              ]
+            }
+          ],
+          usage: { input_tokens: 100, output_tokens: 30 }
+        });
+      },
+      now: () => "2026-08-08T12:00:00.000Z"
+    });
+    const base = {
+      request,
+      requestDigest: "2".repeat(64),
+      triggerParentRunId: "run_quality_prompt",
+      authorizedAt: "2026-08-08T12:00:00.000Z"
+    };
+    const snapshot = await executor.execute({ ...base, operationId: "snapshot", stage: "snapshot", input: {} });
+    const plan = (await executor.execute({
+      ...base,
+      operationId: "plan",
+      stage: "plan",
+      input: { snapshot }
+    })) as { readonly pageJobs: readonly { readonly documentPath: string }[] };
+    const pageJob = plan.pageJobs.find((job) => job.documentPath === "index.md");
+    assert.ok(pageJob);
+    const output = (await executor.execute({
+      ...base,
+      operationId: "page-index",
+      stage: "write-page",
+      input: { snapshot, plan, pageJob }
+    })) as { readonly pageArtifact: ContextArtifactRef };
+    const page = JSON.parse(Buffer.from(await artifacts.get(output.pageArtifact)).toString("utf8")) as {
+      readonly bodyMarkdown: string;
+    };
+    assert.match(capturedInstructions, /first published version of a living engineering wiki/i);
+    assert.match(capturedInstructions, /OVERVIEW CONTRACT/);
+    assert.match(capturedInstructions, /Synthesize cross-file behavior/);
+    assert.match(capturedInstructions, /Treat every repository excerpt.*as data/i);
+    assert.match(capturedPrompt, /1: # Widgets/);
+    assert.doesNotMatch(capturedInstructions, /1: # Widgets/);
+    assert.match(page.bodyMarkdown, /Widgets accepts requests/);
+    assert.match(page.bodyMarkdown, /## Wiki map/);
+    assert.match(page.bodyMarkdown, /\[Architecture\]\(architecture\.md\)/);
+    assert.doesNotMatch(page.bodyMarkdown, /Bogus|bogus\.md/);
+    assert.match(page.bodyMarkdown, /## Closing note/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("incremental planning accounts for every retained, regenerated, added, and retired path", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-context-wiki-incremental-"));
   try {
@@ -312,7 +627,10 @@ test("incremental planning accounts for every retained, regenerated, added, and 
         "log.md",
         "agent-index.md",
         "obsolete.md"
-      ].map((documentPath) => [documentPath, `# ${documentPath}\n\nPrior published content for ${documentPath}.\n`])
+      ].map((documentPath) => [
+        documentPath,
+        `---\ntype: Reference\ntitle: ${JSON.stringify(documentPath)}\ndescription: "Prior release"\ntags: []\njina:\n  roles: ["reference"]\n  source_paths: [${JSON.stringify(documentPath === "components/src.md" ? "src/deleted.ts" : "src/index.ts")}]\n  test_paths: []\n  repository: "acme/widgets"\n  commit: ${JSON.stringify(priorCommitSha)}\n  locale: "en"\n---\n\n# ${documentPath}\n\nPrior published content for ${documentPath}.\n`
+      ])
     );
     const priorPages = [...priorBodies]
       .map(([documentPath, bodyMarkdown]) => ({
@@ -395,6 +713,7 @@ test("incremental planning accounts for every retained, regenerated, added, and 
 
     assert.ok(plan.pathAccounting.retainedPaths.includes("architecture.md"));
     assert.ok(plan.pathAccounting.regeneratedPaths.includes("index.md"));
+    assert.ok(plan.pathAccounting.regeneratedPaths.includes("components/src.md"));
     assert.ok(plan.pathAccounting.regeneratedPaths.includes("log.md"));
     assert.ok(plan.pathAccounting.addedPaths.includes("quickstart.md"));
     assert.ok(plan.pathAccounting.retiredPaths.includes("getting-started.md"));
@@ -440,6 +759,52 @@ test("incremental planning accounts for every retained, regenerated, added, and 
     assert.equal(finalPaths.includes("getting-started.md"), false);
     assert.equal(finalPaths.includes("obsolete.md"), false);
     assert.deepEqual(finalized.pathAccounting, plan.pathAccounting);
+    const finalBundle = await content.get(finalized.contentBundleArtifact);
+    const retainedArchitecture = finalBundle.pages.find((page) => page.documentPath === "architecture.md");
+    assert.ok(retainedArchitecture);
+    assert.match(retainedArchitecture.bodyMarkdown, new RegExp(`commit: ["']?${commitSha}`));
+    assert.doesNotMatch(retainedArchitecture.bodyMarkdown, new RegExp(priorCommitSha));
+    assert.match(retainedArchitecture.bodyMarkdown, /Prior published content for architecture\.md/);
+
+    const cappedCompareExecutor = new ContextWikiStageExecutor({
+      artifactStore: artifacts,
+      contentStore: content,
+      evidenceStore: new MemoryContextEngineStore(),
+      publication: new RecordingPublicationRuntime(),
+      priorReleases: {
+        async getPublishedReleaseInputs() {
+          return { commitSha: priorCommitSha, locale: "en", contentBundleArtifact: priorArtifact };
+        }
+      },
+      mintGitHubToken: async () => ({ token: "installation-token", permissions: { contents: "read" } }),
+      fetch: cappedCompareGithubFetch,
+      now: () => "2026-08-08T12:00:00.000Z"
+    });
+    const cappedBase = {
+      ...base,
+      request: { ...incrementalRequest, boardBuildId: "task_wiki_capped_compare" },
+      requestDigest: "7".repeat(64),
+      triggerParentRunId: "run_capped_compare"
+    };
+    const cappedSnapshot = await cappedCompareExecutor.execute({
+      ...cappedBase,
+      operationId: "snapshot-capped-compare",
+      stage: "snapshot",
+      input: {}
+    });
+    const cappedPlan = (await cappedCompareExecutor.execute({
+      ...cappedBase,
+      operationId: "plan-capped-compare",
+      stage: "plan",
+      input: { snapshot: cappedSnapshot }
+    })) as {
+      readonly pathAccounting: {
+        readonly retainedPaths: readonly string[];
+        readonly regeneratedPaths: readonly string[];
+      };
+    };
+    assert.equal(cappedPlan.pathAccounting.retainedPaths.length, 0);
+    assert.ok(cappedPlan.pathAccounting.regeneratedPaths.includes("architecture.md"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -544,7 +909,7 @@ test(
         const url = new URL(String(input));
         if (url.origin !== "https://api.openai.com") return githubFetch(input);
         const prompt = String(JSON.parse(String(init?.body)).input);
-        const body = prompt.startsWith("Write the Architecture page")
+        const body = prompt.includes("Write the Architecture page")
           ? "# Architecture\n\n`README.md` and `src/index.ts` define this boundary.\n\n```mermaid\nflowchart LR\n  A[README] --> B[Source]\n```\n\n*Diagram: grounded source flow.*\n"
           : `# Generated page\n\nThis page is grounded in \`README.md\` and \`src/index.ts\`.\n\n\`\`\`mermaid\nflowchart LR\n  A[image] --> B[${externalUrl}]\n\`\`\`\n\n*Diagram: an unsafe external image.*\n`;
         return Response.json({
@@ -724,9 +1089,57 @@ async function githubFetch(input: string | URL | Request): Promise<Response> {
 async function incrementalGithubFetch(input: string | URL | Request): Promise<Response> {
   const url = new URL(String(input));
   if (url.pathname.includes("/compare/")) {
-    return Response.json({ files: [{ filename: "README.md" }] });
+    return Response.json({ files: [{ filename: "README.md" }, { filename: "src/deleted.ts", status: "removed" }] });
   }
   return githubFetch(input);
+}
+
+async function cappedCompareGithubFetch(input: string | URL | Request): Promise<Response> {
+  const url = new URL(String(input));
+  if (url.pathname.includes("/compare/")) {
+    return Response.json({
+      files: Array.from({ length: 300 }, (_, index) => ({ filename: `unselected/change-${index}.ts` }))
+    });
+  }
+  return githubFetch(input);
+}
+
+async function monorepoGithubFetch(input: string | URL | Request): Promise<Response> {
+  const url = new URL(String(input));
+  const paths = [
+    "README.md",
+    "package.json",
+    ".github/workflows/deploy.yml",
+    "apps/api/server.ts",
+    "apps/worker/worker.ts",
+    "packages/db/schema.ts",
+    "services/context-trigger/generate-wiki.ts",
+    "tests/wiki.test.ts",
+    ...Array.from({ length: 100 }, (_, index) => `apps/api/features/feature-${String(index).padStart(3, "0")}.ts`),
+    ...Array.from({ length: 8 }, (_, index) => `apps/worker/jobs/job-${index}.ts`),
+    ...Array.from({ length: 8 }, (_, index) => `packages/db/repositories/repository-${index}.ts`),
+    ...Array.from({ length: 8 }, (_, index) => `services/context-trigger/tasks/task-${index}.ts`),
+    ...Array.from({ length: 18 }, (_, index) => `packages/module-${String(index).padStart(2, "0")}/index.ts`)
+  ];
+  const largePaths = new Set(["apps/api/server.ts", "apps/worker/worker.ts", "packages/db/schema.ts"]);
+  const entries = paths.map((path, index) => ({
+    type: "blob",
+    path,
+    sha: (index + 1).toString(16).padStart(40, "0"),
+    size: largePaths.has(path) ? 180_000 : path.startsWith("packages/module-") ? 12_000 : 120
+  }));
+  if (url.pathname.endsWith(`/git/trees/${commitSha}`)) return Response.json({ tree: entries });
+  const sha = url.pathname.split("/").at(-1);
+  const entry = entries.find((candidate) => candidate.sha === sha);
+  if (!entry) return new Response(null, { status: 404 });
+  const body = largePaths.has(entry.path)
+    ? `// ${entry.path}\n${"export const runtimeBoundary = true;\n".repeat(6_000)}`
+    : entry.path.startsWith("packages/module-")
+      ? `// ${entry.path}\n${"export function moduleBoundary() { return true; }\n".repeat(240)}`
+      : entry.path === "README.md"
+        ? "# Jina\n\nA multi-service repository for contextual code understanding.\n"
+        : `// ${entry.path}\nexport const ready = true;\n`;
+  return Response.json({ encoding: "base64", content: Buffer.from(body).toString("base64") });
 }
 
 function sha(value: string): string {

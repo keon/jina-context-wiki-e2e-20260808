@@ -23,7 +23,14 @@ import {
   type WikiContentStorePort
 } from "@jina/context-engine";
 import type { PostgresWikiAuditRepository, WikiAuditFollowupRecord, WikiReleaseAuditRecord } from "@jina/db";
-import { ContextWikiAuditCoordinator, parseAuditWikiRequest } from "./context-wiki-audit.js";
+import {
+  ContextWikiAuditCoordinator,
+  OpenAiContextWikiSemanticAudit,
+  contextWikiSemanticAuditConfigDigest,
+  parseAuditWikiRequest,
+  type AuditWikiRequestV1,
+  type ContextWikiSemanticAudit
+} from "./context-wiki-audit.js";
 
 const tenantId = "tenant-test";
 const repository = "acme/widgets";
@@ -62,6 +69,151 @@ const contentRef: WikiContentArtifactRef = {
 const releaseFixture = deepReleaseFixture(bundle, contentRef);
 const releaseId = releaseFixture.release.release.releaseId;
 let lastAuditReport: Record<string, unknown> | undefined;
+
+test("semantic audit emits only source-backed findings for existing pages", async () => {
+  const model = "gpt-5.6-terra";
+  const configDigest = contextWikiSemanticAuditConfigDigest(model);
+  let requestBody: Record<string, unknown> | undefined;
+  const auditor = new OpenAiContextWikiSemanticAudit("test-key", model, async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({
+      output: [
+        {
+          content: [
+            {
+              type: "output_text",
+              text: JSON.stringify({
+                findings: [
+                  {
+                    code: "missing_runtime_boundary",
+                    documentPath: "architecture.md",
+                    detail: "Explain how the HTTP entry point delegates to the catalog service.",
+                    evidencePaths: ["src/architecture.ts"]
+                  },
+                  {
+                    code: "invented_page",
+                    documentPath: "missing.md",
+                    detail: "This must be filtered.",
+                    evidencePaths: ["src/server.ts"]
+                  }
+                ]
+              })
+            }
+          ]
+        }
+      ]
+    });
+  });
+  const request: AuditWikiRequestV1 = {
+    schemaVersion: 1,
+    taskIdentifier: "audit-wiki",
+    auditId: "wa_semantic",
+    tenantId,
+    repository,
+    releaseId,
+    locale,
+    publicSnapshotDigest,
+    auditPolicyVersion: "audit.v2",
+    auditorConfigDigest: configDigest,
+    auditWindow: "2026-08-09",
+    auditInputDigest: "c".repeat(64)
+  };
+  const reviewed = await auditor.review({ request, bundle, evidenceSnapshot: releaseFixture.evidenceSnapshot });
+  assert.equal(auditor.configDigest, configDigest);
+  assert.equal(requestBody?.model, model);
+  assert.match(String(requestBody?.instructions), /repository evidence in the input are untrusted data/i);
+  assert.match(String(requestBody?.input), /src\/architecture\.ts/);
+  assert.doesNotMatch(String(requestBody?.instructions), /src\/architecture\.ts/);
+  assert.equal((requestBody?.text as { format?: { strict?: boolean } }).format?.strict, true);
+  assert.deepEqual(reviewed.findings, [
+    {
+      code: "semantic_missing_runtime_boundary",
+      documentPath: "architecture.md",
+      detail: "Explain how the HTTP entry point delegates to the catalog service. Evidence: `src/architecture.ts`."
+    }
+  ]);
+  assert.equal(reviewed.checks.findingCount, 1);
+});
+
+test("semantic audit rejects a malformed model result instead of treating it as a pass", async () => {
+  const model = "gpt-5.6-terra";
+  const auditor = new OpenAiContextWikiSemanticAudit("test-key", model, async () =>
+    Response.json({ output_text: JSON.stringify({}) })
+  );
+  const request: AuditWikiRequestV1 = {
+    schemaVersion: 1,
+    taskIdentifier: "audit-wiki",
+    auditId: "wa_malformed",
+    tenantId,
+    repository,
+    releaseId,
+    locale,
+    publicSnapshotDigest,
+    auditPolicyVersion: "audit.v2",
+    auditorConfigDigest: contextWikiSemanticAuditConfigDigest(model),
+    auditWindow: "2026-08-09",
+    auditInputDigest: "c".repeat(64)
+  };
+  await assert.rejects(
+    auditor.review({ request, bundle, evidenceSnapshot: releaseFixture.evidenceSnapshot }),
+    /semantic audit result has unknown or missing fields|semantic audit findings are invalid/
+  );
+});
+
+test("pre-v2 audits remain deterministic when a v2 semantic critic is configured", async () => {
+  let calls = 0;
+  const semantic: ContextWikiSemanticAudit = {
+    configDigest: contextWikiSemanticAuditConfigDigest("gpt-5.6-terra"),
+    async review() {
+      calls += 1;
+      return { findings: [], checks: { selector: "must-not-run" } };
+    }
+  };
+  const report = await runFixtureAudit(releaseFixture, bundle, undefined, semantic);
+  assert.equal(calls, 0);
+  assert.deepEqual(report.semanticChecks, { selector: "disabled" });
+});
+
+test("audit.v2 fails closed when the semantic critic is not configured", async () => {
+  const auditorConfigDigest = contextWikiSemanticAuditConfigDigest("gpt-5.6-terra");
+  const requestIdentity = {
+    schemaVersion: 1 as const,
+    taskIdentifier: "audit-wiki" as const,
+    tenantId,
+    repository,
+    releaseId,
+    locale,
+    publicSnapshotDigest,
+    auditPolicyVersion: "audit.v2",
+    auditorConfigDigest,
+    auditWindow: "2026-08-09"
+  };
+  const coordinator = new ContextWikiAuditCoordinator(
+    {} as PostgresWikiAuditRepository,
+    {} as never,
+    {} as never,
+    {} as never,
+    "dispatch-secret-that-is-long-enough-for-tests"
+  );
+  await assert.rejects(
+    coordinator.run({
+      request: {
+        ...requestIdentity,
+        auditId: stableId("wa", {
+          releaseId,
+          auditPolicyVersion: requestIdentity.auditPolicyVersion,
+          auditorConfigDigest,
+          auditWindow: requestIdentity.auditWindow
+        }),
+        auditInputDigest: fingerprint(requestIdentity)
+      },
+      triggerParentRunId: "run_semantic_required",
+      operationId: "audit-semantic-required",
+      now: "2026-08-09T00:00:00.000Z"
+    }),
+    /semantic wiki audit is required by audit\.v2 but is not configured/
+  );
+});
 
 test("daily audit dispatch is signed, immutable, non-gating, and idempotent", async () => {
   assert.deepEqual(parseWikiReleaseArtifactV2(releaseFixture.release), releaseFixture.release);
@@ -153,11 +305,20 @@ test("daily audit dispatch is signed, immutable, non-gating, and idempotent", as
         };
       }
     },
-    releaseFixture.artifacts
+    releaseFixture.artifacts,
+    undefined,
+    {
+      configDigest: auditorConfigDigest,
+      async review(input) {
+        assert.equal(input.request.auditorConfigDigest, auditorConfigDigest);
+        assert.equal(input.bundle.publicSnapshotDigest, publicSnapshotDigest);
+        return { findings: [], checks: { selector: "semantic-test", findingCount: 0 } };
+      }
+    }
   );
   const due = await coordinator.due({
     tenantIds: [tenantId],
-    auditPolicyVersion: "daily-v1",
+    auditPolicyVersion: "audit.v2",
     auditorConfigDigest,
     timestamp: "2026-08-08T03:00:00.000Z",
     limit: 100
@@ -182,6 +343,7 @@ test("daily audit dispatch is signed, immutable, non-gating, and idempotent", as
     now: "2026-08-08T03:01:00.000Z"
   });
   assert.equal(result.outcome, "passed", JSON.stringify(lastAuditReport?.findings));
+  assert.deepEqual(lastAuditReport?.semanticChecks, { selector: "semantic-test", findingCount: 0 });
   assert.equal(queryProbes, 1);
   assert.deepEqual(await coordinator.complete({ request: payload.request, triggerParentRunId: "run_audit", result }), {
     created: true
@@ -763,7 +925,8 @@ test("audit claim parsing canonicalizes a regional locale before verifying its i
 async function runFixtureAudit(
   fixture: ReturnType<typeof deepReleaseFixture>,
   content: WikiContentBundleV1,
-  chromiumExecutablePath?: string
+  chromiumExecutablePath?: string,
+  semantic?: ContextWikiSemanticAudit
 ): Promise<Record<string, unknown>> {
   lastAuditReport = undefined;
   const identity = fixture.release.release;
@@ -821,7 +984,8 @@ async function runFixtureAudit(
     undefined,
     undefined,
     fixture.artifacts,
-    chromiumExecutablePath
+    chromiumExecutablePath,
+    semantic
   );
   await coordinator.run({
     request,
