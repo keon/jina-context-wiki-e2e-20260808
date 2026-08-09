@@ -152,15 +152,16 @@ fi
 artifact_bucket_bootstrap_hint() {
   cat >&2 <<EOF
 A platform operator must precreate gs://${artifact_bucket} in ${region}
-with uniform bucket-level access, no lifecycle rules, and no public IAM
-principals. This bucket remains the legacy Context artifact store; new wiki
-artifacts are stored by the API in append-only PostgreSQL.
+with uniform bucket-level access and no lifecycle rules. Platform readiness
+also verifies that it has no public IAM principals. This bucket remains the
+legacy Context artifact store; new wiki artifacts are stored by the API in
+append-only PostgreSQL.
 See the staging bootstrap instructions in docs/DEPLOYMENT.md.
 EOF
 }
 
 require_artifact_bucket_prerequisites() {
-  local bucket_description bucket_policy
+  local bucket_description
   if ! bucket_description="$(gcloud storage buckets describe "gs://${artifact_bucket}" \
     --project="${project}" --format=json 2>/dev/null)"; then
     printf 'Artifact bucket gs://%s is missing or unreadable.\n' "${artifact_bucket}" >&2
@@ -197,32 +198,6 @@ if errors:
     exit 2
   fi
 
-  if ! bucket_policy="$(gcloud storage buckets get-iam-policy "gs://${artifact_bucket}" \
-    --project="${project}" --format=json 2>/dev/null)"; then
-    printf 'Cannot read IAM for artifact bucket gs://%s.\n' "${artifact_bucket}" >&2
-    artifact_bucket_bootstrap_hint
-    exit 2
-  fi
-
-  if ! BUCKET_POLICY="${bucket_policy}" python3 -c '
-import json
-import os
-import sys
-
-policy = json.loads(os.environ["BUCKET_POLICY"])
-bindings = policy.get("bindings", [])
-public_members = {"allUsers", "allAuthenticatedUsers"}
-is_public = any(
-    public_members.intersection(binding.get("members", []))
-    for binding in bindings
-)
-if is_public:
-    sys.stderr.write("Artifact bucket prerequisite failed: public IAM principals are forbidden\n")
-    raise SystemExit(2)
-'; then
-    artifact_bucket_bootstrap_hint
-    exit 2
-  fi
 }
 
 for image in "${api_image}" "${worker_image}"; do

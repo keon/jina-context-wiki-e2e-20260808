@@ -31,9 +31,12 @@ publishable/secret key pair is unavailable.
 The staging Context artifact bucket remains a platform prerequisite for legacy
 Context artifacts. It must remain regional in `us-east1`, use uniform bucket-level
 access, have no lifecycle rules or public IAM principals, and retain any object while
-the legacy database references it. Each staging deploy performs only read-only bucket
-shape and privacy checks before migrations or revision mutation. It does not create the
-bucket, change its IAM policy, or require the build or API identity to administer it.
+the legacy database references it. Each routine staging deploy performs only read-only
+bucket shape checks before migrations or revision mutation; its build identity does not
+need permission to read or change bucket IAM. The privileged
+`scripts/check-staging-readiness.sh` audit separately verifies that the platform-owned
+policy has no public principals. The app deploy does not create the bucket or change its
+IAM policy.
 
 New Trigger-backed wiki artifacts do not use this bucket in staging. The API revision
 sets `JINA_WIKI_ARTIFACT_STORE=postgres` and stores their immutable bytes in the
