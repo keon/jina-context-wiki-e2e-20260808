@@ -310,6 +310,11 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
       stagingDeployment.indexOf('gcloud run jobs deploy "${migration_job}"')
   );
   assert.match(stagingDeployment, /JINA_WIKI_ARTIFACT_STORE=postgres/);
+  assert.match(
+    stagingCloudBuild,
+    /if scripts\/cloud-build-ci\.sh >"\$\{validation_log\}" 2>&1; then[\s\S]+?cat "\$\{validation_log\}"[\s\S]+?exit 1/
+  );
+  assert.match(stagingCloudBuild, /full successful output suppressed/);
   assert.doesNotMatch(stagingReadiness, /bucket-scoped roles\/storage\.admin/);
   assert.doesNotMatch(stagingReadiness, /roles\/storage\.objectUser/);
   assert.match(stagingReadiness, /project-level roles\/storage\.admin/);
