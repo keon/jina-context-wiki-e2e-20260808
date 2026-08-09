@@ -859,43 +859,65 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     deliveryId?: string,
     workerRelease?: WorkerReleaseGuard
   ): Promise<T | undefined> {
+    const stateStore = config.stateStore;
+    if (stateStore) {
+      // The durable store serializes updates across every API instance while
+      // holding the api_state advisory lock and reloads the latest snapshot
+      // inside that transaction. Do not put another unbounded process-local
+      // FIFO in front of it: a dispatch authorization waiting there cannot use
+      // the store's bounded lock timeout and can outlive its fenced Board lease.
+      return updateDurableState(stateStore, operation, deliveryId, workerRelease);
+    }
+    // Memory mode has no database transaction to serialize concurrent writes.
     const result = mutations.then(async () => {
-      if (!config.stateStore) {
-        const value = await operation();
-        await persist(deliveryId);
-        return value;
-      }
-      let updated: { readonly committed: boolean; readonly result?: T };
-      try {
-        updated = await config.stateStore.update(
-          async (stored) => {
-            if (isApiSnapshot(stored)) restore(stored);
-            const value = await operation();
-            return { state: snapshot(), result: value };
-          },
-          deliveryId,
-          workerRelease
-        );
-      } catch (error) {
-        if (error instanceof Error && error.name === "WorkerReleaseRejectedError") {
-          throw new ApiError(409, "worker_release_rejected", "worker release identity is not active");
-        }
-        if (error instanceof Error && error.name === "StateStoreBusyError") {
-          throw new ApiError(503, "board_busy", "durable Board state is busy; retry shortly");
-        }
-        throw error;
-      }
-      if (!updated.committed) {
-        await reload();
-        return undefined;
-      }
-      return updated.result;
+      const value = await operation();
+      await persist(deliveryId);
+      return value;
     });
     mutations = result.then(
       () => undefined,
       () => undefined
     );
     return result;
+  }
+
+  async function updateDurableState<T>(
+    stateStore: ApiStateStore,
+    operation: () => Promise<T>,
+    deliveryId?: string,
+    workerRelease?: WorkerReleaseGuard
+  ): Promise<T | undefined> {
+    let updated: { readonly committed: boolean; readonly result?: T };
+    try {
+      updated = await stateStore.update(
+        async (stored) => {
+          if (isApiSnapshot(stored)) restore(stored);
+          const value = await operation();
+          return { state: snapshot(), result: value };
+        },
+        deliveryId,
+        workerRelease
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name === "WorkerReleaseRejectedError") {
+        throw new ApiError(409, "worker_release_rejected", "worker release identity is not active");
+      }
+      if (error instanceof Error && error.name === "StateStoreBusyError") {
+        throw new ApiError(503, "board_busy", "durable Board state is busy; retry shortly");
+      }
+      throw error;
+    }
+    if (!updated.committed) {
+      // A false commit means the durable store rejected a duplicate delivery
+      // before invoking this operation. Do not reload here: the store lock has
+      // already been released, so a later transaction may have restored newer
+      // state and be suspended inside its callback. An unlocked reload could
+      // overwrite that callback's in-memory view before it snapshots its write.
+      // Every future durable mutation restores the authoritative snapshot while
+      // holding the store lock, and read paths perform their own reload.
+      return undefined;
+    }
+    return updated.result;
   }
 
   const server = createServer((request, response) => {
