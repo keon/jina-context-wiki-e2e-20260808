@@ -256,9 +256,14 @@ export class PostgresWikiTriggerPublicationRepository implements WikiTriggerPubl
       evidence_snapshot: unknown;
       build_id: string;
     }>(
-      "jina_context_query",
+      // Independent audits re-read the immutable evidence snapshot, which is
+      // intentionally not exposed to the public query capability. Keep this
+      // material-reader path on the tenant-scoped administrative capability.
+      "jina_context_admin",
       { tenantIds: [tenantId] },
-      `select tenant_id,repository,release_id,ref_name,ref_sequence::text,scope_kind,scope_key,
+      `select publication.tenant_id,publication.repository,publication.release_id,
+              publication.ref_name,publication.ref_sequence::text,
+              publication.scope_kind,publication.scope_key,
               publication.commit_sha,publication.locale,publication.release_family_id,
               publication.public_snapshot_digest,publication.content_bundle_artifact,
               publication.release_artifact,evidence.snapshot as evidence_snapshot,publication.build_id

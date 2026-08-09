@@ -743,6 +743,13 @@ test(
       });
       assert.equal(activatedReceipt?.completedAt, published.publishedAt);
       assert.deepEqual(activatedReceipt?.usage, { inputTokens: 10, outputTokens: 20, costMicros: 30 });
+      const auditInputs = await publications.getPublishedReleaseInputs({ tenantId, repository, releaseId });
+      assert.equal(auditInputs?.tenantId, tenantId);
+      assert.equal(auditInputs?.repository, repository);
+      assert.equal(auditInputs?.releaseId, releaseId);
+      assert.equal(auditInputs?.releaseArtifact.sha256, releaseArtifact.sha256);
+      assert.equal(auditInputs?.contentBundleArtifact.sha256, contentBundleArtifact.sha256);
+      assert.deepEqual(auditInputs?.evidenceSnapshot, evidenceSnapshot);
 
       const contextStore = new PostgresContextEngineStore(database);
       const contextCatalog = new ContextCatalogService(contextStore);

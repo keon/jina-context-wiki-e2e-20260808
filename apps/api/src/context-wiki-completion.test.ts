@@ -206,6 +206,237 @@ test("an oversized wiki dispatch lease is not reclaimed before its two-minute ef
   }
 });
 
+test("durable mutations reach the state store without waiting in a process-local FIFO", async () => {
+  const created = createContextWikiBoardBuild(createEmptyBoardState(), {
+    request,
+    now: "2026-08-08T12:00:00.000Z"
+  });
+  const leasedAt = new Date().toISOString();
+  const leased = leaseNextOutboxMessage(created.state, {
+    topics: [contextWikiBoardTopic],
+    leaseId: "durable-concurrency-lease",
+    writeFenceToken: "durable-concurrency-fence",
+    now: leasedAt,
+    expiresAt: new Date(Date.parse(leasedAt) + 120_000).toISOString()
+  });
+  assert.ok(leased);
+  const inProgress = applyCommand(
+    leased.state,
+    { command: "TransitionTask", taskId: created.buildTaskId, toStatus: "in_progress" },
+    { actor: { type: "run", id: "durable-concurrency-worker" }, now: leasedAt }
+  ).state;
+  const state = new GatedDurableStateStore({
+    intakeState: { board: inProgress },
+    devDeliverySequence: 0
+  });
+  const server = createApiServer({
+    tenantId: TENANT,
+    stateStore: state,
+    internalApiToken: INTERNAL_TOKEN,
+    contextWikiTriggerServiceToken: SERVICE_TOKEN,
+    contextWikiExecutionGrantSecret: GRANT_SECRET,
+    contextWikiDispatchSecret: DISPATCH_SECRET
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const fence = {
+    messageId: leased.message.id,
+    leaseId: leased.message.leaseId,
+    taskId: created.buildTaskId,
+    attempt: leased.message.payload.attempt,
+    writeFenceToken: leased.message.writeFenceToken
+  };
+
+  try {
+    const first = post(baseUrl, "/internal/context/wiki/dispatch/authorize", INTERNAL_TOKEN, fence);
+    await state.waitForUpdateCalls(1);
+    const second = post(baseUrl, "/internal/context/wiki/dispatch/authorize", INTERNAL_TOKEN, fence);
+    await state.waitForUpdateCalls(2);
+    state.releaseFirstUpdate();
+
+    const [firstAuthority, replayedAuthority] = await Promise.all([first, second]);
+    assert.equal(firstAuthority.response.status, 200, JSON.stringify(firstAuthority.body));
+    assert.equal(replayedAuthority.response.status, 200, JSON.stringify(replayedAuthority.body));
+    assert.deepEqual(replayedAuthority.body, firstAuthority.body);
+  } finally {
+    state.releaseFirstUpdate();
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("memory-mode mutations remain process-serialized", async () => {
+  const quota = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
+  const reconcile = quota.reconcileActiveBuilds.bind(quota);
+  let reconciliationCalls = 0;
+  let firstReconciliationEntered!: () => void;
+  let releaseFirstReconciliation!: () => void;
+  const firstEntered = new Promise<void>((resolve) => {
+    firstReconciliationEntered = resolve;
+  });
+  const firstReleased = new Promise<void>((resolve) => {
+    releaseFirstReconciliation = resolve;
+  });
+  quota.reconcileActiveBuilds = async (input) => {
+    reconciliationCalls += 1;
+    if (reconciliationCalls === 1) {
+      firstReconciliationEntered();
+      await firstReleased;
+    }
+    return reconcile(input);
+  };
+  const server = createApiServer({
+    tenantId: TENANT,
+    enableDevEndpoints: true,
+    contextQuotaService: quota
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const webhook = (pullRequestNumber: number, digit: string) =>
+    fetch(`${baseUrl}/dev/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: `acme/memory-serialization-${pullRequestNumber}`,
+        pullRequestNumber,
+        headSha: digit.repeat(40),
+        baseSha: "0".repeat(40)
+      })
+    });
+
+  try {
+    const first = webhook(101, "1");
+    await firstEntered;
+    const second = webhook(102, "2");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(reconciliationCalls, 1, "the second memory mutation must remain behind the first");
+    releaseFirstReconciliation();
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    assert.equal(firstResponse.status, 202, await firstResponse.text());
+    assert.equal(secondResponse.status, 202, await secondResponse.text());
+  } finally {
+    releaseFirstReconciliation();
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("durable mutation contention keeps the bounded board_busy response", async () => {
+  const baseState = memoryStateStore({
+    intakeState: { board: createEmptyBoardState() },
+    devDeliverySequence: 0
+  });
+  const busyState: ApiStateStore = {
+    ...baseState,
+    async update<T>(): Promise<{ readonly committed: boolean; readonly result?: T }> {
+      const error = new Error("durable state lock timed out");
+      error.name = "StateStoreBusyError";
+      throw error;
+    }
+  };
+  const server = createApiServer({
+    tenantId: TENANT,
+    enableDevEndpoints: true,
+    stateStore: busyState
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const response = await fetch(`${baseUrl}/dev/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: "acme/durable-contention",
+        pullRequestNumber: 103,
+        headSha: "3".repeat(40),
+        baseSha: "0".repeat(40)
+      })
+    });
+    assert.equal(response.status, 503);
+    assert.equal(((await response.json()) as { code: string }).code, "board_busy");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("a false durable commit cannot reload stale state over a newer entered mutation", async () => {
+  const staleSnapshot: ApiSnapshot = {
+    intakeState: { board: createEmptyBoardState() },
+    devDeliverySequence: 0
+  };
+  const sentinel = createContextWikiBoardBuild(createEmptyBoardState(), {
+    request,
+    now: "2026-08-08T12:00:00.000Z"
+  });
+  const newerSnapshot: ApiSnapshot = {
+    intakeState: { board: sentinel.state },
+    devDeliverySequence: 0
+  };
+  const state = new FalseCommitRaceStateStore(staleSnapshot, newerSnapshot);
+  const quota = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
+  const reconcile = quota.reconcileActiveBuilds.bind(quota);
+  let newerMutationEntered!: () => void;
+  let releaseNewerMutation!: () => void;
+  const newerEntered = new Promise<void>((resolve) => {
+    newerMutationEntered = resolve;
+  });
+  const newerReleased = new Promise<void>((resolve) => {
+    releaseNewerMutation = resolve;
+  });
+  quota.reconcileActiveBuilds = async (input) => {
+    newerMutationEntered();
+    await newerReleased;
+    return reconcile(input);
+  };
+  const server = createApiServer({
+    tenantId: TENANT,
+    enableDevEndpoints: true,
+    stateStore: state,
+    contextQuotaService: quota
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const webhook = (pullRequestNumber: number, digit: string) =>
+    fetch(`${baseUrl}/dev/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: `acme/false-commit-race-${pullRequestNumber}`,
+        pullRequestNumber,
+        headSha: digit.repeat(40),
+        baseSha: "0".repeat(40)
+      })
+    });
+
+  try {
+    const duplicate = webhook(104, "4");
+    await state.waitForFirstUpdate();
+    const newer = webhook(105, "5");
+    await newerEntered;
+
+    const loadsBeforeFalseCommit = state.loadCount();
+    state.releaseFalseCommit();
+    const duplicateResponse = await duplicate;
+    assert.equal(duplicateResponse.status, 202, await duplicateResponse.text());
+    assert.equal(
+      state.loadCount(),
+      loadsBeforeFalseCommit,
+      "a false commit must not perform an unlocked post-transaction reload"
+    );
+
+    releaseNewerMutation();
+    const newerResponse = await newer;
+    assert.equal(newerResponse.status, 202, await newerResponse.text());
+    assert.ok(
+      state.current().intakeState.board.tasks.some((task) => task.id === sentinel.buildTaskId),
+      "the newer mutation must retain the state it restored before the duplicate returned"
+    );
+  } finally {
+    state.releaseFalseCommit();
+    releaseNewerMutation();
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("Trigger callback verifies activated storage and atomically completes the one Board task", async () => {
   const created = createContextWikiBoardBuild(createEmptyBoardState(), {
     request,
@@ -1014,6 +1245,152 @@ function memoryStateStore(initial: ApiSnapshot): ApiStateStore & { current(): Ap
     },
     async close() {}
   };
+}
+
+class GatedDurableStateStore implements ApiStateStore {
+  readonly #firstUpdateReleased: Promise<void>;
+  readonly #updateWaiters = new Set<() => void>();
+  #releaseFirstUpdate!: () => void;
+  #snapshot: ApiSnapshot;
+  #updateCalls = 0;
+  #updates = Promise.resolve();
+
+  constructor(initial: ApiSnapshot) {
+    this.#snapshot = structuredClone(initial);
+    this.#firstUpdateReleased = new Promise<void>((resolve) => {
+      this.#releaseFirstUpdate = resolve;
+    });
+  }
+
+  async load(): Promise<ApiSnapshot> {
+    return structuredClone(this.#snapshot);
+  }
+
+  async ping(): Promise<void> {}
+
+  async hasDelivery(): Promise<boolean> {
+    return false;
+  }
+
+  async save(snapshot: ApiSnapshot): Promise<boolean> {
+    this.#snapshot = structuredClone(snapshot);
+    return true;
+  }
+
+  update<T>(
+    operation: (snapshot: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>
+  ): Promise<{ readonly committed: boolean; readonly result?: T }> {
+    this.#updateCalls += 1;
+    const updateCall = this.#updateCalls;
+    for (const notify of this.#updateWaiters) notify();
+    const result = this.#updates.then(async () => {
+      if (updateCall === 1) await this.#firstUpdateReleased;
+      const updated = await operation(structuredClone(this.#snapshot));
+      this.#snapshot = structuredClone(updated.state);
+      return { committed: true, result: updated.result };
+    });
+    this.#updates = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  releaseFirstUpdate(): void {
+    this.#releaseFirstUpdate();
+  }
+
+  async waitForUpdateCalls(expected: number): Promise<void> {
+    if (this.#updateCalls >= expected) return;
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.#updateWaiters.delete(reached);
+        reject(new Error(`state store received ${this.#updateCalls} update calls; expected ${expected}`));
+      }, 1_000);
+      const reached = () => {
+        if (this.#updateCalls < expected) return;
+        clearTimeout(timeout);
+        this.#updateWaiters.delete(reached);
+        resolve();
+      };
+      this.#updateWaiters.add(reached);
+      reached();
+    });
+  }
+
+  async close(): Promise<void> {}
+}
+
+class FalseCommitRaceStateStore implements ApiStateStore {
+  readonly #falseCommitReleased: Promise<void>;
+  readonly #firstUpdateEntered: Promise<void>;
+  #enterFirstUpdate!: () => void;
+  #releaseFalseCommit!: () => void;
+  #snapshot: ApiSnapshot;
+  #loads = 0;
+  #updateCalls = 0;
+
+  constructor(
+    staleSnapshot: ApiSnapshot,
+    readonly newerSnapshot: ApiSnapshot
+  ) {
+    this.#snapshot = structuredClone(staleSnapshot);
+    this.#firstUpdateEntered = new Promise<void>((resolve) => {
+      this.#enterFirstUpdate = resolve;
+    });
+    this.#falseCommitReleased = new Promise<void>((resolve) => {
+      this.#releaseFalseCommit = resolve;
+    });
+  }
+
+  current(): ApiSnapshot {
+    return structuredClone(this.#snapshot);
+  }
+
+  loadCount(): number {
+    return this.#loads;
+  }
+
+  async load(): Promise<ApiSnapshot> {
+    this.#loads += 1;
+    return structuredClone(this.#snapshot);
+  }
+
+  async ping(): Promise<void> {}
+
+  async hasDelivery(): Promise<boolean> {
+    return false;
+  }
+
+  async save(snapshot: ApiSnapshot): Promise<boolean> {
+    this.#snapshot = structuredClone(snapshot);
+    return true;
+  }
+
+  async update<T>(
+    operation: (snapshot: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>
+  ): Promise<{ readonly committed: boolean; readonly result?: T }> {
+    this.#updateCalls += 1;
+    if (this.#updateCalls === 1) {
+      this.#enterFirstUpdate();
+      await this.#falseCommitReleased;
+      return { committed: false };
+    }
+    if (this.#updateCalls !== 2) throw new Error("unexpected durable mutation in false-commit race test");
+    const updated = await operation(structuredClone(this.newerSnapshot));
+    this.#snapshot = structuredClone(updated.state);
+    return { committed: true, result: updated.result };
+  }
+
+  waitForFirstUpdate(): Promise<void> {
+    return this.#firstUpdateEntered;
+  }
+
+  releaseFalseCommit(): void {
+    this.#releaseFalseCommit();
+  }
+
+  async close(): Promise<void> {}
 }
 
 class MemoryArtifactStore implements ContextArtifactStore {

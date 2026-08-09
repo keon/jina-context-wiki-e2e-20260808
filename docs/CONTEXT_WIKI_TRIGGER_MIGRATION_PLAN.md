@@ -451,6 +451,15 @@ The bridge follows the same safety principle as an external payment or deploymen
 13. Trigger does not invoke `onFailure` for `CRASHED`, `SYSTEM_FAILURE`, `CANCELED`, `EXPIRED`, or `TIMED_OUT`. A separate five-minute `scheduled-wiki-reconciliation` task pages at most 100 active claimed parents per API page, retrieves exact Trigger run status, and uses a freshly minted run-bound grant to complete or fail them. It never polls in the Board worker.
 14. Both terminal callbacks check the exact activated storage receipt before recording failure. An activation-won race therefore converges to Board `done`; a terminal report can never replace an already published release with failure.
 
+In PostgreSQL mode, each Board mutation enters `PostgresJsonStateStore.update`
+directly. The database-wide `jina_runtime.api_state` advisory lock reloads and
+serializes the authoritative snapshot across processes and Cloud Run instances; a
+second unbounded process-local mutation FIFO is forbidden because it can outlive the
+two-minute dispatch lease before the bounded database lock is even attempted. Memory
+mode retains its process-local serializer. A duplicate durable delivery that is not
+committed returns without an unlocked eager reload; the next mutation reloads under
+the advisory lock and read paths use their existing bounded refresh.
+
 PageIndex activation takes the Board API-state advisory lock and then reads the
 authority snapshot through a narrowly scoped cross-schema `SELECT` grant for the
 Context tenant-admin roles. It does not take a row-write lock and those roles receive
