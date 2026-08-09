@@ -366,6 +366,14 @@ test("stage operations replay exact receipts, retry pre-effect failures, and rec
   });
   const state = memoryStateStore({ intakeState: { board: created.state }, devDeliverySequence: 0 });
   const artifacts = new MemoryArtifactStore();
+  const legacyArtifacts: ContextArtifactStore = {
+    async put() {
+      throw new Error("wiki receipts must not use the legacy GCS-backed store");
+    },
+    async get() {
+      throw new Error("wiki receipts must not use the legacy GCS-backed store");
+    }
+  };
   const calls = new Map<string, number>();
   const recoverable = new Map<string, unknown>();
   let signalConcurrentStarted: (() => void) | undefined;
@@ -410,7 +418,8 @@ test("stage operations replay exact receipts, retry pre-effect failures, and rec
     contextWikiDispatchSecret: DISPATCH_SECRET,
     contextWikiReleaseQueryStore: emptyWikiQueryStore(),
     contextWikiStageExecutor: executor,
-    contextArtifactStore: artifacts
+    contextArtifactStore: legacyArtifacts,
+    contextWikiArtifactStore: artifacts
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

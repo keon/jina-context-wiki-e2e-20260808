@@ -9,6 +9,7 @@ import {
   PostgresEvidenceStore,
   PostgresContextPhaseCheckpointRepository,
   PostgresJsonStateStore,
+  PostgresWikiArtifactStore,
   PostgresWikiTriggerPublicationRepository,
   PostgresWikiAuditRepository,
   PostgresIssueGraphRepository,
@@ -129,24 +130,44 @@ const contextArtifactStore = process.env.CONTEXT_GCS_BUCKET
   : enableDevEndpoints
     ? new FileContextArtifactStore(process.env.CONTEXT_ARTIFACT_DIRECTORY?.trim() || ".jina/context-artifacts")
     : undefined;
-const contextWikiContentStore = process.env.CONTEXT_GCS_BUCKET
-  ? new GcsWikiArtifactStore(process.env.CONTEXT_GCS_BUCKET, {
-      ...(process.env.GOOGLE_CLOUD_PROJECT ? { projectId: process.env.GOOGLE_CLOUD_PROJECT } : {}),
-      ...(process.env.GOOGLE_APPLICATION_CREDENTIALS ? { keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS } : {})
-    })
-  : undefined;
+const contextWikiArtifactBackend = process.env.JINA_WIKI_ARTIFACT_STORE?.trim() || "gcs";
+if (contextWikiArtifactBackend !== "gcs" && contextWikiArtifactBackend !== "postgres") {
+  throw new Error("JINA_WIKI_ARTIFACT_STORE must be gcs or postgres");
+}
+// Trigger never receives either backend credential. Staging may select the
+// tenant-scoped Postgres adapter when platform IAM cannot grant API GCS access.
+const postgresWikiArtifactStore =
+  contextWikiArtifactBackend === "postgres" && contextDatabase
+    ? new PostgresWikiArtifactStore(contextDatabase)
+    : undefined;
+if (contextWikiArtifactBackend === "postgres" && !postgresWikiArtifactStore) {
+  throw new Error("JINA_WIKI_ARTIFACT_STORE=postgres requires a Context database");
+}
+const contextWikiArtifactStore =
+  contextWikiArtifactBackend === "postgres" ? postgresWikiArtifactStore : contextArtifactStore;
+const contextWikiContentStore =
+  contextWikiArtifactBackend === "postgres"
+    ? postgresWikiArtifactStore
+    : process.env.CONTEXT_GCS_BUCKET
+      ? new GcsWikiArtifactStore(process.env.CONTEXT_GCS_BUCKET, {
+          ...(process.env.GOOGLE_CLOUD_PROJECT ? { projectId: process.env.GOOGLE_CLOUD_PROJECT } : {}),
+          ...(process.env.GOOGLE_APPLICATION_CREDENTIALS
+            ? { keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS }
+            : {})
+        })
+      : undefined;
 const contextWikiPublicationStore = contextDatabase
   ? new PostgresWikiTriggerPublicationRepository(contextDatabase)
   : undefined;
 const contextWikiAuditCatalog = new ContextCatalogService(contextStore);
 const contextWikiStageExecutor =
-  contextArtifactStore && contextWikiContentStore && contextWikiPublicationStore
+  contextWikiArtifactStore && contextWikiContentStore && contextWikiPublicationStore
     ? new ContextWikiStageExecutor({
-        artifactStore: contextArtifactStore,
+        artifactStore: contextWikiArtifactStore,
         contentStore: contextWikiContentStore,
         evidenceStore: contextEvidenceStore,
         publication: new ApiOwnedContextWikiPublicationRuntime(
-          contextArtifactStore,
+          contextWikiArtifactStore,
           contextWikiContentStore,
           contextWikiPublicationStore
         ),
@@ -211,7 +232,7 @@ const contextWikiAuditCoordinator =
             };
           }
         },
-        contextArtifactStore,
+        contextWikiArtifactStore,
         process.env.JINA_WIKI_CHROMIUM_EXECUTABLE_PATH
       )
     : undefined;
@@ -230,6 +251,7 @@ const server = createApiServer({
   contextPhaseCheckpointStore,
   ...(relationalBoardWorkerStore ? { relationalBoardWorkerStore } : {}),
   ...(contextArtifactStore ? { contextArtifactStore } : {}),
+  ...(contextWikiArtifactStore ? { contextWikiArtifactStore } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardPublicationTransaction } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardReleaseSeedStore: contextBoardPublicationTransaction } : {}),
   ...(contextBoardPageIndexAttachmentTransaction ? { contextBoardPageIndexAttachmentTransaction } : {}),

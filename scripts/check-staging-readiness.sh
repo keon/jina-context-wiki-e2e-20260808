@@ -151,38 +151,6 @@ fi
 
 artifact_bucket_policy="$(gcloud storage buckets get-iam-policy "gs://${artifact_bucket}" \
   --project="${staging_project}" --format=json 2>/dev/null || true)"
-if jq -e --arg member "serviceAccount:${staging_deployer}" '
-    .bindings[]? |
-    select(.role == "roles/storage.admin" and (.condition // null) == null) |
-    .members[]? | select(. == $member)
-  ' <<<"${artifact_bucket_policy}" >/dev/null; then
-  pass "Automatic staging deployer administers only the Context artifact bucket"
-else
-  fail "Automatic staging deployer requires bucket-scoped roles/storage.admin on the Context artifact bucket"
-fi
-if jq -e --arg member "serviceAccount:${api_service_account}" '
-    .bindings[]? |
-    select(.role == "roles/storage.objectUser" and (.condition // null) == null) |
-    .members[]? | select(. == $member)
-  ' <<<"${artifact_bucket_policy}" >/dev/null; then
-  pass "Staging API can read and write Context artifacts"
-else
-  fail "Staging API requires bucket-scoped roles/storage.objectUser on the Context artifact bucket"
-fi
-if jq -e --arg member "serviceAccount:${api_service_account}" '
-    .bindings[]? |
-    select(
-      .role == "roles/storage.admin" or
-      .role == "roles/storage.objectAdmin" or
-      .role == "roles/storage.legacyBucketOwner" or
-      .role == "roles/storage.legacyBucketWriter"
-    ) |
-    .members[]? | select(. == $member)
-  ' <<<"${artifact_bucket_policy}" >/dev/null; then
-  fail "Staging API must not have stronger direct roles on the Context artifact bucket"
-else
-  pass "Staging API has no stronger direct Context artifact bucket role"
-fi
 if ! jq -e 'type == "object" and (.bindings | type == "array")' \
   <<<"${artifact_bucket_policy}" >/dev/null; then
   fail "Staging Context artifact bucket IAM policy is unreadable"
@@ -191,7 +159,7 @@ elif jq -e '
   ' <<<"${artifact_bucket_policy}" >/dev/null; then
   fail "Staging Context artifact bucket must not grant public IAM access"
 else
-  pass "Staging Context artifact bucket has no public IAM principals"
+  pass "Legacy staging Context artifact bucket has no public IAM principals"
 fi
 
 release_secret_policy="$(gcloud secrets get-iam-policy \
@@ -254,11 +222,13 @@ if jq -e '
     ([$service.spec.template.spec.containers[0].env[]? |
       select(.name == "JINA_PRODUCT_DATABASE_MODE" and .value == "shared")] | length == 1) and
     ([$service.spec.template.spec.containers[0].env[]? |
+      select(.name == "JINA_WIKI_ARTIFACT_STORE" and .value == "postgres")] | length == 1) and
+    ([$service.spec.template.spec.containers[0].env[]? |
       select(.name == "JINA_PRODUCT_DATABASE_URL")] | length == 0)
   ' <<<"${api_service_json}" >/dev/null; then
-  pass "Staging product data uses the shared v2 database connection"
+  pass "Staging product data and wiki artifacts use the shared v2 PostgreSQL connection"
 else
-  fail "Staging product data must use shared v2 DB_* credentials without JINA_PRODUCT_DATABASE_URL"
+  fail "Staging must use shared v2 DB_* credentials and JINA_WIKI_ARTIFACT_STORE=postgres without JINA_PRODUCT_DATABASE_URL"
 fi
 
 database_users="$(gcloud sql users list --instance=jina-db-staging \

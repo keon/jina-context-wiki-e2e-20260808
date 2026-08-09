@@ -23,6 +23,7 @@ const tenantScopedTables = [
   "repository_access",
   "context_evidence_snapshots",
   "context_releases",
+  "context_wiki_artifacts",
   "context_wiki_projections",
   "context_board_publications",
   "current_context_board_releases",

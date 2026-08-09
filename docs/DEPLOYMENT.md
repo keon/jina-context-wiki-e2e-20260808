@@ -28,27 +28,24 @@ coordinated `cloudbuild.yaml` path below.
 Staging dashboard auth defaults to Clerk and fails closed when its configured
 publishable/secret key pair is unavailable.
 
-The staging Context artifact bucket is a platform prerequisite. The preferred
-bootstrap grants its bucket-scoped identities once; never grant either storage
-role at project scope:
+The staging Context artifact bucket remains a platform prerequisite for legacy
+Context artifacts. It must remain regional in `us-east1`, use uniform bucket-level
+access, have no lifecycle rules or public IAM principals, and retain any object while
+the legacy database references it. Each staging deploy performs only read-only bucket
+shape and privacy checks before migrations or revision mutation. It does not create the
+bucket, change its IAM policy, or require the build or API identity to administer it.
 
-```sh
-staging_bucket=gs://jina-staging-20260802-context-artifacts-us-east1
-gcloud storage buckets add-iam-policy-binding "${staging_bucket}" \
-  --member=serviceAccount:jina-cloud-build-staging@jina-staging-20260802.iam.gserviceaccount.com \
-  --role=roles/storage.admin
-gcloud storage buckets add-iam-policy-binding "${staging_bucket}" \
-  --member=serviceAccount:jina-api-staging@jina-staging-20260802.iam.gserviceaccount.com \
-  --role=roles/storage.objectUser
-```
-
-The bucket must remain regional in `us-east1`, use uniform bucket-level access,
-have no lifecycle rules or public IAM principals, and retain immutable Context
-release and wiki objects while the database references them. Each staging deploy
-revalidates the bucket, attempts to maintain the API runtime binding, and proves
-the exact IAM postcondition before migrations or revision mutation. Remove direct
-API grants for `roles/storage.admin`, `roles/storage.objectAdmin`, or legacy bucket
-owner/writer; the API needs only `roles/storage.objectUser` on this bucket.
+New Trigger-backed wiki artifacts do not use this bucket in staging. The API revision
+sets `JINA_WIKI_ARTIFACT_STORE=postgres` and stores their immutable bytes in the
+tenant-scoped `jina_context.context_wiki_artifacts` table through
+`PostgresWikiArtifactStore`. Stage artifacts and receipts, canonical content bundles,
+and audit reports keep their existing `context/...` object keys and digest/generation
+references, but the opaque positive `objectGeneration` now identifies an append-only
+PostgreSQL row. The normal wiki read/query path still uses the compact published
+document, search, citation, hierarchy, and release-pointer projections; it never scans
+artifact `bytea`. `scripts/check-staging-readiness.sh` verifies this exact revision
+environment contract. Production remains on the GCS wiki adapter until a separate,
+explicitly reviewed cutover.
 
 For an operator rerun, invoke the source-bound trigger with the exact audited staging SHA:
 
@@ -135,7 +132,8 @@ gh run watch --repo=omxyz/jina --exit-status
 ```
 
 The ordinary source-bound staging Cloud Build deploy then mounts
-`JINA_WIKI_PIPELINE_MODE=trigger` and the three API authority secrets, and adds
+`JINA_WIKI_PIPELINE_MODE=trigger`, `JINA_WIKI_ARTIFACT_STORE=postgres`, and the three
+API authority secrets, and adds
 `run-wiki-build` to the Context worker. Existing four-stage Context topics remain during
 the compatibility window so already-admitted work can drain; new wiki admissions always
 create exactly one Board task. `scripts/check-staging-readiness.sh` verifies the four
@@ -596,6 +594,7 @@ Production API configuration is:
 ```text
 CONTEXT_GCS_BUCKET=<project>-jina-context-artifacts
 CONTEXT_PRIVATE_CHECKPOINT_KEY=<Secret Manager: base64 key or versioned JSON keyring>
+JINA_WIKI_ARTIFACT_STORE=gcs # current default; staging alone selects postgres
 ```
 
 The precreated artifact bucket is a platform prerequisite. The deployment verifies its

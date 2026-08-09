@@ -287,6 +287,8 @@ export interface ApiServerConfig {
   readonly contextWikiPipelineRouting?: ContextWikiPipelineRouting;
   readonly contextWikiStageExecutor?: Pick<ContextWikiStageExecutor, "execute"> &
     Partial<Pick<ContextWikiStageExecutor, "recover">>;
+  /** Immutable wiki-only artifacts and durable stage receipts. Falls back to the legacy Context store in tests. */
+  readonly contextWikiArtifactStore?: ContextArtifactStore;
   readonly contextWikiAuditCoordinator?: ContextWikiAuditCoordinator;
   readonly contextWikiAuditFixEnabled?: boolean;
   readonly contextWikiReleaseQueryStore?: WikiReleaseQueryStore;
@@ -3752,7 +3754,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     readonly recover?: () => Promise<unknown>;
     readonly execute: () => Promise<unknown>;
   }): Promise<unknown> {
-    if (!config.contextArtifactStore) {
+    const artifactStore = config.contextWikiArtifactStore ?? config.contextArtifactStore;
+    if (!artifactStore) {
       throw new Error("durable Context wiki stage operation receipts are not configured");
     }
     const phase = "wiki-trigger-operation";
@@ -3861,7 +3864,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         if (Buffer.byteLength(content, "utf8") > 512 * 1024) {
           throw new Error("Context wiki stage operation receipt exceeds 524288 bytes");
         }
-        const artifact = await config.contextArtifactStore.put({
+        const artifact = await artifactStore.put({
           tenantId: input.grant.tenantId,
           repository: input.grant.repository,
           buildId: input.grant.subjectId,
@@ -3911,10 +3914,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     },
     inputDigest: string
   ): Promise<unknown> {
-    if (!config.contextArtifactStore) throw new Error("Context wiki stage operation receipt store is unavailable");
+    const artifactStore = config.contextWikiArtifactStore ?? config.contextArtifactStore;
+    if (!artifactStore) throw new Error("Context wiki stage operation receipt store is unavailable");
     let value: unknown;
     try {
-      value = JSON.parse(Buffer.from(await config.contextArtifactStore.get(artifact)).toString("utf8"));
+      value = JSON.parse(Buffer.from(await artifactStore.get(artifact)).toString("utf8"));
     } catch {
       throw new Error("Context wiki stage operation receipt is unreadable");
     }

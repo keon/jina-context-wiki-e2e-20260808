@@ -12,6 +12,12 @@ export { ContextQuotaStoreError, PostgresContextQuotaStore } from "./context/con
 export { PostgresContextPhaseCheckpointRepository } from "./context/context-phase-checkpoint-repository.js";
 export { GcsContextArtifactStore } from "./context/gcs-artifact-store.js";
 export { GcsWikiArtifactStore } from "./context/gcs-wiki-artifact-store.js";
+export {
+  PostgresWikiArtifactStore,
+  POSTGRES_CONTEXT_ARTIFACT_MAX_BYTES,
+  POSTGRES_WIKI_AUDIT_ARTIFACT_MAX_BYTES,
+  POSTGRES_WIKI_CONTENT_MAX_BYTES
+} from "./context/postgres-wiki-artifact-store.js";
 export { PostgresBoardContextPublicationRepository } from "./context/board-publication-repository.js";
 export { PostgresBoardPageIndexAttachmentRepository } from "./context/board-pageindex-attachment-repository.js";
 export {

@@ -152,8 +152,9 @@ fi
 artifact_bucket_bootstrap_hint() {
   cat >&2 <<EOF
 A platform operator must precreate gs://${artifact_bucket} in ${region}
-with uniform bucket-level access and no lifecycle rules, then grant
-roles/storage.admin to ${build_service_account} on that bucket only.
+with uniform bucket-level access, no lifecycle rules, and no public IAM
+principals. This bucket remains the legacy Context artifact store; new wiki
+artifacts are stored by the API in append-only PostgreSQL.
 See the staging bootstrap instructions in docs/DEPLOYMENT.md.
 EOF
 }
@@ -224,73 +225,6 @@ if is_public:
   fi
 }
 
-ensure_artifact_bucket_api_access() {
-  local bucket_policy
-  if ! gcloud storage buckets add-iam-policy-binding "gs://${artifact_bucket}" \
-    --member="serviceAccount:${api_service_account}" \
-    --role="roles/storage.objectUser" \
-    --quiet >/dev/null 2>&1; then
-    printf 'Cannot grant staging API object access on gs://%s using %s.\n' \
-      "${artifact_bucket}" "${build_service_account}" >&2
-    artifact_bucket_bootstrap_hint
-    exit 2
-  fi
-
-  if ! bucket_policy="$(gcloud storage buckets get-iam-policy "gs://${artifact_bucket}" \
-    --project="${project}" --format=json 2>/dev/null)"; then
-    printf 'Cannot verify IAM after granting staging API access on gs://%s.\n' "${artifact_bucket}" >&2
-    exit 2
-  fi
-
-  if ! BUCKET_POLICY="${bucket_policy}" \
-    API_MEMBER="serviceAccount:${api_service_account}" \
-    python3 -c '
-import json
-import os
-import sys
-
-policy = json.loads(os.environ["BUCKET_POLICY"])
-api_member = os.environ["API_MEMBER"]
-bindings = policy.get("bindings", [])
-errors = []
-has_object_user = any(
-    binding.get("role") == "roles/storage.objectUser"
-    and api_member in binding.get("members", [])
-    and not binding.get("condition")
-    for binding in bindings
-)
-stronger_roles = {
-    "roles/storage.admin",
-    "roles/storage.objectAdmin",
-    "roles/storage.legacyBucketOwner",
-    "roles/storage.legacyBucketWriter",
-}
-stronger_api_roles = sorted({
-    binding.get("role")
-    for binding in bindings
-    if binding.get("role") in stronger_roles and api_member in binding.get("members", [])
-})
-public_members = {"allUsers", "allAuthenticatedUsers"}
-is_public = any(
-    public_members.intersection(binding.get("members", []))
-    for binding in bindings
-)
-if not has_object_user:
-    errors.append("the API needs an unconditional roles/storage.objectUser binding")
-if stronger_api_roles:
-    errors.append("the API has forbidden stronger direct bucket roles: " + ", ".join(stronger_api_roles))
-if is_public:
-    errors.append("public IAM principals are forbidden")
-if errors:
-    sys.stderr.write("Artifact bucket API IAM postcondition failed: " + "; ".join(errors) + "\n")
-    raise SystemExit(2)
-'; then
-    printf 'Retain only bucket-scoped roles/storage.objectUser for %s and remove public or stronger direct bucket grants.\n' \
-      "${api_service_account}" >&2
-    exit 2
-  fi
-}
-
 for image in "${api_image}" "${worker_image}"; do
   gcloud artifacts docker images describe "${image}" --project="${project}" >/dev/null
 done
@@ -329,7 +263,6 @@ gcloud secrets versions describe "${product_internal_token_version}" \
   --secret="${product_internal_token_secret}" --project="${project}" >/dev/null
 gcloud secrets describe "${worker_release_credential_secret}" --project="${project}" >/dev/null
 require_artifact_bucket_prerequisites
-ensure_artifact_bucket_api_access
 
 serving_revision() {
   local service="$1"
@@ -585,7 +518,7 @@ else
     --wait
 fi
 
-api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=${require_worker_release_gate}~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~JINA_WIKI_PIPELINE_MODE=trigger~JINA_WIKI_GENERATOR_POLICY_VERSION=wiki-generator-v1~JINA_WIKI_DEFAULT_LOCALE=en~JINA_WIKI_AUDIT_POLICY_VERSION=audit.v1~JINA_WIKI_AUDIT_FIX_ENABLED=true~JINA_WIKI_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com,https://jina-staging-dashboard.vercel.app~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=${github_app_install_url}~GITHUB_APP_SLUG=${github_app_slug}~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=30000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
+api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENVIRONMENT=staging~OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${otel_endpoint}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=${require_worker_release_gate}~JINA_TENANCY_MODE=shared-db~JINA_PRODUCT_API_ENABLED=true~JINA_PRODUCT_DATABASE_MODE=shared~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal~JINA_WIKI_PIPELINE_MODE=trigger~JINA_WIKI_ARTIFACT_STORE=postgres~JINA_WIKI_GENERATOR_POLICY_VERSION=wiki-generator-v1~JINA_WIKI_DEFAULT_LOCALE=en~JINA_WIKI_AUDIT_POLICY_VERSION=audit.v1~JINA_WIKI_AUDIT_FIX_ENABLED=true~JINA_WIKI_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium~DASHBOARD_AUTH_MODE=clerk~DASHBOARD_URL=https://app.staging.usejina.com~DASHBOARD_ORIGIN=https://app.staging.usejina.com,https://jina-staging-dashboard.vercel.app~API_BASE_URL=https://api.staging.usejina.com~DASHBOARD_COOKIE_SAMESITE=None~DASHBOARD_COOKIE_SECURE=true~CLERK_PUBLISHABLE_KEY=pk_test_cGVhY2VmdWwtcXVhaWwtOTMuY2xlcmsuYWNjb3VudHMuZGV2JA~GITHUB_APP_INSTALL_URL=${github_app_install_url}~GITHUB_APP_SLUG=${github_app_slug}~JINA_BILLING_ENFORCE=off~JINA_GRAPH_API_URL=https://api.staging.usejina.com~JINA_GRAPH_REQUEST_TIMEOUT_MS=30000~JINA_GRAPH_DELEGATED_TOKEN_TTL_MINUTES=15"
 if [[ "${github_webhook_inbox_enabled}" == "true" ]]; then
   api_env+="~JINA_GITHUB_WEBHOOK_INBOX_ENABLED=true~GITHUB_WEBHOOK_INBOX_ENCRYPTION_KEY_VERSION=${github_webhook_inbox_encryption_key_version}"
 fi
