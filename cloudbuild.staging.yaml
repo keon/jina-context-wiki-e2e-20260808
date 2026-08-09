@@ -22,8 +22,8 @@ steps:
       # Staging images must pass the same validation as production CI —
       # a forked inline copy silently drops gates (this one had lost lint).
       # Test output can exceed the GitHub check limit and hide the terminal
-      # failure. Keep the complete log inside the step, but emit only its last
-      # 400 lines on failure and one bounded record on success.
+      # failure. Keep the complete log inside the step, but emit at most its
+      # last 400 lines / 48,000 bytes on failure and one bounded success record.
       - -ceu
       - |
         validation_log=/tmp/jina-staging-validation.log
@@ -31,7 +31,8 @@ steps:
           printf 'staging validation passed; full successful output suppressed\n'
         else
           printf 'staging validation failed; terminal output follows\n'
-          tail -n 400 "${validation_log}"
+          tail -n 400 "${validation_log}" | tail -c 48000
+          printf '\n'
           exit 1
         fi
     env:

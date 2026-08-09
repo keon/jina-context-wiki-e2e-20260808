@@ -312,7 +312,7 @@ test("staging branch pushes deploy one immutable coordinated release", () => {
   assert.match(stagingDeployment, /JINA_WIKI_ARTIFACT_STORE=postgres/);
   assert.match(
     stagingCloudBuild,
-    /if scripts\/cloud-build-ci\.sh >"\$\{validation_log\}" 2>&1; then[\s\S]+?tail -n 400 "\$\{validation_log\}"[\s\S]+?exit 1/
+    /if scripts\/cloud-build-ci\.sh >"\$\{validation_log\}" 2>&1; then[\s\S]+?tail -n 400 "\$\{validation_log\}" \| tail -c 48000[\s\S]+?exit 1/
   );
   assert.match(stagingCloudBuild, /full successful output suppressed/);
   assert.match(stagingCloudBuild, /staging validation failed; terminal output follows/);
