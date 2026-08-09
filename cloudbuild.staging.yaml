@@ -21,7 +21,19 @@ steps:
     args:
       # Staging images must pass the same validation as production CI —
       # a forked inline copy silently drops gates (this one had lost lint).
-      - scripts/cloud-build-ci.sh
+      # Successful test output can exceed the GitHub check limit and hide a
+      # later deploy failure. Keep the complete log on failure, but emit one
+      # bounded success record so the terminal deployment diagnostics remain
+      # visible in the source-bound check.
+      - -ceu
+      - |
+        validation_log=/tmp/jina-staging-validation.log
+        if scripts/cloud-build-ci.sh >"${validation_log}" 2>&1; then
+          printf 'staging validation passed; full successful output suppressed\n'
+        else
+          cat "${validation_log}"
+          exit 1
+        fi
     env:
       - DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
       - TEST_DATABASE_URL=postgresql://postgres:postgres@jina-ci-postgres:5432/jina_test
