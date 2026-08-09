@@ -1307,27 +1307,11 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
       });
       throw new ApiError(503, "GitHub webhook inbox is unavailable");
     }
-    let processed;
-    try {
-      processed = await githubWebhookInbox.processOne(
-        captured.deliveryId,
-        (input) => processGithubWebhook(input),
-      );
-    } catch (error) {
-      // Capture already committed. A claim/retry bookkeeping outage must not
-      // turn a durable delivery into a failed GitHub response; the expired
-      // lease or pending row remains recoverable through the drain endpoint.
-      console.error("github_webhook_inbox_process_attempt_failed", {
-        delivery_id: captured.deliveryId,
-        event: captured.event,
-        error_code: error instanceof Error ? error.name : "unknown_error",
-      });
-      processed = {
-        deliveryId: captured.deliveryId,
-        disposition: "retry_wait" as const,
-      };
-    }
-
+    // GitHub allows only a short acknowledgement window. The durable inbox is
+    // the handoff boundary: once capture commits, return immediately and let
+    // the authenticated scheduler drain Context + review work asynchronously.
+    // Processing here would put Board/Context latency on the provider request
+    // and cause GitHub to report a timeout even though the delivery is durable.
     return c.json({
       accepted: true,
       captured: true,
@@ -1335,10 +1319,8 @@ export function createApp(config: AppConfig, dependencies: ProductAppDependencie
       ...(captured.action ? { action: captured.action } : {}),
       delivery_id: captured.deliveryId,
       inserted: captured.inserted,
-      inbox_disposition: processed.disposition,
-      ...(processed.response?.workflow_id
-        ? { workflow_id: processed.response.workflow_id }
-        : {}),
+      inbox_status: captured.status,
+      processing: "scheduled",
     }, 202);
   });
 
