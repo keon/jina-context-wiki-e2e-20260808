@@ -33,3 +33,8 @@ export function evaluateRelease(candidate: ReleaseCandidate): ReleaseDecision {
     failedStages
   };
 }
+
+export function releaseDecisionSummary(decision: ReleaseDecision): string {
+  if (decision.status === "ready") return `${decision.version}: ready`;
+  return `${decision.version}: blocked by ${decision.failedStages.join(", ")}`;
+}

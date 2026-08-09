@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateRelease } from "../src/index.js";
+import { evaluateRelease, releaseDecisionSummary } from "../src/index.js";
 
 test("a fully passing pipeline is ready", () => {
   assert.deepEqual(
@@ -41,5 +41,16 @@ test("duplicate stages are rejected", () => {
         ]
       }),
     /duplicate stage/
+  );
+});
+
+test("release summaries expose the blocking causal stages", () => {
+  assert.equal(
+    releaseDecisionSummary({
+      version: "2026.08.09",
+      status: "blocked",
+      failedStages: ["test", "deploy"]
+    }),
+    "2026.08.09: blocked by test, deploy"
   );
 });
