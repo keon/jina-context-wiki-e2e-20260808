@@ -12,13 +12,7 @@ import {
   tenantAccessDenial,
 } from "./app.js";
 import type { AppConfig } from "./config.js";
-import type {
-  GithubWebhookInboxCapture,
-  GithubWebhookInboxCaptureResult,
-  GithubWebhookInboxLease,
-  GithubWebhookInboxRepository,
-  GithubWebhookInboxSnapshot,
-} from "./github-webhook-inbox-store.js";
+import type { GithubWebhookInboxRepository } from "./github-webhook-inbox-store.js";
 
 /**
  * Minimal AppConfig for route-glue tests. Auth is "disabled" so requireDashboardSession returns
@@ -111,18 +105,32 @@ test("GitHub inbox capture failure returns 503 and never acknowledges the delive
   assert.deepEqual(await response.json(), { error: "GitHub webhook inbox is unavailable" });
 });
 
-test("durable capture returns 202 when another worker already owns processing", async () => {
+test("durable capture acknowledges before any Context or review processing", async () => {
   let captured = 0;
+  let claimed = 0;
+  let relayed = 0;
+  let reviewed = 0;
   const repository = {
     async capture() {
       captured += 1;
       return { inserted: true, status: "pending" as const };
     },
     async claim() {
-      return undefined;
+      claimed += 1;
+      throw new Error("processing must not run on the provider request");
     },
   } as unknown as GithubWebhookInboxRepository;
-  const app = createApp(inboxAppConfig(), { githubWebhookInboxRepository: repository });
+  const app = createApp(inboxAppConfig(), {
+    githubWebhookInboxRepository: repository,
+    fetch: async () => {
+      relayed += 1;
+      throw new Error("Context relay must be scheduled");
+    },
+    githubWebhookHandler: async () => {
+      reviewed += 1;
+      throw new Error("review must be scheduled");
+    },
+  });
   const body = JSON.stringify({
     action: "opened",
     installation: { id: 456 },
@@ -137,6 +145,9 @@ test("durable capture returns 202 when another worker already owns processing", 
 
   assert.equal(response.status, 202);
   assert.equal(captured, 1);
+  assert.equal(claimed, 0);
+  assert.equal(relayed, 0);
+  assert.equal(reviewed, 0);
   assert.deepEqual(await response.json(), {
     accepted: true,
     captured: true,
@@ -144,86 +155,13 @@ test("durable capture returns 202 when another worker already owns processing", 
     action: "opened",
     delivery_id: "delivery-app-test",
     inserted: true,
-    inbox_disposition: "not_claimed",
+    inbox_status: "pending",
+    processing: "scheduled",
   });
 });
 
-test("durable inbox retries review after Context accepted the same delivery exactly once", async () => {
-  const repository = new RetryableInboxRepository();
-  const body = JSON.stringify({
-    action: "opened",
-    installation: { id: 456 },
-    repository: { id: 123, full_name: "omxyz/example" },
-    pull_request: { number: 42, head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40) } },
-  });
-  const relayedDeliveryIds: string[] = [];
-  let reviewAttempts = 0;
-  const app = createApp(
-    inboxAppConfig({
-      graph: {
-        apiUrl: "https://context.example.test",
-        accessToken: "context-static-token",
-        timeoutMs: 5_000,
-      },
-    }),
-    {
-      githubWebhookInboxRepository: repository,
-      fetch: async (_input, init) => {
-        const headers = new Headers(init?.headers);
-        relayedDeliveryIds.push(headers.get("x-github-delivery") ?? "");
-        assert.equal(init?.body, body);
-        return Response.json({ accepted: true }, { status: 202 });
-      },
-      githubWebhookHandler: async () => {
-        reviewAttempts += 1;
-        if (reviewAttempts === 1) throw new Error("review dispatch unavailable");
-        return {
-          accepted: true,
-          event: "pull_request",
-          action: "opened",
-          workflow_id: "review-workflow-42",
-        };
-      },
-    },
-  );
-
-  const first = await app.request("/webhooks/github", {
-    method: "POST",
-    headers: githubHeaders(body),
-    body,
-  });
-  assert.equal(first.status, 202);
-  assert.equal((await first.json() as { inbox_disposition: string }).inbox_disposition, "retry_wait");
-  assert.equal(repository.retryCount, 1);
-  assert.equal(repository.completeCount, 0);
-
-  const replay = await app.request("/webhooks/github", {
-    method: "POST",
-    headers: githubHeaders(body),
-    body,
-  });
-  assert.equal(replay.status, 202);
-  assert.deepEqual(await replay.json(), {
-    accepted: true,
-    captured: true,
-    event: "pull_request",
-    action: "opened",
-    delivery_id: "delivery-app-test",
-    inserted: false,
-    inbox_disposition: "completed",
-    workflow_id: "review-workflow-42",
-  });
-  assert.deepEqual(relayedDeliveryIds, ["delivery-app-test", "delivery-app-test"]);
-  assert.equal(reviewAttempts, 2);
-  assert.equal(repository.completeCount, 1);
-  assert.equal(repository.active, false);
-});
-
-function inboxAppConfig(overrides: {
-  graph?: AppConfig["graph"];
-} = {}): AppConfig {
+function inboxAppConfig(): AppConfig {
   return testConfig({
-    ...(overrides.graph ? { graph: overrides.graph } : {}),
     githubWebhookInbox: {
       encryptionKey: Buffer.alloc(32, 5),
       encryptionKeyVersion: "4",
@@ -240,77 +178,6 @@ function githubHeaders(body: string): Record<string, string> {
     "x-github-event": "pull_request",
     "x-hub-signature-256": `sha256=${createHmac("sha256", "whsec").update(body).digest("hex")}`,
   };
-}
-
-class RetryableInboxRepository implements GithubWebhookInboxRepository {
-  private captured?: GithubWebhookInboxCapture;
-  retryCount = 0;
-  completeCount = 0;
-
-  get active(): boolean {
-    return Boolean(this.captured);
-  }
-
-  async capture(input: GithubWebhookInboxCapture): Promise<GithubWebhookInboxCaptureResult> {
-    if (this.captured) return { inserted: false, status: "retry_wait" };
-    this.captured = input;
-    return { inserted: true, status: "pending" };
-  }
-
-  async hasDelivery(deliveryId: string): Promise<boolean> {
-    return this.captured?.deliveryId === deliveryId;
-  }
-
-  async reserveRedelivery(): Promise<boolean> {
-    return false;
-  }
-
-  async recordRedeliveryResult(): Promise<void> {}
-
-  async claim(): Promise<GithubWebhookInboxLease | undefined> {
-    const captured = this.captured;
-    if (!captured) return undefined;
-    return {
-      leaseId: `lease-${this.retryCount + this.completeCount + 1}`,
-      deliveryId: captured.deliveryId,
-      event: captured.event,
-      ...(captured.action ? { action: captured.action } : {}),
-      ...(captured.repositoryFullName
-        ? { repositoryFullName: captured.repositoryFullName }
-        : {}),
-      payloadSha256: captured.payloadSha256,
-      payloadCiphertext: captured.payloadCiphertext,
-      encryptionKeyVersion: captured.encryptionKeyVersion,
-      attemptCount: this.retryCount + 1,
-    };
-  }
-
-  async complete(): Promise<void> {
-    this.completeCount += 1;
-    this.captured = undefined;
-  }
-
-  async retry(): Promise<void> {
-    this.retryCount += 1;
-  }
-
-  async deadLetter(): Promise<void> {
-    throw new Error("unexpected dead letter");
-  }
-
-  async snapshot(): Promise<GithubWebhookInboxSnapshot> {
-    return {
-      pending: this.captured ? 1 : 0,
-      leased: 0,
-      retryWait: this.retryCount > 0 && this.captured ? 1 : 0,
-      completed: this.completeCount,
-      deadLetter: 0,
-      deadLetterByErrorCode: {},
-      recentDeadLetters: [],
-      activeKeyVersions: this.captured ? { [this.captured.encryptionKeyVersion]: 1 } : {},
-      deadLetterKeyVersions: {},
-    };
-  }
 }
 
 /* -------------------------- topup origin/CSRF hardening (NON-BLOCKING ADOPTED b) --- */
