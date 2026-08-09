@@ -8,6 +8,7 @@ import {
   contextArtifactKey,
   createContextWikiBoardBuild,
   contextWikiBoardTopic,
+  MemoryContextPhaseCheckpointStore,
   type ContextArtifactRef,
   type ContextArtifactStore,
   type ContextArtifactWrite
@@ -375,6 +376,16 @@ test("stage operations replay exact receipts, retry pre-effect failures, and rec
     }
   };
   const calls = new Map<string, number>();
+  const checkpoints = new MemoryContextPhaseCheckpointStore();
+  const recordCheckpoint = checkpoints.record.bind(checkpoints);
+  checkpoints.record = async (checkpoint) => {
+    assert.match(
+      checkpoint.checkpointKey,
+      /^[0-9a-f]{64}$/,
+      "durable stage receipts must use the PostgreSQL checkpoint-key contract"
+    );
+    return recordCheckpoint(checkpoint);
+  };
   const recoverable = new Map<string, unknown>();
   let signalConcurrentStarted: (() => void) | undefined;
   const concurrentStarted = new Promise<void>((resolve) => {
@@ -418,6 +429,7 @@ test("stage operations replay exact receipts, retry pre-effect failures, and rec
     contextWikiDispatchSecret: DISPATCH_SECRET,
     contextWikiReleaseQueryStore: emptyWikiQueryStore(),
     contextWikiStageExecutor: executor,
+    contextPhaseCheckpointStore: checkpoints,
     contextArtifactStore: legacyArtifacts,
     contextWikiArtifactStore: artifacts
   });
