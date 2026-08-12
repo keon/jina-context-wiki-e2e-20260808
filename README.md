@@ -5,3 +5,5 @@ Staging-only fixture for the Trigger.dev review workflow. Run the executable fix
 ```sh
 npm test
 ```
+
+The redirect policy is intended for OAuth callback validation at the application boundary.
