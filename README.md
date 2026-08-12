@@ -1,2 +1,7 @@
-# jina-context-wiki-e2e-20260808
-Staging-only fixture for Context wiki Trigger.dev end-to-end acceptance
+# Jina staging review fixture
+
+Staging-only fixture for the Trigger.dev review workflow. Run the executable fixture with:
+
+```sh
+npm test
+```
