@@ -4,13 +4,13 @@ const ZONE_BASE_CENTS = Object.freeze({
 });
 
 export function quoteShipping({ subtotalCents, weightGrams, zone }) {
-  if (!Number.isInteger(subtotalCents) || subtotalCents < 0) {
-    throw new TypeError("subtotalCents must be a non-negative integer");
+  if (!Number.isSafeInteger(subtotalCents) || subtotalCents < 0) {
+    throw new TypeError("subtotalCents must be a non-negative safe integer");
   }
-  if (!Number.isInteger(weightGrams) || weightGrams <= 0) {
-    throw new TypeError("weightGrams must be a positive integer");
+  if (!Number.isSafeInteger(weightGrams) || weightGrams <= 0) {
+    throw new TypeError("weightGrams must be a positive safe integer");
   }
-  if (!Object.hasOwn(ZONE_BASE_CENTS, zone)) {
+  if (typeof zone !== "string" || !Object.hasOwn(ZONE_BASE_CENTS, zone)) {
     throw new TypeError("zone must be domestic or international");
   }
 

@@ -37,4 +37,16 @@ test("invalid inputs fail closed", () => {
     () => quoteShipping({ subtotalCents: 100, weightGrams: 500, zone: "moon" }),
     /zone/
   );
+  assert.throws(
+    () => quoteShipping({ subtotalCents: Number.MAX_SAFE_INTEGER + 1, weightGrams: 500, zone: "domestic" }),
+    /subtotalCents/
+  );
+  assert.throws(
+    () => quoteShipping({ subtotalCents: 100, weightGrams: Number.MAX_SAFE_INTEGER + 1, zone: "domestic" }),
+    /weightGrams/
+  );
+  assert.throws(
+    () => quoteShipping({ subtotalCents: 100, weightGrams: 500, zone: { toString: () => "domestic" } }),
+    /zone/
+  );
 });
