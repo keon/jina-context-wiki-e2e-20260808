@@ -1,0 +1,8 @@
+{
+  "name": "jina-staging-review-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
