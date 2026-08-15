@@ -7,12 +7,12 @@ export class JobQueue {
     const job = {
       id: crypto.randomUUID(),
       name,
-      payload,
+      payload: structuredClone(payload),
       attempts: 0,
       status: "queued",
     };
     this.#jobs.push(job);
-    return { ...job };
+    return snapshot(job);
   }
 
   next() {
@@ -20,16 +20,17 @@ export class JobQueue {
     if (!job) return null;
     job.status = "running";
     job.attempts += 1;
-    return { ...job };
+    return snapshot(job);
   }
 
   complete(id, attempt) {
     if (!Number.isSafeInteger(attempt) || attempt < 1) {
       throw new TypeError("attempt must be a positive integer");
     }
-    const job = this.#jobs.find((candidate) => candidate.id === id);
+    const index = this.#jobs.findIndex((candidate) => candidate.id === id);
+    const job = this.#jobs[index];
     if (!job || job.status !== "running" || job.attempts !== attempt) return false;
-    job.status = "completed";
+    this.#jobs.splice(index, 1);
     this.#retryLimits.delete(id);
     return true;
   }
@@ -51,8 +52,13 @@ export class JobQueue {
       this.#jobs.splice(index, 1);
       this.#jobs.push(job);
     } else {
+      this.#jobs.splice(index, 1);
       this.#retryLimits.delete(id);
     }
     return true;
   }
+}
+
+function snapshot(job) {
+  return { ...job, payload: structuredClone(job.payload) };
 }

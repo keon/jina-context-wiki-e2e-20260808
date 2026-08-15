@@ -97,3 +97,17 @@ test("retried jobs return behind work that is already queued", () => {
   assert.equal(queue.next().id, secondCreated.id);
   assert.equal(queue.next().id, firstCreated.id);
 });
+
+test("each retry attempt receives an isolated payload snapshot", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", { nested: { value: "original" }, items: ["a"] });
+  const first = queue.next();
+
+  created.payload.nested.value = "changed-after-enqueue";
+  first.payload.nested.value = "changed-by-first-attempt";
+  first.payload.items.push("corruption");
+  assert.equal(queue.retry(created.id, first.attempts), true);
+  const second = queue.next();
+
+  assert.deepEqual(second.payload, { nested: { value: "original" }, items: ["a"] });
+});
