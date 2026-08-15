@@ -24,9 +24,13 @@ export class JobQueue {
   }
 
   complete(id, attempt) {
+    if (!Number.isSafeInteger(attempt) || attempt < 1) {
+      throw new TypeError("attempt must be a positive integer");
+    }
     const job = this.#jobs.find((candidate) => candidate.id === id);
     if (!job || job.status !== "running" || job.attempts !== attempt) return false;
     job.status = "completed";
+    this.#retryLimits.delete(id);
     return true;
   }
 
@@ -40,12 +44,14 @@ export class JobQueue {
     const index = this.#jobs.findIndex((candidate) => candidate.id === id);
     const job = this.#jobs[index];
     if (!job || job.status !== "running" || job.attempts !== attempt) return false;
-    const retryLimit = Math.min(this.#retryLimits.get(id) ?? maxAttempts, maxAttempts);
-    this.#retryLimits.set(id, retryLimit);
+    const retryLimit = this.#retryLimits.get(id) ?? maxAttempts;
+    if (!this.#retryLimits.has(id)) this.#retryLimits.set(id, retryLimit);
     job.status = job.attempts >= retryLimit ? "failed" : "queued";
     if (job.status === "queued") {
       this.#jobs.splice(index, 1);
       this.#jobs.push(job);
+    } else {
+      this.#retryLimits.delete(id);
     }
     return true;
   }

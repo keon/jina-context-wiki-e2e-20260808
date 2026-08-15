@@ -43,6 +43,14 @@ test("completed jobs cannot be retried", () => {
   assert.equal(queue.next(), null);
 });
 
+test("completion requires an explicit attempt token", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
+  queue.next();
+
+  assert.throws(() => queue.complete(created.id), /attempt must be a positive integer/);
+});
+
 test("stale completions cannot overwrite a newer attempt", () => {
   const queue = new JobQueue();
   const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
@@ -65,6 +73,18 @@ test("a retry budget cannot increase after the lifecycle begins", () => {
   const second = queue.next();
   assert.equal(queue.retry(created.id, second.attempts, 100), true);
   assert.equal(queue.next(), null);
+});
+
+test("the default retry argument cannot shrink an established budget", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
+  const first = queue.next();
+
+  assert.equal(queue.retry(created.id, first.attempts, 5), true);
+  const second = queue.next();
+  assert.equal(queue.retry(created.id, second.attempts), true);
+  const third = queue.next();
+  assert.equal(third.attempts, 3);
 });
 
 test("retried jobs return behind work that is already queued", () => {
