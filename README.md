@@ -9,3 +9,9 @@ review agent to exercise retries and for OpenWiki to document the runtime flow.
 ```sh
 npm test
 ```
+
+## Canonical documentation
+
+Jina regenerates this repository's canonical Wiki from the exact `main` commit
+after a change is merged. Pull requests are reviewed against the current
+canonical release and do not create separate Wiki releases.
