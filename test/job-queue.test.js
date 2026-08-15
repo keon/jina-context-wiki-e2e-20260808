@@ -11,3 +11,12 @@ test("jobs move from queued to completed", () => {
   assert.equal(running.attempts, 1);
   assert.equal(queue.complete(running.id), true);
 });
+
+test("a failed job can be retried within its attempt budget", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
+  queue.next();
+
+  assert.equal(queue.retry(created.id), true);
+  assert.equal(queue.next().attempts, 2);
+});

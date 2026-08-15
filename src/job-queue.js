@@ -28,4 +28,11 @@ export class JobQueue {
     job.status = "completed";
     return true;
   }
+
+  retry(id, maxAttempts = 3) {
+    const job = this.#jobs.find((candidate) => candidate.id === id);
+    if (!job) return false;
+    job.status = job.attempts >= maxAttempts ? "failed" : "queued";
+    return true;
+  }
 }
