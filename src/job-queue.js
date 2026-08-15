@@ -22,16 +22,19 @@ export class JobQueue {
     return { ...job };
   }
 
-  complete(id) {
+  complete(id, attempt) {
     const job = this.#jobs.find((candidate) => candidate.id === id);
-    if (!job) return false;
+    if (!job || job.status !== "running" || job.attempts !== attempt) return false;
     job.status = "completed";
     return true;
   }
 
   retry(id, maxAttempts = 3) {
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+      throw new TypeError("maxAttempts must be a positive integer");
+    }
     const job = this.#jobs.find((candidate) => candidate.id === id);
-    if (!job) return false;
+    if (!job || job.status !== "running") return false;
     job.status = job.attempts >= maxAttempts ? "failed" : "queued";
     return true;
   }
