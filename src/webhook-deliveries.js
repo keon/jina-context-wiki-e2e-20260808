@@ -7,6 +7,7 @@ export class WebhookDeliveries {
   #leaseMs;
   #maxEntries;
   #now;
+  #readingClock = false;
   #validatingPayload = false;
 
   constructor({ leaseMs = 30_000, maxEntries = 10_000, now = () => performance.now() } = {}) {
@@ -21,10 +22,9 @@ export class WebhookDeliveries {
   }
 
   enqueue(eventId, payload) {
-    this.#assertNotValidating();
+    this.#assertNotReentrant();
     const normalizedId = normalizeEventId(eventId);
     const existing = this.#deliveries.get(normalizedId);
-    if (!existing && this.#deliveries.size >= this.#maxEntries) throw new Error("delivery capacity exceeded");
     this.#validatingPayload = true;
     let normalizedPayload;
     try {
@@ -38,14 +38,14 @@ export class WebhookDeliveries {
       }
       return snapshot(existing);
     }
-    if (this.#deliveries.size >= this.#maxEntries) throw new Error("delivery capacity exceeded");
+    this.#makeRoom();
     const delivery = { eventId: normalizedId, payload: normalizedPayload, attempts: 0, status: "pending" };
     this.#deliveries.set(normalizedId, delivery);
     return snapshot(delivery);
   }
 
   attempt(eventId) {
-    this.#assertNotValidating();
+    this.#assertNotReentrant();
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!delivery || delivery.status === "delivered") return null;
     const now = this.#readNow();
@@ -59,7 +59,7 @@ export class WebhookDeliveries {
   }
 
   fail(eventId, attemptToken) {
-    this.#assertNotValidating();
+    this.#assertNotReentrant();
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!ownsLiveAttempt(delivery, attemptToken, this.#readNow())) return false;
     delivery.status = "pending";
@@ -69,7 +69,7 @@ export class WebhookDeliveries {
   }
 
   renew(eventId, attemptToken) {
-    this.#assertNotValidating();
+    this.#assertNotReentrant();
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     const now = this.#readNow();
     if (!ownsLiveAttempt(delivery, attemptToken, now)) return false;
@@ -78,7 +78,7 @@ export class WebhookDeliveries {
   }
 
   complete(eventId, attemptToken) {
-    this.#assertNotValidating();
+    this.#assertNotReentrant();
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!ownsLiveAttempt(delivery, attemptToken, this.#readNow())) return false;
     delivery.status = "delivered";
@@ -88,9 +88,16 @@ export class WebhookDeliveries {
   }
 
   #readNow() {
-    const now = this.#now();
+    this.#readingClock = true;
+    let now;
+    try {
+      now = this.#now();
+    } finally {
+      this.#readingClock = false;
+    }
     if (!Number.isFinite(now)) throw new TypeError("clock must return a finite timestamp");
     if (now < this.#lastNow) throw new RangeError("clock must be monotonic");
+    this.#leaseDeadline(now);
     this.#lastNow = now;
     return now;
   }
@@ -101,8 +108,20 @@ export class WebhookDeliveries {
     return deadline;
   }
 
-  #assertNotValidating() {
-    if (this.#validatingPayload) throw new Error("delivery operations cannot reenter payload validation");
+  #makeRoom() {
+    if (this.#deliveries.size < this.#maxEntries) return;
+    for (const [eventId, delivery] of this.#deliveries) {
+      if (delivery.status !== "delivered") continue;
+      this.#deliveries.delete(eventId);
+      return;
+    }
+    throw new Error("delivery capacity exceeded");
+  }
+
+  #assertNotReentrant() {
+    if (this.#validatingPayload || this.#readingClock) {
+      throw new Error("delivery operations cannot reenter callbacks");
+    }
   }
 }
 
@@ -122,10 +141,10 @@ function normalizeEventId(eventId) {
 }
 
 function cloneJsonPayload(payload) {
-  validateJsonValue(payload, new Set(), 0, { bytes: 0, properties: 0 });
-  const encoded = JSON.stringify(payload);
+  const cloned = normalizeJsonValue(payload, new Set(), 0, { bytes: 0, properties: 0 });
+  const encoded = JSON.stringify(cloned);
   if (Buffer.byteLength(encoded, "utf8") > 64 * 1024) throw new TypeError("event payload exceeds 64 KiB");
-  return JSON.parse(encoded);
+  return cloned;
 }
 
 function ownsLiveAttempt(delivery, attemptToken, now) {
@@ -135,18 +154,19 @@ function ownsLiveAttempt(delivery, attemptToken, now) {
     && delivery.leaseExpiresAt > now;
 }
 
-function validateJsonValue(value, ancestors, depth, budget) {
+function normalizeJsonValue(value, ancestors, depth, budget) {
   if (depth > 64) throw new TypeError("event payload nesting exceeds 64 levels");
   if (typeof value === "string" && value.length > 64 * 1024) {
     throw new TypeError("event payload exceeds 64 KiB");
   }
   if (value === null || typeof value === "string" || typeof value === "boolean") {
     chargePayloadBudget(budget, JSON.stringify(value));
-    return;
+    return value;
   }
   if (typeof value === "number" && Number.isFinite(value)) {
-    chargePayloadBudget(budget, JSON.stringify(value));
-    return;
+    const encoded = JSON.stringify(value);
+    chargePayloadBudget(budget, encoded);
+    return JSON.parse(encoded);
   }
   if (typeof value !== "object") throw new TypeError("event payload must contain only JSON values");
   if (ancestors.has(value)) throw new TypeError("event payload must not contain cycles");
@@ -156,6 +176,7 @@ function validateJsonValue(value, ancestors, depth, budget) {
     throw new TypeError("event payload must contain only JSON objects and arrays");
   }
   ancestors.add(value);
+  const cloned = isArray ? [] : Object.create(null);
   chargePayloadBudget(budget, "[]");
   let entries = 0;
   for (const key in value) {
@@ -169,11 +190,13 @@ function validateJsonValue(value, ancestors, depth, budget) {
     if (!descriptor?.enumerable || !("value" in descriptor)) {
       throw new TypeError("event payload properties must be enumerable JSON data");
     }
-    validateJsonValue(descriptor.value, ancestors, depth + 1, budget);
+    const child = normalizeJsonValue(descriptor.value, ancestors, depth + 1, budget);
+    Object.defineProperty(cloned, key, { value: child, enumerable: true, writable: true, configurable: true });
     entries += 1;
   }
   ancestors.delete(value);
   validateJsonProperties(value, isArray, entries);
+  return cloned;
 }
 
 function validateJsonProperties(value, isArray, enumerableEntries) {

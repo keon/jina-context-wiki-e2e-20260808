@@ -113,8 +113,8 @@ test("payload validation is atomic against reentrant delivery operations", () =>
   const deliveries = new WebhookDeliveries({ maxEntries: 1 });
   const reentrant = new Proxy({ orderId: "order-7" }, {
     ownKeys(target) {
-      assert.throws(() => deliveries.enqueue("nested-event", {}), /cannot reenter payload validation/);
-      assert.throws(() => deliveries.attempt("nested-event"), /cannot reenter payload validation/);
+      assert.throws(() => deliveries.enqueue("nested-event", {}), /cannot reenter callbacks/);
+      assert.throws(() => deliveries.attempt("nested-event"), /cannot reenter callbacks/);
       return Reflect.ownKeys(target);
     },
   });
@@ -123,9 +123,43 @@ test("payload validation is atomic against reentrant delivery operations", () =>
   assert.throws(() => deliveries.enqueue("nested-event", {}), /capacity exceeded/);
 });
 
+test("payload proxies cannot rewrite descriptor values during serialization", () => {
+  const payload = new Proxy({ orderId: "order-7" }, {
+    get(target, key, receiver) {
+      if (key === "orderId") return "rewritten";
+      return Reflect.get(target, key, receiver);
+    },
+  });
+
+  assert.deepEqual(new WebhookDeliveries().enqueue("event-123", payload).payload, { orderId: "order-7" });
+});
+
 test("unrepresentable lease deadlines do not mutate pending deliveries", () => {
   const deliveries = new WebhookDeliveries({ leaseMs: 1, now: () => Number.MAX_SAFE_INTEGER + 1 });
   deliveries.enqueue("event-123", {});
 
   assert.throws(() => deliveries.attempt("event-123"), /clock is too large/);
+});
+
+test("clock callbacks cannot reenter state and failed clocks do not poison later attempts", () => {
+  let now = Number.MAX_SAFE_INTEGER + 1;
+  let deliveries;
+  deliveries = new WebhookDeliveries({ leaseMs: 1, now: () => {
+    assert.throws(() => deliveries.attempt("event-123"), /cannot reenter callbacks/);
+    return now;
+  } });
+  deliveries.enqueue("event-123", {});
+
+  assert.throws(() => deliveries.attempt("event-123"), /clock is too large/);
+  now = 1_000;
+  assert.equal(deliveries.attempt("event-123").attempts, 1);
+});
+
+test("completed deliveries yield bounded capacity to newer events", () => {
+  const deliveries = new WebhookDeliveries({ maxEntries: 1 });
+  deliveries.enqueue("event-123", {});
+  const attempt = deliveries.attempt("event-123");
+  assert.equal(deliveries.complete("event-123", attempt.attemptToken), true);
+
+  assert.equal(deliveries.enqueue("event-456", {}).eventId, "event-456");
 });
