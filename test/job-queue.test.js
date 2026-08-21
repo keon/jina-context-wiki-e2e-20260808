@@ -23,5 +23,6 @@ test("running jobs can be retried without losing attempt history", () => {
   const secondAttempt = queue.next();
   assert.equal(secondAttempt.id, firstAttempt.id);
   assert.equal(secondAttempt.attempts, 2);
+  assert.equal(secondAttempt.status, "running");
   assert.equal(queue.retry("missing"), false);
 });
