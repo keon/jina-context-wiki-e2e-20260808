@@ -211,3 +211,16 @@ test("event IDs are portable, well-formed, and canonically normalized", () => {
   assert.equal(composed.eventId, "caf\u00e9");
   assert.deepEqual(decomposedReplay, composed);
 });
+
+test("reclaimed deliveries reject stale lease renewal", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", {});
+  const abandoned = deliveries.attemptNext();
+
+  now = 1_101;
+  const reclaimed = deliveries.attemptNext();
+  assert.equal(deliveries.renew("event-123", abandoned.attemptToken), false);
+  assert.equal(deliveries.renew("event-123", reclaimed.attemptToken), true);
+  assert.equal(deliveries.complete("event-123", reclaimed.attemptToken), true);
+});
