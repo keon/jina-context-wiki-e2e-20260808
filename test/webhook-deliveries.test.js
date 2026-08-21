@@ -163,3 +163,27 @@ test("completed deliveries yield bounded capacity to newer events", () => {
 
   assert.equal(deliveries.enqueue("event-456", {}).eventId, "event-456");
 });
+
+test("replacement workers discover pending and expired deliveries without IDs", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", {});
+  const abandoned = deliveries.attemptNext();
+  assert.equal(abandoned.eventId, "event-123");
+  assert.equal(deliveries.attemptNext(), null);
+
+  now = 1_101;
+  const reclaimed = deliveries.attemptNext();
+  assert.equal(reclaimed.eventId, "event-123");
+  assert.notEqual(reclaimed.attemptToken, abandoned.attemptToken);
+});
+
+test("event IDs are portable, well-formed, and canonically normalized", () => {
+  const deliveries = new WebhookDeliveries();
+  assert.throws(() => deliveries.enqueue("\uD800", {}), /well-formed Unicode/);
+  const composed = deliveries.enqueue("caf\u00e9", {});
+  const decomposedReplay = deliveries.enqueue("cafe\u0301", {});
+
+  assert.equal(composed.eventId, "caf\u00e9");
+  assert.deepEqual(decomposedReplay, composed);
+});

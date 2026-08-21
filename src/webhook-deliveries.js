@@ -49,13 +49,17 @@ export class WebhookDeliveries {
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!delivery || delivery.status === "delivered") return null;
     const now = this.#readNow();
-    if (delivery.status === "delivering" && delivery.leaseExpiresAt > now) return null;
-    const leaseExpiresAt = this.#leaseDeadline(now);
-    delivery.attempts += 1;
-    delivery.status = "delivering";
-    delivery.attemptToken = crypto.randomUUID();
-    delivery.leaseExpiresAt = leaseExpiresAt;
-    return snapshot(delivery, true);
+    return this.#claim(delivery, now);
+  }
+
+  attemptNext() {
+    this.#assertNotReentrant();
+    const now = this.#readNow();
+    for (const delivery of this.#deliveries.values()) {
+      const attempt = this.#claim(delivery, now);
+      if (attempt) return attempt;
+    }
+    return null;
   }
 
   fail(eventId, attemptToken) {
@@ -118,6 +122,16 @@ export class WebhookDeliveries {
     throw new Error("delivery capacity exceeded");
   }
 
+  #claim(delivery, now) {
+    if (delivery.status === "delivered") return null;
+    if (delivery.status === "delivering" && delivery.leaseExpiresAt > now) return null;
+    delivery.attempts += 1;
+    delivery.status = "delivering";
+    delivery.attemptToken = crypto.randomUUID();
+    delivery.leaseExpiresAt = this.#leaseDeadline(now);
+    return snapshot(delivery, true);
+  }
+
   #assertNotReentrant() {
     if (this.#validatingPayload || this.#readingClock) {
       throw new Error("delivery operations cannot reenter callbacks");
@@ -133,7 +147,8 @@ function snapshot(delivery, includeAttemptToken = false) {
 
 function normalizeEventId(eventId) {
   if (typeof eventId !== "string" || !eventId.trim()) throw new TypeError("event id is required");
-  const normalized = eventId.trim();
+  const normalized = eventId.trim().normalize("NFC");
+  if (!normalized.isWellFormed()) throw new TypeError("event id must be well-formed Unicode");
   if (normalized.length > 256 || Buffer.byteLength(normalized, "utf8") > 256) {
     throw new TypeError("event id exceeds 256 bytes");
   }
