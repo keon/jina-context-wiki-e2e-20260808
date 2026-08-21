@@ -10,6 +10,7 @@ test("duplicate webhook events deliver once and retry safely", () => {
   assert.deepEqual(replay, first);
   const firstAttempt = deliveries.attempt("event-123");
   assert.equal(firstAttempt.attempts, 1);
+  assert.equal(deliveries.enqueue("event-123", { orderId: "order-7" }).attemptToken, undefined);
   assert.equal(deliveries.attempt("event-123"), null);
   assert.equal(deliveries.fail("event-123", firstAttempt.attemptToken), true);
   const retry = deliveries.attempt("event-123");
@@ -34,4 +35,22 @@ test("replays reject conflicting or externally mutated payloads", () => {
     () => deliveries.enqueue("event-123", { order: { id: "different-order" } }),
     /payload conflicts/,
   );
+  assert.throws(
+    () => deliveries.enqueue("shared-event", { bytes: new SharedArrayBuffer(8) }),
+    /JSON objects and arrays/,
+  );
+});
+
+test("an expired delivery claim is reclaimed without accepting stale completion", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", { orderId: "order-7" });
+  const abandoned = deliveries.attempt("event-123");
+
+  now = 1_101;
+  const reclaimed = deliveries.attempt("event-123");
+  assert.equal(reclaimed.attempts, 2);
+  assert.notEqual(reclaimed.attemptToken, abandoned.attemptToken);
+  assert.equal(deliveries.complete("event-123", abandoned.attemptToken), false);
+  assert.equal(deliveries.complete("event-123", reclaimed.attemptToken), true);
 });
