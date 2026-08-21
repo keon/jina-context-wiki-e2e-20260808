@@ -84,3 +84,27 @@ test("workers renew active claims and receivers share a stable idempotency key",
   assert.equal(deliveries.complete("event-123", first.attemptToken), false);
   assert.equal(deliveries.complete("event-123", reclaimed.attemptToken), true);
 });
+
+test("clock rollback cannot revive or shorten delivery claims", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", { orderId: "order-7" });
+  const attempt = deliveries.attempt("event-123");
+
+  now = 1_075;
+  assert.equal(deliveries.renew("event-123", attempt.attemptToken), true);
+  now = 1_050;
+  assert.throws(() => deliveries.renew("event-123", attempt.attemptToken), /clock must be monotonic/);
+  now = 1_176;
+  assert.equal(deliveries.complete("event-123", attempt.attemptToken), false);
+});
+
+test("JSON-equivalent replays and resource limits are deterministic", () => {
+  const deliveries = new WebhookDeliveries({ maxEntries: 1 });
+  deliveries.enqueue("event-123", { amount: -0 });
+  assert.deepEqual(deliveries.enqueue("event-123", { amount: 0 }).payload, { amount: 0 });
+  assert.throws(() => deliveries.enqueue("event-456", {}), /capacity exceeded/);
+  assert.throws(() => new WebhookDeliveries().enqueue("x".repeat(257), {}), /event id exceeds 256 bytes/);
+  const broad = Object.fromEntries(Array.from({ length: 4_097 }, (_, index) => [`key-${index}`, index]));
+  assert.throws(() => new WebhookDeliveries().enqueue("broad-event", broad), /too many properties/);
+});
