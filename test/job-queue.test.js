@@ -24,6 +24,7 @@ test("running jobs can be retried without losing attempt history", () => {
   assert.equal(secondAttempt.id, firstAttempt.id);
   assert.equal(secondAttempt.attempts, 2);
   assert.equal(secondAttempt.status, "running");
+  assert.deepEqual(secondAttempt.payload, { repository: "fixture" });
   assert.equal(queue.retry("missing"), false);
 });
 
