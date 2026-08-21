@@ -1,0 +1,213 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { WebhookDeliveries } from "../src/webhook-deliveries.js";
+
+test("duplicate webhook events deliver once and retry safely", () => {
+  const deliveries = new WebhookDeliveries();
+  const first = deliveries.enqueue("event-123", { orderId: "order-7" });
+  const replay = deliveries.enqueue(" event-123 ", { orderId: "order-7" });
+
+  assert.deepEqual(replay, first);
+  const firstAttempt = deliveries.attempt("event-123");
+  assert.equal(firstAttempt.attempts, 1);
+  assert.equal(deliveries.enqueue("event-123", { orderId: "order-7" }).attemptToken, undefined);
+  assert.equal(deliveries.attempt("event-123"), null);
+  assert.equal(deliveries.fail("event-123", firstAttempt.attemptToken), true);
+  const retry = deliveries.attempt("event-123");
+  assert.equal(retry.attempts, 2);
+  assert.equal(deliveries.complete("event-123", firstAttempt.attemptToken), false);
+  assert.equal(deliveries.fail("event-123", firstAttempt.attemptToken), false);
+  assert.equal(deliveries.complete("event-123", retry.attemptToken), true);
+  assert.equal(deliveries.attempt("event-123"), null);
+});
+
+test("replays reject conflicting or externally mutated payloads", () => {
+  const deliveries = new WebhookDeliveries();
+  const payload = { order: { id: "order-7" } };
+  const created = deliveries.enqueue("event-123", payload);
+  payload.order.id = "mutated-input";
+  created.payload.order.id = "mutated-output";
+
+  assert.deepEqual(deliveries.enqueue("event-123", { order: { id: "order-7" } }).payload, {
+    order: { id: "order-7" },
+  });
+  assert.throws(
+    () => deliveries.enqueue("event-123", { order: { id: "different-order" } }),
+    /payload conflicts/,
+  );
+  assert.throws(
+    () => deliveries.enqueue("shared-event", { bytes: new SharedArrayBuffer(8) }),
+    /JSON objects and arrays/,
+  );
+  assert.throws(() => deliveries.enqueue("large-event", { body: "x".repeat(65 * 1024) }), /exceeds 64 KiB/);
+  const customSerialization = { orderId: "order-7" };
+  Object.defineProperty(customSerialization, "toJSON", {
+    value: () => ({ orderId: "rewritten" }),
+    enumerable: false,
+  });
+  assert.throws(() => deliveries.enqueue("custom-event", customSerialization), /enumerable JSON data/);
+  let deeplyNested = {};
+  for (let depth = 0; depth < 65; depth += 1) deeplyNested = { child: deeplyNested };
+  assert.throws(() => deliveries.enqueue("deep-event", deeplyNested), /nesting exceeds 64 levels/);
+});
+
+test("an expired delivery claim is reclaimed without accepting stale completion", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", { orderId: "order-7" });
+  const abandoned = deliveries.attempt("event-123");
+
+  now = 1_101;
+  assert.equal(deliveries.complete("event-123", abandoned.attemptToken), false);
+  const reclaimed = deliveries.attempt("event-123");
+  assert.equal(reclaimed.attempts, 2);
+  assert.notEqual(reclaimed.attemptToken, abandoned.attemptToken);
+  assert.equal(deliveries.complete("event-123", abandoned.attemptToken), false);
+  assert.equal(deliveries.complete("event-123", reclaimed.attemptToken), true);
+});
+
+test("workers renew active claims and receivers share a stable idempotency key", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", { orderId: "order-7" });
+  const first = deliveries.attempt("event-123");
+
+  now = 1_075;
+  assert.equal(deliveries.renew("event-123", first.attemptToken), true);
+  now = 1_150;
+  assert.equal(deliveries.attempt("event-123"), null);
+  now = 1_176;
+  assert.equal(deliveries.renew("event-123", first.attemptToken), false);
+  const reclaimed = deliveries.attempt("event-123");
+
+  assert.equal(reclaimed.eventId, first.eventId);
+  assert.equal(deliveries.complete("event-123", first.attemptToken), false);
+  assert.equal(deliveries.complete("event-123", reclaimed.attemptToken), true);
+});
+
+test("clock rollback cannot revive or shorten delivery claims", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", { orderId: "order-7" });
+  const attempt = deliveries.attempt("event-123");
+
+  now = 1_075;
+  assert.equal(deliveries.renew("event-123", attempt.attemptToken), true);
+  now = 1_050;
+  assert.throws(() => deliveries.renew("event-123", attempt.attemptToken), /clock must be monotonic/);
+  now = 1_176;
+  assert.equal(deliveries.complete("event-123", attempt.attemptToken), false);
+});
+
+test("JSON-equivalent replays and resource limits are deterministic", () => {
+  const deliveries = new WebhookDeliveries({ maxEntries: 1 });
+  deliveries.enqueue("event-123", { amount: -0 });
+  assert.deepEqual(deliveries.enqueue("event-123", { amount: 0 }).payload, { amount: 0 });
+  assert.throws(() => deliveries.enqueue("event-456", {}), /capacity exceeded/);
+  assert.throws(() => new WebhookDeliveries().enqueue("x".repeat(257), {}), /event id exceeds 256 bytes/);
+  const broad = Object.fromEntries(Array.from({ length: 4_097 }, (_, index) => [`key-${index}`, index]));
+  assert.throws(() => new WebhookDeliveries().enqueue("broad-event", broad), /too many properties/);
+});
+
+test("payload validation is atomic against reentrant delivery operations", () => {
+  const deliveries = new WebhookDeliveries({ maxEntries: 1 });
+  const reentrant = new Proxy({ orderId: "order-7" }, {
+    ownKeys(target) {
+      assert.throws(() => deliveries.enqueue("nested-event", {}), /cannot reenter callbacks/);
+      assert.throws(() => deliveries.attempt("nested-event"), /cannot reenter callbacks/);
+      return Reflect.ownKeys(target);
+    },
+  });
+
+  deliveries.enqueue("event-123", reentrant);
+  assert.throws(() => deliveries.enqueue("nested-event", {}), /capacity exceeded/);
+});
+
+test("payload proxies cannot rewrite descriptor values during serialization", () => {
+  const payload = new Proxy({ orderId: "order-7" }, {
+    get(target, key, receiver) {
+      if (key === "orderId") return "rewritten";
+      return Reflect.get(target, key, receiver);
+    },
+  });
+
+  assert.deepEqual(new WebhookDeliveries().enqueue("event-123", payload).payload, { orderId: "order-7" });
+});
+
+test("unrepresentable lease deadlines do not mutate pending deliveries", () => {
+  const deliveries = new WebhookDeliveries({ leaseMs: 1, now: () => Number.MAX_SAFE_INTEGER + 1 });
+  deliveries.enqueue("event-123", {});
+
+  assert.throws(() => deliveries.attempt("event-123"), /clock is too large/);
+});
+
+test("clock callbacks cannot reenter state and failed clocks do not poison later attempts", () => {
+  let now = Number.MAX_SAFE_INTEGER + 1;
+  let deliveries;
+  deliveries = new WebhookDeliveries({ leaseMs: 1, now: () => {
+    assert.throws(() => deliveries.attempt("event-123"), /cannot reenter callbacks/);
+    return now;
+  } });
+  deliveries.enqueue("event-123", {});
+
+  assert.throws(() => deliveries.attempt("event-123"), /clock is too large/);
+  now = 1_000;
+  assert.equal(deliveries.attempt("event-123").attempts, 1);
+});
+
+test("completed deliveries yield bounded capacity to newer events", () => {
+  const deliveries = new WebhookDeliveries({ maxEntries: 1 });
+  deliveries.enqueue("event-123", {});
+  const attempt = deliveries.attempt("event-123");
+  assert.equal(deliveries.complete("event-123", attempt.attemptToken), true);
+
+  assert.equal(deliveries.enqueue("event-456", {}).eventId, "event-456");
+});
+
+test("replacement workers discover pending and expired deliveries without IDs", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", {});
+  const abandoned = deliveries.attemptNext();
+  assert.equal(abandoned.eventId, "event-123");
+  assert.equal(deliveries.attemptNext(), null);
+
+  now = 1_101;
+  const reclaimed = deliveries.attemptNext();
+  assert.equal(reclaimed.eventId, "event-123");
+  assert.notEqual(reclaimed.attemptToken, abandoned.attemptToken);
+});
+
+test("replacement workers claim active deliveries fairly", () => {
+  const deliveries = new WebhookDeliveries();
+  deliveries.enqueue("poison-event", {});
+  deliveries.enqueue("healthy-event", {});
+
+  const poison = deliveries.attemptNext();
+  assert.equal(poison.eventId, "poison-event");
+  assert.equal(deliveries.fail(poison.eventId, poison.attemptToken), true);
+  assert.equal(deliveries.attemptNext().eventId, "healthy-event");
+});
+
+test("completed dedupe history does not consume active queue capacity", () => {
+  const deliveries = new WebhookDeliveries({ maxEntries: 1 });
+  deliveries.enqueue("event-123", { version: 1 });
+  const first = deliveries.attemptNext();
+  deliveries.complete(first.eventId, first.attemptToken);
+  assert.throws(() => deliveries.enqueue("event-123", { version: 2 }), /payload conflicts/);
+
+  deliveries.enqueue("event-456", {});
+  const second = deliveries.attemptNext();
+  deliveries.complete(second.eventId, second.attemptToken);
+  assert.equal(deliveries.enqueue("event-789", {}).eventId, "event-789");
+});
+
+test("event IDs are portable, well-formed, and canonically normalized", () => {
+  const deliveries = new WebhookDeliveries();
+  assert.throws(() => deliveries.enqueue("\uD800", {}), /well-formed Unicode/);
+  const composed = deliveries.enqueue("caf\u00e9", {});
+  const decomposedReplay = deliveries.enqueue("cafe\u0301", {});
+
+  assert.equal(composed.eventId, "caf\u00e9");
+  assert.deepEqual(decomposedReplay, composed);
+});
