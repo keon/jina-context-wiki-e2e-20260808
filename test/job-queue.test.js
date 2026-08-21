@@ -17,6 +17,7 @@ test("running jobs can be retried without losing attempt history", () => {
   queue.enqueue("refresh-wiki", { repository: "fixture" });
 
   const firstAttempt = queue.next();
+  assert.equal(firstAttempt.payload.repository, "fixture");
   assert.equal(queue.retry(firstAttempt.id), true);
   assert.equal(queue.retry(firstAttempt.id), false);
 
