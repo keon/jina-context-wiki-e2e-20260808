@@ -65,3 +65,22 @@ test("an expired delivery claim is reclaimed without accepting stale completion"
   assert.equal(deliveries.complete("event-123", abandoned.attemptToken), false);
   assert.equal(deliveries.complete("event-123", reclaimed.attemptToken), true);
 });
+
+test("workers renew active claims and receivers share a stable idempotency key", () => {
+  let now = 1_000;
+  const deliveries = new WebhookDeliveries({ leaseMs: 100, now: () => now });
+  deliveries.enqueue("event-123", { orderId: "order-7" });
+  const first = deliveries.attempt("event-123");
+
+  now = 1_075;
+  assert.equal(deliveries.renew("event-123", first.attemptToken), true);
+  now = 1_150;
+  assert.equal(deliveries.attempt("event-123"), null);
+  now = 1_176;
+  assert.equal(deliveries.renew("event-123", first.attemptToken), false);
+  const reclaimed = deliveries.attempt("event-123");
+
+  assert.equal(reclaimed.eventId, first.eventId);
+  assert.equal(deliveries.complete("event-123", first.attemptToken), false);
+  assert.equal(deliveries.complete("event-123", reclaimed.attemptToken), true);
+});

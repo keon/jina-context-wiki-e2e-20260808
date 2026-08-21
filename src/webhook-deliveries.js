@@ -50,6 +50,14 @@ export class WebhookDeliveries {
     return true;
   }
 
+  renew(eventId, attemptToken) {
+    const delivery = this.#deliveries.get(normalizeEventId(eventId));
+    const now = this.#now();
+    if (!ownsLiveAttempt(delivery, attemptToken, now)) return false;
+    delivery.leaseExpiresAt = now + this.#leaseMs;
+    return true;
+  }
+
   complete(eventId, attemptToken) {
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!ownsLiveAttempt(delivery, attemptToken, this.#now())) return false;

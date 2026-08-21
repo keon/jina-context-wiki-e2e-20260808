@@ -5,6 +5,13 @@ It contains a small in-memory job queue and an idempotent webhook delivery flow
 with enough executable behavior for the review agent to exercise retries and
 for OpenWiki to document the runtime flows.
 
+Webhook dispatch is intentionally at-least-once. Workers renew their lease
+while a request is in flight, and receivers must deduplicate side effects using
+the normalized `eventId` from every attempt as the stable idempotency key. A
+worker crash or an ambiguous network response can still cause a retry; attempt
+tokens fence stale workers from changing Jina's delivery state, but cannot undo
+an external side effect.
+
 ## Commands
 
 ```sh
