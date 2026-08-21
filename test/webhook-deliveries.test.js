@@ -220,6 +220,7 @@ test("reclaimed deliveries reject stale lease renewal", () => {
 
   now = 1_101;
   const reclaimed = deliveries.attemptNext();
+  assert.notEqual(reclaimed.attemptToken, abandoned.attemptToken);
   assert.equal(deliveries.renew("event-123", abandoned.attemptToken), false);
   assert.equal(deliveries.renew("event-123", reclaimed.attemptToken), true);
   assert.equal(deliveries.complete("event-123", reclaimed.attemptToken), true);
