@@ -1,1 +1,5 @@
-/etc/hosts
+/fixtures/openwiki-policy/repository-ignored.md
+!fixtures/openwiki-policy/.env
+!fixtures/openwiki-policy/server.KEY
+!fixtures/openwiki-policy/PHOTO.PNG
+!fixtures/openwiki-policy/ARCHIVE.ZIP
