@@ -108,3 +108,24 @@ test("JSON-equivalent replays and resource limits are deterministic", () => {
   const broad = Object.fromEntries(Array.from({ length: 4_097 }, (_, index) => [`key-${index}`, index]));
   assert.throws(() => new WebhookDeliveries().enqueue("broad-event", broad), /too many properties/);
 });
+
+test("payload validation is atomic against reentrant delivery operations", () => {
+  const deliveries = new WebhookDeliveries({ maxEntries: 1 });
+  const reentrant = new Proxy({ orderId: "order-7" }, {
+    ownKeys(target) {
+      assert.throws(() => deliveries.enqueue("nested-event", {}), /cannot reenter payload validation/);
+      assert.throws(() => deliveries.attempt("nested-event"), /cannot reenter payload validation/);
+      return Reflect.ownKeys(target);
+    },
+  });
+
+  deliveries.enqueue("event-123", reentrant);
+  assert.throws(() => deliveries.enqueue("nested-event", {}), /capacity exceeded/);
+});
+
+test("unrepresentable lease deadlines do not mutate pending deliveries", () => {
+  const deliveries = new WebhookDeliveries({ leaseMs: 1, now: () => Number.MAX_SAFE_INTEGER + 1 });
+  deliveries.enqueue("event-123", {});
+
+  assert.throws(() => deliveries.attempt("event-123"), /clock is too large/);
+});

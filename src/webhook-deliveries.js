@@ -7,6 +7,7 @@ export class WebhookDeliveries {
   #leaseMs;
   #maxEntries;
   #now;
+  #validatingPayload = false;
 
   constructor({ leaseMs = 30_000, maxEntries = 10_000, now = () => performance.now() } = {}) {
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new TypeError("leaseMs must be a positive integer");
@@ -20,34 +21,45 @@ export class WebhookDeliveries {
   }
 
   enqueue(eventId, payload) {
+    this.#assertNotValidating();
     const normalizedId = normalizeEventId(eventId);
     const existing = this.#deliveries.get(normalizedId);
     if (!existing && this.#deliveries.size >= this.#maxEntries) throw new Error("delivery capacity exceeded");
-    const normalizedPayload = cloneJsonPayload(payload);
+    this.#validatingPayload = true;
+    let normalizedPayload;
+    try {
+      normalizedPayload = cloneJsonPayload(payload);
+    } finally {
+      this.#validatingPayload = false;
+    }
     if (existing) {
       if (!isDeepStrictEqual(existing.payload, normalizedPayload)) {
         throw new TypeError("event payload conflicts with replay");
       }
       return snapshot(existing);
     }
+    if (this.#deliveries.size >= this.#maxEntries) throw new Error("delivery capacity exceeded");
     const delivery = { eventId: normalizedId, payload: normalizedPayload, attempts: 0, status: "pending" };
     this.#deliveries.set(normalizedId, delivery);
     return snapshot(delivery);
   }
 
   attempt(eventId) {
+    this.#assertNotValidating();
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!delivery || delivery.status === "delivered") return null;
     const now = this.#readNow();
     if (delivery.status === "delivering" && delivery.leaseExpiresAt > now) return null;
+    const leaseExpiresAt = this.#leaseDeadline(now);
     delivery.attempts += 1;
     delivery.status = "delivering";
     delivery.attemptToken = crypto.randomUUID();
-    delivery.leaseExpiresAt = now + this.#leaseMs;
+    delivery.leaseExpiresAt = leaseExpiresAt;
     return snapshot(delivery, true);
   }
 
   fail(eventId, attemptToken) {
+    this.#assertNotValidating();
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!ownsLiveAttempt(delivery, attemptToken, this.#readNow())) return false;
     delivery.status = "pending";
@@ -57,14 +69,16 @@ export class WebhookDeliveries {
   }
 
   renew(eventId, attemptToken) {
+    this.#assertNotValidating();
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     const now = this.#readNow();
     if (!ownsLiveAttempt(delivery, attemptToken, now)) return false;
-    delivery.leaseExpiresAt = now + this.#leaseMs;
+    delivery.leaseExpiresAt = this.#leaseDeadline(now);
     return true;
   }
 
   complete(eventId, attemptToken) {
+    this.#assertNotValidating();
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!ownsLiveAttempt(delivery, attemptToken, this.#readNow())) return false;
     delivery.status = "delivered";
@@ -79,6 +93,16 @@ export class WebhookDeliveries {
     if (now < this.#lastNow) throw new RangeError("clock must be monotonic");
     this.#lastNow = now;
     return now;
+  }
+
+  #leaseDeadline(now) {
+    const deadline = now + this.#leaseMs;
+    if (!Number.isFinite(deadline) || deadline <= now) throw new RangeError("clock is too large for lease duration");
+    return deadline;
+  }
+
+  #assertNotValidating() {
+    if (this.#validatingPayload) throw new Error("delivery operations cannot reenter payload validation");
   }
 }
 
