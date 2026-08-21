@@ -40,6 +40,15 @@ test("replays reject conflicting or externally mutated payloads", () => {
     /JSON objects and arrays/,
   );
   assert.throws(() => deliveries.enqueue("large-event", { body: "x".repeat(65 * 1024) }), /exceeds 64 KiB/);
+  const customSerialization = { orderId: "order-7" };
+  Object.defineProperty(customSerialization, "toJSON", {
+    value: () => ({ orderId: "rewritten" }),
+    enumerable: false,
+  });
+  assert.throws(() => deliveries.enqueue("custom-event", customSerialization), /enumerable JSON data/);
+  let deeplyNested = {};
+  for (let depth = 0; depth < 65; depth += 1) deeplyNested = { child: deeplyNested };
+  assert.throws(() => deliveries.enqueue("deep-event", deeplyNested), /nesting exceeds 64 levels/);
 });
 
 test("an expired delivery claim is reclaimed without accepting stale completion", () => {
