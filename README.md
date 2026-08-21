@@ -10,8 +10,10 @@ while a request is in flight, and receivers must deduplicate side effects using
 the normalized `eventId` from every attempt as the stable idempotency key. A
 worker crash or an ambiguous network response can still cause a retry; attempt
 tokens fence stale workers from changing Jina's delivery state, but cannot undo
-an external side effect. Deduplication history is bounded by `maxEntries`; when
-full, the oldest completed record is evicted to admit a validated new event.
+an external side effect. Active work and completed deduplication history each
+retain at most `maxEntries` records. The oldest completed record leaves the
+in-process dedupe window when that history fills; receivers remain responsible
+for durable idempotency beyond that window.
 Replacement workers use `attemptNext()` to discover pending or expired work
 without retaining an event ID. IDs are trimmed, normalized to Unicode NFC, and
 must be well-formed before they become receiver idempotency keys.

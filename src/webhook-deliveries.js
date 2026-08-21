@@ -2,7 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 import { performance } from "node:perf_hooks";
 
 export class WebhookDeliveries {
-  #deliveries = new Map();
+  #active = new Map();
+  #completed = new Map();
   #lastNow = Number.NEGATIVE_INFINITY;
   #leaseMs;
   #maxEntries;
@@ -24,7 +25,7 @@ export class WebhookDeliveries {
   enqueue(eventId, payload) {
     this.#assertNotReentrant();
     const normalizedId = normalizeEventId(eventId);
-    const existing = this.#deliveries.get(normalizedId);
+    const existing = this.#active.get(normalizedId) ?? this.#completed.get(normalizedId);
     this.#validatingPayload = true;
     let normalizedPayload;
     try {
@@ -38,25 +39,26 @@ export class WebhookDeliveries {
       }
       return snapshot(existing);
     }
-    this.#makeRoom();
+    if (this.#active.size >= this.#maxEntries) throw new Error("delivery capacity exceeded");
     const delivery = { eventId: normalizedId, payload: normalizedPayload, attempts: 0, status: "pending" };
-    this.#deliveries.set(normalizedId, delivery);
+    this.#active.set(normalizedId, delivery);
     return snapshot(delivery);
   }
 
   attempt(eventId) {
     this.#assertNotReentrant();
-    const delivery = this.#deliveries.get(normalizeEventId(eventId));
-    if (!delivery || delivery.status === "delivered") return null;
+    const normalizedId = normalizeEventId(eventId);
+    const delivery = this.#active.get(normalizedId);
+    if (!delivery) return null;
     const now = this.#readNow();
-    return this.#claim(delivery, now);
+    return this.#claim(normalizedId, delivery, now);
   }
 
   attemptNext() {
     this.#assertNotReentrant();
     const now = this.#readNow();
-    for (const delivery of this.#deliveries.values()) {
-      const attempt = this.#claim(delivery, now);
+    for (const [eventId, delivery] of this.#active) {
+      const attempt = this.#claim(eventId, delivery, now);
       if (attempt) return attempt;
     }
     return null;
@@ -64,17 +66,20 @@ export class WebhookDeliveries {
 
   fail(eventId, attemptToken) {
     this.#assertNotReentrant();
-    const delivery = this.#deliveries.get(normalizeEventId(eventId));
+    const normalizedId = normalizeEventId(eventId);
+    const delivery = this.#active.get(normalizedId);
     if (!ownsLiveAttempt(delivery, attemptToken, this.#readNow())) return false;
     delivery.status = "pending";
     delete delivery.attemptToken;
     delete delivery.leaseExpiresAt;
+    this.#active.delete(normalizedId);
+    this.#active.set(normalizedId, delivery);
     return true;
   }
 
   renew(eventId, attemptToken) {
     this.#assertNotReentrant();
-    const delivery = this.#deliveries.get(normalizeEventId(eventId));
+    const delivery = this.#active.get(normalizeEventId(eventId));
     const now = this.#readNow();
     if (!ownsLiveAttempt(delivery, attemptToken, now)) return false;
     delivery.leaseExpiresAt = this.#leaseDeadline(now);
@@ -83,11 +88,17 @@ export class WebhookDeliveries {
 
   complete(eventId, attemptToken) {
     this.#assertNotReentrant();
-    const delivery = this.#deliveries.get(normalizeEventId(eventId));
+    const normalizedId = normalizeEventId(eventId);
+    const delivery = this.#active.get(normalizedId);
     if (!ownsLiveAttempt(delivery, attemptToken, this.#readNow())) return false;
     delivery.status = "delivered";
     delete delivery.attemptToken;
     delete delivery.leaseExpiresAt;
+    this.#active.delete(normalizedId);
+    this.#completed.set(normalizedId, delivery);
+    while (this.#completed.size > this.#maxEntries) {
+      this.#completed.delete(this.#completed.keys().next().value);
+    }
     return true;
   }
 
@@ -112,24 +123,20 @@ export class WebhookDeliveries {
     return deadline;
   }
 
-  #makeRoom() {
-    if (this.#deliveries.size < this.#maxEntries) return;
-    for (const [eventId, delivery] of this.#deliveries) {
-      if (delivery.status !== "delivered") continue;
-      this.#deliveries.delete(eventId);
-      return;
-    }
-    throw new Error("delivery capacity exceeded");
-  }
-
-  #claim(delivery, now) {
-    if (delivery.status === "delivered") return null;
+  #claim(eventId, delivery, now) {
     if (delivery.status === "delivering" && delivery.leaseExpiresAt > now) return null;
-    delivery.attempts += 1;
-    delivery.status = "delivering";
-    delivery.attemptToken = crypto.randomUUID();
-    delivery.leaseExpiresAt = this.#leaseDeadline(now);
-    return snapshot(delivery, true);
+    const claimed = {
+      ...delivery,
+      attempts: delivery.attempts + 1,
+      status: "delivering",
+      attemptToken: crypto.randomUUID(),
+      leaseExpiresAt: this.#leaseDeadline(now),
+    };
+    const result = snapshot(claimed, true);
+    Object.assign(delivery, claimed);
+    this.#active.delete(eventId);
+    this.#active.set(eventId, delivery);
+    return result;
   }
 
   #assertNotReentrant() {

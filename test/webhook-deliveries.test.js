@@ -178,6 +178,30 @@ test("replacement workers discover pending and expired deliveries without IDs", 
   assert.notEqual(reclaimed.attemptToken, abandoned.attemptToken);
 });
 
+test("replacement workers claim active deliveries fairly", () => {
+  const deliveries = new WebhookDeliveries();
+  deliveries.enqueue("poison-event", {});
+  deliveries.enqueue("healthy-event", {});
+
+  const poison = deliveries.attemptNext();
+  assert.equal(poison.eventId, "poison-event");
+  assert.equal(deliveries.fail(poison.eventId, poison.attemptToken), true);
+  assert.equal(deliveries.attemptNext().eventId, "healthy-event");
+});
+
+test("completed dedupe history does not consume active queue capacity", () => {
+  const deliveries = new WebhookDeliveries({ maxEntries: 1 });
+  deliveries.enqueue("event-123", { version: 1 });
+  const first = deliveries.attemptNext();
+  deliveries.complete(first.eventId, first.attemptToken);
+  assert.throws(() => deliveries.enqueue("event-123", { version: 2 }), /payload conflicts/);
+
+  deliveries.enqueue("event-456", {});
+  const second = deliveries.attemptNext();
+  deliveries.complete(second.eventId, second.attemptToken);
+  assert.equal(deliveries.enqueue("event-789", {}).eventId, "event-789");
+});
+
 test("event IDs are portable, well-formed, and canonically normalized", () => {
   const deliveries = new WebhookDeliveries();
   assert.throws(() => deliveries.enqueue("\uD800", {}), /well-formed Unicode/);
