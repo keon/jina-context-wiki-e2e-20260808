@@ -1,34 +1,47 @@
+import { isDeepStrictEqual } from "node:util";
+
 export class WebhookDeliveries {
   #deliveries = new Map();
 
   enqueue(eventId, payload) {
-    if (!eventId?.trim()) throw new TypeError("event id is required");
-    const existing = this.#deliveries.get(eventId);
-    if (existing) return { ...existing };
-    const delivery = { eventId, payload, attempts: 0, status: "pending" };
-    this.#deliveries.set(eventId, delivery);
-    return { ...delivery };
+    const normalizedId = eventId?.trim();
+    if (!normalizedId) throw new TypeError("event id is required");
+    const existing = this.#deliveries.get(normalizedId);
+    if (existing) {
+      if (!isDeepStrictEqual(existing.payload, payload)) throw new TypeError("event payload conflicts with replay");
+      return snapshot(existing);
+    }
+    const delivery = { eventId: normalizedId, payload: structuredClone(payload), attempts: 0, status: "pending" };
+    this.#deliveries.set(normalizedId, delivery);
+    return snapshot(delivery);
   }
 
   attempt(eventId) {
-    const delivery = this.#deliveries.get(eventId);
-    if (!delivery || delivery.status === "delivered") return null;
+    const delivery = this.#deliveries.get(eventId.trim());
+    if (!delivery || delivery.status !== "pending") return null;
     delivery.attempts += 1;
     delivery.status = "delivering";
-    return { ...delivery };
+    delivery.attemptToken = crypto.randomUUID();
+    return snapshot(delivery);
   }
 
-  fail(eventId) {
-    const delivery = this.#deliveries.get(eventId);
-    if (!delivery || delivery.status !== "delivering") return false;
+  fail(eventId, attemptToken) {
+    const delivery = this.#deliveries.get(eventId.trim());
+    if (!delivery || delivery.status !== "delivering" || delivery.attemptToken !== attemptToken) return false;
     delivery.status = "pending";
+    delete delivery.attemptToken;
     return true;
   }
 
-  complete(eventId) {
-    const delivery = this.#deliveries.get(eventId);
-    if (!delivery || delivery.status !== "delivering") return false;
+  complete(eventId, attemptToken) {
+    const delivery = this.#deliveries.get(eventId.trim());
+    if (!delivery || delivery.status !== "delivering" || delivery.attemptToken !== attemptToken) return false;
     delivery.status = "delivered";
+    delete delivery.attemptToken;
     return true;
   }
+}
+
+function snapshot(delivery) {
+  return structuredClone(delivery);
 }
