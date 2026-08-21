@@ -26,3 +26,13 @@ test("running jobs can be retried without losing attempt history", () => {
   assert.equal(secondAttempt.status, "running");
   assert.equal(queue.retry("missing"), false);
 });
+
+test("completed jobs cannot be retried", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
+
+  queue.next();
+  assert.equal(queue.complete(created.id), true);
+  assert.equal(queue.retry(created.id), false);
+  assert.equal(queue.next(), null);
+});
