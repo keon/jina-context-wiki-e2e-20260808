@@ -10,6 +10,8 @@ review agent to exercise retries and for OpenWiki to document the runtime flow.
 npm test
 ```
 
+The fixture uses Node's built-in test runner and has no install-time dependencies.
+
 ## Canonical documentation
 
 Jina regenerates this repository's canonical Wiki from the exact `main` commit
