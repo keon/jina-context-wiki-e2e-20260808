@@ -7,6 +7,7 @@ export class WebhookDeliveries {
 
   constructor({ leaseMs = 30_000, now = Date.now } = {}) {
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) throw new TypeError("leaseMs must be a positive integer");
+    if (typeof now !== "function") throw new TypeError("now must be a function");
     this.#leaseMs = leaseMs;
     this.#now = now;
   }
@@ -30,6 +31,7 @@ export class WebhookDeliveries {
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
     if (!delivery || delivery.status === "delivered") return null;
     const now = this.#now();
+    if (!Number.isFinite(now)) throw new TypeError("clock must return a finite timestamp");
     if (delivery.status === "delivering" && delivery.leaseExpiresAt > now) return null;
     delivery.attempts += 1;
     delivery.status = "delivering";
@@ -40,7 +42,7 @@ export class WebhookDeliveries {
 
   fail(eventId, attemptToken) {
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
-    if (!delivery || delivery.status !== "delivering" || delivery.attemptToken !== attemptToken) return false;
+    if (!ownsLiveAttempt(delivery, attemptToken, this.#now())) return false;
     delivery.status = "pending";
     delete delivery.attemptToken;
     delete delivery.leaseExpiresAt;
@@ -49,7 +51,7 @@ export class WebhookDeliveries {
 
   complete(eventId, attemptToken) {
     const delivery = this.#deliveries.get(normalizeEventId(eventId));
-    if (!delivery || delivery.status !== "delivering" || delivery.attemptToken !== attemptToken) return false;
+    if (!ownsLiveAttempt(delivery, attemptToken, this.#now())) return false;
     delivery.status = "delivered";
     delete delivery.attemptToken;
     delete delivery.leaseExpiresAt;
@@ -70,7 +72,16 @@ function normalizeEventId(eventId) {
 
 function cloneJsonPayload(payload) {
   validateJsonValue(payload, new Set());
-  return JSON.parse(JSON.stringify(payload));
+  const encoded = JSON.stringify(payload);
+  if (Buffer.byteLength(encoded, "utf8") > 64 * 1024) throw new TypeError("event payload exceeds 64 KiB");
+  return JSON.parse(encoded);
+}
+
+function ownsLiveAttempt(delivery, attemptToken, now) {
+  return delivery?.status === "delivering"
+    && delivery.attemptToken === attemptToken
+    && Number.isFinite(now)
+    && delivery.leaseExpiresAt > now;
 }
 
 function validateJsonValue(value, ancestors) {

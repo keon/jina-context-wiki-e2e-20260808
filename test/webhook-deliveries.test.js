@@ -39,6 +39,7 @@ test("replays reject conflicting or externally mutated payloads", () => {
     () => deliveries.enqueue("shared-event", { bytes: new SharedArrayBuffer(8) }),
     /JSON objects and arrays/,
   );
+  assert.throws(() => deliveries.enqueue("large-event", { body: "x".repeat(65 * 1024) }), /exceeds 64 KiB/);
 });
 
 test("an expired delivery claim is reclaimed without accepting stale completion", () => {
@@ -48,6 +49,7 @@ test("an expired delivery claim is reclaimed without accepting stale completion"
   const abandoned = deliveries.attempt("event-123");
 
   now = 1_101;
+  assert.equal(deliveries.complete("event-123", abandoned.attemptToken), false);
   const reclaimed = deliveries.attempt("event-123");
   assert.equal(reclaimed.attempts, 2);
   assert.notEqual(reclaimed.attemptToken, abandoned.attemptToken);
