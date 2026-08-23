@@ -5,6 +5,14 @@ It contains a small in-memory job queue and an idempotent webhook delivery flow
 with enough executable behavior for the review agent to exercise retries and
 for OpenWiki to document the runtime flows.
 
+## Account deletion confirmation
+
+Account deletion is a destructive, two-step flow. A user requests deletion and
+receives one short-lived confirmation token. Repeating the request while that token
+is live is idempotent. Confirming once deletes the account; expired, cancelled,
+unknown, or already-used tokens must never delete it. A completed or expired request
+must not prevent the user from starting a fresh deletion request.
+
 Webhook dispatch is intentionally at-least-once. Workers renew their lease
 while a request is in flight, and receivers must deduplicate side effects using
 the normalized `eventId` from every attempt as the stable idempotency key. A
