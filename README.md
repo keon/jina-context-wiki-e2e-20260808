@@ -5,15 +5,13 @@ It contains a small in-memory job queue and an idempotent webhook delivery flow
 with enough executable behavior for the review agent to exercise retries and
 for OpenWiki to document the runtime flows.
 
-## Account deletion confirmation
+## User onboarding and account activation
 
-Account deletion is a destructive, two-step flow. A user requests deletion and
-receives one short-lived confirmation token. Repeating the request while that token
-is live is idempotent. Confirmation must name the same normalized account that owns
-the token. Confirming once deletes that account; expired, cancelled, unknown, or
-already-used tokens must never delete it. A detected clock rollback invalidates all
-live deletion authority, then safely rebases for new requests. A completed or expired
-request must not prevent the user from starting a fresh deletion request.
+New users remain pending until they complete a profile, verify their email, and accept
+the terms. Steps may happen in any order and repeating a completed step is idempotent.
+The account becomes active only when every required step is complete. Resetting the
+flow returns it to a clean pending state. The state transition is pure and immutable;
+persistence and delivery live outside this fixture's domain boundary.
 
 Webhook dispatch is intentionally at-least-once. Workers renew their lease
 while a request is in flight, and receivers must deduplicate side effects using
