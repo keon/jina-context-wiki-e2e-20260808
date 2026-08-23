@@ -20,9 +20,16 @@ function readCompletedSteps(current) {
   if (!current || !Array.isArray(current.completedSteps)) {
     throw new TypeError("onboarding state is required");
   }
-  const completed = [...current.completedSteps];
-  if (new Set(completed).size !== completed.length || completed.some((step) => !REQUIRED_STEP_SET.has(step))) {
-    throw new TypeError("onboarding state contains invalid steps");
+  if (current.completedSteps.length > REQUIRED_STEPS.length) {
+    throw new TypeError("onboarding state contains too many steps");
+  }
+  const completed = [];
+  for (let index = 0; index < current.completedSteps.length; index += 1) {
+    const step = current.completedSteps[index];
+    if (!REQUIRED_STEP_SET.has(step) || completed.includes(step)) {
+      throw new TypeError("onboarding state contains invalid steps");
+    }
+    completed.push(step);
   }
   return completed;
 }

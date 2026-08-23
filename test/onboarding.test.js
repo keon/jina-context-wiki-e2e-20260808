@@ -51,3 +51,15 @@ test("invalid or forged state is rejected and reset starts clean", () => {
   );
   assert.deepEqual(resetOnboarding(), beginOnboarding());
 });
+
+test("state validation is bounded and ignores caller iterators", () => {
+  assert.throws(
+    () => completeOnboardingStep({ completedSteps: new Array(1_000_000) }, "profile"),
+    /too many steps/,
+  );
+  const completedSteps = ["profile"];
+  completedSteps[Symbol.iterator] = () => {
+    throw new Error("caller iterator must not run");
+  };
+  assert.equal(completeOnboardingStep({ completedSteps }, "verify_email").status, "pending");
+});
