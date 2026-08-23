@@ -49,7 +49,7 @@ test("invalid or forged state is rejected and reset starts clean", () => {
     () => completeOnboardingStep({ completedSteps: ["profile", "profile"] }, "verify_email"),
     /invalid steps/,
   );
-  assert.deepEqual(resetOnboarding(), beginOnboarding());
+  assert.deepEqual(resetOnboarding(beginOnboarding()), beginOnboarding());
 });
 
 test("an activated onboarding flow can be reset for a fresh start", () => {
@@ -58,7 +58,7 @@ test("an activated onboarding flow can be reset for a fresh start", () => {
     state = completeOnboardingStep(state, step);
   }
   assert.equal(state.status, "active");
-  assert.deepEqual(resetOnboarding(), beginOnboarding());
+  assert.deepEqual(resetOnboarding(state), beginOnboarding());
 });
 
 test("state validation is bounded and ignores caller iterators", () => {

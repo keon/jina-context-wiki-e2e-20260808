@@ -12,7 +12,8 @@ export function completeOnboardingStep(current, step) {
   return snapshot(completed);
 }
 
-export function resetOnboarding() {
+export function resetOnboarding(current) {
+  readCompletedSteps(current);
   return beginOnboarding();
 }
 
