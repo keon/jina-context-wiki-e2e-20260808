@@ -39,3 +39,13 @@ test("completed jobs cannot be retried", () => {
   assert.equal(queue.retry(created.id), false);
   assert.equal(queue.next(), null);
 });
+
+test("blank names are rejected without adding claimable work", () => {
+  const queue = new JobQueue();
+
+  assert.throws(() => queue.enqueue("   ", { repository: "fixture" }), {
+    name: "TypeError",
+    message: "job name is required",
+  });
+  assert.equal(queue.next(), null);
+});
