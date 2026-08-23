@@ -25,11 +25,13 @@ function readCompletedSteps(current) {
     throw new TypeError("onboarding state requires own completed steps");
   }
   const steps = stateField.value;
-  if (steps.length > REQUIRED_STEPS.length) {
+  const lengthField = Object.getOwnPropertyDescriptor(steps, "length");
+  const length = lengthField && "value" in lengthField ? lengthField.value : Number.NaN;
+  if (!Number.isSafeInteger(length) || length < 0 || length > REQUIRED_STEPS.length) {
     throw new TypeError("onboarding state contains too many steps");
   }
   const completed = [];
-  for (let index = 0; index < steps.length; index += 1) {
+  for (let index = 0; index < length; index += 1) {
     const entry = Object.getOwnPropertyDescriptor(steps, String(index));
     if (!entry || !("value" in entry) || !REQUIRED_STEP_SET.has(entry.value) || completed.includes(entry.value)) {
       throw new TypeError("onboarding state contains invalid steps");
