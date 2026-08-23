@@ -5,6 +5,14 @@ It contains a small in-memory job queue and an idempotent webhook delivery flow
 with enough executable behavior for the review agent to exercise retries and
 for OpenWiki to document the runtime flows.
 
+## User onboarding and account activation
+
+New users remain pending until they complete a profile, verify their email, and accept
+the terms. Steps may happen in any order and repeating a completed step is idempotent.
+The account becomes active only when every required step is complete. Resetting the
+flow returns it to a clean pending state. The state transition is pure and immutable;
+persistence and delivery live outside this fixture's domain boundary.
+
 Webhook dispatch is intentionally at-least-once. Workers renew their lease
 while a request is in flight, and receivers must deduplicate side effects using
 the normalized `eventId` from every attempt as the stable idempotency key. A
