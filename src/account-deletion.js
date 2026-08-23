@@ -1,15 +1,15 @@
 const DEFAULT_TTL_MS = 15 * 60 * 1_000;
 const DEFAULT_MAX_ENTRIES = 10_000;
-const MAX_TOKEN_ATTEMPTS = 8;
 
 export class AccountDeletionRequests {
   #activeByUser = new Map();
   #busy = false;
-  #lastNow = 0;
+  #lastNow;
   #maxEntries;
   #now;
   #requests = new Map();
-  #retired = new Set();
+  #sequence = 0;
+  #tokenNamespace;
   #ttlMs;
 
   constructor({ maxEntries = DEFAULT_MAX_ENTRIES, now = Date.now, ttlMs = DEFAULT_TTL_MS } = {}) {
@@ -22,27 +22,26 @@ export class AccountDeletionRequests {
     }
     this.#maxEntries = maxEntries;
     this.#now = now;
+    this.#tokenNamespace = crypto.randomUUID();
     this.#ttlMs = ttlMs;
   }
 
   request(userId) {
     return this.#exclusive(() => {
       const user = normalizeUserId(userId);
-      const now = this.#readNow();
+      const now = this.#observeNow();
       if (now > Number.MAX_SAFE_INTEGER - this.#ttlMs) {
         throw new RangeError("deletion deadline is not representable");
       }
-      this.#lastNow = now;
+      this.#acceptClock(now);
+
       const existing = this.#requests.get(this.#activeByUser.get(user));
       if (existing?.expiresAt > now) return snapshot(existing);
-
-      const liveCount = [...this.#requests.values()].filter((request) => request.expiresAt > now).length;
-      if (liveCount >= this.#maxEntries) throw new RangeError("deletion request capacity reached");
-      const token = this.#newToken();
       this.#sweepExpired(now);
+      if (this.#requests.size >= this.#maxEntries) throw new RangeError("deletion request capacity reached");
 
       const request = {
-        token,
+        token: this.#newToken(),
         userId: user,
         status: "pending",
         expiresAt: now + this.#ttlMs,
@@ -53,17 +52,38 @@ export class AccountDeletionRequests {
     });
   }
 
-  confirm(token) {
-    return this.#exclusive(() => this.#confirm(token));
+  confirm(userId, token) {
+    return this.#exclusive(() => {
+      const request = this.#ownedRequest(userId, token);
+      if (!request) return false;
+      const now = this.#observeNow();
+      if (now > Number.MAX_SAFE_INTEGER - this.#ttlMs) {
+        this.#retire(request);
+        return false;
+      }
+      if (this.#acceptClock(now)) return false;
+      this.#retire(request);
+      return request.expiresAt > now;
+    });
   }
 
-  cancel(token) {
+  cancel(userId, token) {
     return this.#exclusive(() => {
-      const request = this.#requests.get(token);
+      const request = this.#ownedRequest(userId, token);
       if (!request) return false;
       this.#retire(request);
       return true;
     });
+  }
+
+  #acceptClock(now) {
+    const rolledBack = this.#lastNow !== undefined && now < this.#lastNow;
+    if (rolledBack) {
+      this.#requests.clear();
+      this.#activeByUser.clear();
+    }
+    this.#lastNow = now;
+    return rolledBack;
   }
 
   #exclusive(operation) {
@@ -76,39 +96,30 @@ export class AccountDeletionRequests {
     }
   }
 
-  #confirm(token) {
-    const request = this.#requests.get(token);
-    if (!request) return false;
-    const now = this.#readNow();
-    if (now <= Number.MAX_SAFE_INTEGER - this.#ttlMs) this.#lastNow = now;
-    this.#retire(request);
-    return request.expiresAt > now;
-  }
-
   #newToken() {
-    for (let attempt = 0; attempt < MAX_TOKEN_ATTEMPTS; attempt += 1) {
-      const token = crypto.randomUUID();
-      if (!this.#requests.has(token) && !this.#retired.has(token)) return token;
-    }
-    throw new Error("could not allocate a unique deletion token");
+    if (this.#sequence >= Number.MAX_SAFE_INTEGER) throw new RangeError("deletion token space exhausted");
+    this.#sequence += 1;
+    return `${this.#tokenNamespace}.${this.#sequence.toString(36)}`;
   }
 
-  #readNow() {
-    const observed = this.#now();
-    if (!Number.isSafeInteger(observed) || observed < 0) {
+  #observeNow() {
+    const now = this.#now();
+    if (!Number.isSafeInteger(now) || now < 0) {
       throw new TypeError("now must return a non-negative safe integer");
     }
-    return Math.max(this.#lastNow, observed);
+    return now;
+  }
+
+  #ownedRequest(userId, token) {
+    const user = normalizeUserId(userId);
+    const request = this.#requests.get(token);
+    return request?.userId === user ? request : undefined;
   }
 
   #retire(request) {
     this.#requests.delete(request.token);
     if (this.#activeByUser.get(request.userId) === request.token) {
       this.#activeByUser.delete(request.userId);
-    }
-    this.#retired.add(request.token);
-    if (this.#retired.size > this.#maxEntries) {
-      this.#retired.delete(this.#retired.values().next().value);
     }
   }
 
