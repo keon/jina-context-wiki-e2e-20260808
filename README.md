@@ -12,6 +12,8 @@ the terms. Steps may happen in any order and repeating a completed step is idemp
 The account becomes active only when every required step is complete. Resetting the
 flow returns it to a clean pending state. The state transition is pure and immutable;
 persistence and delivery live outside this fixture's domain boundary.
+Activation is always derived from the three canonical completed steps, never trusted
+from caller-supplied status fields.
 
 Webhook dispatch is intentionally at-least-once. Workers renew their lease
 while a request is in flight, and receivers must deduplicate side effects using
