@@ -29,18 +29,20 @@ export class AccountDeletionRequests {
     return this.#exclusive(() => {
       const user = normalizeUserId(userId);
       const now = this.#readNow();
-      const existing = this.#requests.get(this.#activeByUser.get(user));
-      if (existing?.expiresAt > now) return snapshot(existing);
-      if (existing) this.#retire(existing);
-
-      if (this.#requests.size >= this.#maxEntries) this.#sweepExpired(now);
-      if (this.#requests.size >= this.#maxEntries) throw new RangeError("deletion request capacity reached");
       if (now > Number.MAX_SAFE_INTEGER - this.#ttlMs) {
         throw new RangeError("deletion deadline is not representable");
       }
+      this.#lastNow = now;
+      const existing = this.#requests.get(this.#activeByUser.get(user));
+      if (existing?.expiresAt > now) return snapshot(existing);
+
+      const liveCount = [...this.#requests.values()].filter((request) => request.expiresAt > now).length;
+      if (liveCount >= this.#maxEntries) throw new RangeError("deletion request capacity reached");
+      const token = this.#newToken();
+      this.#sweepExpired(now);
 
       const request = {
-        token: this.#newToken(),
+        token,
         userId: user,
         status: "pending",
         expiresAt: now + this.#ttlMs,
@@ -52,11 +54,16 @@ export class AccountDeletionRequests {
   }
 
   confirm(token) {
-    return this.#exclusive(() => this.#finish(token));
+    return this.#exclusive(() => this.#confirm(token));
   }
 
   cancel(token) {
-    return this.#exclusive(() => this.#finish(token));
+    return this.#exclusive(() => {
+      const request = this.#requests.get(token);
+      if (!request) return false;
+      this.#retire(request);
+      return true;
+    });
   }
 
   #exclusive(operation) {
@@ -69,10 +76,11 @@ export class AccountDeletionRequests {
     }
   }
 
-  #finish(token) {
+  #confirm(token) {
     const request = this.#requests.get(token);
     if (!request) return false;
     const now = this.#readNow();
+    if (now <= Number.MAX_SAFE_INTEGER - this.#ttlMs) this.#lastNow = now;
     this.#retire(request);
     return request.expiresAt > now;
   }
@@ -90,8 +98,7 @@ export class AccountDeletionRequests {
     if (!Number.isSafeInteger(observed) || observed < 0) {
       throw new TypeError("now must return a non-negative safe integer");
     }
-    this.#lastNow = Math.max(this.#lastNow, observed);
-    return this.#lastNow;
+    return Math.max(this.#lastNow, observed);
   }
 
   #retire(request) {

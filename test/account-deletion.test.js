@@ -81,6 +81,20 @@ test("capacity is bounded and expired entries yield space", () => {
   assert.doesNotThrow(() => requests.request("user-c"));
 });
 
+test("unrepresentable deadlines preserve live requests and do not poison recovery", () => {
+  let now = 7_000;
+  const requests = new AccountDeletionRequests({ maxEntries: 2, now: () => now, ttlMs: 100 });
+  const first = requests.request("user-overflow");
+  const second = requests.request("user-stable");
+
+  now = Number.MAX_SAFE_INTEGER;
+  assert.throws(() => requests.request("user-overflow"), /not representable/);
+  now = 7_001;
+  assert.equal(requests.confirm(first.token), true);
+  assert.equal(requests.cancel(second.token), true);
+  assert.doesNotThrow(() => requests.request("user-recovered"));
+});
+
 test("duplicate generated tokens are rejected without rebinding authorization", () => {
   const original = crypto.randomUUID;
   const fixed = original.call(crypto);
