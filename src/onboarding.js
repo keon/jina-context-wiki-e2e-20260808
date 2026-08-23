@@ -17,19 +17,24 @@ export function resetOnboarding() {
 }
 
 function readCompletedSteps(current) {
-  if (!current || !Array.isArray(current.completedSteps)) {
+  if (!current || typeof current !== "object") {
     throw new TypeError("onboarding state is required");
   }
-  if (current.completedSteps.length > REQUIRED_STEPS.length) {
+  const stateField = Object.getOwnPropertyDescriptor(current, "completedSteps");
+  if (!stateField || !("value" in stateField) || !Array.isArray(stateField.value)) {
+    throw new TypeError("onboarding state requires own completed steps");
+  }
+  const steps = stateField.value;
+  if (steps.length > REQUIRED_STEPS.length) {
     throw new TypeError("onboarding state contains too many steps");
   }
   const completed = [];
-  for (let index = 0; index < current.completedSteps.length; index += 1) {
-    const step = current.completedSteps[index];
-    if (!REQUIRED_STEP_SET.has(step) || completed.includes(step)) {
+  for (let index = 0; index < steps.length; index += 1) {
+    const entry = Object.getOwnPropertyDescriptor(steps, String(index));
+    if (!entry || !("value" in entry) || !REQUIRED_STEP_SET.has(entry.value) || completed.includes(entry.value)) {
       throw new TypeError("onboarding state contains invalid steps");
     }
-    completed.push(step);
+    completed.push(entry.value);
   }
   return completed;
 }

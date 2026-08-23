@@ -63,3 +63,23 @@ test("state validation is bounded and ignores caller iterators", () => {
   };
   assert.equal(completeOnboardingStep({ completedSteps }, "verify_email").status, "pending");
 });
+
+test("inherited fields, sparse entries, and getters cannot forge progress", () => {
+  assert.throws(
+    () => completeOnboardingStep(Object.create({ completedSteps: ["profile"] }), "verify_email"),
+    /own completed steps/,
+  );
+
+  const sparse = new Array(3);
+  const inherited = Object.create(Array.prototype, {
+    0: { value: "profile" },
+    1: { value: "verify_email" },
+    2: { value: "accept_terms" },
+  });
+  Object.setPrototypeOf(sparse, inherited);
+  assert.throws(() => completeOnboardingStep({ completedSteps: sparse }, "profile"), /invalid steps/);
+
+  const accessor = [];
+  Object.defineProperty(accessor, "0", { get: () => "profile" });
+  assert.throws(() => completeOnboardingStep({ completedSteps: accessor }, "verify_email"), /invalid steps/);
+});
