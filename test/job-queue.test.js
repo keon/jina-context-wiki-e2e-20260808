@@ -11,3 +11,31 @@ test("jobs move from queued to completed", () => {
   assert.equal(running.attempts, 1);
   assert.equal(queue.complete(running.id), true);
 });
+
+test("running jobs can be retried without losing attempt history", () => {
+  const queue = new JobQueue();
+  queue.enqueue("refresh-wiki", { repository: "fixture" });
+
+  const firstAttempt = queue.next();
+  assert.equal(firstAttempt.payload.repository, "fixture");
+  assert.equal(queue.retry(firstAttempt.id), true);
+  assert.equal(queue.retry(firstAttempt.id), false);
+
+  const secondAttempt = queue.next();
+  assert.notStrictEqual(secondAttempt, firstAttempt);
+  assert.equal(secondAttempt.id, firstAttempt.id);
+  assert.equal(secondAttempt.attempts, 2);
+  assert.equal(secondAttempt.status, "running");
+  assert.deepEqual(secondAttempt.payload, { repository: "fixture" });
+  assert.equal(queue.retry("missing"), false);
+});
+
+test("completed jobs cannot be retried", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
+
+  queue.next();
+  assert.equal(queue.complete(created.id), true);
+  assert.equal(queue.retry(created.id), false);
+  assert.equal(queue.next(), null);
+});
