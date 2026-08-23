@@ -52,6 +52,15 @@ test("invalid or forged state is rejected and reset starts clean", () => {
   assert.deepEqual(resetOnboarding(), beginOnboarding());
 });
 
+test("an activated onboarding flow can be reset for a fresh start", () => {
+  let state = beginOnboarding();
+  for (const step of ["profile", "verify_email", "accept_terms"]) {
+    state = completeOnboardingStep(state, step);
+  }
+  assert.equal(state.status, "active");
+  assert.deepEqual(resetOnboarding(), beginOnboarding());
+});
+
 test("state validation is bounded and ignores caller iterators", () => {
   assert.throws(
     () => completeOnboardingStep({ completedSteps: new Array(1_000_000) }, "profile"),
