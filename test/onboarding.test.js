@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { beginOnboarding, completeOnboardingStep, resetOnboarding } from "../src/onboarding.js";
+import {
+  beginOnboarding,
+  completeOnboardingStep,
+  onboardingProgress,
+  resetOnboarding,
+} from "../src/onboarding.js";
 
 test("a new onboarding flow starts pending with every required step", () => {
   assert.deepEqual(beginOnboarding(), {
@@ -30,6 +35,20 @@ test("required steps may be completed in any order", () => {
   }
   assert.equal(state.status, "active");
   assert.deepEqual(state.completedSteps, ["profile", "verify_email", "accept_terms"]);
+});
+
+test("progress reports the completed share without mutating state", () => {
+  const initial = beginOnboarding();
+  const profile = completeOnboardingStep(initial, "profile");
+  const active = completeOnboardingStep(
+    completeOnboardingStep(profile, "verify_email"),
+    "accept_terms",
+  );
+
+  assert.equal(onboardingProgress(initial), 0);
+  assert.equal(onboardingProgress(profile), 33);
+  assert.equal(onboardingProgress(active), 100);
+  assert.deepEqual(profile.completedSteps, ["profile"]);
 });
 
 test("snapshots are immutable and caller state is never mutated", () => {
