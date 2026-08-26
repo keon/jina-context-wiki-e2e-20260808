@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { JobQueue } from "../src/job-queue.js";
 
+test("size tracks queued jobs without exposing mutable state", () => {
+  const queue = new JobQueue();
+  assert.equal(queue.size, 0);
+  queue.enqueue("welcome-email", { userId: "u-1" });
+  assert.equal(queue.size, 1);
+  queue.next();
+  assert.equal(queue.size, 1);
+});
+
 test("jobs move from queued to completed", () => {
   const queue = new JobQueue();
   const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
