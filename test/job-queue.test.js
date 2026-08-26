@@ -5,11 +5,13 @@ import { JobQueue } from "../src/job-queue.js";
 test("jobs move from queued to completed", () => {
   const queue = new JobQueue();
   const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
+  assert.equal(queue.size, 1);
   const running = queue.next();
 
   assert.equal(running.id, created.id);
   assert.equal(running.attempts, 1);
   assert.equal(queue.complete(running.id), true);
+  assert.equal(queue.size, 1);
 });
 
 test("running jobs can be retried without losing attempt history", () => {
@@ -20,6 +22,7 @@ test("running jobs can be retried without losing attempt history", () => {
   assert.equal(firstAttempt.payload.repository, "fixture");
   assert.equal(queue.retry(firstAttempt.id), true);
   assert.equal(queue.retry(firstAttempt.id), false);
+  assert.equal(queue.size, 1);
 
   const secondAttempt = queue.next();
   assert.notStrictEqual(secondAttempt, firstAttempt);
