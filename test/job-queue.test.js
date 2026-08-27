@@ -40,6 +40,17 @@ test("completed jobs cannot be retried", () => {
   assert.equal(queue.next(), null);
 });
 
+test("queued count follows claim and retry transitions", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
+
+  assert.equal(queue.queuedCount, 1);
+  queue.next();
+  assert.equal(queue.queuedCount, 0);
+  queue.retry(created.id);
+  assert.equal(queue.queuedCount, 1);
+});
+
 test("blank names are rejected without adding claimable work", () => {
   const queue = new JobQueue();
 

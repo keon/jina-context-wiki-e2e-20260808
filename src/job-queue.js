@@ -1,6 +1,10 @@
 export class JobQueue {
   #jobs = [];
 
+  get queuedCount() {
+    return this.#jobs.filter((job) => job.status === "queued").length;
+  }
+
   enqueue(name, payload) {
     if (!name?.trim()) throw new TypeError("job name is required");
     const job = {
