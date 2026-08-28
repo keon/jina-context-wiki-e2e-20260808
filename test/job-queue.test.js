@@ -12,6 +12,18 @@ test("jobs move from queued to completed", () => {
   assert.equal(queue.complete(running.id), true);
 });
 
+test("pending count excludes running and completed work", () => {
+  const queue = new JobQueue();
+  queue.enqueue("first", {});
+  queue.enqueue("second", {});
+  assert.equal(queue.pendingCount(), 2);
+
+  const running = queue.next();
+  assert.equal(queue.pendingCount(), 1);
+  queue.complete(running.id);
+  assert.equal(queue.pendingCount(), 1);
+});
+
 test("running jobs can be retried without losing attempt history", () => {
   const queue = new JobQueue();
   queue.enqueue("refresh-wiki", { repository: "fixture" });

@@ -22,6 +22,10 @@ export class JobQueue {
     return { ...job };
   }
 
+  pendingCount() {
+    return this.#jobs.filter((candidate) => candidate.status === "queued").length;
+  }
+
   retry(id) {
     const job = this.#jobs.find((candidate) => candidate.id === id);
     if (!job || job.status !== "running") return false;
