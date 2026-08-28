@@ -22,6 +22,12 @@ export class JobQueue {
     return { ...job };
   }
 
+  queuedNames() {
+    return this.#jobs
+      .filter((candidate) => candidate.status === "queued")
+      .map((candidate) => candidate.name);
+  }
+
   retry(id) {
     const job = this.#jobs.find((candidate) => candidate.id === id);
     if (!job || job.status !== "running") return false;

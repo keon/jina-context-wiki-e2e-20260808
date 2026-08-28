@@ -12,6 +12,18 @@ test("jobs move from queued to completed", () => {
   assert.equal(queue.complete(running.id), true);
 });
 
+test("queued names are snapshots of pending work", () => {
+  const queue = new JobQueue();
+  queue.enqueue("first", {});
+  queue.enqueue("second", {});
+  const names = queue.queuedNames();
+  names.push("external mutation");
+  assert.deepEqual(queue.queuedNames(), ["first", "second"]);
+
+  queue.next();
+  assert.deepEqual(queue.queuedNames(), ["second"]);
+});
+
 test("running jobs can be retried without losing attempt history", () => {
   const queue = new JobQueue();
   queue.enqueue("refresh-wiki", { repository: "fixture" });
