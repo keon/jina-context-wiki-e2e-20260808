@@ -40,6 +40,14 @@ test("completed jobs cannot be retried", () => {
   assert.equal(queue.next(), null);
 });
 
+test("queued jobs can be cancelled before execution", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
+
+  assert.deepEqual(queue.cancel(created.id), { ...created, status: "cancelled" });
+  assert.equal(queue.next(), null);
+});
+
 test("blank names are rejected without adding claimable work", () => {
   const queue = new JobQueue();
 
