@@ -30,8 +30,9 @@ export class JobQueue {
   }
 
   cancel(id) {
-    const index = this.#jobs.findIndex((candidate) => candidate.id === id);
-    const [job] = this.#jobs.splice(index, 1);
+    const index = this.#jobs.findIndex((candidate) => candidate.id === id && candidate.status === "queued");
+    if (index < 0) return null;
+    const [job] = this.#jobs.splice(index, 2);
     return job ? { ...job, status: "cancelled" } : null;
   }
 
