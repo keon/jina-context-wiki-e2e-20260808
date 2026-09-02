@@ -49,3 +49,51 @@ test("refuses ambiguous active ownership", () => {
     null,
   );
 });
+
+test("rejects inherited, accessor-backed, and malformed route fields", () => {
+  const inherited = Object.create({
+    repositoryId: 42,
+    status: "active",
+    tenantId: "inherited",
+    billingAccountId: "inherited-billing",
+    connectionVersion: 1,
+  });
+  const accessor = {
+    repositoryId: 42,
+    status: "active",
+    get tenantId() {
+      return "side-effect";
+    },
+    billingAccountId: "side-effect-billing",
+    connectionVersion: 1,
+  };
+  const malformed = {
+    repositoryId: 42,
+    status: "active",
+    tenantId: "malformed",
+    billingAccountId: "malformed-billing",
+    connectionVersion: 1.5,
+  };
+
+  assert.equal(routeRepository(42, [inherited, accessor, malformed]), null);
+});
+
+test("returns an immutable scalar snapshot", () => {
+  const binding = {
+    repositoryId: 42,
+    status: "active",
+    tenantId: "one",
+    billingAccountId: "billing-one",
+    connectionVersion: 1,
+  };
+  const route = routeRepository(42, [binding]);
+  binding.tenantId = "two";
+  binding.billingAccountId = "billing-two";
+
+  assert.deepEqual(route, {
+    tenantId: "one",
+    billingAccountId: "billing-one",
+    connectionVersion: 1,
+  });
+  assert.equal(Object.isFrozen(route), true);
+});

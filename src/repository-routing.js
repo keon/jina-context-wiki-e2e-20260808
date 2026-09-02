@@ -3,14 +3,31 @@ export function routeRepository(repositoryId, bindings) {
     throw new TypeError("repositoryId must be a positive integer");
   }
 
-  const active = bindings.filter(
-    (binding) => binding.repositoryId === repositoryId && binding.status === "active",
-  );
+  if (!Array.isArray(bindings)) throw new TypeError("bindings must be an array");
+  const active = [];
+  for (const binding of bindings) {
+    if (binding === null || typeof binding !== "object") continue;
+    const fields = Object.getOwnPropertyDescriptors(binding);
+    const repositoryIdField = fields.repositoryId?.value;
+    const status = fields.status?.value;
+    const tenantId = fields.tenantId?.value;
+    const billingAccountId = fields.billingAccountId?.value;
+    const connectionVersion = fields.connectionVersion?.value;
+    if (
+      repositoryIdField !== repositoryId ||
+      status !== "active" ||
+      typeof tenantId !== "string" ||
+      tenantId.length === 0 ||
+      typeof billingAccountId !== "string" ||
+      billingAccountId.length === 0 ||
+      !Number.isSafeInteger(connectionVersion) ||
+      connectionVersion <= 0
+    ) {
+      continue;
+    }
+    active.push({ tenantId, billingAccountId, connectionVersion });
+  }
   if (active.length !== 1) return null;
 
-  return {
-    tenantId: active[0].tenantId,
-    billingAccountId: active[0].billingAccountId,
-    connectionVersion: active[0].connectionVersion,
-  };
+  return Object.freeze({ ...active[0] });
 }
