@@ -44,3 +44,9 @@ take precedence, and an active build disables duplicate generation.
 
 Release acceptance checks inspect published Wiki documents and saved Scenario
 library entries, not only the background task's completion status.
+
+Provider recovery checks keep repository ownership unchanged. Each admitted
+review, Wiki build, and Scenario update uses the workspace's selected provider
+policy; reconnecting an account does not assign or transfer this repository.
+An interrupted Wiki build may preserve private verified progress for a later
+authorized build, but incomplete pages are never published as a release.
