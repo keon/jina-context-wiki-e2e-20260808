@@ -41,3 +41,5 @@ canonical release and do not create separate Wiki releases.
 The executable Wiki readiness model keeps a previously published release
 readable while a refresh is running. Assignment and repository access still
 take precedence, and an active build disables duplicate generation.
+Exhausting the generation allowance disables new builds but does not hide an
+already published release or cancel an admitted build.
