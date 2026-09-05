@@ -37,3 +37,7 @@ npm test
 Jina regenerates this repository's canonical Wiki from the exact `main` commit
 after a change is merged. Pull requests are reviewed against the current
 canonical release and do not create separate Wiki releases.
+
+The executable Wiki readiness model keeps a previously published release
+readable while a refresh is running. Assignment and repository access still
+take precedence, and an active build disables duplicate generation.
