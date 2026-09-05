@@ -41,3 +41,6 @@ canonical release and do not create separate Wiki releases.
 The executable Wiki readiness model keeps a previously published release
 readable while a refresh is running. Assignment and repository access still
 take precedence, and an active build disables duplicate generation.
+
+Release acceptance checks inspect published Wiki documents and saved Scenario
+library entries, not only the background task's completion status.
