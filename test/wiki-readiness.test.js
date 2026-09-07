@@ -29,3 +29,19 @@ test("a retained release never overrides repository access", () => {
   assert.deepEqual(wikiReadiness({ assigned: false, available: true, activeBuild: true, releaseId: "canonical-1" }), { state: "unassigned", canGenerate: false });
   assert.deepEqual(wikiReadiness({ assigned: true, available: false, activeBuild: true, releaseId: "canonical-1" }), { state: "access-unavailable", canGenerate: false });
 });
+
+// A generation allowance affects refresh admission, never access to a published Wiki.
+test("an unavailable generation allowance preserves published content", () => {
+  for (const generationAllowed of [false, null, 0, "false"]) {
+    const readiness = wikiReadiness({ assigned: true, available: true, releaseId: "canonical-1", generationAllowed });
+    assert.deepEqual(readiness, { state: "ready", canGenerate: false, releaseId: "canonical-1" });
+    assert.ok(Object.isFrozen(readiness));
+    assert.deepEqual(wikiReadiness({ assigned: true, available: true, generationAllowed }), { state: "awaiting-first-wiki", canGenerate: false });
+  }
+});
+
+test("generation allowance cannot bypass access checks or an active build", () => {
+  assert.deepEqual(wikiReadiness({ assigned: false, available: true, generationAllowed: true }), { state: "unassigned", canGenerate: false });
+  assert.deepEqual(wikiReadiness({ assigned: true, available: false, generationAllowed: true }), { state: "access-unavailable", canGenerate: false });
+  assert.deepEqual(wikiReadiness({ assigned: true, available: true, activeBuild: true, releaseId: "canonical-1", generationAllowed: true }), { state: "generating", canGenerate: false, releaseId: "canonical-1" });
+});

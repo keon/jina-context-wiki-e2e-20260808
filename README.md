@@ -42,6 +42,10 @@ The executable Wiki readiness model keeps a previously published release
 readable while a refresh is running. Assignment and repository access still
 take precedence, and an active build disables duplicate generation.
 
+An explicit `generationAllowed: false` blocks a new build without hiding an
+existing published release. Restoring the allowance makes a refresh available
+again once repository access is valid and no build is active.
+
 Release acceptance checks inspect published Wiki documents and saved Scenario
 library entries, not only the background task's completion status.
 
@@ -50,3 +54,5 @@ review, Wiki build, and Scenario update uses the workspace's selected provider
 policy; reconnecting an account does not assign or transfer this repository.
 An interrupted Wiki build may preserve private verified progress for a later
 authorized build, but incomplete pages are never published as a release.
+
+The same recovery checks apply when a workspace uses a connected model provider.
