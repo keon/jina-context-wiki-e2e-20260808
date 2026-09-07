@@ -32,6 +32,8 @@ must be well-formed before they become receiver idempotency keys.
 npm test
 ```
 
+The fixture uses Node's built-in test runner and has no install-time dependencies.
+
 ## Canonical documentation
 
 Jina regenerates this repository's canonical Wiki from the exact `main` commit
