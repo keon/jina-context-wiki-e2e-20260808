@@ -54,3 +54,6 @@ review, Wiki build, and Scenario update uses the workspace's selected provider
 policy; reconnecting an account does not assign or transfer this repository.
 An interrupted Wiki build may preserve private verified progress for a later
 authorized build, but incomplete pages are never published as a release.
+
+Provider validation must finish before the fixture is considered merge-ready.
+A failed investigation leaves the result incomplete and exposes a recovery action.
