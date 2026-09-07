@@ -16,6 +16,10 @@ export function resetOnboarding() {
   return beginOnboarding();
 }
 
+export function isOnboardingComplete(current) {
+  return readCompletedSteps(current).length === REQUIRED_STEPS.length;
+}
+
 function readCompletedSteps(current) {
   if (!current || typeof current !== "object") {
     throw new TypeError("onboarding state is required");

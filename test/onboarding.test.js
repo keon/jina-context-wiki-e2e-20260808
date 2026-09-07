@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { beginOnboarding, completeOnboardingStep, resetOnboarding } from "../src/onboarding.js";
+import {
+  beginOnboarding,
+  completeOnboardingStep,
+  isOnboardingComplete,
+  resetOnboarding,
+} from "../src/onboarding.js";
+
+test("completion can be queried from a validated snapshot", () => {
+  let state = beginOnboarding();
+  assert.equal(isOnboardingComplete(state), false);
+  for (const step of ["profile", "verify_email", "accept_terms"]) {
+    state = completeOnboardingStep(state, step);
+  }
+  assert.equal(isOnboardingComplete(state), true);
+});
 
 test("a new onboarding flow starts pending with every required step", () => {
   assert.deepEqual(beginOnboarding(), {
