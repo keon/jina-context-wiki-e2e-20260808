@@ -1,4 +1,4 @@
-export function wikiReadiness({ assigned, available, activeBuild, releaseId }) {
+export function wikiReadiness({ assigned, available, activeBuild, releaseId, generationAllowed = true }) {
   if (!assigned) return Object.freeze({ state: "unassigned", canGenerate: false });
   if (!available) return Object.freeze({ state: "access-unavailable", canGenerate: false });
   if (activeBuild) {
@@ -10,7 +10,7 @@ export function wikiReadiness({ assigned, available, activeBuild, releaseId }) {
     });
   }
   if (typeof releaseId === "string" && releaseId.trim()) {
-    return Object.freeze({ state: "ready", canGenerate: true, releaseId });
+    return Object.freeze({ state: "ready", canGenerate: generationAllowed === true, releaseId });
   }
-  return Object.freeze({ state: "awaiting-first-wiki", canGenerate: true });
+  return Object.freeze({ state: "awaiting-first-wiki", canGenerate: generationAllowed === true });
 }
