@@ -97,3 +97,14 @@ test("returns an immutable scalar snapshot", () => {
   });
   assert.equal(Object.isFrozen(route), true);
 });
+
+test("rejects whitespace-only identities before downstream description", () => {
+  for (const field of ["tenantId", "billingAccountId"]) {
+    for (const value of [" ", "\t", "\n"]) {
+      assert.equal(routeRepository(42, [{
+        repositoryId: 42, status: "active", tenantId: "one",
+        billingAccountId: "billing-one", connectionVersion: 1, [field]: value,
+      }]), null);
+    }
+  }
+});

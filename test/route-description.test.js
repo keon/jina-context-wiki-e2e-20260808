@@ -24,3 +24,15 @@ test("rejects incomplete routing snapshots", () => {
     /valid immutable routing snapshot/,
   );
 });
+
+
+test("rejects whitespace-only routing identities", () => {
+  for (const field of ["tenantId", "billingAccountId"]) {
+    for (const value of [" ", "\t\n"]) {
+      assert.throws(
+        () => describeRepositoryRoute({tenantId: "workspace-omxyz", billingAccountId: "billing-omxyz", connectionVersion: 3, [field]: value}),
+        /valid immutable routing snapshot/,
+      );
+    }
+  }
+});
