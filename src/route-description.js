@@ -16,3 +16,9 @@ export function describeRepositoryRoute(route) {
 
   return `${tenantId}@v${connectionVersion}`;
 }
+
+// Validate the same immutable snapshot before answering assignment status.
+export function hasAssignedRepositoryRoute(route) {
+  describeRepositoryRoute(route);
+  return route !== null;
+}
