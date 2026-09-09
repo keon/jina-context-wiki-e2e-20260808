@@ -17,9 +17,9 @@ export function routeRepository(repositoryId, bindings) {
       repositoryIdField !== repositoryId ||
       status !== "active" ||
       typeof tenantId !== "string" ||
-      tenantId.length === 0 ||
+      tenantId.trim().length === 0 ||
       typeof billingAccountId !== "string" ||
-      billingAccountId.length === 0 ||
+      billingAccountId.trim().length === 0 ||
       !Number.isSafeInteger(connectionVersion) ||
       connectionVersion <= 0
     ) {
