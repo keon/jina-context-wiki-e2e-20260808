@@ -50,3 +50,16 @@ review, Wiki build, and Scenario update uses the workspace's selected provider
 policy; reconnecting an account does not assign or transfer this repository.
 An interrupted Wiki build may preserve private verified progress for a later
 authorized build, but incomplete pages are never published as a release.
+
+Before opening a release-acceptance pull request, verify that this fixture is
+installed on `jina-staging` and is not installed on `jina-review-bot`. Review
+report links for this fixture must use `https://app.staging.usejina.com/`.
+
+A pull-request review intentionally uses the latest canonical Wiki from the
+repository's default branch; that Wiki is not an artifact of the PR head. For
+post-merge publication acceptance, record the fixture repository and merge SHA.
+Require a newly published canonical `main` release for that repository whose
+`requested_source_sha` and `documented_git_head` both equal the recorded merge
+SHA, whose `openwiki_version` is `0.5.0`, and whose document count is positive.
+Open a document and search that exact release. A successful task or an older
+base-branch Wiki does not by itself satisfy post-merge publication acceptance.
