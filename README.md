@@ -50,3 +50,7 @@ review, Wiki build, and Scenario update uses the workspace's selected provider
 policy; reconnecting an account does not assign or transfer this repository.
 An interrupted Wiki build may preserve private verified progress for a later
 authorized build, but incomplete pages are never published as a release.
+
+Before opening a release-acceptance pull request, verify that this fixture is
+installed on `jina-staging` and is not installed on `jina-review-bot`. Review
+report links for this fixture must use `https://app.staging.usejina.com/`.
