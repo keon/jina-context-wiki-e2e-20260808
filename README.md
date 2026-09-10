@@ -50,3 +50,9 @@ review, Wiki build, and Scenario update uses the workspace's selected provider
 policy; reconnecting an account does not assign or transfer this repository.
 An interrupted Wiki build may preserve private verified progress for a later
 authorized build, but incomplete pages are never published as a release.
+
+## Inventory retry diagnostics
+
+The pure inventory retry reason model separates funding, quota, provider
+availability, and saved-work compatibility failures. Unknown codes remain
+unknown so an unrecognized failure cannot be treated as a successful repair.
