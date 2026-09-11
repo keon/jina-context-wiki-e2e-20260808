@@ -49,3 +49,28 @@ test("blank names are rejected without adding claimable work", () => {
   });
   assert.equal(queue.next(), null);
 });
+
+
+test("completion requires a running attempt and succeeds only once", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", {});
+  assert.equal(queue.complete(created.id), false);
+  assert.equal(queue.complete("missing"), false);
+  assert.equal(queue.next().id, created.id);
+  assert.equal(queue.complete(created.id), true);
+  assert.equal(queue.complete(created.id), false);
+  assert.equal(queue.retry(created.id), false);
+  assert.equal(queue.next(), null);
+});
+
+test("a queued retry cannot be completed until claimed again", () => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", {});
+  queue.next();
+  assert.equal(queue.retry(created.id), true);
+  assert.equal(queue.complete(created.id), false);
+  const retried = queue.next();
+  assert.equal(retried.id, created.id);
+  assert.equal(retried.attempts, 2);
+  assert.equal(queue.complete(created.id), true);
+});
