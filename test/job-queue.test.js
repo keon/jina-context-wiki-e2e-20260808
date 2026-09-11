@@ -93,3 +93,17 @@ test("obsolete attempts cannot complete or retry a newly claimed attempt", () =>
   assert.equal(queue.complete(second.id, second.attemptToken), false);
   assert.equal(queue.retry(second.id, second.attemptToken), false);
 });
+
+test("token generation failure leaves the queued job claimable", (t) => {
+  const queue = new JobQueue();
+  const created = queue.enqueue("refresh-wiki", {});
+  const uuid = t.mock.method(crypto, "randomUUID", () => {
+    throw new Error("entropy temporarily unavailable");
+  });
+  assert.throws(() => queue.next(), /entropy temporarily unavailable/);
+  uuid.mock.restore();
+  const running = queue.next();
+  assert.equal(running.id, created.id);
+  assert.equal(running.attempts, 1);
+  assert.equal(queue.complete(running.id, running.attemptToken), true);
+});

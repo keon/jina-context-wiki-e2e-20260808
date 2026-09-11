@@ -17,9 +17,10 @@ export class JobQueue {
   next() {
     const job = this.#jobs.find((candidate) => candidate.status === "queued");
     if (!job) return null;
+    const attemptToken = crypto.randomUUID();
     job.status = "running";
     job.attempts += 1;
-    job.attemptToken = crypto.randomUUID();
+    job.attemptToken = attemptToken;
     return { ...job };
   }
 
