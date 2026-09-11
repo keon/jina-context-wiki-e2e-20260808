@@ -1,3 +1,5 @@
+import { types } from "node:util";
+
 export function describeRepositoryRoute(route) {
   if (route === null) return "unassigned";
   if (typeof route !== "object") throw new TypeError("route must be an object or null");
@@ -28,6 +30,22 @@ export function repositoryRouteVersionMatches(route, expectedVersion) {
   if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
     throw new TypeError("expectedVersion must be a positive safe integer");
   }
-  describeRepositoryRoute(route);
-  return route !== null && route.connectionVersion === expectedVersion;
+  if (route === null) return false;
+  if (typeof route !== "object" || types.isProxy(route) || !Object.isFrozen(route)) {
+    throw new TypeError("route must be a valid immutable routing snapshot");
+  }
+  const fields = Object.getOwnPropertyDescriptors(route);
+  const names = ["tenantId", "billingAccountId", "connectionVersion"];
+  if (
+    Reflect.ownKeys(fields).length !== names.length ||
+    !names.every((name) => {
+      const field = fields[name];
+      return field && Object.hasOwn(field, "value") && field.enumerable && !field.writable && !field.configurable;
+    })
+  ) {
+    throw new TypeError("route must be a valid immutable routing snapshot");
+  }
+  const snapshot = Object.fromEntries(names.map((name) => [name, fields[name].value]));
+  describeRepositoryRoute(snapshot);
+  return snapshot.connectionVersion === expectedVersion;
 }
