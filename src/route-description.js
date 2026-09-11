@@ -31,7 +31,10 @@ export function repositoryRouteVersionMatches(route, expectedVersion) {
     throw new TypeError("expectedVersion must be a positive safe integer");
   }
   if (route === null) return false;
-  if (typeof route !== "object" || types.isProxy(route) || !Object.isFrozen(route)) {
+  if (
+    typeof route !== "object" || types.isProxy(route) ||
+    Object.getPrototypeOf(route) !== Object.prototype || !Object.isFrozen(route)
+  ) {
     throw new TypeError("route must be a valid immutable routing snapshot");
   }
   const fields = Object.getOwnPropertyDescriptors(route);
