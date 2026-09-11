@@ -9,3 +9,5 @@ Production fix acceptance: verify zero-call reuse after deploying 42ce7542.
 Review head acknowledgement acceptance: first revision.
 
 Review head acknowledgement acceptance: immediately pushed revision.
+
+PR 703 staging acceptance: preserve the canonical Wiki when only ignored source changes.
