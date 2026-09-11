@@ -40,7 +40,7 @@ export function repositoryRouteVersionMatches(route, expectedVersion) {
     Reflect.ownKeys(fields).length !== names.length ||
     !names.every((name) => {
       const field = fields[name];
-      return field && Object.hasOwn(field, "value") && field.enumerable && !field.writable && !field.configurable;
+      return field && Object.prototype.hasOwnProperty.call(field, "value") && field.enumerable && !field.writable && !field.configurable;
     })
   ) {
     throw new TypeError("route must be a valid immutable routing snapshot");
