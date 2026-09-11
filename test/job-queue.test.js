@@ -107,3 +107,37 @@ test("token generation failure leaves the queued job claimable", (t) => {
   assert.equal(running.attempts, 1);
   assert.equal(queue.complete(running.id, running.attemptToken), true);
 });
+
+test("retries join the tail behind jobs already waiting", () => {
+  const queue = new JobQueue();
+  const first = queue.enqueue("first", {});
+  const second = queue.enqueue("second", {});
+  const third = queue.enqueue("third", {});
+  const running = queue.next();
+  assert.equal(queue.retry(running.id, running.attemptToken), true);
+  assert.equal(queue.next().id, second.id);
+  assert.equal(queue.next().id, third.id);
+  assert.equal(queue.next().id, first.id);
+});
+
+test("producer and worker snapshots cannot mutate stored payloads", () => {
+  const queue = new JobQueue();
+  const input = { nested: { value: 1 }, items: [1] };
+  const created = queue.enqueue("refresh-wiki", input);
+  input.nested.value = 2;
+  created.payload.nested.value = 3;
+  const running = queue.next();
+  assert.equal(running.payload.nested.value, 1);
+  running.payload.nested.value = 4;
+  running.payload.items.push(2);
+  assert.equal(queue.retry(running.id, running.attemptToken), true);
+  const next = queue.next();
+  assert.deepEqual(next.payload, { nested: { value: 1 }, items: [1] });
+  assert.equal(queue.complete(next.id, next.attemptToken), true);
+});
+
+test("uncloneable payloads fail before enqueueing work", () => {
+  const queue = new JobQueue();
+  assert.throws(() => queue.enqueue("invalid", { callback() {} }), { name: "DataCloneError" });
+  assert.equal(queue.next(), null);
+});

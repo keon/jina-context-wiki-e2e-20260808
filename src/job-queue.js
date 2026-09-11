@@ -6,22 +6,24 @@ export class JobQueue {
     const job = {
       id: crypto.randomUUID(),
       name,
-      payload,
+      payload: structuredClone(payload),
       attempts: 0,
       status: "queued",
     };
+    const snapshot = structuredClone(job);
     this.#jobs.push(job);
-    return { ...job };
+    return snapshot;
   }
 
   next() {
     const job = this.#jobs.find((candidate) => candidate.status === "queued");
     if (!job) return null;
+    const snapshot = structuredClone(job);
     const attemptToken = crypto.randomUUID();
     job.status = "running";
     job.attempts += 1;
     job.attemptToken = attemptToken;
-    return { ...job };
+    return { ...snapshot, status: job.status, attempts: job.attempts, attemptToken };
   }
 
   retry(id, attemptToken) {
@@ -29,6 +31,8 @@ export class JobQueue {
     if (!job || job.status !== "running" || job.attemptToken !== attemptToken) return false;
     job.status = "queued";
     delete job.attemptToken;
+    this.#jobs.splice(this.#jobs.indexOf(job), 1);
+    this.#jobs.push(job);
     return true;
   }
 
