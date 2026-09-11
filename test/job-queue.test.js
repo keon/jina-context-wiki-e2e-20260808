@@ -141,3 +141,12 @@ test("uncloneable payloads fail before enqueueing work", () => {
   assert.throws(() => queue.enqueue("invalid", { callback() {} }), { name: "DataCloneError" });
   assert.equal(queue.next(), null);
 });
+
+test("a rejected completion leaves the current attempt claimable", () => {
+  const queue = new JobQueue();
+  queue.enqueue("refresh-wiki", { repository: "fixture" });
+  const attempt = queue.next();
+  assert.equal(queue.complete(attempt.id, "not-the-active-token"), false);
+  assert.equal(queue.complete(attempt.id, attempt.attemptToken), true);
+  assert.equal(queue.next(), null);
+});
