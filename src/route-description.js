@@ -22,3 +22,12 @@ export function hasAssignedRepositoryRoute(route) {
   describeRepositoryRoute(route);
   return route !== null;
 }
+
+// Match a validated immutable routing snapshot against the expected generation.
+export function repositoryRouteVersionMatches(route, expectedVersion) {
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
+    throw new TypeError("expectedVersion must be a positive safe integer");
+  }
+  describeRepositoryRoute(route);
+  return route !== null && route.connectionVersion === expectedVersion;
+}
