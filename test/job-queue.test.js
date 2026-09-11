@@ -9,7 +9,7 @@ test("jobs move from queued to completed", () => {
 
   assert.equal(running.id, created.id);
   assert.equal(running.attempts, 1);
-  assert.equal(queue.complete(running.id), true);
+  assert.equal(queue.complete(running.id, running.attemptToken), true);
 });
 
 test("running jobs can be retried without losing attempt history", () => {
@@ -18,8 +18,8 @@ test("running jobs can be retried without losing attempt history", () => {
 
   const firstAttempt = queue.next();
   assert.equal(firstAttempt.payload.repository, "fixture");
-  assert.equal(queue.retry(firstAttempt.id), true);
-  assert.equal(queue.retry(firstAttempt.id), false);
+  assert.equal(queue.retry(firstAttempt.id, firstAttempt.attemptToken), true);
+  assert.equal(queue.retry(firstAttempt.id, firstAttempt.attemptToken), false);
 
   const secondAttempt = queue.next();
   assert.notStrictEqual(secondAttempt, firstAttempt);
@@ -34,8 +34,8 @@ test("completed jobs cannot be retried", () => {
   const queue = new JobQueue();
   const created = queue.enqueue("refresh-wiki", { repository: "fixture" });
 
-  queue.next();
-  assert.equal(queue.complete(created.id), true);
+  const running = queue.next();
+  assert.equal(queue.complete(created.id, running.attemptToken), true);
   assert.equal(queue.retry(created.id), false);
   assert.equal(queue.next(), null);
 });
@@ -50,14 +50,14 @@ test("blank names are rejected without adding claimable work", () => {
   assert.equal(queue.next(), null);
 });
 
-
 test("completion requires a running attempt and succeeds only once", () => {
   const queue = new JobQueue();
   const created = queue.enqueue("refresh-wiki", {});
   assert.equal(queue.complete(created.id), false);
   assert.equal(queue.complete("missing"), false);
-  assert.equal(queue.next().id, created.id);
-  assert.equal(queue.complete(created.id), true);
+  const running = queue.next();
+  assert.equal(running.id, created.id);
+  assert.equal(queue.complete(created.id, running.attemptToken), true);
   assert.equal(queue.complete(created.id), false);
   assert.equal(queue.retry(created.id), false);
   assert.equal(queue.next(), null);
@@ -66,11 +66,30 @@ test("completion requires a running attempt and succeeds only once", () => {
 test("a queued retry cannot be completed until claimed again", () => {
   const queue = new JobQueue();
   const created = queue.enqueue("refresh-wiki", {});
-  queue.next();
-  assert.equal(queue.retry(created.id), true);
+  const running = queue.next();
+  assert.equal(queue.retry(created.id, running.attemptToken), true);
   assert.equal(queue.complete(created.id), false);
   const retried = queue.next();
   assert.equal(retried.id, created.id);
   assert.equal(retried.attempts, 2);
-  assert.equal(queue.complete(created.id), true);
+  assert.equal(queue.complete(created.id, retried.attemptToken), true);
+});
+
+test("obsolete attempts cannot complete or retry a newly claimed attempt", () => {
+  const queue = new JobQueue();
+  queue.enqueue("refresh-wiki", {});
+  const first = queue.next();
+  for (const token of [undefined, null, "wrong"]) {
+    assert.equal(queue.complete(first.id, token), false);
+    assert.equal(queue.retry(first.id, token), false);
+  }
+  assert.equal(queue.retry(first.id, first.attemptToken), true);
+  const second = queue.next();
+  assert.notEqual(second.attemptToken, first.attemptToken);
+  assert.equal(queue.complete(first.id, first.attemptToken), false);
+  assert.equal(queue.retry(first.id, first.attemptToken), false);
+  assert.equal(queue.next(), null);
+  assert.equal(queue.complete(second.id, second.attemptToken), true);
+  assert.equal(queue.complete(second.id, second.attemptToken), false);
+  assert.equal(queue.retry(second.id, second.attemptToken), false);
 });

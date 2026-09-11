@@ -63,3 +63,7 @@ Require a newly published canonical `main` release for that repository whose
 SHA, whose `openwiki_version` is `0.5.0`, and whose document count is positive.
 Open a document and search that exact release. A successful task or an older
 base-branch Wiki does not by itself satisfy post-merge publication acceptance.
+
+### Job queue attempt ownership
+
+`JobQueue.next()` returns a new `attemptToken` with each running snapshot. Callers must pass that token to `complete(id, attemptToken)` and `retry(id, attemptToken)`. Missing, wrong, queued, completed, and obsolete attempt tokens return `false` without changing the current job. Retrying preserves the job ID and attempt count; claiming it again rotates the token. This is an intentional fixture API change: ID-only completion and retry are no longer accepted. The queue remains process-local and does not provide durable storage or lease expiry.
