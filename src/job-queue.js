@@ -1,6 +1,11 @@
 export class JobQueue {
   #jobs = [];
 
+  // Includes queued work and in-flight attempts; completed jobs are excluded.
+  hasPendingWork() {
+    return this.#jobs.some((job) => job.status !== "completed");
+  }
+
   counts() {
     const counts = { queued: 0, running: 0, completed: 0 };
     for (const job of this.#jobs) counts[job.status] += 1;
