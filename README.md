@@ -70,4 +70,6 @@ base-branch Wiki does not by itself satisfy post-merge publication acceptance.
 
 Retried jobs join the back of the queue behind work that is already waiting. Payloads must be structured-cloneable; enqueueing and returned snapshots isolate nested payload data from producer and worker mutations. Token generation and snapshot creation happen before a claim changes stored state.
 
+`JobQueue.counts()` returns a fresh `{ queued, running, completed }` snapshot. Changing the returned object cannot mutate jobs or later snapshots. Reading counts does not claim, retry, or complete a job.
+
 The fixture requires Node.js 22 or newer, including its built-in `crypto.randomUUID` and `structuredClone` APIs. Run `npm test` under that supported runtime.
