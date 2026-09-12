@@ -1,6 +1,12 @@
 export class JobQueue {
   #jobs = [];
 
+  counts() {
+    const counts = { queued: 0, running: 0, completed: 0 };
+    for (const job of this.#jobs) counts[job.status] += 1;
+    return counts;
+  }
+
   enqueue(name, payload) {
     if (!name?.trim()) throw new TypeError("job name is required");
     const job = {

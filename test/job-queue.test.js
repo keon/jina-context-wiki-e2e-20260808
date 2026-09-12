@@ -150,3 +150,21 @@ test("a rejected completion leaves the current attempt claimable", () => {
   assert.equal(queue.complete(attempt.id, attempt.attemptToken), true);
   assert.equal(queue.next(), null);
 });
+
+// Staging acceptance: repository controls and review preference hierarchy.
+test("queue counts observe transitions without exposing mutable queue state", () => {
+  const queue = new JobQueue();
+  assert.deepEqual(queue.counts(), { queued: 0, running: 0, completed: 0 });
+  queue.enqueue("first", {});
+  queue.enqueue("second", {});
+  const first = queue.next();
+  assert.deepEqual(queue.counts(), { queued: 1, running: 1, completed: 0 });
+  assert.equal(queue.retry(first.id, first.attemptToken), true);
+  assert.deepEqual(queue.counts(), { queued: 2, running: 0, completed: 0 });
+  const second = queue.next();
+  assert.equal(queue.complete(second.id, second.attemptToken), true);
+  assert.deepEqual(queue.counts(), { queued: 1, running: 0, completed: 1 });
+  const snapshot = queue.counts();
+  snapshot.queued = 999;
+  assert.deepEqual(queue.counts(), { queued: 1, running: 0, completed: 1 });
+});
