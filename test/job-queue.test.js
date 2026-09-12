@@ -168,3 +168,23 @@ test("queue counts observe transitions without exposing mutable queue state", ()
   snapshot.queued = 999;
   assert.deepEqual(queue.counts(), { queued: 1, running: 0, completed: 1 });
 });
+
+test("pending work remains true through retries until every job completes", () => {
+  const queue = new JobQueue();
+  assert.equal(queue.hasPendingWork(), false);
+  queue.enqueue("first", {});
+  queue.enqueue("second", {});
+  assert.equal(queue.hasPendingWork(), true);
+  const first = queue.next();
+  assert.equal(queue.hasPendingWork(), true);
+  assert.equal(queue.retry(first.id, first.attemptToken), true);
+  const second = queue.next();
+  assert.equal(queue.complete(second.id, second.attemptToken), true);
+  assert.equal(queue.hasPendingWork(), true);
+  const retried = queue.next();
+  assert.equal(retried.id, first.id);
+  assert.equal(queue.complete(retried.id, first.attemptToken), false);
+  assert.equal(queue.hasPendingWork(), true);
+  assert.equal(queue.complete(retried.id, retried.attemptToken), true);
+  assert.equal(queue.hasPendingWork(), false);
+});
