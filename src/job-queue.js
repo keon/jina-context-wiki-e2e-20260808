@@ -6,6 +6,10 @@ export class JobQueue {
     return this.#jobs.some((job) => job.status !== "completed");
   }
 
+  pendingCount() {
+    return this.#jobs.filter((job) => job.status !== "completed").length;
+  }
+
   counts() {
     const counts = { queued: 0, running: 0, completed: 0 };
     for (const job of this.#jobs) counts[job.status] += 1;
