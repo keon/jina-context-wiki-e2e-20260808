@@ -188,3 +188,23 @@ test("pending work remains true through retries until every job completes", () =
   assert.equal(queue.complete(retried.id, retried.attemptToken), true);
   assert.equal(queue.hasPendingWork(), false);
 });
+
+
+test("pendingCount follows queued, running, retried and completed work", () => {
+  const queue = new JobQueue();
+  assert.equal(queue.pendingCount(), 0);
+  queue.enqueue("first", {});
+  queue.enqueue("second", {});
+  assert.equal(queue.pendingCount(), 2);
+  const first = queue.next();
+  assert.equal(queue.pendingCount(), 2);
+  assert.equal(queue.retry(first.id, first.attemptToken), true);
+  const second = queue.next();
+  queue.complete(second.id, second.attemptToken);
+  assert.equal(queue.pendingCount(), 1);
+  const retried = queue.next();
+  assert.equal(queue.complete(retried.id, first.attemptToken), false);
+  assert.equal(queue.pendingCount(), 1);
+  queue.complete(retried.id, retried.attemptToken);
+  assert.equal(queue.pendingCount(), 0);
+});
