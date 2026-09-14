@@ -21,3 +21,5 @@ Staging release f25bf3e4 acceptance: this ignored-only follow-up must not requir
 Customer readiness acceptance 2026-09-14: this excluded operational note must advance the canonical Wiki without inference.
 
 PR723 acceptance: ignored-only follow-up after interrupted Wiki publication, 2026-09-14.
+
+Acceptance marker: review-provenance-725.
