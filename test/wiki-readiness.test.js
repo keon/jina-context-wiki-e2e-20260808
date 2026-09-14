@@ -29,3 +29,11 @@ test("a retained release never overrides repository access", () => {
   assert.deepEqual(wikiReadiness({ assigned: false, available: true, activeBuild: true, releaseId: "canonical-1" }), { state: "unassigned", canGenerate: false });
   assert.deepEqual(wikiReadiness({ assigned: true, available: false, activeBuild: true, releaseId: "canonical-1" }), { state: "access-unavailable", canGenerate: false });
 });
+
+
+test("canonical identifiers are normalized consistently during idle and active builds", () => {
+  for (const activeBuild of [false, true]) {
+    assert.equal(wikiReadiness({ assigned: true, available: true, activeBuild, releaseId: "  canonical-1  " }).releaseId, "canonical-1");
+    assert.equal(wikiReadiness({ assigned: true, available: true, activeBuild, releaseId: "  " }).releaseId, undefined);
+  }
+});
