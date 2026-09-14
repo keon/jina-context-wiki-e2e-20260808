@@ -17,3 +17,5 @@ After baseline repair, this ignored note must advance the canonical Wiki with ze
 Wiki readiness acceptance: ignored-source update on 2026-09-12.
 
 Staging release f25bf3e4 acceptance: this ignored-only follow-up must not require Wiki inference.
+
+Customer readiness acceptance 2026-09-14: this excluded operational note must advance the canonical Wiki without inference.
